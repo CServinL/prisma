@@ -1,0 +1,30 @@
+# This file defines code ownership for the Prisma project
+# Code owners are automatically requested for review when someone 
+# opens a pull request that modifies code that they own.
+
+# Global ownership - Project Lead has oversight of all changes
+* @CServinL
+
+# Governance and community files require Project Lead approval
+GOVERNANCE.md @CServinL
+CONTRIBUTING.md @CServinL
+CODE_OF_CONDUCT.md @CServinL
+SECURITY.md @CServinL
+CODEOWNERS @CServinL
+
+# Documentation changes should be reviewed by maintainers
+*.md @CServinL
+docs/ @CServinL
+
+# Configuration files require careful review
+*.yml @CServinL
+*.yaml @CServinL
+*.json @CServinL
+*.toml @CServinL
+
+# Future code ownership areas (to be updated as project develops):
+# /src/core/ @CServinL @core-maintainer
+# /src/agents/ @CServinL @ai-specialist
+# /src/api/ @CServinL @api-maintainer
+# /tests/ @CServinL @testing-lead
+# /docker/ @CServinL @devops-lead

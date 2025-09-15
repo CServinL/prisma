@@ -1,5 +1,5 @@
 """
-Unit tests for configuration system.
+Unit tests for Pydantic-based configuration system.
 """
 
 import unittest
@@ -11,11 +11,12 @@ import sys
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / 'src'))
 
-from utils.config import ConfigLoader
+from src.utils.config import ConfigLoader, PrismaConfig, ZoteroConfig, LLMConfig
+from pydantic import ValidationError
 
 
 class TestConfigLoader(unittest.TestCase):
-    """Test configuration loading and merging."""
+    """Test configuration loading and merging with Pydantic validation."""
     
     def setUp(self):
         """Set up test fixtures."""
@@ -26,7 +27,13 @@ llm:
 
 search:
   default_limit: 5
-  sources: ["test"]
+  sources: ["arxiv"]
+
+sources:
+  zotero:
+    enabled: true
+    api_key: "test_key"
+    library_id: "12345"
 """
     
     def test_default_config_loading(self):
@@ -38,10 +45,11 @@ search:
             
             config_loader = ConfigLoader()
             
-            # Should have defaults
-            self.assertEqual(config_loader.get('llm.provider'), 'ollama')
-            self.assertEqual(config_loader.get('llm.model'), 'llama3.1:8b')
-            self.assertEqual(config_loader.get('search.default_limit'), 10)
+            # Should have defaults and be Pydantic model
+            self.assertIsInstance(config_loader.config, PrismaConfig)
+            self.assertEqual(config_loader.config.llm.provider, 'ollama')
+            self.assertEqual(config_loader.config.llm.model, 'llama3.1:8b')
+            self.assertEqual(config_loader.config.search.default_limit, 10)
             
             # Restore environment
             if old_env:
@@ -61,13 +69,18 @@ search:
             
             config_loader = ConfigLoader()
             
-            # Should have merged config
-            self.assertEqual(config_loader.get('llm.model'), 'test-model')
-            self.assertEqual(config_loader.get('llm.host'), 'localhost:11434')
-            self.assertEqual(config_loader.get('search.default_limit'), 5)
+            # Should have merged config with Pydantic validation
+            self.assertIsInstance(config_loader.config, PrismaConfig)
+            self.assertEqual(config_loader.config.llm.model, 'test-model')
+            self.assertEqual(config_loader.config.llm.host, 'localhost:11434')
+            self.assertEqual(config_loader.config.search.default_limit, 5)
             
             # Should still have defaults for missing keys
-            self.assertEqual(config_loader.get('llm.provider'), 'ollama')
+            self.assertEqual(config_loader.config.llm.provider, 'ollama')
+            
+            # Test Zotero config
+            self.assertTrue(config_loader.config.sources.zotero.enabled)
+            self.assertEqual(config_loader.config.sources.zotero.api_key, 'test_key')
             
         finally:
             os.unlink(config_path)
@@ -77,7 +90,7 @@ search:
                 del os.environ['PRISMA_CONFIG']
     
     def test_get_method_with_dot_notation(self):
-        """Test the get method with dot notation."""
+        """Test the get method with dot notation for backward compatibility."""
         config_loader = ConfigLoader()
         
         # Test existing key
@@ -95,9 +108,36 @@ search:
         
         self.assertIn('provider', llm_config)
         self.assertIn('model', llm_config)
-        self.assertIn('host', llm_config)
         self.assertIn('base_url', llm_config)
-        self.assertTrue(llm_config['base_url'].startswith('http://'))
+        self.assertEqual(llm_config['provider'], 'ollama')
+    
+    def test_validation_errors(self):
+        """Test that Pydantic validation catches invalid configurations."""
+        # Test invalid output format
+        with self.assertRaises(ValidationError):
+            PrismaConfig(output={'format': 'invalid_format'})
+        
+        # Test invalid library type
+        with self.assertRaises(ValidationError):
+            PrismaConfig(sources={'zotero': {'library_type': 'invalid'}})
+        
+        # Test invalid search limit
+        with self.assertRaises(ValidationError):
+            PrismaConfig(search={'default_limit': -1})
+    
+    def test_zotero_credentials_check(self):
+        """Test Zotero credentials validation."""
+        config_loader = ConfigLoader()
+        
+        # Default config should not have credentials
+        self.assertFalse(config_loader.has_zotero_credentials())
+        
+        # Mock config with credentials
+        config_loader.config.sources.zotero.enabled = True
+        config_loader.config.sources.zotero.api_key = 'test_key'
+        config_loader.config.sources.zotero.library_id = '12345'
+        
+        self.assertTrue(config_loader.has_zotero_credentials())
 
 
 if __name__ == '__main__':

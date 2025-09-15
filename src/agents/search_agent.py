@@ -6,6 +6,9 @@ import requests
 import xml.etree.ElementTree as ET
 from typing import Dict, List, Any
 from urllib.parse import quote
+from datetime import datetime
+
+from storage.models.agent_models import SearchResult, PaperMetadata
 
 
 class SearchAgent:
@@ -14,7 +17,7 @@ class SearchAgent:
     def __init__(self):
         self.arxiv_base_url = "http://export.arxiv.org/api/query"
         
-    def search(self, query: str, sources: List[str], limit: int = 10) -> Dict[str, Any]:
+    def search(self, query: str, sources: List[str], limit: int = 10) -> SearchResult:
         """
         Search for papers across specified sources.
         
@@ -24,7 +27,7 @@ class SearchAgent:
             limit: Maximum number of papers to return
             
         Returns:
-            Search results with papers list
+            SearchResult with papers list and metadata
         """
         all_papers = []
         
@@ -39,14 +42,15 @@ class SearchAgent:
         unique_papers = self._deduplicate_papers(all_papers)
         limited_papers = unique_papers[:limit]
         
-        return {
-            'papers': limited_papers,
-            'total_found': len(unique_papers),
-            'sources_searched': sources,
-            'query': query
-        }
+        return SearchResult(
+            papers=limited_papers,
+            total_found=len(unique_papers),
+            sources_searched=sources,
+            query=query,
+            timestamp=datetime.now()
+        )
     
-    def _search_arxiv(self, query: str, limit: int) -> List[Dict[str, Any]]:
+    def _search_arxiv(self, query: str, limit: int) -> List[PaperMetadata]:
         """Search arXiv API for papers."""
         try:
             # Format query for arXiv API
@@ -76,7 +80,7 @@ class SearchAgent:
             print(f"[ERROR] ArXiv search failed: {e}")
             return []
     
-    def _parse_arxiv_entry(self, entry) -> Dict[str, Any]:
+    def _parse_arxiv_entry(self, entry) -> PaperMetadata:
         """Parse a single arXiv entry into paper metadata."""
         try:
             # Namespaces
@@ -99,18 +103,18 @@ class SearchAgent:
             # Extract publication date
             published = entry.find(f'{atom_ns}published').text[:10]  # YYYY-MM-DD
             
-            # Build paper metadata
-            paper = {
-                'title': title,
-                'authors': authors,
-                'abstract': summary,
-                'source': 'arxiv',
-                'arxiv_id': arxiv_id,
-                'url': f"https://arxiv.org/abs/{arxiv_id}",
-                'pdf_url': f"https://arxiv.org/pdf/{arxiv_id}.pdf",
-                'published_date': published,
-                'connected_papers_url': f"https://www.connectedpapers.com/search?q={quote(title)}"
-            }
+            # Build paper metadata using Pydantic model
+            paper = PaperMetadata(
+                title=title,
+                authors=authors,
+                abstract=summary,
+                source='arxiv',
+                arxiv_id=arxiv_id,
+                url=f"https://arxiv.org/abs/{arxiv_id}",
+                pdf_url=f"https://arxiv.org/pdf/{arxiv_id}.pdf",
+                published_date=published,
+                connected_papers_url=f"https://www.connectedpapers.com/search?q={quote(title)}"
+            )
             
             return paper
             
@@ -118,7 +122,7 @@ class SearchAgent:
             print(f"[ERROR] Failed to parse arXiv entry: {e}")
             return None
     
-    def _deduplicate_papers(self, papers: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _deduplicate_papers(self, papers: List[PaperMetadata]) -> List[PaperMetadata]:
         """Remove duplicate papers based on title similarity."""
         if not papers:
             return []
@@ -127,7 +131,7 @@ class SearchAgent:
         seen_titles = set()
         
         for paper in papers:
-            title_key = paper['title'].lower().strip()
+            title_key = paper.title.lower().strip()
             if title_key not in seen_titles:
                 seen_titles.add(title_key)
                 unique_papers.append(paper)

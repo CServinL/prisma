@@ -1,0 +1,128 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Run All Tests",
+            "type": "shell",
+            "command": "pipenv",
+            "args": [
+                "run",
+                "python",
+                "-m",
+                "pytest",
+                "tests/",
+                "-v"
+            ],
+            "group": {
+                "kind": "test",
+                "isDefault": true
+            },
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": false,
+                "panel": "shared",
+                "showReuseMessage": true,
+                "clear": false
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "Run Tests with Coverage",
+            "type": "shell",
+            "command": "pipenv",
+            "args": [
+                "run",
+                "python",
+                "-m",
+                "pytest",
+                "tests/",
+                "-v",
+                "--cov=src",
+                "--cov-report=html",
+                "--cov-report=term-missing"
+            ],
+            "group": "test",
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": false,
+                "panel": "shared",
+                "showReuseMessage": true,
+                "clear": false
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "Run Unit Tests Only",
+            "type": "shell",
+            "command": "pipenv",
+            "args": [
+                "run",
+                "python",
+                "-m",
+                "pytest",
+                "tests/unit/",
+                "-v"
+            ],
+            "group": "test",
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": false,
+                "panel": "shared",
+                "showReuseMessage": true,
+                "clear": false
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "Run Integration Tests Only",
+            "type": "shell",
+            "command": "pipenv",
+            "args": [
+                "run",
+                "python",
+                "-m",
+                "pytest",
+                "tests/integration/",
+                "-v"
+            ],
+            "group": "test",
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": false,
+                "panel": "shared",
+                "showReuseMessage": true,
+                "clear": false
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "Run Tests in Debug Mode",
+            "type": "shell",
+            "command": "pipenv",
+            "args": [
+                "run",
+                "python",
+                "-m",
+                "pytest",
+                "tests/",
+                "-v",
+                "-s",
+                "--tb=long"
+            ],
+            "group": "test",
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": false,
+                "panel": "shared",
+                "showReuseMessage": true,
+                "clear": false
+            },
+            "problemMatcher": []
+        }
+    ]
+}

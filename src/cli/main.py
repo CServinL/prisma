@@ -24,6 +24,9 @@ def main():
 Examples:
   python -m src.cli.main --topic "machine learning" --output "ml_review.md"
   python -m src.cli.main --topic "climate change" --sources "arxiv" --limit 20
+  python -m src.cli.main --topic "neural networks" --zotero --include-authors
+  python -m src.cli.main --topic "deep learning" --zotero-only --zotero-collections "AI Papers,ML Research"
+  python -m src.cli.main --topic "transformers" --zotero-recent 2 --limit 50
         """
     )
     
@@ -58,6 +61,33 @@ Examples:
         help="Include author analysis and research directory"
     )
     
+    # Zotero integration options
+    parser.add_argument(
+        "--zotero",
+        action="store_true",
+        help="Include Zotero library search in addition to other sources"
+    )
+    
+    parser.add_argument(
+        "--zotero-only",
+        action="store_true",
+        help="Search only in Zotero library (ignores --sources)"
+    )
+    
+    parser.add_argument(
+        "--zotero-collections",
+        default=None,
+        help="Comma-separated list of Zotero collection names or keys to search"
+    )
+    
+    parser.add_argument(
+        "--zotero-recent",
+        type=int,
+        default=None,
+        metavar="YEARS",
+        help="Include papers from Zotero added in the last N years"
+    )
+
     parser.add_argument(
         "--debug",
         action="store_true",
@@ -69,10 +99,29 @@ Examples:
     # Get configuration defaults
     search_config = config.get_search_config()
     output_config = config.get_output_config()
+    zotero_config = config.get_zotero_config()
+    
+    # Validate Zotero options
+    if (args.zotero or args.zotero_only or args.zotero_collections or args.zotero_recent):
+        if not config.has_zotero_credentials():
+            print("❌ Error: Zotero integration requested but not configured.")
+            print("Please set up Zotero API credentials in your config file.")
+            print("Required: sources.zotero.api_key and sources.zotero.library_id")
+            sys.exit(1)
     
     # Apply config defaults to args
     if args.sources is None:
         args.sources = ','.join(search_config['sources'])
+    
+    # Handle Zotero-only mode
+    if args.zotero_only:
+        args.sources = 'zotero'
+    elif args.zotero:
+        # Add zotero to existing sources
+        sources_list = args.sources.split(',')
+        if 'zotero' not in sources_list:
+            sources_list.append('zotero')
+        args.sources = ','.join(sources_list)
     
     if args.limit is None:
         args.limit = search_config['default_limit']
@@ -110,7 +159,9 @@ Examples:
             'sources': args.sources.split(','),
             'limit': args.limit,
             'output_file': str(output_path),
-            'include_authors': args.include_authors
+            'include_authors': args.include_authors,
+            'zotero_collections': args.zotero_collections.split(',') if args.zotero_collections else None,
+            'zotero_recent_years': args.zotero_recent
         }
         
         result = coordinator.run_review(review_config)

@@ -1,0 +1,156 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mxfile host="app.diagrams.net" agent="Mozilla/5.0" version="24.7.7">
+  <diagram name="Prisma Simple Pipeline" id="prisma-pipeline">
+    <mxGraphModel dx="1422" dy="794" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1169" pageHeight="827" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        
+        <!-- Background -->
+        <mxCell id="bg" value="" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f8f9fa;strokeColor=none;" vertex="1" parent="1">
+          <mxGeometry x="40" y="40" width="1080" height="600" as="geometry" />
+        </mxCell>
+        
+        <!-- Title -->
+        <mxCell id="title" value="Prisma Simple Literature Review Pipeline" style="text;html=1;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=20;fontStyle=1;fillColor=none;strokeColor=none;" vertex="1" parent="1">
+          <mxGeometry x="60" y="60" width="520" height="30" as="geometry" />
+        </mxCell>
+        
+        <!-- CLI Interface -->
+        <mxCell id="cli" value="CLI Interface&#xa;(Typer)&#xa;&#xa;• prisma start config.yaml&#xa;• prisma status job_123&#xa;• prisma results job_123" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e3f2fd;strokeColor=#1976d2;fontSize=12;align=center;" vertex="1" parent="1">
+          <mxGeometry x="80" y="120" width="180" height="100" as="geometry" />
+        </mxCell>
+        
+        <!-- Configuration -->
+        <mxCell id="config" value="YAML Config&#xa;&#xa;topic: &quot;ML healthcare&quot;&#xa;sources: [pubmed, arxiv]&#xa;max_papers: 100" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f3e5f5;strokeColor=#7b1fa2;fontSize=11;align=center;" vertex="1" parent="1">
+          <mxGeometry x="300" y="120" width="150" height="100" as="geometry" />
+        </mxCell>
+        
+        <!-- Coordinator -->
+        <mxCell id="coordinator" value="Coordinator&#xa;&#xa;• Loads config&#xa;• Creates job in SQLite&#xa;• Runs pipeline sequentially&#xa;• Updates progress" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff3e0;strokeColor=#f57c00;fontSize=12;align=center;" vertex="1" parent="1">
+          <mxGeometry x="500" y="120" width="180" height="100" as="geometry" />
+        </mxCell>
+        
+        <!-- Search Agent -->
+        <mxCell id="search" value="Search Agent&#xa;&#xa;• PubMed API&#xa;• ArXiv API&#xa;• Returns paper metadata&#xa;• Status: searching" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8f5e8;strokeColor=#4caf50;fontSize=12;align=center;" vertex="1" parent="1">
+          <mxGeometry x="200" y="280" width="180" height="100" as="geometry" />
+        </mxCell>
+        
+        <!-- Analysis Agent -->
+        <mxCell id="analysis" value="Analysis Agent&#xa;&#xa;• Fetches full papers&#xa;• Summarizes with Ollama&#xa;• Extracts key findings&#xa;• Status: analyzing" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff8e1;strokeColor=#ffc107;fontSize=12;align=center;" vertex="1" parent="1">
+          <mxGeometry x="420" y="280" width="180" height="100" as="geometry" />
+        </mxCell>
+        
+        <!-- Report Agent -->
+        <mxCell id="report" value="Report Agent&#xa;&#xa;• Generates markdown&#xa;• Creates bibliography&#xa;• Saves final report&#xa;• Status: completed" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fce4ec;strokeColor=#e91e63;fontSize=12;align=center;" vertex="1" parent="1">
+          <mxGeometry x="640" y="280" width="180" height="100" as="geometry" />
+        </mxCell>
+        
+        <!-- SQLite Database -->
+        <mxCell id="database" value="SQLite Database&#xa;&#xa;• Job status tracking&#xa;• Paper metadata&#xa;• Summaries&#xa;• Final reports" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f1f8e9;strokeColor=#689f38;fontSize=12;align=center;" vertex="1" parent="1">
+          <mxGeometry x="860" y="120" width="180" height="100" as="geometry" />
+        </mxCell>
+        
+        <!-- External APIs -->
+        <mxCell id="apis" value="External APIs&#xa;&#xa;• PubMed&#xa;• ArXiv&#xa;• Paper download sites" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#efebe9;strokeColor=#5d4037;fontSize=12;align=center;" vertex="1" parent="1">
+          <mxGeometry x="80" y="450" width="180" height="100" as="geometry" />
+        </mxCell>
+        
+        <!-- Ollama LLM -->
+        <mxCell id="ollama" value="Ollama LLM&#xa;&#xa;• Local inference&#xa;• Paper summarization&#xa;• Key insight extraction" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e0f2f1;strokeColor=#00695c;fontSize=12;align=center;" vertex="1" parent="1">
+          <mxGeometry x="420" y="450" width="180" height="100" as="geometry" />
+        </mxCell>
+        
+        <!-- File System -->
+        <mxCell id="files" value="File System&#xa;&#xa;• Configuration files&#xa;• Generated reports&#xa;• Cached papers" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f3e5f5;strokeColor=#7b1fa2;fontSize=12;align=center;" vertex="1" parent="1">
+          <mxGeometry x="640" y="450" width="180" height="100" as="geometry" />
+        </mxCell>
+        
+        <!-- Flow Arrows -->
+        <!-- CLI to Config -->
+        <mxCell id="cli-to-config" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;strokeColor=#666666;" edge="1" parent="1" source="cli" target="config">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        
+        <!-- Config to Coordinator -->
+        <mxCell id="config-to-coordinator" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;strokeColor=#666666;" edge="1" parent="1" source="config" target="coordinator">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        
+        <!-- Coordinator to Database -->
+        <mxCell id="coordinator-to-db" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;strokeColor=#666666;" edge="1" parent="1" source="coordinator" target="database">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        
+        <!-- Pipeline Flow: Search -> Analysis -> Report -->
+        <mxCell id="coordinator-to-search" value="1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=3;strokeColor=#4caf50;fontSize=14;fontStyle=1;" edge="1" parent="1" source="coordinator" target="search">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="search-to-analysis" value="2" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=3;strokeColor=#ffc107;fontSize=14;fontStyle=1;" edge="1" parent="1" source="search" target="analysis">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="analysis-to-report" value="3" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=3;strokeColor=#e91e63;fontSize=14;fontStyle=1;" edge="1" parent="1" source="analysis" target="report">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        
+        <!-- External connections -->
+        <mxCell id="search-to-apis" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=1;strokeColor=#999999;dashed=1;" edge="1" parent="1" source="search" target="apis">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="analysis-to-ollama" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=1;strokeColor=#999999;dashed=1;" edge="1" parent="1" source="analysis" target="ollama">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="report-to-files" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=1;strokeColor=#999999;dashed=1;" edge="1" parent="1" source="report" target="files">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        
+        <!-- Legend -->
+        <mxCell id="legend-bg" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#cccccc;" vertex="1" parent="1">
+          <mxGeometry x="880" y="280" width="200" height="120" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="legend-title" value="Legend" style="text;html=1;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=14;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="930" y="290" width="100" height="20" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="legend-pipeline" value="Pipeline Flow" style="text;html=1;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="920" y="315" width="100" height="15" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="legend-pipeline-line" value="" style="edgeStyle=none;rounded=0;html=1;strokeWidth=3;strokeColor=#4caf50;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="890" y="322" as="sourcePoint" />
+            <mxPoint x="910" y="322" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="legend-external" value="External APIs" style="text;html=1;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="920" y="340" width="100" height="15" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="legend-external-line" value="" style="edgeStyle=none;rounded=0;html=1;strokeWidth=1;strokeColor=#999999;dashed=1;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="890" y="347" as="sourcePoint" />
+            <mxPoint x="910" y="347" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="legend-data" value="Data Flow" style="text;html=1;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="920" y="365" width="100" height="15" as="geometry" />
+        </mxCell>
+        
+        <mxCell id="legend-data-line" value="" style="edgeStyle=none;rounded=0;html=1;strokeWidth=2;strokeColor=#666666;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="890" y="372" as="sourcePoint" />
+            <mxPoint x="910" y="372" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

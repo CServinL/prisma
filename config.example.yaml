@@ -1,0 +1,68 @@
+# Prisma Configuration Example with Zotero Integration
+#
+# Copy this file to ~/.config/prisma/config.yaml and customize for your setup
+
+# Data Sources Configuration
+sources:
+  zotero:
+    # Enable Zotero Web API integration
+    enabled: true
+    
+    # Your Zotero API key (get from https://www.zotero.org/settings/keys/new)
+    api_key: "YOUR_ZOTERO_API_KEY_HERE"
+    
+    # Your Zotero library ID (user ID for personal library, group ID for groups)
+    library_id: "YOUR_LIBRARY_ID_HERE"
+    
+    # Library type: "user" for personal library, "group" for group library
+    library_type: "user"
+    
+    # Optional: Default collections to search (leave empty to search all)
+    # You can specify collection keys or use collection names
+    default_collections: []
+    # Example:
+    # default_collections: ["AI_PAPERS", "MACHINE_LEARNING"]
+    
+    # Include notes and attachments in searches
+    include_notes: false
+    include_attachments: false
+
+# LLM Configuration for Analysis
+llm:
+  provider: 'ollama'
+  model: 'llama3.1:8b'
+  host: '172.29.32.1:11434'  # WSL default host, adjust for your setup
+
+# Output Configuration
+output:
+  directory: './outputs'
+  format: 'markdown'
+
+# Search Configuration
+search:
+  default_limit: 10
+  # Include 'zotero' to search your Zotero library by default
+  sources: ['arxiv', 'zotero']
+
+# Analysis Configuration
+analysis:
+  summary_length: 'medium'
+
+# Logging Configuration
+logging:
+  level: 'INFO'
+  file: './logs/prisma.log'
+
+# Example Usage:
+#
+# Basic search with Zotero:
+#   python src/cli/main.py --topic "neural networks" --zotero
+#
+# Search only in Zotero:
+#   python src/cli/main.py --topic "machine learning" --zotero-only
+#
+# Search specific collections:
+#   python src/cli/main.py --topic "AI" --zotero-collections "Deep Learning,Computer Vision"
+#
+# Recent papers from Zotero (last 2 years):
+#   python src/cli/main.py --topic "transformers" --zotero-recent 2

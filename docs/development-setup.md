@@ -4,29 +4,94 @@ This guide covers the complete setup process for developing and running Prisma o
 
 ## Prerequisites
 
-- WSL2 (Windows) or native Linux distri**2. Zotero Database Access Issues:**
-```bash
-# Check if Zotero is running (close it if needed)
-ps aux | grep zotero
-
-# Verify database exists and is accessible
-ls -la ~/snap/zotero-snap/common/Zotero/zotero.sqlite
-
-# Test database connectivity
-sqlite3 ~/snap/zotero-snap/common/Zotero/zotero.sqlite "SELECT COUNT(*) FROM items;"
-
-# If database doesn't exist, run Zotero once to create it
-timeout 10s zotero-snap
-```Ubuntu 20.04+ recommended)
+- WSL2 (Windows) or native Linux distribution (Ubuntu 20.04+ recommended)
 - Python 3.12+ 
 - Git
 - Internet connection for downloading models and accessing APIs
 
-## 1. Zotero Setup in WSL/Linux
+## 1. Zotero Setup and Integration
 
-Zotero integration is a core component of Prisma, allowing you to leverage your existing research library.
+Prisma supports both local Zotero database access and cloud-based Zotero Web API integration for accessing your research library.
 
-### Option A: Install Zotero in WSL/Linux (Recommended)
+### Option A: Zotero Web API Integration (Recommended)
+
+The Zotero Web API provides reliable cloud-based access to your Zotero library with full synchronization support.
+
+#### Step 1: Create Zotero API Key
+
+1. Go to [https://www.zotero.org/settings/keys/new](https://www.zotero.org/settings/keys/new)
+2. Log in to your Zotero account
+3. Create a new API key with these settings:
+   - **Description**: "Prisma Literature Review Tool"
+   - **Key Type**: Personal
+   - **Permissions**: 
+     - ✅ Allow library access
+     - ✅ Allow notes access
+     - ✅ Allow write access (optional)
+   - **Default Group Permissions**: Read (if you want to access group libraries)
+
+4. Copy the generated API key (you'll need this for configuration)
+
+#### Step 2: Find Your Library ID
+
+**For Personal Library:**
+- Your User ID is shown on the API Keys page
+- Or go to [https://www.zotero.org/settings/keys](https://www.zotero.org/settings/keys) and note the number in the URL
+
+**For Group Library:**
+- Go to your group's page on zotero.org
+- The group ID is in the URL: `https://www.zotero.org/groups/[GROUP_ID]/`
+
+#### Step 3: Configure Prisma
+
+Create or update your Prisma configuration file at `~/.config/prisma/config.yaml`:
+
+```yaml
+sources:
+  zotero:
+    enabled: true
+    api_key: "YOUR_API_KEY_HERE"
+    library_id: "YOUR_LIBRARY_ID"
+    library_type: "user"  # or "group" for group libraries
+    default_collections: []  # Optional: specific collection keys to search by default
+    include_notes: false
+    include_attachments: false
+
+# Other existing configuration...
+llm:
+  provider: 'ollama'
+  model: 'llama3.1:8b'
+  host: '172.29.32.1:11434'
+
+output:
+  directory: './outputs'
+  format: 'markdown'
+
+search:
+  default_limit: 10
+  sources: ['arxiv', 'zotero']  # Include zotero in default sources
+```
+
+#### Step 4: Test Zotero Integration
+
+```bash
+# Test the connection
+python -c "
+from src.integrations.zotero import ZoteroClient, ZoteroConfig
+config = ZoteroConfig(api_key='YOUR_KEY', library_id='YOUR_ID')
+client = ZoteroClient(config)
+print('Connection successful!' if client.test_connection() else 'Connection failed!')
+"
+
+# Test CLI with Zotero
+python src/cli/main.py --topic "machine learning" --zotero-only --limit 5
+```
+
+### Option B: Local Zotero Database Access (Alternative)
+
+If you prefer to use a local Zotero installation, you can access the SQLite database directly.
+
+#### Install Zotero in WSL/Linux
 
 ```bash
 # Update package lists
@@ -47,7 +112,20 @@ sudo snap install zotero-snap
 zotero-snap --version
 ```
 
-### Option B: Use Existing Windows Zotero Installation
+#### Configure Local Database Access
+
+Update your `~/.config/prisma/config.yaml`:
+
+```yaml
+sources:
+  zotero:
+    enabled: false  # Disable API integration
+    # Local database paths (for legacy support)
+    library_path: "/home/username/snap/zotero-snap/common/Zotero/zotero.sqlite"
+    data_directory: "/home/username/snap/zotero-snap/common/Zotero/"
+```
+
+### Option C: Use Existing Windows Zotero Installation
 
 If you already have Zotero installed on Windows, you can access its database from WSL:
 

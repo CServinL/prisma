@@ -209,3 +209,12 @@ __marimo__/
 # Generated outputs
 outputs/*
 !outputs/.gitkeep
+
+# Personal configuration files
+config.yaml
+.ai-approval.json
+.copilot-approval.json
+
+# User-specific VS Code settings that shouldn't be shared
+.vscode/launch.json
+.vscode/extensions.json

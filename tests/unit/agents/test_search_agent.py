@@ -11,6 +11,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / 'src'))
 
 from agents.search_agent import SearchAgent
+from storage.models.agent_models import SearchResult, PaperMetadata
 
 
 class TestSearchAgent(unittest.TestCase):
@@ -50,13 +51,15 @@ class TestSearchAgent(unittest.TestCase):
             limit=1
         )
         
-        # Verify results
-        self.assertIn('papers', result)
-        self.assertIn('total_found', result)
-        self.assertIn('sources_searched', result)
-        self.assertIn('query', result)
-        self.assertEqual(result['query'], "test query")
-        self.assertEqual(result['sources_searched'], ["arxiv"])
+        # Verify result is SearchResult instance
+        self.assertIsInstance(result, SearchResult)
+        self.assertEqual(result.query, "test query")
+        self.assertEqual(result.sources_searched, ["arxiv"])
+        self.assertGreaterEqual(len(result.papers), 0)
+        
+        # Verify papers are PaperMetadata instances
+        if result.papers:
+            self.assertIsInstance(result.papers[0], PaperMetadata)
     
     def test_search_unsupported_source(self):
         """Test search with unsupported source."""
@@ -66,23 +69,47 @@ class TestSearchAgent(unittest.TestCase):
             limit=10
         )
         
-        # Should return empty results but not crash
-        self.assertEqual(len(result['papers']), 0)
-        self.assertEqual(result['sources_searched'], ["unsupported"])
+        # Should return SearchResult with empty papers but not crash
+        self.assertIsInstance(result, SearchResult)
+        self.assertEqual(len(result.papers), 0)
+        self.assertEqual(result.sources_searched, ["unsupported"])
     
     def test_deduplicate_papers(self):
         """Test paper deduplication functionality."""
+        # Create test PaperMetadata objects
+        
         papers = [
-            {'title': 'Paper A', 'id': '1'},
-            {'title': 'Paper B', 'id': '2'},
-            {'title': 'Paper A', 'id': '1'},  # Duplicate
+            PaperMetadata(
+                title='Paper A',
+                authors=['Author 1'],
+                abstract='Abstract A',
+                source='arxiv',
+                arxiv_id='1',
+                url='http://test1.com'
+            ),
+            PaperMetadata(
+                title='Paper B',
+                authors=['Author 2'],
+                abstract='Abstract B',
+                source='arxiv',
+                arxiv_id='2',
+                url='http://test2.com'
+            ),
+            PaperMetadata(
+                title='Paper A',  # Duplicate
+                authors=['Author 1'],
+                abstract='Abstract A',
+                source='arxiv',
+                arxiv_id='1',
+                url='http://test1.com'
+            ),
         ]
         
         unique_papers = self.search_agent._deduplicate_papers(papers)
         
         # Should remove duplicate
         self.assertEqual(len(unique_papers), 2)
-        titles = [p['title'] for p in unique_papers]
+        titles = [p.title for p in unique_papers]
         self.assertIn('Paper A', titles)
         self.assertIn('Paper B', titles)
 

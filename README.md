@@ -59,19 +59,29 @@ We welcome contributions from the community! Please see our [Contributing Guidel
 6. [Zotero Integration](#6-zotero-integration)
 7. [Roadmap](#7-roadmap)
 8. [Development Setup](#8-development-setup)
+   - 📖 [Complete Setup Guide](docs/development-setup.md) (WSL/Linux)
 
-## ⚡ Development Timeline (7-Day MVP)
+## ⚡ Development Timeline (8-Day MVP)
 
-**Target: Working literature review tool in 1 week**
+**Target: Working literature review tool covering core components**
 
 | Day | Component | Goal | Output |
 |-----|-----------|------|---------|
-| 1 | Infrastructure | CLI + basic file I/O | Running command interface |
-| 2 | Search Agent | Single API integration (arXiv) | Paper metadata retrieval |
-| 3 | Analysis Agent | Text processing basics | Abstract summarization |
-| 4 | Report Agent | Markdown generation | Formatted reports |
-| 5 | Author Analysis | Author extraction + directory | Research contact list |
-| 6-7 | Integration | End-to-end testing | Working MVP |
+| 1 | Infrastructure | CLI + basic file I/O | ✅ Running command interface |
+| 2 | Zotero Integration | SQLite reading + search | Local library access |
+| 3 | Multi-Source Search | arXiv + PubMed APIs | External paper discovery |
+| 4 | Analysis Agent | Basic LLM integration (Ollama) | AI-powered summarization |
+| 5 | Report Generation | Enhanced markdown reports | Structured literature reviews |
+| 6 | Author Analysis | Research directory creation | Academic contact database |
+| 7 | Integration Testing | End-to-end workflows | Validated core features |
+| 8 | Polish & Documentation | Error handling + docs | Production-ready MVP |
+
+**Core Components Coverage:**
+- 🔍 **Zotero Integration** (Day 2)
+- 🌐 **Multi-Source Search** (Day 3) 
+- 🤖 **AI Analysis** (Day 4)
+- 📊 **Report Generation** (Day 5)
+- 👥 **Author Analysis** (Day 6)
 
 ## 🚀 Quick Start
 
@@ -159,7 +169,7 @@ Config File → Search Agent → Analysis Agent → Report Agent → Results
 ## 4) Technology Stack
 
 ### Core Technologies
-- **🐍 Python 3.13.7**: Main programming language
+- **🐍 Python 3.12+**: Main programming language (3.12.3 or higher)
 - **📦 pipenv**: Dependency management and virtual environments
 - **🤖 Ollama**: Local LLM backend (Llama 3.1:8b model)
 - **🗃️ SQLite**: Local database for job state and metadata
@@ -406,17 +416,18 @@ prisma-workspace/
 ## 7) Roadmap
 
 ### Phase 0: Core MVP (Current Focus)
-**Goal**: Basic literature review automation
+**Goal**: Basic literature review automation with all core components
 
 **Features:**
 - ✅ Simple pipeline architecture (4 core components)
-- ✅ Zotero integration + external API search
-- ✅ LLM-based paper analysis and summarization
-- ✅ Markdown report generation
-- ✅ YAML configuration files
+- 🔄 Zotero integration + external API search (Day 2-3)
+- 🔄 LLM-based paper analysis and summarization (Day 4)
+- ✅ Markdown report generation (Enhanced Day 5)
+- ✅ YAML configuration files  
 - ✅ CLI interface
+- 🔄 Author analysis and research directory (Day 6)
 
-**Timeline**: Q4 2024 - Q1 2025
+**Timeline**: Q4 2024 - Q1 2025 (8-day intensive MVP)
 
 ### Phase 1: Enhanced Analysis (Next)
 **Goal**: Improve analysis quality and user experience
@@ -527,15 +538,16 @@ prisma-workspace/
 
 ## 8) Development Setup
 
-### Prerequisites
-1. **Python 3.13.7** with pipenv
-2. **Ollama** installed with llama3.1:8b model:
-   ```bash
-   # Install Ollama (see https://ollama.ai)
-   ollama pull llama3.1:8b
-   ```
+> **📖 Complete Setup Guide**: See [docs/development-setup.md](docs/development-setup.md) for detailed WSL/Linux setup instructions covering Zotero, Ollama, and Prisma configuration.
 
-### Getting Started
+### Quick Start (Prerequisites Required)
+
+**Prerequisites:**
+1. **Python 3.12+** with pipenv 
+2. **Ollama** installed with llama3.1:8b model
+3. **Zotero** with research library (optional for basic testing)
+
+### Basic Installation
 
 1. **Clone the repository:**
    ```bash
@@ -546,7 +558,7 @@ prisma-workspace/
 2. **Set up development environment:**
    ```bash
    # Install pipenv if you don't have it
-   pip install pipenv
+   pipx install pipenv
    
    # Install dependencies and create virtual environment
    pipenv install --dev
@@ -555,9 +567,14 @@ prisma-workspace/
    pipenv shell
    ```
 
-3. **Run tests:**
+3. **Test basic functionality:**
    ```bash
-   pytest
+   # Test CLI interface
+   python src/cli/main.py --help
+   
+   # Run simple literature review (Day 1 MVP)
+   python src/cli/main.py --topic "machine learning" --limit 3
+   ```
    ```
 
 4. **Try a simple example:**

@@ -1,0 +1,3 @@
+# This file ensures the outputs directory is tracked by git
+# All generated reports and analysis files will be placed here
+# The actual output files are ignored by .gitignore

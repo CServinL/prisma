@@ -1,14 +1,36 @@
 # Prisma
-*AI-Driven Systematic Literature Review System*
+*AI-### 🔍 **Comprehensive Document Discovery**
+- **Academic Papers**: Journal articles, conference papers, preprints
+- **Books & Monogr### Key Features
+- **📚 Multi-Document Support**: Papers, books, chapters, theses, reports, and grey literature
+- **🔗 Zotero Integration**: Leverages existing research libraries and bibliographic data
+- **🌐 Multi-Source Search**: Combines Zotero with external APIs for comprehensive coverage
+- **📖 Full-Text Analysis**: Processes PDFs, abstracts, and metadata across all document types
+- **🤖 AI-Powered Synthesis**: Uses local LLMs for cross-document analysis and comparison
+- **👥 Author Analysis**: Identifies key researchers and creates academic contact directory
+- **📊 Structured Output**: Generates both human-readable reports and machine-readable data*: Academic books, textbooks, reference works
+- **Book Chapters**: Individual chapters from edited volumes
+- **Conference Proceedings**: Full conference publications and presentations
+- **Theses & Dissertations**: PhD dissertations, Master's theses
+- **Reports**: Technical reports, government publications, white papers
+- **Grey Literature**: Working papers, institutional reports, policy documentsriven Systematic Literature Review System*
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Contributor Covenant](https://img.shields.io/badge/Contributor%20Covenant-2.1-4baaaa.svg)](CODE_OF_CONDUCT.md)
 
 ## Executive Abstract
 
-This document defines the master plan for **Prisma**, an AI‑driven swarm of specialized agents that collaborate to perform systematic literature reviews in academic research. It outlines the overall scope, architecture, workflows, deployment setups, integration with reference managers, permissions for open‑access vs non‑open‑access content, scheduled refresh capabilities, investigator summaries, and notification systems. The plan establishes the foundation for building a reproducible, ethical, and scalable system that can continuously synthesize the current state of research on any given topic, supporting both individual investigators and research teams.
+**Prisma** is an AI-driven system that automates comprehensive literature reviews for academic research. Given a research topic, it searches academic databases, analyzes papers, books, conference proceedings, theses, and reports using language models, and generates comprehensive reports with key findings and recommendations.
 
-**Goal:** Given a research topic (e.g., current state of research on LLMs for small, low‑power devices), the swarm searches, filters, summarizes, classifies, compares, performs methodological critique, and produces an executive report with recommendations.
+**Core Goal:** Input a research topic (e.g., "LLMs for small, low‑power devices") → Output an executive report with synthesis, trends, gaps, and recommendations.
+
+**Key Features:**
+- 🔍 **Smart Search**: Integrates with Zotero and academic APIs (arXiv, PubMed, Semantic Scholar)
+- 🤖 **AI Analysis**: Uses local LLMs (Ollama) to summarize and analyze papers
+- 📊 **Comprehensive Reports**: Generates structured markdown reports with findings and insights
+- 👥 **Author Analysis**: Identifies key researchers, their contributions, and research trajectories
+- 📞 **Research Directory**: Creates "telephone guide" of academics working in the field
+- ⚙️ **Simple Config**: YAML configuration files for reproducible research workflows
 
 ## Contributing
 
@@ -28,142 +50,235 @@ We welcome contributions from the community! Please see our [Contributing Guidel
 
 ## Table of Contents
 
-1. [Scope and Deliverables](#1-scope-and-deliverables)
+1. [Quick Start](#1-quick-start)
 2. [Architecture Overview](#2-architecture-overview)
 3. [Data Flow](#3-data-flow)
-4. [Stack](#4-stack)
-5. [Deployment Setups](#5-deployment-setups)
+   - 📊 [Information Flow Diagram](docs/information-flow-diagram.md)
+4. [Technology Stack](#4-technology-stack)
+5. [Configuration](#5-configuration)
 6. [Zotero Integration](#6-zotero-integration)
-7. [Permissions Model (OA vs Non‑OA)](#7-permissions-model-oa-vs-non-oa)
-8. [Legal/Data Strategies](#8-legaldata-strategies)
-9. [Prompts (conceptual)](#9-prompts-conceptual)
-10. [MVP Code Skeleton (conceptual only)](#10-mvp-code-skeleton-conceptual-only)
-11. [Configuration-Driven User Interface](#11-configuration-driven-user-interface)
-12. [Monitoring & Metrics](#12-monitoring--metrics)
-13. [Risks & Mitigations](#13-risks--mitigations)
-14. [Roadmap](#14-roadmap)
-15. [How to Run MVP (conceptual)](#15-how-to-run-mvp-conceptual)
-16. [Pending Decisions](#16-pending-decisions)
-17. [Investigator Summary in Reports](#17-investigator-summary-in-reports)
-18. [Saved Job Config & Scheduled Refresh](#18-saved-job-config--scheduled-refresh)
-19. [Notification System](#19-notification-system)
-20. [API Endpoints (planned)](#20-api-endpoints-planned)
-21. [Data Model Extensions](#21-data-model-extensions)
-22. [Scheduling & Execution Notes](#22-scheduling--execution-notes)
-23. [Security & Privacy](#23-security--privacy)
-24. [API Rate Limits & Throttling](#24-api-rate-limits--throttling-documented-policies)
-25. [References](#25-references)
+7. [Roadmap](#7-roadmap)
+8. [Development Setup](#8-development-setup)
 
-## 1) Scope and Deliverables
+## ⚡ Development Timeline (7-Day MVP)
 
-### Input
-- **Configuration file** (YAML/JSON): research topic/query, parameters, filters
-- **Parameters**: date ranges, sources (arXiv, PubMed, Semantic Scholar), minimum citations, include/exclude keywords
-- **Zotero library path** or connection details
+**Target: Working literature review tool in 1 week**
 
-### Output
-- **Executive report** (Markdown/HTML files): synthesis, key findings, topic map, comparison tables, gaps, future research directions
-- **Auxiliary artifacts**: CSV with metadata, JSON of per‑paper summaries, vector index for semantic search
-- **Log files**: execution logs, error reports, processing statistics
+| Day | Component | Goal | Output |
+|-----|-----------|------|---------|
+| 1 | Infrastructure | CLI + basic file I/O | Running command interface |
+| 2 | Search Agent | Single API integration (arXiv) | Paper metadata retrieval |
+| 3 | Analysis Agent | Text processing basics | Abstract summarization |
+| 4 | Report Agent | Markdown generation | Formatted reports |
+| 5 | Author Analysis | Author extraction + directory | Research contact list |
+| 6-7 | Integration | End-to-end testing | Working MVP |
 
-### User Interaction Model (Phase 0)
-- **Config-driven**: Users create configuration files specifying research parameters
-- **File-based output**: Results delivered as files in designated output directories
-- **Command-line execution**: Run via CLI commands or scheduled execution
-- **No web UI**: Direct file system interaction for input/output
+## 🚀 Quick Start
+
+```bash
+# Clone the repository
+git clone https://github.com/username/prisma.git
+cd prisma
+
+# Set up Python environment with pipenv
+pipenv install
+pipenv shell
+
+# Run a simple literature review (MVP target)
+python -m src.coordinator --topic "machine learning" --sources "arxiv" --output "review.md"
+```
+
+### What You Get
+- **Executive Summary**: Key findings and trends
+- **Paper Summaries**: Structured analysis of each paper
+- **Comparative Analysis**: Trends, gaps, and conflicts
+- **Recommendations**: Future research directions
+- **Raw Data**: CSV/JSON exports for further analysis
 
 ## 2) Architecture Overview
 
-### Manager/Planner
-Orchestrates workflow, distributes tasks, handles retries/errors
+Prisma uses a **simple pipeline architecture** with specialized components that work together to automate literature reviews.
 
-### Specialized Agents (parallelizable):
-- **Zotero Query Agent** (primary search in user's library)
-- **External Searchers** (arXiv/PubMed/Semantic Scholar for gaps)
-- **Zotero Import Agent** (auto-import discovered papers)
-- **Deduplicator & Metadata Normalizer**
-- **PDF Fetcher & Text Extractor** (abstract, methods, results, discussion)
-- **Summarizers** (homogeneous per‑paper summaries)
-- **Thematic Classifier** (topic clustering/taxonomy)
-- **Comparator** (similarities, conflicts, benchmarks, gaps)
-- **Methodology Critic** (sample sizes, biases, validity)
-- **Synthesizer** (meta‑summary + visuals)
-- **Evaluator** (quality control, coherence, reference checking)
-- **Report Builder** (Markdown/HTML)
+### Core Components
+
+**📋 Coordinator**
+- Orchestrates the entire workflow
+- Manages job execution and error handling
+- Coordinates data flow between components
+
+**🔍 Search Agent**
+- Searches Zotero library and external APIs (arXiv, PubMed, Semantic Scholar)
+- Handles deduplication and metadata normalization
+- Downloads and extracts text from available PDFs
+
+**🤖 Analysis Agent**
+- Generates structured summaries for each paper
+- Performs thematic classification and comparison
+- Identifies trends, conflicts, and research gaps
+
+**📊 Report Agent**
+- Synthesizes findings into executive reports
+- Generates markdown reports with structured insights
+- Creates author analysis and research landscape mapping
+- Produces comprehensive "research directory" with key academics
+- Creates supplementary data files (CSV, JSON)
+
+### Simple Data Flow
+```
+Config File → Search Agent → Analysis Agent → Report Agent → Results
+     ↓              ↓              ↓             ↓
+  Parameters    Paper PDFs    Summaries    Final Report
+```
 
 ### Communication
-Message bus (in‑memory queue), metadata/state in relational DB + vector index
+- **Simple messaging**: Direct function calls between components
+- **State storage**: SQLite database for job state and metadata
+- **File-based**: Results stored as files in designated directories
 
 ## 3) Data Flow
 
-1. Manager receives topic, creates job
-2. **Zotero Query Agent** searches user's library first
-3. **External Searchers** query APIs for missing papers (in parallel)
-4. **Zotero Import Agent** adds newly discovered papers to user's library
-5. **Deduplicator** normalizes records and removes duplicates across all sources
-6. **Fetchers** download OA PDFs / extract text (prioritizing Zotero-stored PDFs)
-7. **Summarizers** produce normalized summaries
-8. **Thematic Classifier** groups into subtopics
-9. **Comparator** detects trends/conflicts/gaps
-10. **Methodology Critic** reviews methodological quality
-11. **Synthesizer** builds global narrative
-12. **Evaluator** validates coherence and references
-13. **Report Builder** compiles the final document
+> 📊 **Visual Guide**: See the complete [Information Flow Diagram](docs/information-flow-diagram.md) for a detailed visual representation of the system architecture.
 
-## 4) Stack
+### Simplified Pipeline
 
-- **LLM backend**: Ollama (e.g., Llama 3.1 8B/70B, Mistral 7B, Qwen)
-- **Orchestration**: AirFlow for workflow management and scheduling; CrewAI/AutoGen/LangChain for agent coordination
-- **Scaling**: Ray/Dask for parallel processing
-- **Vector DB**: FAISS or Chroma (local)
-- **Database**: SQLite or Postgres
-- **PDF/Text extraction**: PyMuPDF, pdfminer.six; GROBID optional for scholarly metadata
-- **Configuration**: YAML/JSON config files for job definitions
-- **CLI interface**: Command-line tools for job submission and monitoring
-- **Optional model routing**: see RouteLLM APIs (unified gateway)
+1. **Job Setup**: Coordinator reads config file and initializes job
+2. **Literature Search**: Search Agent queries Zotero library and external APIs
+3. **Content Processing**: Search Agent downloads PDFs and extracts text
+4. **Deduplication**: Remove duplicate papers using DOI and fuzzy title matching
+5. **Analysis**: Analysis Agent generates summaries and performs comparisons
+6. **Synthesis**: Analysis Agent identifies themes, trends, and gaps
+7. **Report Generation**: Report Agent creates final markdown report
+8. **Output**: Results saved to specified directory
 
-## 5) Deployment Setups
+### Key Features
+- **Zotero Integration**: Leverages existing research libraries
+- **Multi-Source Search**: Combines Zotero with external APIs for comprehensive coverage
+- **AI-Powered Analysis**: Uses local LLMs for paper summarization and comparison
+- **Structured Output**: Generates both human-readable reports and machine-readable data
 
-### Setup A – Local GPU (RTX 4090M, 16 GB VRAM)
-- One efficient base model (e.g., Llama 3.1 8B Q4 or Mistral 7B Q4) loaded in Ollama
-- 3–6 concurrent agents share the same model (prompt‑based role differentiation)
-- **Trade‑off**: fast and consistent; less depth than 70B for critique/synthesis
-- **Use case**: personal research, MVP prototyping
+## 4) Technology Stack
 
-### Setup B – High‑end Node (EVO‑X2, 128 GB VRAM)
-- Concurrent models: 8B for batch/parallel; 70B for deep critique/synthesis
-- 20+ agents for 8B; 1–2 for 70B
-- **Use case**: research teams, production‑grade reports
+### Core Technologies
+- **🐍 Python 3.13.7**: Main programming language
+- **📦 pipenv**: Dependency management and virtual environments
+- **🤖 Ollama**: Local LLM backend (Llama 3.1:8b model)
+- **🗃️ SQLite**: Local database for job state and metadata
+- **⌨️ Typer**: Command-line interface framework
+
+### External APIs
+- **arXiv**: Physics, computer science, and mathematics papers
+- **PubMed**: Biomedical literature database
+
+### Configuration & Output
+- **YAML**: Configuration files for reproducible research
+- **Markdown**: Primary report format (human-readable)
+- **JSON**: Structured data exports
+
+### Why This Stack?
+- **Simple**: Minimal dependencies, focused on core functionality
+- **Local-first**: No cloud dependencies, works offline
+- **Reproducible**: Configuration files ensure consistent results
+- **Developer-friendly**: Modern Python tooling with pipenv
+
+## 5) Configuration
+
+Prisma uses YAML configuration files to define research parameters and ensure reproducible results.
+
+### Basic Configuration Structure
+
+```yaml
+# prisma-config.yaml
+research:
+  topic: "transformer architectures for edge computing"
+  keywords:
+    include: ["edge AI", "mobile transformers", "quantization"]
+    exclude: ["cloud computing", "datacenter"]
+  date_range:
+    start: "2020-01-01"
+    end: "2024-12-31"
+
+sources:
+  zotero:
+    library_path: "/path/to/zotero/library.sqlite"
+    collections: ["AI Research", "Edge Computing"]  # optional
+  external:
+    arxiv: true
+    pubmed: false
+    semantic_scholar: true
+
+filters:
+  min_citations: 5
+  max_papers: 100
+  languages: ["en"]
+  document_types: ["journal", "conference"]
+
+output:
+  directory: "./results/edge-ai-review-2024"
+  format: "markdown"
+  include_raw_data: true
+
+execution:
+  model: "llama3.1:8b"
+  max_concurrent: 4
+```
+
+### Configuration Options
+
+**Research Parameters:**
+- `topic`: Main research question or area
+- `keywords`: Include/exclude terms for filtering
+- `date_range`: Publication date filters
+
+**Data Sources:**
+- `zotero`: Local Zotero library integration
+- `external`: Enable/disable external API sources
+
+**Output Settings:**
+- `directory`: Where to save results
+- `format`: Report format (currently markdown)
+- `include_raw_data`: Export CSV/JSON data files
+
+**Execution:**
+- `model`: Ollama model to use for analysis
+- `max_concurrent`: Number of parallel operations
 
 ## 6) Zotero Integration
 
-### Primary Strategy: Zotero as Core Database
-Zotero serves as our **primary source** for paper metadata, PDFs, and bibliographic management. Prisma will leverage Zotero's existing infrastructure and user collections as the foundation.
+Prisma works seamlessly with Zotero, the popular reference management tool, to leverage your existing research library.
 
-### Integration Methods:
-- **Web API** (multi‑user, cloud sync) — API key required, best for team collaboration
-- **SQLite local** (fast, offline, private) — direct database access for individual researchers
-- **Connector API** (BetterBibTeX export via local connector) — seamless bibliography export
+### Why Zotero Integration?
+- **Leverage Existing Work**: Use papers you've already collected and organized
+- **Avoid Redundancy**: Don't re-download papers you already have
+- **Respect Your Organization**: Maintains your existing collections and tags
+- **Enhanced Coverage**: Combines your curated library with fresh external searches
 
-### Hybrid Approach: Zotero + External APIs
-Since Zotero won't contain every paper, Prisma implements a **cascading search strategy**:
+### How It Works
 
-1. **Primary**: Search user's Zotero library first (fastest, most relevant to user's research)
-2. **Secondary**: Query external APIs (arXiv, PubMed, Semantic Scholar) for missing papers
-3. **Integration**: Auto-import discovered papers back into Zotero for future use
-4. **Deduplication**: Cross-reference DOIs/titles between Zotero and external sources
+1. **Primary Search**: Prisma searches your Zotero library first for relevant papers
+2. **Gap Analysis**: Identifies missing papers by comparing with external sources
+3. **External Search**: Searches arXiv, PubMed, Semantic Scholar for additional papers
+4. **Optional Import**: Can add newly discovered papers back to your Zotero library
 
-### Implementation Strategy:
-- **MVP**: SQLite local access + external API fallback
-- **Production**: Web API for teams + enhanced auto-import workflows
-- **Advanced**: Real-time sync between Prisma discoveries and user's Zotero collections
+### Setup
 
-### Benefits:
-- Leverages user's existing research organization
-- Respects user's curation and tagging
-- Reduces redundant searches for known papers
-- Maintains user's preferred bibliography format
-- Enables collaborative research through shared Zotero groups
+**Find Your Zotero Database:**
+- **Windows**: `%USERPROFILE%\Zotero\zotero.sqlite`
+- **macOS**: `~/Zotero/zotero.sqlite`
+- **Linux**: `~/Zotero/zotero.sqlite`
+
+**Configuration:**
+```yaml
+sources:
+  zotero:
+    library_path: "/path/to/zotero.sqlite"
+    collections: ["AI Research", "Edge Computing"]  # optional: specific collections
+```
+
+### Benefits for Researchers
+- **Time Saving**: Don't re-analyze papers you've already read
+- **Context Aware**: Builds on your existing research interests
+- **Quality Control**: Leverages your curation decisions
+- **Workflow Integration**: Fits into existing research practices
 
 ## 7) Permissions Model (OA vs Non‑OA)
 
@@ -288,162 +403,187 @@ prisma-workspace/
 - **Data quality**: DOI/author normalization; dedup (DOI + fuzzy title)
 - **Robustness**: retry/backoff for APIs; local metadata cache
 
-## 14) Roadmap
+## 7) Roadmap
 
-- **Phase 0**: Config-driven MVP, file-based I/O, AirFlow orchestration, OA only, Markdown reports
-- **Phase 1**: Enhanced parallelism + vector DB + CLI improvements
-- **Phase 2**: Robust Methodology Critic & Comparator; public/private dual view; FastAPI endpoints
-- **Phase 3**: Web UI + Zotero Web integration + groups, ACL model
-- **Phase 4**: Advanced UI features + HTML export; PDF exporter
+### Phase 0: Core MVP (Current Focus)
+**Goal**: Basic literature review automation
 
-## 15) How to Run MVP (conceptual)
+**Features:**
+- ✅ Simple pipeline architecture (4 core components)
+- ✅ Zotero integration + external API search
+- ✅ LLM-based paper analysis and summarization
+- ✅ Markdown report generation
+- ✅ YAML configuration files
+- ✅ CLI interface
+
+**Timeline**: Q4 2024 - Q1 2025
+
+### Phase 1: Enhanced Analysis (Next)
+**Goal**: Improve analysis quality and user experience
+
+**Features:**
+- 📊 Better comparative analysis and trend detection
+- 🎯 Improved deduplication and metadata handling
+- 📄 Multiple output formats (HTML, PDF export)
+- ⚡ Performance optimizations
+- 🔧 Enhanced CLI with better error handling
+
+**Timeline**: Q2-Q3 2025
+
+### Phase 2: Collaborative Features (Future)
+**Goal**: Multi-user workflows and advanced features
+
+**Features:**
+- 🌐 Optional web interface for report viewing
+- 👥 Shared research projects and collaboration
+- 🔄 Scheduled review updates
+- 📈 Advanced analytics and visualizations
+- 🔌 API endpoints for integration
+
+**Timeline**: Q4 2025 - Q1 2026
+
+### Development Principles
+- **MVP First**: Get core functionality working before adding features
+- **User-Driven**: Features based on real researcher needs
+- **Simple by Default**: Complex features are optional, not required
+- **Academic Integrity**: Maintain research quality and reproducibility standards
+
+### Future Enhancements (Post-MVP)
+
+**Priority: Get working MVP in 7 days, then iterate based on user feedback**
+
+#### 📅 **Week 2: Critical Improvements** 
+- **Multiple APIs**: Add PubMed, Semantic Scholar integration
+- **Book Support**: ISBN lookup, library catalogs, Google Books API
+- **Document Processing**: PDF full-text extraction and analysis
+- **LLM Analysis**: Local model integration for semantic analysis  
+- **Better Export**: LaTeX and Word format support
+- **Performance**: Concurrent processing and caching
+
+#### 📅 **Month 2: Advanced Features**
+- **Reference Managers**: Mendeley, EndNote, RefWorks integration
+- **Grey Literature**: Technical reports, theses, government publications
+- **Team Collaboration**: Shared projects and multi-user support
+- **Conference Proceedings**: Full conference database integration
+- **Advanced Analytics**: Citation impact and trend analysis
+
+#### 🔍 **Expanded Search Scope**
+- **Additional Databases**: Semantic Scholar, IEEE Xplore, JSTOR, Web of Science
+- **Cross-domain Search**: Multi-disciplinary research support across all major databases
+- **Advanced Filtering**: Institution-based, author-based, and citation-based filtering
+- **Search Optimization**: Smarter query expansion and result ranking
+
+#### 📚 **Non-Open Access Support**
+- **Institutional Access**: Integration with university library systems
+- **Publisher APIs**: Direct integration with major academic publishers
+- **Access Management**: Handle subscription-based and paywall content
+- **Fair Use Compliance**: Automated compliance with academic use policies
+
+#### ⚡ **Parallel Processing & Performance**
+- **Concurrent Search**: Search multiple databases simultaneously
+- **Parallel Analysis**: Process multiple papers concurrently with LLM batching
+- **Distributed Processing**: Scale across multiple machines for large reviews
+- **Caching & Resume**: Smart caching and ability to resume interrupted reviews
+
+#### 🔄 **Automated Updates & Monitoring**
+- **Scheduled Reviews**: Automatic updates to existing literature reviews
+- **"What's New" Reports**: Highlight changes between report versions with visual diff
+- **Delta Analysis**: Show new papers, updated citations, and emerging trends since last review
+- **Change Notifications**: Alert system when new relevant papers are published
+- **Trend Monitoring**: Track emerging topics and research directions over time
+- **Version Control**: Maintain history of review updates and changes
+- **Smart Incremental Updates**: Only re-analyze changed or new content to save time
+
+#### 🌐 **Advanced Integration**
+- **Reference Managers**: Deep integration with Mendeley, EndNote, RefWorks
+- **Citation Networks**: Analyze citation patterns and research impact
+- **Collaboration Tools**: Team-based research projects and shared reviews
+- **Export Formats**: LaTeX, Word, EndNote, and journal-specific formats
+
+#### � **Author Intelligence & Research Mapping**
+- **Comprehensive Author Profiles**: Detailed profiles of key researchers in the field
+- **Research Trajectories**: Track how authors' research has evolved over time
+- **Collaboration Networks**: Map co-authorship patterns and research partnerships
+- **Institution Mapping**: Identify leading research institutions and departments
+- **Contact Directory**: Academic "telephone guide" with affiliations and contact information
+- **Expertise Classification**: Categorize authors by research specializations and methodologies
+- **Publication Analytics**: Author productivity, citation impact, and influence metrics
+- **Research Timeline**: Chronological view of each author's contributions to the field
+- **Emerging Researchers**: Identify up-and-coming scholars and recent PhD graduates
+- **Geographic Distribution**: Map research activity by country and region
+
+#### �📊 **Visual Analytics & Reference Mapping**
+- **ConnectedPapers Integration**: Generate ConnectedPapers.com links for citation network visualization
+- **One-click Network View**: Auto-generate ConnectedPapers URLs using DOIs or paper identifiers
+- **Batch Link Generation**: Create ConnectedPapers links for multiple key papers simultaneously  
+- **Report Embedding**: Include ConnectedPapers links directly in markdown literature review reports
+- **Discovery Workflow**: Use ConnectedPapers to explore networks → Import relevant papers back to Prisma
+- **Multi-origin Networks**: Leverage ConnectedPapers' multi-origin graphs for comprehensive field views
+- **Prior/Derivative Works**: Link to ConnectedPapers' prior and derivative work views for temporal analysis
+
+*Note: ConnectedPapers does not currently offer a public API, but we can generate direct links to their service using paper DOIs, arXiv IDs, or Semantic Scholar URLs for seamless integration.*
+
+*Note: These features represent potential directions based on user feedback and academic research needs. The core philosophy remains simplicity and reliability first.*
+
+## 8) Development Setup
 
 ### Prerequisites
-1. Python environment prepared; Ollama installed; target models pulled (e.g., Llama 3.1 8B)
-2. AirFlow installed and configured
-3. API keys (as applicable) configured in environment
-4. Zotero library accessible (local SQLite or API credentials)
+1. **Python 3.13.7** with pipenv
+2. **Ollama** installed with llama3.1:8b model:
+   ```bash
+   # Install Ollama (see https://ollama.ai)
+   ollama pull llama3.1:8b
+   ```
 
-### Execution Process
-1. **Create config file**: Define research topic, parameters, sources in YAML/JSON
-2. **Submit job**: Use CLI tool to submit configuration to AirFlow
-3. **Monitor execution**: Check AirFlow UI for job progress and logs
-4. **Retrieve results**: Access generated reports and artifacts in output directory
+### Getting Started
 
-### Example Config Structure
-```yaml
-job:
-  name: "llm-edge-devices-review"
-  topic: "LLMs for small, low-power devices"
-  date_range: "2020-2024"
-  sources: ["arxiv", "pubmed", "semantic_scholar"]
-  zotero:
-    library_path: "/path/to/zotero.sqlite"
-  output:
-    directory: "/path/to/results"
-    formats: ["markdown", "json", "csv"]
+1. **Clone the repository:**
+   ```bash
+   git clone https://github.com/CServinL/prisma.git
+   cd prisma
+   ```
+
+2. **Set up development environment:**
+   ```bash
+   # Install pipenv if you don't have it
+   pip install pipenv
+   
+   # Install dependencies and create virtual environment
+   pipenv install --dev
+   
+   # Activate virtual environment
+   pipenv shell
+   ```
+
+3. **Run tests:**
+   ```bash
+   pytest
+   ```
+
+4. **Try a simple example:**
+   ```bash
+   python -m src.cli.main start examples/simple-review.yaml
+   ```
+
+### Project Structure
+```
+prisma/
+├── src/                # Main source code
+│   ├── coordinator.py  # Main pipeline controller
+│   ├── agents/         # Search, analysis, and report agents  
+│   ├── integrations/   # External API connectors
+│   ├── storage/        # SQLite database layer
+│   ├── cli/           # Command-line interface
+│   └── utils/         # Configuration and logging
+├── tests/             # Test suite
+├── config/            # Configuration templates
+└── docs/             # Documentation and ADRs
 ```
 
-## 16) Pending Decisions
+### Contributing
+See our [Contributing Guidelines](CONTRIBUTING.md) for development workflow, coding standards, and how to submit pull requests.
 
-- Compile and periodically update API rate limits/quotas by source (arXiv, PubMed, Semantic Scholar, CrossRef)
-- **Retention policy**: TODO
-- **Group/user ACL specifics**: TODO
-- **Final report**: start with Markdown; add PDF exporter later
-
-## 17) Investigator Summary in Reports
-
-Report includes investigators and institutions derived from metadata
-
-### Content:
-- Top authors (with affiliations where available) and their paper counts
-- Top institutions and counts; emerging investigators (single‑paper authors in period)
-- **Optional**: citation influence (if available from APIs)
-
-### Normalization
-Harmonize author names and affiliations; merge institution aliases
-
-## 18) Saved Job Config & Scheduled Refresh
-
-Persist job templates to re‑run literature scans and rebuild reports
-
-### Core Schema (conceptual)
-- **jobs** (topic, filters, sources, owners)
-- **schedules** (manual/cron)  
-- **runs** (history with deltas)
-
-### Behaviors:
-- **On‑demand**: user triggers new run for a saved job
-- **Scheduled**: cron‑style schedule runs at configured times
-- **Delta detection**: compare last run timestamp; mark newly added DOIs
-
-### Report Variants:
-- Full regenerated report
-- Delta appendix: newly added papers since last run
-
-## 19) Notification System
-
-### Channels
-- **Email** (default), optional Slack/Teams
-
-### Triggers
-- After scheduled/on‑demand run; emphasize when new papers found
-
-### Settings per Job
-- Recipients, channels, minimum delta threshold
-
-### Example
-**Email subject**: `ResearchUpdate: New publications on {topic}`
-
-## 20) API Endpoints (planned)
-
-```http
-POST /jobs                           # create job (topic, filters, sources, optional schedule)
-GET  /jobs/{job_id}                  # fetch job definition
-POST /jobs/{job_id}/run              # trigger on‑demand run
-GET  /jobs/{job_id}/runs             # list historical runs
-GET  /jobs/{job_id}/report           # latest public report
-GET  /jobs/{job_id}/report/private   # owner/group enriched view
-POST /jobs/{job_id}/schedule         # set/update schedule
-POST /papers/{paper_id}/upload_pdf   # upload Non‑OA PDF for private processing
-```
-
-## 21) Data Model Extensions
-
-- **authors**: `id`, `name_norm`, `affiliation_norm`
-- **paper_authors** (many‑to‑many): `paper_id`, `author_id`, `position`
-- **institutions** (optional): `id`, `name_norm`, `aliases`
-- **investigator_stats** (materialized/view): `author_id`, `papers_count`, `last_year_count`
-- **reports**: add `investigator_summary_path` and visibility markers
-
-## 22) Scheduling & Execution Notes
-
-### MVP Scheduler (Phase 0)
-- **AirFlow DAGs**: Each research job becomes an AirFlow DAG
-- **File-based triggers**: Monitor config directories for new job files
-- **Manual execution**: CLI commands to trigger individual jobs
-
-### Production Scheduler
-- **AirFlow workflows**: Full production DAGs with complex dependencies
-- **Scheduled runs**: Cron-style scheduling for recurring literature reviews
-- **Backoff & rate limits**: Honor API quotas; stagger queries; cache by DOI
-- **Idempotency**: Dedupe by DOI + fuzzy title; safe re‑runs without duplication
-
-### Job Management
-- **Config versioning**: Track configuration file changes
-- **Result archiving**: Maintain historical outputs and reports
-- **Error handling**: Robust retry mechanisms and failure notifications
-
-## 23) Security & Privacy
-
-- **Notifications**: store minimal PII; encrypt API keys; restrict access tokens to job owners
-- **Non‑OA PDFs**: private storage with owner/group ACL; file checksums; no redistribution
-- **Audit trail**: per‑run logs (who/what/when), processing provenance
-
-## 24) API Rate Limits & Throttling (documented policies)
-
-### arXiv
-- Public REST/ATOM; conservative throttle ~1 req/s; paginate; cache queries; jitter
-
-### PubMed (NCBI E‑utilities)
-- ~1 req/s baseline (higher with API key); include tool/email; honor Retry‑After; chain ESearch → EFetch
-
-### Semantic Scholar
-- REST; API key often required; ~1 req/s baseline; request only required fields; cache by DOI/paperId
-
-### CrossRef REST
-- Polite pool with mailto; ~1 req/s; include mailto in User‑Agent; filter by date/type; cache
-
-### General Backoff Policy
-- Exponential backoff with jitter on HTTP 429/503; centralized token‑bucket per source; configurable rps/burst/retries/timeouts/cache_ttl
-
-### Telemetry
-- Track request rates, 2xx/4xx/5xx, 429s, retries; alert on sustained throttling or high error rates
-
-## 25) References
-
-- Zotero Web API documentation (for future team setups)
-- NCBI E‑utilities (PubMed), arXiv API, CrossRef REST API, Semantic Scholar API (for operational policies)
+---
 
 ---
 

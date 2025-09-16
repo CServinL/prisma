@@ -10,7 +10,8 @@ import logging
 from typing import List, Dict, Any, Optional, Set, Tuple
 from pydantic import BaseModel, Field, field_validator
 
-from ..integrations.zotero import ZoteroClient, ZoteroConfig, ZoteroClientError
+from ..utils.config import ZoteroConfig
+from ..integrations.zotero import ZoteroClient, ZoteroAPIConfig, ZoteroClientError
 from ..storage.models import ZoteroItem, ZoteroCollection, ZoteroItemType
 
 logger = logging.getLogger(__name__)
@@ -65,7 +66,19 @@ class ZoteroAgent:
             config: ZoteroConfig with API credentials
         """
         self.config = config
-        self.client = ZoteroClient(config)
+        
+        # Validate required fields
+        if not config.api_key or not config.library_id:
+            raise ValueError("ZoteroConfig must have api_key and library_id for API access")
+        
+        # Convert to API-specific config for the client
+        api_config = ZoteroAPIConfig(
+            api_key=config.api_key,
+            library_id=config.library_id,
+            library_type=config.library_type,
+            api_version=3
+        )
+        self.client = ZoteroClient(api_config)
         self._collections_cache: Optional[List[ZoteroCollection]] = None
         
         logger.info(f"Initialized ZoteroAgent for {config.library_type} library {config.library_id}")

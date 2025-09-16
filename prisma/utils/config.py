@@ -15,12 +15,16 @@ class ZoteroConfig(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
     
     enabled: bool = Field(False, description="Whether Zotero integration is enabled")
+    mode: str = Field("hybrid", description="Zotero client mode: 'hybrid', 'local_api', 'sqlite', 'web'")
     api_key: Optional[str] = Field(None, description="Zotero API key")
     library_id: Optional[str] = Field(None, description="Zotero library ID")
     library_type: str = Field("user", description="Library type: 'user' or 'group'")
     default_collections: List[str] = Field(default_factory=list, description="Default collections to search")
     include_notes: bool = Field(False, description="Include notes in results")
     include_attachments: bool = Field(False, description="Include attachments in results")
+    
+    # Local API configuration
+    server_url: str = Field("http://127.0.0.1:23119", description="Zotero Local API server URL")
     
     # Legacy local database support
     library_path: str = Field(
@@ -74,7 +78,7 @@ class SearchConfig(BaseModel):
     @field_validator('sources')
     @classmethod
     def validate_sources(cls, v):
-        valid_sources = ['arxiv', 'zotero', 'pubmed', 'google_scholar']
+        valid_sources = ['arxiv', 'zotero', 'pubmed', 'google_scholar', 'semanticscholar', 'openlibrary', 'googlebooks', 'academia']
         for source in v:
             if source not in valid_sources:
                 raise ValueError(f'source "{source}" not in valid sources: {valid_sources}')

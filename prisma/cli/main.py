@@ -56,6 +56,12 @@ Examples:
     )
     
     parser.add_argument(
+        "--stream",
+        default=None,
+        help="Research stream name (used for Zotero collection and tagging)"
+    )
+    
+    parser.add_argument(
         "--include-authors",
         action="store_true",
         help="Include author analysis and research directory"
@@ -159,6 +165,7 @@ Examples:
             'sources': args.sources.split(','),
             'limit': args.limit,
             'output_file': str(output_path),
+            'stream_name': args.stream,
             'include_authors': args.include_authors,
             'zotero_collections': args.zotero_collections.split(',') if args.zotero_collections else None,
             'zotero_recent_years': args.zotero_recent
@@ -166,14 +173,17 @@ Examples:
         
         result = coordinator.run_review(review_config)
         
-        if result['success']:
+        if result.success:
             print(f"✅ Review completed successfully!")
-            print(f"📄 Report saved to: {output_path}")
-            print(f"📊 Papers analyzed: {result['papers_analyzed']}")
+            print(f"📄 Report saved to: {result.output_file}")
+            print(f"📊 Papers analyzed: {result.papers_analyzed}")
             if args.include_authors:
-                print(f"👥 Authors identified: {result.get('authors_found', 0)}")
+                print(f"👥 Authors identified: {result.authors_found}")
         else:
-            print(f"❌ Review failed: {result['error']}")
+            print(f"❌ Review failed")
+            if result.errors:
+                for error in result.errors:
+                    print(f"   Error: {error}")
             sys.exit(1)
             
     except KeyboardInterrupt:

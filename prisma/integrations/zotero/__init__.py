@@ -3,13 +3,13 @@ Zotero Integration Package
 
 This package provides comprehensive Zotero integration with multiple approaches:
 - Web API client for online access
-- SQLite client for offline/fast local access  
+- Local HTTP server for offline read operations  
 - Desktop app client for saving items (100% compatible)
 - Hybrid client that intelligently combines all approaches
 - Local API client for enhanced Zotero 7 integration
 
 Key Features:
-- Read existing library data (SQLite/Web API/Local API)
+- Read existing library data (Web API/Local HTTP server)
 - Save new items via desktop app (maintains compatibility)
 - Intelligent fallback strategies
 - Full compatibility with Zotero sync and data integrity
@@ -17,7 +17,7 @@ Key Features:
 
 # Import core clients
 try:
-    from .client import ZoteroClient, ZoteroConfig, ZoteroClientError
+    from .client import ZoteroClient, ZoteroAPIConfig, ZoteroClientError
 except ImportError:
     pass
 
@@ -33,11 +33,6 @@ except ImportError:
 
 # Import other clients that may have import issues when running standalone
 try:
-    from .sqlite_client import ZoteroSQLiteClient, ZoteroSQLiteConfig, ZoteroSQLiteError
-except ImportError:
-    pass
-
-try:
     from .hybrid_client import ZoteroHybridClient, ZoteroHybridConfig
 except ImportError:
     pass
@@ -45,18 +40,18 @@ except ImportError:
 __all__ = [
     # Web API Client
     "ZoteroClient",
-    "ZoteroConfig", 
+    "ZoteroAPIConfig", 
     "ZoteroClientError",
-    
-    # SQLite Client
-    "ZoteroSQLiteClient",
-    "ZoteroSQLiteConfig",
-    "ZoteroSQLiteError",
     
     # Desktop App Client
     "ZoteroDesktopClient",
     "ZoteroDesktopConfig", 
     "ZoteroDesktopError",
+    
+    # Local API Client
+    "ZoteroLocalAPIClient",
+    "ZoteroLocalAPIConfig",
+    "ZoteroLocalAPIError",
     
     # Hybrid Client (Recommended)
     "ZoteroHybridClient",

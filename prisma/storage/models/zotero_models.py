@@ -101,12 +101,23 @@ class ZoteroCollection(BaseModel):
     def from_zotero_data(cls, data: Dict[str, Any]) -> "ZoteroCollection":
         """Create ZoteroCollection from Zotero API data"""
         collection_data = data.get("data", {})
+        
+        # Handle parent_collection - convert False to None
+        parent_collection = collection_data.get("parentCollection")
+        if parent_collection is False:
+            parent_collection = None
+        
+        # Handle library - extract string identifier from dict or use as-is
+        library = data.get("library")
+        if isinstance(library, dict):
+            library = str(library.get("id", "")) if library.get("id") else None
+        
         return cls(
             key=data.get("key", ""),
             name=collection_data.get("name", ""),
-            parent_collection=collection_data.get("parentCollection"),
+            parentCollection=parent_collection,
             version=data.get("version"),
-            library=data.get("library"),
+            library=library,
             links=data.get("links", {}),
             meta=data.get("meta", {})
         )
@@ -242,7 +253,7 @@ class ZoteroItem(BaseModel):
             date_added=item_data.get("dateAdded"),
             date_modified=item_data.get("dateModified"),
             version=data.get("version"),
-            library=data.get("library"),
+            library=str(data.get("library", "")) if data.get("library") else None,
             raw_data=data
         )
     

@@ -11,7 +11,7 @@ import time
 from typing import List, Dict, Any, Optional, Union
 from pathlib import Path
 import requests
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict, field_validator
 
 from ...storage.models.zotero_models import ZoteroItem, ZoteroCollection, ZoteroSearchQuery, ZoteroSearchResult
 
@@ -20,9 +20,44 @@ logger = logging.getLogger(__name__)
 
 class ZoteroLocalAPIConfig(BaseModel):
     """Configuration for Zotero Local API integration"""
-    server_url: str = Field("http://127.0.0.1:23119", description="Zotero HTTP server URL")
-    timeout: float = Field(30.0, description="Request timeout in seconds")
-    user_id: str = Field("0", description="User ID (usually 0 for local)")
+    
+    model_config = ConfigDict(
+        validate_assignment=True,
+        str_strip_whitespace=True,
+        frozen=False
+    )
+    
+    server_url: str = "http://127.0.0.1:23119"
+    timeout: float = 30.0
+    user_id: str = "0"
+    
+    @field_validator('server_url')
+    @classmethod
+    def validate_server_url(cls, v: str) -> str:
+        """Validate server URL is well-formed"""
+        if not v.startswith(('http://', 'https://')):
+            raise ValueError('Server URL must start with http:// or https://')
+        if not v.replace('http://', '').replace('https://', '').strip():
+            raise ValueError('Server URL cannot be empty after protocol')
+        return v
+    
+    @field_validator('timeout')
+    @classmethod
+    def validate_timeout(cls, v: float) -> float:
+        """Validate timeout is positive"""
+        if v <= 0:
+            raise ValueError('Timeout must be positive')
+        if v > 300:  # 5 minutes max
+            raise ValueError('Timeout must be 300 seconds or less')
+        return v
+    
+    @field_validator('user_id')
+    @classmethod
+    def validate_user_id(cls, v: str) -> str:
+        """Validate user ID format"""
+        if not v.isdigit():
+            raise ValueError('User ID must be a numeric string')
+        return v
 
 
 class ZoteroLocalAPIError(Exception):
@@ -244,10 +279,14 @@ class ZoteroLocalAPIClient:
             True if successful
         """
         try:
+            import random
+            # Generate unique session ID with microsecond precision and random component
+            session_id = f"prisma-{int(time.time() * 1000000)}-{random.randint(1000, 9999)}"
+            
             # Format for connector API
             request_data = {
                 "items": items,
-                "sessionID": f"prisma-{int(time.time())}",
+                "sessionID": session_id,
                 "token": ""
             }
             
@@ -328,3 +367,31 @@ class ZoteroLocalAPIClient:
     def is_available(self) -> bool:
         """Check if the local API is available"""
         return self._check_connection()
+    
+    def delete_item(self, item_key: str) -> bool:
+        """
+        Delete an item from the Zotero library
+        
+        Args:
+            item_key: The key of the item to delete
+            
+        Returns:
+            True if deletion was successful, False otherwise
+        """
+        try:
+            # Use the DELETE endpoint for items
+            response = self.session.delete(
+                f"{self.config.server_url}/api/users/{self.config.user_id}/items/{item_key}",
+                timeout=self.config.timeout
+            )
+            
+            if response.status_code in [200, 204, 404]:  # 404 means item was already deleted
+                logger.info(f"Successfully deleted item {item_key}")
+                return True
+            else:
+                logger.warning(f"Failed to delete item {item_key}: HTTP {response.status_code}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Error deleting item {item_key}: {e}")
+            return False

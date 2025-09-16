@@ -140,9 +140,15 @@ def list_streams(status: Optional[str], config: Optional[str]):
 @click.argument('stream_id', required=False)
 @click.option('--all', '-a', is_flag=True, help='Update all active streams')
 @click.option('--force', '-f', is_flag=True, help='Force update even if not due')
+@click.option('--refresh-cache', '-r', is_flag=True, help='Refresh cached entries with new metadata instead of using cache')
 @click.option('--config', '-c', help='Path to configuration file')
-def update_streams(stream_id: Optional[str], all: bool, force: bool, config: Optional[str]):
-    """Update research streams to find new papers"""
+def update_streams(stream_id: Optional[str], all: bool, force: bool, refresh_cache: bool, config: Optional[str]):
+    """
+    Update research streams to find new papers
+    
+    By default, uses cached metadata for known papers. Use --refresh-cache to update
+    existing entries with latest information from sources.
+    """
     try:
         manager = ResearchStreamManager(config)
         
@@ -160,7 +166,9 @@ def update_streams(stream_id: Optional[str], all: bool, force: bool, config: Opt
             for stream in streams:
                 if force or stream.is_due_for_update():
                     click.echo(f"   🔍 Updating {stream.name}...")
-                    result = manager.update_stream(stream.id, force=force)
+                    if refresh_cache:
+                        click.echo(f"     🔄 Refreshing cached metadata...")
+                    result = manager.update_stream(stream.id, force=force, refresh_cache=refresh_cache)
                     
                     if result.success:
                         total_new_papers += result.new_papers_found
@@ -180,7 +188,9 @@ def update_streams(stream_id: Optional[str], all: bool, force: bool, config: Opt
                 raise click.ClickException("Stream not found")
             
             click.echo(f"🔄 Updating stream: {stream.name}")
-            result = manager.update_stream(stream_id, force=force)
+            if refresh_cache:
+                click.echo(f"🔄 Refreshing cached metadata...")
+            result = manager.update_stream(stream_id, force=force, refresh_cache=refresh_cache)
             
             if result.success:
                 click.echo(f"✅ Found {result.new_papers_found} new papers")

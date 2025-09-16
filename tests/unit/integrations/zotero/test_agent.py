@@ -5,7 +5,8 @@ Test Zotero Agent functionality
 import pytest
 from unittest.mock import Mock, patch, MagicMock
 from prisma.agents.zotero_agent import ZoteroAgent, ZoteroSearchCriteria
-from prisma.integrations.zotero import ZoteroConfig, ZoteroClientError
+from prisma.integrations.zotero import ZoteroAPIConfig, ZoteroClientError
+from prisma.utils.config import ZoteroConfig
 from prisma.storage.models import ZoteroItem, ZoteroCollection, ZoteroCreator
 
 
@@ -103,7 +104,12 @@ class TestZoteroAgent:
         
         assert agent.config == self.config
         assert agent.client == mock_client
-        mock_client_class.assert_called_once_with(self.config)
+        # The agent converts ZoteroConfig to ZoteroAPIConfig internally
+        mock_client_class.assert_called_once()
+        call_args = mock_client_class.call_args[0][0]  # Get the first positional argument
+        assert isinstance(call_args, ZoteroAPIConfig)
+        assert call_args.api_key == self.config.api_key
+        assert call_args.library_id == self.config.library_id
     
     @patch('prisma.agents.zotero_agent.ZoteroClient')
     def test_test_connection(self, mock_client_class):

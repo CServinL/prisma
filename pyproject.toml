@@ -51,4 +51,5 @@ markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
     "integration: marks tests as integration tests",
     "unit: marks tests as unit tests",
+    "zotero_api: marks tests that use real Zotero API",
 ]

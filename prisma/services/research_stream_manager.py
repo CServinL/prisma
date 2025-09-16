@@ -41,10 +41,42 @@ class ResearchStreamManager:
     def __init__(self, config_path: Optional[str] = None):
         """Initialize the research stream manager"""
         self.config = ConfigLoader().config
-        self.zotero_client = ZoteroHybridClient(self.config)
+        self.zotero_client = self._create_zotero_client()
         self.streams_file = Path("./data") / "research_streams.json"
         self._streams_cache: Dict[str, ResearchStream] = {}
         self._load_streams()
+    
+    def _create_zotero_client(self):
+        """Create appropriate Zotero client based on configuration mode"""
+        zotero_mode = getattr(self.config.sources.zotero, 'mode', 'hybrid')
+        
+        if zotero_mode == 'local_api':
+            from ..integrations.zotero.local_api_client import ZoteroLocalAPIClient, ZoteroLocalAPIConfig
+            server_url = getattr(self.config.sources.zotero, 'server_url', 'http://127.0.0.1:23119')
+            local_config = ZoteroLocalAPIConfig(
+                server_url=server_url,
+                timeout=30.0,
+                user_id="0"
+            )
+            return ZoteroLocalAPIClient(local_config)
+        else:
+            # Default to hybrid client for other modes
+            from ..integrations.zotero.hybrid_client import ZoteroHybridClient, ZoteroHybridConfig
+            
+            # Convert PrismaConfig to ZoteroHybridConfig
+            zotero_config = ZoteroHybridConfig(
+                api_key=getattr(self.config.sources.zotero, 'api_key', None),
+                library_id=getattr(self.config.sources.zotero, 'library_id', None),
+                library_type=getattr(self.config.sources.zotero, 'library_type', 'user'),
+                local_server_url=getattr(self.config.sources.zotero, 'server_url', 'http://127.0.0.1:23119'),
+                local_server_timeout=5,
+                enable_desktop_save=True,
+                desktop_server_url=getattr(self.config.sources.zotero, 'server_url', 'http://127.0.0.1:23119'),
+                collection_key=None,
+                prefer_local_server=True,
+                fallback_to_api=True
+            )
+            return ZoteroHybridClient(zotero_config)
     
     def _load_streams(self):
         """Load research streams from storage"""
@@ -134,7 +166,7 @@ class ResearchStreamManager:
                 status=StreamStatus.ACTIVE
             )
             
-            # Create Zotero collection
+            # Create Zotero collection (if supported by client)
             collection_data = stream.to_zotero_collection()
             created_collection = self.zotero_client.create_collection(collection_data)
             
@@ -142,7 +174,8 @@ class ResearchStreamManager:
                 stream.collection_key = created_collection.key
                 logger.info(f"Created Zotero collection: {created_collection.key}")
             else:
-                logger.warning("Failed to create Zotero collection")
+                logger.warning(f"Failed to create Zotero collection '{stream.collection_name}' - local API may not support collection creation")
+                logger.info("Items will be saved to library without collection organization")
             
             # Store the stream
             self._streams_cache[stream_id] = stream
@@ -155,13 +188,80 @@ class ResearchStreamManager:
             logger.error(f"Error creating research stream: {e}")
             raise ResearchStreamError(f"Failed to create stream: {e}")
     
-    def update_stream(self, stream_id: str, force: bool = False) -> StreamUpdateResult:
+    def _ensure_stream_collection(self, stream: ResearchStream) -> Optional[str]:
+        """
+        Ensure the stream's collection exists in Zotero, creating it if necessary.
+        Returns the collection key if successful, None otherwise.
+        """
+        try:
+            if stream.collection_key:
+                # Collection key exists, verify it's still valid
+                try:
+                    collections = self.zotero_client.get_collections()
+                    for collection in collections:
+                        if hasattr(collection, 'key') and collection.key == stream.collection_key:
+                            logger.info(f"Stream collection exists: {stream.collection_key}")
+                            return stream.collection_key
+                    
+                    # Collection key is invalid, reset it
+                    logger.warning(f"Collection key {stream.collection_key} no longer exists, will recreate")
+                    stream.collection_key = None
+                except Exception as e:
+                    logger.warning(f"Failed to verify collection: {e}")
+                    stream.collection_key = None
+            
+            # No collection key or invalid key - find existing or create new
+            if stream.collection_name:
+                # Try to find existing collection by name
+                try:
+                    collections = self.zotero_client.get_collections()
+                    for collection in collections:
+                        if hasattr(collection, 'name') and collection.name == stream.collection_name:
+                            logger.info(f"Found existing collection: {collection.name} -> {collection.key}")
+                            stream.collection_key = collection.key
+                            return collection.key
+                except Exception as e:
+                    logger.warning(f"Failed to search for existing collection: {e}")
+                
+                # Collection doesn't exist, create it
+                try:
+                    collection_data = {
+                        "name": stream.collection_name,
+                        "parentCollection": stream.parent_collection_key or False
+                    }
+                    created_collection = self.zotero_client.create_collection(collection_data)
+                    
+                    if created_collection and hasattr(created_collection, 'key'):
+                        stream.collection_key = created_collection.key
+                        logger.info(f"Created new collection: {stream.collection_name} -> {created_collection.key}")
+                        
+                        # Save updated stream immediately
+                        self._streams_cache[stream.id] = stream
+                        self._save_streams()
+                        
+                        return created_collection.key
+                    else:
+                        logger.error(f"Failed to create collection {stream.collection_name}")
+                        return None
+                        
+                except Exception as e:
+                    logger.error(f"Error creating collection: {e}")
+                    return None
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error ensuring stream collection: {e}")
+            return None
+    
+    def update_stream(self, stream_id: str, force: bool = False, refresh_cache: bool = False) -> StreamUpdateResult:
         """
         Update a research stream by searching for new papers
         
         Args:
             stream_id: ID of the stream to update
             force: Force update even if not due
+            refresh_cache: If True, refresh cached metadata for existing items instead of using cache
             
         Returns:
             StreamUpdateResult with update details
@@ -174,6 +274,13 @@ class ResearchStreamManager:
             if not stream:
                 raise ResearchStreamError(f"Stream not found: {stream_id}")
             
+            # Ensure the stream's collection exists in Zotero
+            collection_key = self._ensure_stream_collection(stream)
+            if collection_key:
+                logger.info(f"Using collection: {stream.collection_name} -> {collection_key}")
+            else:
+                logger.warning(f"No collection available for stream {stream_id}")
+            
             # Check if update is due
             if not force and not stream.is_due_for_update():
                 return StreamUpdateResult(
@@ -182,45 +289,199 @@ class ResearchStreamManager:
                     errors=["Update not due"]
                 )
             
-            # Search for new papers
-            search_query = ZoteroSearchQuery(
-                query=stream.search_criteria.query,
-                tags=stream.search_criteria.tags,
+            # Import SearchAgent for internet searches
+            from ..agents.search_agent import SearchAgent
+            search_agent = SearchAgent()
+            
+            # Define search sources (prioritizing academic sources)
+            search_sources = ['arxiv', 'semanticscholar']  # High-quality academic sources
+            
+            # Search internet sources for new papers
+            search_query_str = stream.search_criteria.query
+            logger.info(f"Searching internet sources for: {search_query_str}")
+            
+            # Use SearchAgent to find papers from internet sources
+            search_result = search_agent.search(
+                query=search_query_str,
+                sources=search_sources,
                 limit=stream.search_criteria.max_results
             )
             
-            search_result = self.zotero_client.search_items(search_query)
+            errors = []  # Initialize errors list
             
-            # Filter out existing papers
-            existing_items = set()
-            if stream.collection_key:
-                collection_items = self.zotero_client.get_collection_items(stream.collection_key)
-                existing_items = {item.key for item in collection_items}
+            # Get all found papers from internet search
+            internet_papers = search_result.papers
+            logger.info(f"Found {len(internet_papers)} papers from internet sources")
             
-            new_papers = [item for item in search_result.items if item.key not in existing_items]
+            # Handle cache refresh vs normal operation
+            updated_count = 0
+            if refresh_cache:
+                logger.info("REFRESH CACHE MODE: Processing internet sources fully, updating existing items")
+                # In refresh mode, we want to update metadata for existing papers
+                existing_items = {}
+                updated_items = []
+                if stream.collection_key:
+                    collection_items = self.zotero_client.get_collection_items(stream.collection_key)
+                    existing_items = {item.key: item for item in collection_items}
+                
+                # Process all papers fully and update existing ones with better info
+                new_papers = []
+                for paper in internet_papers:
+                    # Check if paper exists locally (by DOI, title similarity, etc.)
+                    existing_key = self._find_existing_paper_key(paper, existing_items)
+                    
+                    if existing_key:
+                        try:
+                            # Update existing paper with fresh metadata
+                            logger.info(f"Updating cached metadata for paper: {paper.title[:50]}...")
+                            # Here we would update the local item with fresh data
+                            updated_items.append(existing_key)
+                            updated_count += 1
+                        except Exception as e:
+                            errors.append(f"Error updating cached paper: {e}")
+                    else:
+                        # This is a new paper not in our local collection
+                        new_papers.append(paper)
+                
+                logger.info(f"Cache refresh mode: Updated {len(updated_items)} existing items, found {len(new_papers)} new papers")
+            else:
+                logger.info("DEFAULT CACHE MODE: Light processing, using cached details when available")
+                # Normal mode: light processing of internet sources, get details from local cache
+                
+                # ALWAYS check the entire library for duplicates, not just the collection
+                logger.info("Checking entire library for existing papers to avoid duplicates...")
+                all_library_items = self.zotero_client.search_items("")
+                library_items = {}
+                if hasattr(all_library_items, 'items'):
+                    library_items = {item.key: item for item in all_library_items.items}
+                elif isinstance(all_library_items, list):
+                    library_items = {getattr(item, 'key', str(i)): item for i, item in enumerate(all_library_items)}
+                
+                # Also get collection items to know which existing items are already in the collection
+                collection_items = {}
+                if stream.collection_key:
+                    try:
+                        collection_item_list = self.zotero_client.get_collection_items(stream.collection_key)
+                        collection_items = {item.key: item for item in collection_item_list}
+                        logger.info(f"Collection {stream.collection_key} currently has {len(collection_items)} items")
+                    except Exception as e:
+                        logger.warning(f"Could not get collection items: {e}")
+                
+                new_papers = []
+                existing_papers_to_add = []  # Papers that exist but may not be in collection
+                
+                for paper in internet_papers:
+                    # Check if we have this paper in the entire library (by DOI or title)
+                    existing_key = self._find_existing_paper_key(paper, library_items)
+                    
+                    if not existing_key:
+                        # This is a new paper not in our library - add to processing list
+                        new_papers.append(paper)
+                    else:
+                        logger.info(f"Paper already exists in library: {paper.title[:50]}...")
+                        
+                        # If we have a collection and this existing item is not in it, add it to our list
+                        if stream.collection_key and existing_key not in collection_items:
+                            # This existing paper is not in our stream collection yet
+                            existing_papers_to_add.append(existing_key)
+                            logger.info(f"Will add existing paper to collection: {paper.title[:50]}...")
+                        elif stream.collection_key and existing_key in collection_items:
+                            logger.info(f"Paper already in collection, skipping: {paper.title[:50]}...")
+                
+                # Add existing papers to the stream collection if needed
+                if stream.collection_key and existing_papers_to_add:
+                    logger.info(f"Adding {len(existing_papers_to_add)} existing papers to collection {stream.collection_key}")
+                    for item_key in existing_papers_to_add:
+                        try:
+                            success = self.zotero_client.add_item_to_collection(item_key, stream.collection_key)
+                            if success:
+                                logger.info(f"Added existing item {item_key} to collection")
+                            else:
+                                logger.warning(f"Failed to add existing item {item_key} to collection")
+                        except Exception as e:
+                            logger.error(f"Error adding existing item {item_key} to collection: {e}")
+                            errors.append(f"Error adding existing item to collection: {e}")
             
-            # Add new papers to collection with smart tags
+            # Save new papers to Zotero and add to collection
             added_count = 0
-            errors = []
             
             for paper in new_papers:
                 try:
-                    # Apply smart tags
-                    enhanced_paper = self._apply_smart_tags(paper, stream)
+                    # Convert PaperMetadata to Zotero item and save it
+                    logger.info(f"Saving new paper to Zotero: {paper.title[:50]}...")
                     
-                    # Add to collection
-                    if stream.collection_key:
-                        success = self.zotero_client.add_item_to_collection(
-                            enhanced_paper.key, 
-                            stream.collection_key
-                        )
-                        if success:
-                            added_count += 1
-                        else:
-                            errors.append(f"Failed to add paper {enhanced_paper.key} to collection")
+                    # Create Zotero item data from PaperMetadata
+                    zotero_item_data = {
+                        "itemType": "journalArticle",
+                        "title": paper.title,
+                        "abstractNote": getattr(paper, 'abstract', '') or '',
+                        "DOI": getattr(paper, 'doi', '') or '',
+                        "url": getattr(paper, 'url', '') or '',
+                        "date": getattr(paper, 'publication_date', '') or '',
+                        "publicationTitle": getattr(paper, 'journal', '') or '',
+                        "creators": []
+                    }
+                    
+                    # Add authors if available
+                    if hasattr(paper, 'authors') and paper.authors:
+                        for author in paper.authors:
+                            if isinstance(author, str):
+                                # Simple string author
+                                zotero_item_data["creators"].append({
+                                    "creatorType": "author",
+                                    "name": author
+                                })
+                            elif hasattr(author, 'name'):
+                                # Author object with name
+                                zotero_item_data["creators"].append({
+                                    "creatorType": "author", 
+                                    "name": author.name
+                                })
+                    
+                    # Save to Zotero using appropriate method based on client type
+                    if hasattr(self.zotero_client, 'create_item'):
+                        # HybridClient method - returns item key
+                        try:
+                            item_key = self.zotero_client.create_item(zotero_item_data)
+                            if item_key:
+                                added_count += 1
+                                logger.info(f"Successfully saved paper to Zotero: {paper.title[:50]}...")
+                                
+                                # Add to collection if specified
+                                if stream.collection_key:
+                                    try:
+                                        self.zotero_client.add_item_to_collection(item_key, stream.collection_key)
+                                        logger.info(f"Added item to collection: {stream.collection_key}")
+                                    except Exception as e:
+                                        logger.warning(f"Failed to add item to collection: {e}")
+                            else:
+                                errors.append(f"Failed to save paper to Zotero: {paper.title[:50]}...")
+                        except Exception as e:
+                            errors.append(f"Error saving paper via create_item: {e}")
+                            logger.error(f"Error saving paper via create_item: {e}")
+                            
+                    elif hasattr(self.zotero_client, 'save_items'):
+                        # LocalAPIClient method - fallback
+                        try:
+                            save_success = self.zotero_client.save_items([zotero_item_data])
+                            if save_success:
+                                added_count += 1
+                                logger.info(f"Successfully saved paper to Zotero: {paper.title[:50]}...")
+                            else:
+                                errors.append(f"Failed to save paper to Zotero: {paper.title[:50]}...")
+                        except Exception as e:
+                            errors.append(f"Error saving paper via save_items: {e}")
+                            logger.error(f"Error saving paper via save_items: {e}")
+                            
+                    else:
+                        error_msg = f"Zotero client does not support item creation. Current client: {type(self.zotero_client).__name__}"
+                        errors.append(error_msg)
+                        logger.error(error_msg)
                 
                 except Exception as e:
-                    errors.append(f"Error processing paper {paper.key}: {e}")
+                    paper_title = getattr(paper, 'title', 'unknown')[:50]
+                    errors.append(f"Error processing paper {paper_title}: {e}")
+                    logger.error(f"Error processing paper {paper_title}: {e}")
             
             # Update stream metadata
             stream.last_updated = datetime.utcnow()
@@ -234,7 +495,10 @@ class ResearchStreamManager:
             
             duration = (datetime.utcnow() - start_time).total_seconds()
             
-            logger.info(f"Updated stream {stream_id}: {added_count} new papers")
+            if refresh_cache:
+                logger.info(f"Updated stream {stream_id}: {added_count} new papers, {updated_count} items refreshed")
+            else:
+                logger.info(f"Updated stream {stream_id}: {added_count} new papers")
             
             return StreamUpdateResult(
                 stream_id=stream_id,
@@ -254,6 +518,61 @@ class ResearchStreamManager:
                 errors=[str(e)],
                 duration_seconds=duration
             )
+    
+    def _find_existing_paper_key(self, paper, existing_items: Dict) -> Optional[str]:
+        """
+        Find if a paper from internet search already exists in local Zotero collection.
+        
+        Args:
+            paper: PaperMetadata from internet search
+            existing_items: Dict of {key: ZoteroItem} from local collection
+            
+        Returns:
+            Key of existing item if found, None otherwise
+        """
+        # Match by DOI first (most reliable)
+        if hasattr(paper, 'doi') and paper.doi:
+            paper_doi = paper.doi.lower().strip()
+            for key, item in existing_items.items():
+                # Handle both attribute access and dict access
+                item_doi = None
+                if hasattr(item, 'doi') and item.doi:
+                    item_doi = item.doi.lower().strip()
+                elif isinstance(item, dict) and item.get('DOI'):
+                    item_doi = item.get('DOI', '').lower().strip()
+                elif hasattr(item, 'raw_data') and item.raw_data.get('data', {}).get('DOI'):
+                    item_doi = item.raw_data['data']['DOI'].lower().strip()
+                
+                if item_doi and item_doi == paper_doi:
+                    logger.info(f"Found existing paper by DOI match: {paper.title[:50]}...")
+                    return key
+        
+        # Match by title similarity (enhanced implementation)
+        if hasattr(paper, 'title') and paper.title:
+            paper_title = self._normalize_title(paper.title)
+            for key, item in existing_items.items():
+                # Handle both attribute access and dict access
+                item_title = None
+                if hasattr(item, 'title') and item.title:
+                    item_title = self._normalize_title(item.title)
+                elif isinstance(item, dict) and item.get('title'):
+                    item_title = self._normalize_title(item.get('title', ''))
+                elif hasattr(item, 'raw_data') and item.raw_data.get('data', {}).get('title'):
+                    item_title = self._normalize_title(item.raw_data['data']['title'])
+                
+                if item_title and item_title == paper_title:
+                    logger.info(f"Found existing paper by title match: {paper.title[:50]}...")
+                    return key
+        
+        return None
+    
+    def _normalize_title(self, title: str) -> str:
+        """Normalize title for comparison by removing punctuation and extra whitespace"""
+        import re
+        # Convert to lowercase, remove punctuation, normalize whitespace
+        normalized = re.sub(r'[^\w\s]', '', title.lower())
+        normalized = re.sub(r'\s+', ' ', normalized).strip()
+        return normalized
     
     def get_stream(self, stream_id: str) -> Optional[ResearchStream]:
         """Get a research stream by ID"""

@@ -11,7 +11,9 @@ import time
 from .agents.search_agent import SearchAgent
 from .agents.analysis_agent import AnalysisAgent  
 from .agents.report_agent import ReportAgent
+from .agents.zotero_agent import ZoteroAgent
 from .storage.models.agent_models import CoordinatorResult
+from .utils.config import config
 
 
 class PrismaCoordinator:
@@ -22,6 +24,18 @@ class PrismaCoordinator:
         self.search_agent = SearchAgent()
         self.analysis_agent = AnalysisAgent()
         self.report_agent = ReportAgent()
+        
+        # Initialize Zotero agent for saving papers
+        self.zotero_agent = None
+        if config.get('sources.zotero.enabled', False) and config.get('sources.zotero.auto_save_papers', False):
+            try:
+                zotero_config = config.get('sources.zotero', {})
+                self.zotero_agent = ZoteroAgent(zotero_config)
+                if debug:
+                    print("[DEBUG] Zotero agent initialized for auto-saving")
+            except Exception as e:
+                if debug:
+                    print(f"[DEBUG] Failed to initialize Zotero agent: {e}")
         
         if debug:
             print("[DEBUG] Coordinator initialized")
@@ -60,7 +74,8 @@ class PrismaCoordinator:
                     authors_found=0,
                     output_file="",
                     errors=["No papers found for the given query"],
-                    total_duration=time.time() - start_time
+                    total_duration=time.time() - start_time,
+                    pipeline_metadata={}
                 )
             
             if self.debug:
@@ -73,6 +88,18 @@ class PrismaCoordinator:
             analysis_start = time.time()
             analysis_results = self.analysis_agent.analyze(search_results.papers)
             analysis_time = time.time() - analysis_start
+            
+            # Step 2.5: Save high-quality papers to Zotero (if enabled)
+            saved_papers_count = 0
+            if self.zotero_agent is not None:
+                try:
+                    saved_papers_count = self._save_papers_to_zotero(search_results.papers, analysis_results, config['topic'])
+                    if self.debug and saved_papers_count > 0:
+                        print(f"[DEBUG] Saved {saved_papers_count} high-quality papers to Zotero")
+                except Exception as e:
+                    warnings.append(f"Failed to save papers to Zotero: {str(e)}")
+                    if self.debug:
+                        print(f"[DEBUG] Zotero save error: {e}")
             
             # Step 3: Generate report
             if self.debug:
@@ -110,7 +137,8 @@ class PrismaCoordinator:
                     'analysis_time': analysis_time,
                     'report_time': report_time,
                     'search_results': search_results.total_found,
-                    'sources_searched': search_results.sources_searched
+                    'sources_searched': search_results.sources_searched,
+                    'saved_to_zotero': saved_papers_count
                 },
                 errors=errors,
                 warnings=warnings
@@ -128,10 +156,11 @@ class PrismaCoordinator:
                 authors_found=0,
                 output_file="",
                 errors=errors,
-                total_duration=time.time() - start_time
+                total_duration=time.time() - start_time,
+                pipeline_metadata={}
             )
     
-    def get_status(self) -> Dict[str, str]:
+    def get_status(self) -> Dict[str, Any]:
         """Get current system status."""
         return {
             'version': '0.1.0-mvp',
@@ -142,6 +171,88 @@ class PrismaCoordinator:
                 'report': 'initialized'
             }
         }
+    
+    def _save_papers_to_zotero(self, papers: List[Any], analysis_results: Any, topic: str) -> int:
+        """
+        Save high-quality papers to Zotero using the topic as collection name.
+        
+        Args:
+            papers: List of papers from search results
+            analysis_results: Analysis results containing paper summaries
+            topic: Research topic (used as collection name)
+            
+        Returns:
+            Number of papers successfully saved
+        """
+        if not self.zotero_agent or not papers:
+            return 0
+        
+        min_confidence = config.get('sources.zotero.min_confidence_for_save', 0.5)
+        # Use topic as collection name, with fallback
+        collection_name = topic or config.get('sources.zotero.auto_save_collection', 'Prisma Discoveries')
+        
+        # Filter papers by confidence score
+        high_quality_papers = []
+        for paper in papers:
+            confidence = getattr(paper, 'confidence_score', 0.0)
+            if confidence >= min_confidence:
+                high_quality_papers.append(paper)
+        
+        if not high_quality_papers:
+            if self.debug:
+                print(f"[DEBUG] No papers meet minimum confidence threshold ({min_confidence})")
+            return 0
+        
+        try:
+            # Convert papers to Zotero format and save
+            zotero_items = []
+            for paper in high_quality_papers:
+                item = {
+                    'itemType': 'journalArticle',
+                    'title': paper.title,
+                    'creators': [{'creatorType': 'author', 'firstName': '', 'lastName': author} 
+                               for author in paper.authors],
+                    'abstractNote': paper.abstract,
+                    'url': paper.url,
+                    'DOI': getattr(paper, 'doi', ''),
+                    'publicationTitle': getattr(paper, 'venue', ''),
+                    'date': str(getattr(paper, 'year', '')),
+                    'tags': [{'tag': f'Prisma-Discovery'}, 
+                            {'tag': f'Confidence-{paper.confidence_score:.2f}'},
+                            {'tag': f'Source-{paper.source}'},
+                            {'tag': f'Topic-{topic}'}]
+                }
+                
+                # Add summary as note if available
+                if hasattr(analysis_results, 'summaries'):
+                    for summary in analysis_results.summaries:
+                        if summary.title == paper.title:
+                            item['abstractNote'] += f"\n\n[Prisma Summary]\n{summary.summary}"
+                            break
+                
+                zotero_items.append(item)
+            
+            # Save to Zotero
+            try:
+                # Try to save items (for desktop/local API clients)
+                save_method = getattr(self.zotero_agent.client, 'save_items', None)
+                if save_method:
+                    save_method(zotero_items)
+                else:
+                    if self.debug:
+                        print("[DEBUG] Client doesn't support save_items, skipping Zotero save")
+                    return 0
+            except AttributeError:
+                if self.debug:
+                    print("[DEBUG] Client doesn't support save_items, skipping Zotero save")
+                return 0
+            
+            return len(zotero_items)
+            
+        except Exception as e:
+            if self.debug:
+                print(f"[DEBUG] Error saving to Zotero: {e}")
+            raise
 
 
 # Legacy class alias for backward compatibility

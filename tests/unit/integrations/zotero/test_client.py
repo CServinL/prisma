@@ -1,21 +1,25 @@
 """
-Test Zotero client functionality with mocking
+Test Zotero client func        config = ZoteroAPIConfig(
+            api_key="test_key",
+            library_id="12345"
+        )ality with mocking
 """
 
 import pytest
 from unittest.mock import Mock, patch, MagicMock
-from prisma.integrations.zotero import ZoteroClient, ZoteroConfig, ZoteroClientError
+from prisma.integrations.zotero import ZoteroClient, ZoteroAPIConfig, ZoteroClientError
 
 
 class TestZoteroConfig:
-    """Test ZoteroConfig data class"""
+    """Test ZoteroAPIConfig data class"""
     
     def test_config_initialization(self):
         """Test basic config initialization"""
-        config = ZoteroConfig(
+        config = ZoteroAPIConfig(
             api_key="test_key_123",
             library_id="12345",
-            library_type="user"
+            library_type="user",
+            api_version=3
         )
         
         assert config.api_key == "test_key_123"
@@ -25,9 +29,11 @@ class TestZoteroConfig:
     
     def test_config_defaults(self):
         """Test default values"""
-        config = ZoteroConfig(
+        config = ZoteroAPIConfig(
             api_key="test_key",
-            library_id="123"
+            library_id="123",
+            library_type="user",
+            api_version=3
         )
         
         assert config.library_type == "user"
@@ -39,10 +45,11 @@ class TestZoteroClient:
     
     def setup_method(self):
         """Set up test fixtures"""
-        self.config = ZoteroConfig(
+        self.config = ZoteroAPIConfig(
             api_key="test_key_123",
             library_id="12345",
-            library_type="user"
+            library_type="user",
+            api_version=3
         )
     
     @patch('prisma.integrations.zotero.client.zotero')

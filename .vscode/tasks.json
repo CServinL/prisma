@@ -4,7 +4,7 @@
         {
             "label": "Run All Tests",
             "type": "shell",
-            "command": "pipenv",
+            "command": "poetry",
             "args": [
                 "run",
                 "python",
@@ -30,7 +30,7 @@
         {
             "label": "Run Tests with Coverage",
             "type": "shell",
-            "command": "pipenv",
+            "command": "poetry",
             "args": [
                 "run",
                 "python",
@@ -38,7 +38,7 @@
                 "pytest",
                 "tests/",
                 "-v",
-                "--cov=src",
+                "--cov=prisma",
                 "--cov-report=html",
                 "--cov-report=term-missing"
             ],
@@ -56,7 +56,7 @@
         {
             "label": "Run Unit Tests Only",
             "type": "shell",
-            "command": "pipenv",
+            "command": "poetry",
             "args": [
                 "run",
                 "python",
@@ -79,7 +79,7 @@
         {
             "label": "Run Integration Tests Only",
             "type": "shell",
-            "command": "pipenv",
+            "command": "poetry",
             "args": [
                 "run",
                 "python",
@@ -102,7 +102,7 @@
         {
             "label": "Run Tests in Debug Mode",
             "type": "shell",
-            "command": "pipenv",
+            "command": "poetry",
             "args": [
                 "run",
                 "python",

@@ -1,16 +1,38 @@
 {
+    // Python interpreter for Poetry
+    "python.defaultInterpreterPath": "C:\\Users\\emile\\AppData\\Local\\pypoetry\\Cache\\virtualenvs\\prisma-4Ee01IJn-py3.13\\Scripts\\python.exe",
+    
     // Python testing configuration
     "python.testing.pytestArgs": [
-        "tests",
-        "-v"
+        "tests"
     ],
     "python.testing.unittestEnabled": false,
     "python.testing.pytestEnabled": true,
     "python.testing.autoTestDiscoverOnSaveEnabled": true,
     "python.testing.cwd": "${workspaceFolder}",
+    "python.testing.pytestPath": "C:\\Users\\emile\\AppData\\Local\\pypoetry\\Cache\\virtualenvs\\prisma-4Ee01IJn-py3.13\\Scripts\\pytest.exe",
+    
+    // Terminal and environment
     "python.terminal.activateEnvInCurrentTerminal": true,
+    "python.terminal.activateEnvironment": true,
+    
+    // Analysis paths for Pylance
     "python.analysis.extraPaths": [
-        "${workspaceFolder}/src"
+        "${workspaceFolder}"
     ],
-    "python.terminal.activateEnvironment": true
+    "python.analysis.include": [
+        "prisma/**",
+        "tests/**"
+    ],
+    "python.analysis.exclude": [
+        "**/__pycache__",
+        ".venv",
+        "build",
+        "dist"
+    ],
+    
+    // Pylance settings
+    "python.languageServer": "Pylance",
+    "python.analysis.autoImportCompletions": true,
+    "python.analysis.typeCheckingMode": "basic"
 }

@@ -4,7 +4,7 @@ Test Zotero data models
 
 import pytest
 from datetime import datetime
-from src.storage.models.zotero_models import (
+from prisma.storage.models.zotero_models import (
     ZoteroItem, 
     ZoteroCollection, 
     ZoteroCreator, 

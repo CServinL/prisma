@@ -4,7 +4,7 @@ Test Zotero client functionality with mocking
 
 import pytest
 from unittest.mock import Mock, patch, MagicMock
-from src.integrations.zotero import ZoteroClient, ZoteroConfig, ZoteroClientError
+from prisma.integrations.zotero import ZoteroClient, ZoteroConfig, ZoteroClientError
 
 
 class TestZoteroConfig:
@@ -45,7 +45,7 @@ class TestZoteroClient:
             library_type="user"
         )
     
-    @patch('src.integrations.zotero.client.zotero')
+    @patch('prisma.integrations.zotero.client.zotero')
     def test_client_initialization_success(self, mock_zotero):
         """Test successful client initialization"""
         mock_zotero_instance = Mock()
@@ -60,13 +60,13 @@ class TestZoteroClient:
             api_key="test_key_123"
         )
     
-    @patch('src.integrations.zotero.client.zotero', None)
+    @patch('prisma.integrations.zotero.client.zotero', None)
     def test_client_initialization_no_pyzotero(self):
         """Test initialization fails when pyzotero not installed"""
         with pytest.raises(ZoteroClientError, match="pyzotero is required"):
             ZoteroClient(self.config)
     
-    @patch('src.integrations.zotero.client.zotero')
+    @patch('prisma.integrations.zotero.client.zotero')
     def test_client_initialization_failure(self, mock_zotero):
         """Test initialization fails with invalid config"""
         mock_zotero.Zotero.side_effect = Exception("Invalid API key")
@@ -74,7 +74,7 @@ class TestZoteroClient:
         with pytest.raises(ZoteroClientError, match="Failed to initialize"):
             ZoteroClient(self.config)
     
-    @patch('src.integrations.zotero.client.zotero')
+    @patch('prisma.integrations.zotero.client.zotero')
     def test_test_connection_success(self, mock_zotero):
         """Test successful connection test"""
         mock_zotero_instance = Mock()
@@ -87,7 +87,7 @@ class TestZoteroClient:
         assert result is True
         mock_zotero_instance.key_info.assert_called_once()
     
-    @patch('src.integrations.zotero.client.zotero')
+    @patch('prisma.integrations.zotero.client.zotero')
     def test_test_connection_failure(self, mock_zotero):
         """Test connection test failure"""
         mock_zotero_instance = Mock()
@@ -99,7 +99,7 @@ class TestZoteroClient:
         
         assert result is False
     
-    @patch('src.integrations.zotero.client.zotero')
+    @patch('prisma.integrations.zotero.client.zotero')
     def test_get_collections_success(self, mock_zotero):
         """Test successful collections retrieval"""
         mock_collections = [
@@ -118,7 +118,7 @@ class TestZoteroClient:
         assert collections[0]["key"] == "ABC123"
         mock_zotero_instance.collections.assert_called_once_with(limit=50)
     
-    @patch('src.integrations.zotero.client.zotero')
+    @patch('prisma.integrations.zotero.client.zotero')
     def test_get_collections_failure(self, mock_zotero):
         """Test collections retrieval failure"""
         mock_zotero_instance = Mock()
@@ -130,7 +130,7 @@ class TestZoteroClient:
         with pytest.raises(ZoteroClientError, match="Failed to retrieve collections"):
             client.get_collections()
     
-    @patch('src.integrations.zotero.client.zotero')
+    @patch('prisma.integrations.zotero.client.zotero')
     def test_get_items_success(self, mock_zotero):
         """Test successful items retrieval"""
         mock_items = [
@@ -152,7 +152,7 @@ class TestZoteroClient:
             itemType="journalArticle"
         )
     
-    @patch('src.integrations.zotero.client.zotero')
+    @patch('prisma.integrations.zotero.client.zotero')
     def test_search_items_success(self, mock_zotero):
         """Test successful item search"""
         mock_items = [
@@ -173,7 +173,7 @@ class TestZoteroClient:
             limit=10
         )
     
-    @patch('src.integrations.zotero.client.zotero')
+    @patch('prisma.integrations.zotero.client.zotero')
     def test_get_collection_items_success(self, mock_zotero):
         """Test successful collection items retrieval"""
         mock_items = [
@@ -194,7 +194,7 @@ class TestZoteroClient:
             limit=20
         )
     
-    @patch('src.integrations.zotero.client.zotero')
+    @patch('prisma.integrations.zotero.client.zotero')
     def test_get_item_success(self, mock_zotero):
         """Test successful single item retrieval"""
         mock_item = {
@@ -212,7 +212,7 @@ class TestZoteroClient:
         assert item["key"] == "SINGLE_ITEM"
         mock_zotero_instance.item.assert_called_once_with("SINGLE_ITEM")
     
-    @patch('src.integrations.zotero.client.zotero')
+    @patch('prisma.integrations.zotero.client.zotero')
     def test_get_tags_success(self, mock_zotero):
         """Test successful tags retrieval"""
         mock_tags = [
@@ -231,7 +231,7 @@ class TestZoteroClient:
         assert tags[0]["tag"] == "machine learning"
         mock_zotero_instance.tags.assert_called_once_with(limit=100)
     
-    @patch('src.integrations.zotero.client.zotero')
+    @patch('prisma.integrations.zotero.client.zotero')
     def test_get_item_tags_success(self, mock_zotero):
         """Test successful item tags retrieval"""
         mock_tags = [

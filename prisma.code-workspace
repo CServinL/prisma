@@ -1,0 +1,10 @@
+{
+    "folders": [
+        {
+            "path": "."
+        }
+    ],
+    "settings": {
+        "python.defaultInterpreterPath": "C:\\Users\\emile\\AppData\\Local\\pypoetry\\Cache\\virtualenvs\\prisma-4Ee01IJn-py3.13\\Scripts\\python.exe"
+    }
+}

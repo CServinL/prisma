@@ -40,9 +40,9 @@ class ResearchStreamManager:
     
     def __init__(self, config_path: Optional[str] = None):
         """Initialize the research stream manager"""
-        self.config = ConfigLoader(config_path).load()
+        self.config = ConfigLoader().config
         self.zotero_client = ZoteroHybridClient(self.config)
-        self.streams_file = Path(self.config.storage.base_path) / "research_streams.json"
+        self.streams_file = Path("./data") / "research_streams.json"
         self._streams_cache: Dict[str, ResearchStream] = {}
         self._load_streams()
     

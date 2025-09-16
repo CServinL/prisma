@@ -8,11 +8,11 @@ import sys
 from pathlib import Path
 from datetime import datetime
 
-# Add src to path
-sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / 'src'))
+# Add prisma to path
+sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 
-from agents.analysis_agent import AnalysisAgent
-from storage.models.agent_models import PaperMetadata, AnalysisResult, PaperSummary
+from prisma.agents.analysis_agent import AnalysisAgent
+from prisma.storage.models.agent_models import PaperMetadata, AnalysisResult, PaperSummary
 
 
 class TestAnalysisAgent(unittest.TestCase):
@@ -64,7 +64,7 @@ class TestAnalysisAgent(unittest.TestCase):
         self.assertIsInstance(summary.methodology, str)
         self.assertIsInstance(summary.connected_papers_url, str)
     
-    @patch('agents.analysis_agent.requests.post')
+    @patch('prisma.agents.analysis_agent.requests.post')
     def test_ollama_integration_success(self, mock_post):
         """Test successful Ollama integration."""
         # Mock successful Ollama response
@@ -83,7 +83,7 @@ class TestAnalysisAgent(unittest.TestCase):
         self.assertIsNotNone(summary)
         self.assertIn('machine learning', summary)
     
-    @patch('agents.analysis_agent.requests.post')
+    @patch('prisma.agents.analysis_agent.requests.post')
     def test_ollama_integration_failure(self, mock_post):
         """Test Ollama integration failure handling."""
         # Mock failed Ollama response

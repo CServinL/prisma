@@ -4,9 +4,9 @@ Test Zotero Agent functionality
 
 import pytest
 from unittest.mock import Mock, patch, MagicMock
-from src.agents.zotero_agent import ZoteroAgent, ZoteroSearchCriteria
-from src.integrations.zotero import ZoteroConfig, ZoteroClientError
-from src.storage.models import ZoteroItem, ZoteroCollection, ZoteroCreator
+from prisma.agents.zotero_agent import ZoteroAgent, ZoteroSearchCriteria
+from prisma.integrations.zotero import ZoteroConfig, ZoteroClientError
+from prisma.storage.models import ZoteroItem, ZoteroCollection, ZoteroCreator
 
 
 class TestZoteroSearchCriteria:
@@ -93,7 +93,7 @@ class TestZoteroAgent:
             }
         ]
     
-    @patch('src.agents.zotero_agent.ZoteroClient')
+    @patch('prisma.agents.zotero_agent.ZoteroClient')
     def test_agent_initialization(self, mock_client_class):
         """Test agent initialization"""
         mock_client = Mock()
@@ -105,7 +105,7 @@ class TestZoteroAgent:
         assert agent.client == mock_client
         mock_client_class.assert_called_once_with(self.config)
     
-    @patch('src.agents.zotero_agent.ZoteroClient')
+    @patch('prisma.agents.zotero_agent.ZoteroClient')
     def test_test_connection(self, mock_client_class):
         """Test connection testing"""
         mock_client = Mock()
@@ -118,7 +118,7 @@ class TestZoteroAgent:
         assert result is True
         mock_client.test_connection.assert_called_once()
     
-    @patch('src.agents.zotero_agent.ZoteroClient')
+    @patch('prisma.agents.zotero_agent.ZoteroClient')
     def test_get_collections_success(self, mock_client_class):
         """Test successful collections retrieval"""
         mock_client = Mock()
@@ -133,7 +133,7 @@ class TestZoteroAgent:
         assert collections[0].name == "AI Papers"
         assert collections[1].name == "Machine Learning"
     
-    @patch('src.agents.zotero_agent.ZoteroClient')
+    @patch('prisma.agents.zotero_agent.ZoteroClient')
     def test_get_collections_cached(self, mock_client_class):
         """Test collections caching"""
         mock_client = Mock()
@@ -151,7 +151,7 @@ class TestZoteroAgent:
         # Client should only be called once
         mock_client.get_collections.assert_called_once()
     
-    @patch('src.agents.zotero_agent.ZoteroClient')
+    @patch('prisma.agents.zotero_agent.ZoteroClient')
     def test_get_collections_refresh_cache(self, mock_client_class):
         """Test cache refresh"""
         mock_client = Mock()
@@ -168,7 +168,7 @@ class TestZoteroAgent:
         # Client should be called twice
         assert mock_client.get_collections.call_count == 2
     
-    @patch('src.agents.zotero_agent.ZoteroClient')
+    @patch('prisma.agents.zotero_agent.ZoteroClient')
     def test_find_collections_by_name(self, mock_client_class):
         """Test finding collections by name pattern"""
         mock_client = Mock()
@@ -186,7 +186,7 @@ class TestZoteroAgent:
         collections = agent.find_collections_by_name("a")
         assert len(collections) == 2  # Both contain "a"
     
-    @patch('src.agents.zotero_agent.ZoteroClient')
+    @patch('prisma.agents.zotero_agent.ZoteroClient')
     def test_search_papers_by_query(self, mock_client_class):
         """Test searching papers by query"""
         mock_client = Mock()
@@ -203,7 +203,7 @@ class TestZoteroAgent:
         assert papers[0].title == "Neural Networks Study"
         mock_client.search_items.assert_called_once_with("neural networks", limit=50)
     
-    @patch('src.agents.zotero_agent.ZoteroClient')
+    @patch('prisma.agents.zotero_agent.ZoteroClient')
     def test_search_papers_by_collections(self, mock_client_class):
         """Test searching papers by collections"""
         mock_client = Mock()
@@ -219,7 +219,7 @@ class TestZoteroAgent:
         assert papers[0].title == "Neural Networks Study"
         mock_client.get_collection_items.assert_called_once_with("COLL1", limit=25)
     
-    @patch('src.agents.zotero_agent.ZoteroClient')
+    @patch('prisma.agents.zotero_agent.ZoteroClient')
     def test_search_papers_all_items(self, mock_client_class):
         """Test searching all papers"""
         mock_client = Mock()
@@ -234,7 +234,7 @@ class TestZoteroAgent:
         assert len(papers) == 2
         mock_client.get_items.assert_called_once_with(limit=100)
     
-    @patch('src.agents.zotero_agent.ZoteroClient')
+    @patch('prisma.agents.zotero_agent.ZoteroClient')
     def test_search_papers_with_filters(self, mock_client_class):
         """Test searching papers with additional filters"""
         mock_client = Mock()
@@ -256,7 +256,7 @@ class TestZoteroAgent:
         assert papers[0].item_type == "journalArticle"
         assert papers[0].year == 2023
     
-    @patch('src.agents.zotero_agent.ZoteroClient')
+    @patch('prisma.agents.zotero_agent.ZoteroClient')
     def test_get_academic_papers(self, mock_client_class):
         """Test getting only academic papers"""
         mock_client = Mock()
@@ -271,7 +271,7 @@ class TestZoteroAgent:
         for paper in papers:
             assert paper.is_academic_paper is True
     
-    @patch('src.agents.zotero_agent.ZoteroClient')
+    @patch('prisma.agents.zotero_agent.ZoteroClient')
     def test_get_papers_by_topic(self, mock_client_class):
         """Test getting papers by topic"""
         mock_client = Mock()
@@ -288,7 +288,7 @@ class TestZoteroAgent:
         # Collections search should be called instead of search_items because collection was found
         mock_client.get_collection_items.assert_called_once_with("COLL2", limit=30)
     
-    @patch('src.agents.zotero_agent.ZoteroClient')
+    @patch('prisma.agents.zotero_agent.ZoteroClient')
     def test_get_recent_papers(self, mock_client_class):
         """Test getting recent papers"""
         mock_client = Mock()
@@ -301,7 +301,7 @@ class TestZoteroAgent:
         # Both test papers are from 2022-2023, so should be included
         assert len(papers) == 2
     
-    @patch('src.agents.zotero_agent.ZoteroClient')
+    @patch('prisma.agents.zotero_agent.ZoteroClient')
     def test_get_library_summary(self, mock_client_class):
         """Test getting library summary"""
         mock_client = Mock()
@@ -322,7 +322,7 @@ class TestZoteroAgent:
         assert summary["year_range"] == (2022, 2023)
         assert len(summary["collections"]) == 2
     
-    @patch('src.agents.zotero_agent.ZoteroClient')
+    @patch('prisma.agents.zotero_agent.ZoteroClient')
     def test_get_library_summary_error(self, mock_client_class):
         """Test library summary with error"""
         mock_client = Mock()
@@ -340,7 +340,7 @@ class TestZoteroAgent:
     def test_export_papers_metadata(self):
         """Test exporting papers metadata"""
         # Create test items directly without mocking
-        from src.storage.models import ZoteroCreator, ZoteroTag
+        from prisma.storage.models import ZoteroCreator, ZoteroTag
         
         creators = [ZoteroCreator(creator_type="author", first_name="John", last_name="Doe")]
         tags = [ZoteroTag(tag="test")]
@@ -358,7 +358,7 @@ class TestZoteroAgent:
         
         # Don't need to mock for this test
         config = ZoteroConfig(api_key="test", library_id="123")
-        with patch('src.agents.zotero_agent.ZoteroClient'):
+        with patch('prisma.agents.zotero_agent.ZoteroClient'):
             agent = ZoteroAgent(config)
             metadata = agent.export_papers_metadata(papers)
         

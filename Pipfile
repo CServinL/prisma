@@ -4,17 +4,8 @@ verify_ssl = true
 name = "pypi"
 
 [packages]
-typer = "*"
-pyyaml = "*"
-requests = "*"
-pyzotero = "*"
-pydantic = "*"
 
 [dev-packages]
-pytest = "*"
-black = "*"
-flake8 = "*"
-mypy = "*"
 
 [requires]
-python_version = "3.12"
+python_version = "3.13"

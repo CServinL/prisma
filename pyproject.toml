@@ -1,3 +1,36 @@
+[project]
+name = "prisma"
+version = "0.1.0"
+description = "Automated Literature Review Tool"
+authors = [
+    {name = "CServinL", email = "8943596+CServinL@users.noreply.github.com"}
+]
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "pyyaml", 
+    "requests",
+    "pyzotero",
+    "pydantic",
+    "click (>=8.2.1,<9.0.0)",
+    "colorama"
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "black", 
+    "flake8",
+    "mypy"
+]
+
+[project.scripts]
+prisma = "prisma.cli.prisma_cli:cli"
+
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py", "*_test.py"]

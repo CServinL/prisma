@@ -7,11 +7,11 @@ from unittest.mock import patch, MagicMock
 import sys
 from pathlib import Path
 
-# Add src to path
-sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / 'src'))
+# Add prisma to path
+sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 
-from agents.search_agent import SearchAgent
-from storage.models.agent_models import SearchResult, PaperMetadata
+from prisma.agents.search_agent import SearchAgent
+from prisma.storage.models.agent_models import SearchResult, PaperMetadata
 
 
 class TestSearchAgent(unittest.TestCase):
@@ -26,7 +26,7 @@ class TestSearchAgent(unittest.TestCase):
         self.assertIsNotNone(self.search_agent.arxiv_base_url)
         self.assertEqual(self.search_agent.arxiv_base_url, "http://export.arxiv.org/api/query")
     
-    @patch('agents.search_agent.requests.get')
+    @patch('prisma.agents.search_agent.requests.get')
     def test_search_success(self, mock_get):
         """Test successful search operation."""
         # Mock response

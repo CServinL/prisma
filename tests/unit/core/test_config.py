@@ -7,11 +7,12 @@ import tempfile
 import os
 from pathlib import Path
 import sys
+from unittest.mock import patch
 
-# Add src to path
-sys.path.insert(0, str(Path(__file__).parent.parent.parent / 'src'))
+# Add prisma to path
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from src.utils.config import ConfigLoader, PrismaConfig, ZoteroConfig, LLMConfig
+from prisma.utils.config import ConfigLoader, PrismaConfig, ZoteroConfig, LLMConfig
 from pydantic import ValidationError
 
 
@@ -127,12 +128,15 @@ sources:
     
     def test_zotero_credentials_check(self):
         """Test Zotero credentials validation."""
+        # Test with a clean config loader (no config file)
+        with patch('prisma.utils.config.Path.exists', return_value=False):
+            config_loader = ConfigLoader()
+            
+            # Default config should not have credentials
+            self.assertFalse(config_loader.has_zotero_credentials())
+        
+        # Test with credentials
         config_loader = ConfigLoader()
-        
-        # Default config should not have credentials
-        self.assertFalse(config_loader.has_zotero_credentials())
-        
-        # Mock config with credentials
         config_loader.config.sources.zotero.enabled = True
         config_loader.config.sources.zotero.api_key = 'test_key'
         config_loader.config.sources.zotero.library_id = '12345'

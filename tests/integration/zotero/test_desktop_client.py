@@ -9,7 +9,7 @@ import pytest
 import json
 from unittest.mock import Mock, patch, MagicMock
 import requests
-from src.integrations.zotero.desktop_client import (
+from prisma.integrations.zotero.desktop_client import (
     ZoteroDesktopClient, 
     ZoteroDesktopConfig, 
     ZoteroDesktopError

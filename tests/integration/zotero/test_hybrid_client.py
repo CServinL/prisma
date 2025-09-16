@@ -8,7 +8,7 @@ import pytest
 from unittest.mock import Mock, patch
 from pathlib import Path
 
-from src.integrations.zotero import ZoteroHybridClient, ZoteroHybridConfig
+from prisma.integrations.zotero import ZoteroHybridClient, ZoteroHybridConfig
 
 
 class TestZoteroHybridConfig:
@@ -48,8 +48,8 @@ class TestZoteroHybridClient:
         with pytest.raises(ValueError, match="No valid Zotero configuration"):
             ZoteroHybridClient(config)
     
-    @patch('src.integrations.zotero.hybrid_client.ZoteroSQLiteClient')
-    @patch('src.integrations.zotero.hybrid_client.ZoteroSQLiteConfig')
+    @patch('prisma.integrations.zotero.hybrid_client.ZoteroSQLiteClient')
+    @patch('prisma.integrations.zotero.hybrid_client.ZoteroSQLiteConfig')
     def test_sqlite_only_initialization(self, mock_sqlite_config, mock_sqlite_client):
         """Test initialization with SQLite only"""
         # Mock Path.exists to return True
@@ -66,7 +66,7 @@ class TestZoteroHybridClient:
             assert client.api_client is None
             mock_sqlite_client.assert_called_once()
     
-    @patch('src.integrations.zotero.hybrid_client.ZoteroClient')
+    @patch('prisma.integrations.zotero.hybrid_client.ZoteroClient')
     def test_api_only_initialization(self, mock_api_client):
         """Test initialization with Web API only"""
         config = ZoteroHybridConfig(
@@ -81,10 +81,10 @@ class TestZoteroHybridClient:
         assert client.api_client is not None
         mock_api_client.assert_called_once()
     
-    @patch('src.integrations.zotero.hybrid_client.ZoteroClient')
-    @patch('src.integrations.zotero.hybrid_client.ZoteroSQLiteClient')  
-    @patch('src.integrations.zotero.hybrid_client.ZoteroSQLiteConfig')
-    @patch('src.integrations.zotero.hybrid_client.ZoteroConfig')
+    @patch('prisma.integrations.zotero.hybrid_client.ZoteroClient')
+    @patch('prisma.integrations.zotero.hybrid_client.ZoteroSQLiteClient')  
+    @patch('prisma.integrations.zotero.hybrid_client.ZoteroSQLiteConfig')
+    @patch('prisma.integrations.zotero.hybrid_client.ZoteroConfig')
     def test_hybrid_initialization(self, mock_zotero_config, mock_sqlite_config, mock_sqlite_client, mock_api_client):
         """Test initialization with both SQLite and API"""
         with patch.object(Path, 'exists', return_value=True):
@@ -108,8 +108,8 @@ class TestZoteroHybridClient:
             mock_sqlite_client.assert_called_once()
             mock_api_client.assert_called_once()
     
-    @patch('src.integrations.zotero.hybrid_client.ZoteroSQLiteClient')
-    @patch('src.integrations.zotero.hybrid_client.ZoteroSQLiteConfig')
+    @patch('prisma.integrations.zotero.hybrid_client.ZoteroSQLiteClient')
+    @patch('prisma.integrations.zotero.hybrid_client.ZoteroSQLiteConfig')
     def test_search_sqlite_preferred(self, mock_sqlite_config, mock_sqlite_client):
         """Test that SQLite is preferred for search when available"""
         with patch.object(Path, 'exists', return_value=True):

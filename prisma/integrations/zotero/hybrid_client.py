@@ -172,6 +172,15 @@ class ZoteroHybridClient:
                 hasattr(self.zotero_config, 'library_id') and 
                 self.zotero_config.library_id)
     
+    def _test_desktop_connection(self) -> bool:
+        """Test if Zotero desktop app is accessible"""
+        if not self.desktop_client:
+            return False
+        try:
+            return self.desktop_client._check_zotero_running()
+        except Exception:
+            return False
+    
     def search_items(self, query: str = None, collection_keys: List[str] = None, 
                     item_types: List[str] = None, limit: int = 100) -> List[Dict[str, Any]]:
         """

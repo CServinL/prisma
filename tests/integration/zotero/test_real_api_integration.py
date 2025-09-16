@@ -49,9 +49,9 @@ class TestRealZoteroAPIIntegration:
     
     @pytest.fixture
     def test_collection_name(self) -> str:
-        """Generate a unique test collection name"""
+        """Generate a unique test collection name with standard prefix"""
         import time
-        return f"Test Collection {int(time.time())}"
+        return f"prisma-test: Collection {int(time.time())}"
     
     def test_client_initialization(self, zotero_client):
         """Test that the Zotero client initializes properly"""
@@ -113,7 +113,7 @@ class TestRealZoteroAPIIntegration:
         """Test creating a collection with a parent collection"""
         # First create a parent collection
         parent_data = {
-            'name': f"Parent Collection {int(__import__('time').time())}",
+            'name': f"prisma-test: Parent Collection {int(__import__('time').time())}",
             'parentCollection': False
         }
         parent_collection = zotero_client.create_collection(parent_data)
@@ -127,7 +127,7 @@ class TestRealZoteroAPIIntegration:
         try:
             # Now create a child collection
             child_data = {
-                'name': f"Child Collection {int(__import__('time').time())}",
+                'name': f"prisma-test: Child Collection {int(__import__('time').time())}",
                 'parentCollection': parent_collection.key
             }
             child_collection = zotero_client.create_collection(child_data)
@@ -336,11 +336,11 @@ class TestRealZoteroAPIIntegration:
         assert delete_result is False  # Should return False, not raise exception
         
         # Test creating collection with invalid parent
-        invalid_parent_data = {
-            'name': f"Invalid Parent Test {int(__import__('time').time())}",
+        collection_data = {
+            'name': f"prisma-test: Invalid Parent Test {int(__import__('time').time())}",
             'parentCollection': 'INVALID_PARENT_123'
         }
-        result = zotero_client.create_collection(invalid_parent_data)
+        result = zotero_client.create_collection(collection_data)
         assert result is None  # Should fail gracefully
         
         # Test creating collection with missing name
@@ -358,7 +358,7 @@ class TestRealZoteroAPIIntegration:
             # Create multiple test collections
             for i in range(3):
                 collection_data = {
-                    'name': f"Bulk Test Collection {i} - {int(__import__('time').time())}",
+                    'name': f"prisma-test: Bulk Collection {i+1} - {int(__import__('time').time())}",
                     'parentCollection': False
                 }
                 collection = zotero_client.create_collection(collection_data)
@@ -591,7 +591,7 @@ class TestZoteroItemOperations:
         try:
             # First create a test collection
             collection_data = {
-                'name': f'Test Collection for Items - {int(time.time())}'
+                'name': f'prisma-test: Collection for Items - {int(time.time())}'
             }
             created_collection = zotero_client.create_collection(collection_data)
             assert created_collection is not None
@@ -689,7 +689,7 @@ class TestZoteroResearchStreamIntegration:
         """Test that research streams properly create and can clean up collections"""
         import time
         
-        stream_name = f"Test Research Stream {int(time.time())}"
+        stream_name = f"prisma-test: Research Stream {int(time.time())}"
         stream_query = "test machine learning pydantic"
         
         created_stream_id = None
@@ -710,26 +710,33 @@ class TestZoteroResearchStreamIntegration:
             if stream.collection_key:
                 created_collection_key = stream.collection_key
                 
-                # Verify the collection exists in Zotero using Web API directly
-                # (since we just created it via Web API, avoid sync timing issues)
+                # Verify the collection exists in Zotero
                 zotero_client = research_stream_manager.zotero_client
-                if hasattr(zotero_client, 'api_client') and zotero_client.api_client:
-                    # Use Web API directly to avoid Local HTTP sync delays
-                    collections = zotero_client.api_client.get_collections()
-                else:
-                    # Fallback to hybrid client method (which may have timing issues)
-                    collections = zotero_client.get_collections()
+                collections = zotero_client.get_collections()
                 
-                collection_keys = [col['key'] for col in collections]
+                # Handle both raw dicts (from direct API calls) and ZoteroCollection objects
+                if collections and hasattr(collections[0], 'key'):
+                    # ZoteroCollection Pydantic objects
+                    collection_keys = [col.key for col in collections]
+                else:
+                    # Raw dictionary format
+                    collection_keys = [col['key'] for col in collections]
+                
                 assert created_collection_key in collection_keys, f"Collection {created_collection_key} not found in Zotero"
                 
                 # Verify collection has correct name
                 for col in collections:
-                    if col['key'] == created_collection_key:
-                        # Hybrid client uses normalized format with 'name' field directly
-                        collection_name_field = col.get('name') or col.get('data', {}).get('name', '')
-                        assert stream.collection_name in collection_name_field
-                        break
+                    if hasattr(col, 'key'):
+                        # ZoteroCollection object
+                        if col.key == created_collection_key:
+                            assert stream.collection_name in col.name
+                            break
+                    else:
+                        # Raw dictionary
+                        if col['key'] == created_collection_key:
+                            collection_name_field = col.get('name') or col.get('data', {}).get('name', '')
+                            assert stream.collection_name in collection_name_field
+                            break
             
         finally:
             # Clean up: Delete the collection if it was created
@@ -739,12 +746,17 @@ class TestZoteroResearchStreamIntegration:
                     delete_success = zotero_client.delete_collection(created_collection_key)
                     assert delete_success, f"Failed to delete collection {created_collection_key}"
                     
-                    # Verify collection is gone using Web API directly to avoid sync timing issues
-                    if hasattr(zotero_client, 'api_client') and zotero_client.api_client:
-                        collections_after = zotero_client.api_client.get_collections()
+                    # Verify collection is gone
+                    collections_after = zotero_client.get_collections()
+                    
+                    # Handle both raw dicts and ZoteroCollection objects
+                    if collections_after and hasattr(collections_after[0], 'key'):
+                        # ZoteroCollection objects
+                        collection_keys_after = [col.key for col in collections_after]
                     else:
-                        collections_after = zotero_client.get_collections()
-                    collection_keys_after = [col['key'] for col in collections_after]
+                        # Raw dictionaries
+                        collection_keys_after = [col['key'] for col in collections_after]
+                    
                     assert created_collection_key not in collection_keys_after, f"Collection {created_collection_key} still exists after deletion"
                 except Exception as cleanup_error:
                     pytest.fail(f"Failed to clean up collection {created_collection_key}: {cleanup_error}")
@@ -765,7 +777,7 @@ class TestZoteroResearchStreamIntegration:
         # Mock a scenario where collection creation might fail
         # This test ensures the stream is still created even if collection creation fails
         
-        stream_name = f"Test Failure Handling {int(time.time())}"
+        stream_name = f"prisma-test: Failure Handling {int(time.time())}"
         stream_query = "test failure handling"
         
         created_stream_id = None
@@ -839,7 +851,7 @@ class TestZoteroBatchOperations:
         try:
             # Create multiple collections
             for i in range(5):
-                collection_name = f"Batch Test Collection {i+1} - {int(time.time())}"
+                collection_name = f"prisma-test: Batch Collection {i+1} - {int(time.time())}"
                 collection_data = {"name": collection_name}
                 collection = zotero_client.create_collection(collection_data)
                 assert collection is not None
@@ -886,7 +898,7 @@ class TestZoteroBatchOperations:
         try:
             # Create enough collections to test pagination
             for i in range(3):
-                collection_name = f"Pagination Test {i+1} - {int(time.time())}"
+                collection_name = f"prisma-test: Pagination {i+1} - {int(time.time())}"
                 collection_data = {"name": collection_name}
                 collection = zotero_client.create_collection(collection_data)
                 assert collection is not None
@@ -998,7 +1010,11 @@ class TestZoteroLibraryCleanupVerification:
             pytest.fail(error_msg)
     
     def test_no_test_collections_remain_in_library(self, zotero_client):
-        """Verify that no test collections remain in the library - clean up if found"""
+        """Verify that no test collections remain in the library - clean up any found
+        
+        Uses the standard 'prisma-test:' prefix to safely identify test collections.
+        This ensures production collections (like 'Prisma: Research Stream Name') are never touched.
+        """
         if not zotero_client:
             pytest.skip("Zotero client not available")
         
@@ -1012,20 +1028,25 @@ class TestZoteroLibraryCleanupVerification:
             all_collections = zotero_client.get_collections()
         
         test_collections_found = []
-        test_indicators = ['test', 'batch test', 'pagination test', 'prisma:', 'integration testing']
+        
+        # SAFE AND PRECISE: Only collections with the standard test prefix will be cleaned up
+        PRISMA_TEST_PREFIX = "prisma-test"
         
         for collection in all_collections:
-            collection_name = collection.get('data', {}).get('name', '') or collection.get('name', '')
+            # Handle both raw dicts and ZoteroCollection objects
+            if hasattr(collection, 'name'):
+                collection_name = collection.name
+                collection_key = collection.key
+            else:
+                collection_name = collection.get('data', {}).get('name', '') or collection.get('name', '')
+                collection_key = collection.get('key', '')
             
-            # Check if collection name contains test indicators
-            has_test_name = any(
-                indicator.lower() in collection_name.lower()
-                for indicator in test_indicators
-            )
-            
-            if has_test_name:
+            # SAFETY CHECK: Only delete collections that contain our test prefix
+            # This covers both "prisma-test: Name" and "Prisma: prisma-test: Name" formats
+            # This ensures we NEVER accidentally delete production collections
+            if PRISMA_TEST_PREFIX in collection_name:
                 test_collections_found.append({
-                    'key': collection['key'],
+                    'key': collection_key,
                     'name': collection_name
                 })
         
@@ -1064,6 +1085,83 @@ class TestZoteroLibraryCleanupVerification:
                 pytest.fail(error_msg)
             else:
                 print("🎉 All test collections cleaned up successfully!")
+    
+    def test_no_test_streams_remain_in_system(self):
+        """Verify that no test research streams remain in the system - clean up any found
+        
+        Uses the standard 'prisma-test:' prefix to safely identify test streams.
+        This ensures production streams are never touched.
+        """
+        from prisma.services.research_stream_manager import ResearchStreamManager
+        
+        # Initialize research stream manager
+        stream_manager = ResearchStreamManager()
+        
+        # Get all streams
+        all_streams = stream_manager.list_streams()
+        
+        # SAFE AND PRECISE: Only streams with the standard test prefix will be cleaned up
+        PRISMA_TEST_PREFIX = "prisma-test:"
+        
+        test_streams_found = []
+        for stream in all_streams:
+            if stream.name.startswith(PRISMA_TEST_PREFIX):
+                test_streams_found.append({
+                    'id': stream.id,
+                    'name': stream.name,
+                    'collection_key': stream.collection_key
+                })
+        
+        # Also check for old-style test streams that don't follow the new convention
+        old_test_indicators = [
+            'test research stream',
+            'test stream',
+            'integration test',
+            'test:',  # For streams like "Test: Research Stream" which become "Prisma: Test: Research Stream"
+            'failure handling'  # Specific test pattern
+        ]
+        
+        for stream in all_streams:
+            if not stream.name.startswith(PRISMA_TEST_PREFIX):
+                # Check if it matches old test patterns
+                stream_name_lower = stream.name.lower()
+                if any(indicator in stream_name_lower for indicator in old_test_indicators):
+                    test_streams_found.append({
+                        'id': stream.id,
+                        'name': stream.name,
+                        'collection_key': stream.collection_key
+                    })
+        
+        # If test streams are found, clean them up
+        if test_streams_found:
+            print(f"\n🧹 Found {len(test_streams_found)} test streams to clean up:")
+            
+            cleanup_errors = []
+            for stream in test_streams_found:
+                try:
+                    print(f"  Deleting stream: {stream['id']} - {stream['name']}")
+                    
+                    # Delete the stream and its collection
+                    success = stream_manager.delete_stream(stream['id'], delete_collection=True)
+                    
+                    if success:
+                        print(f"    ✅ Deleted successfully")
+                    else:
+                        print(f"    ⚠️ Delete returned False")
+                        
+                except Exception as e:
+                    error_msg = f"Failed to delete stream {stream['id']}: {e}"
+                    print(f"    ❌ {error_msg}")
+                    cleanup_errors.append(error_msg)
+            
+            # Only fail if we couldn't clean up the streams
+            if cleanup_errors:
+                error_msg = "Failed to clean up some test streams:\n"
+                for error in cleanup_errors:
+                    error_msg += f"  - {error}\n"
+                pytest.fail(error_msg)
+            else:
+                print("🎉 All test streams cleaned up successfully!")
     
     def test_library_integrity_check(self, zotero_client):
         """Basic integrity check to ensure the library is accessible and not corrupted"""

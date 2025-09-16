@@ -16,7 +16,6 @@ from ..storage.models.research_stream_models import (
     SearchCriteria, StreamUpdateResult, StreamSummary
 )
 from ..storage.models.zotero_models import ZoteroItem, ZoteroCollection, ZoteroSearchQuery, ZoteroSearchResult
-from ..integrations.zotero.hybrid_client import ZoteroHybridClient
 from ..utils.config import ConfigLoader
 
 logger = logging.getLogger(__name__)
@@ -47,36 +46,21 @@ class ResearchStreamManager:
         self._load_streams()
     
     def _create_zotero_client(self):
-        """Create appropriate Zotero client based on configuration mode"""
-        zotero_mode = getattr(self.config.sources.zotero, 'mode', 'hybrid')
+        """Create and configure Zotero client"""
+        # Use the unified ZoteroClient that handles all implementation details
+        from ..integrations.zotero import ZoteroClient
         
-        if zotero_mode == 'local_api':
-            from ..integrations.zotero.local_api_client import ZoteroLocalAPIClient, ZoteroLocalAPIConfig
-            server_url = getattr(self.config.sources.zotero, 'server_url', 'http://127.0.0.1:23119')
-            local_config = ZoteroLocalAPIConfig(
-                server_url=server_url,
-                timeout=30.0,
-                user_id="0"
-            )
-            return ZoteroLocalAPIClient(local_config)
-        else:
-            # Default to hybrid client for other modes
-            from ..integrations.zotero.hybrid_client import ZoteroHybridClient, ZoteroHybridConfig
+        logger.info("🔧 Creating unified Zotero client")
+        
+        try:
+            client = ZoteroClient.from_config(self.config)
+            logger.info(f"✅ Successfully created {client.client_type} Zotero client")
+            logger.info(f"📊 Client info: {client.client_info}")
+            return client
             
-            # Convert PrismaConfig to ZoteroHybridConfig
-            zotero_config = ZoteroHybridConfig(
-                api_key=getattr(self.config.sources.zotero, 'api_key', None),
-                library_id=getattr(self.config.sources.zotero, 'library_id', None),
-                library_type=getattr(self.config.sources.zotero, 'library_type', 'user'),
-                local_server_url=getattr(self.config.sources.zotero, 'server_url', 'http://127.0.0.1:23119'),
-                local_server_timeout=5,
-                enable_desktop_save=True,
-                desktop_server_url=getattr(self.config.sources.zotero, 'server_url', 'http://127.0.0.1:23119'),
-                collection_key=None,
-                prefer_local_server=True,
-                fallback_to_api=True
-            )
-            return ZoteroHybridClient(zotero_config)
+        except Exception as e:
+            logger.error(f"❌ Failed to create Zotero client: {e}")
+            raise ValueError(f"Failed to initialize Zotero client: {e}")
     
     def _load_streams(self):
         """Load research streams from storage"""
@@ -438,45 +422,24 @@ class ResearchStreamManager:
                                     "name": author.name
                                 })
                     
-                    # Save to Zotero using appropriate method based on client type
-                    if hasattr(self.zotero_client, 'create_item'):
-                        # HybridClient method - returns item key
-                        try:
-                            item_key = self.zotero_client.create_item(zotero_item_data)
-                            if item_key:
-                                added_count += 1
-                                logger.info(f"Successfully saved paper to Zotero: {paper.title[:50]}...")
-                                
-                                # Add to collection if specified
-                                if stream.collection_key:
-                                    try:
-                                        self.zotero_client.add_item_to_collection(item_key, stream.collection_key)
-                                        logger.info(f"Added item to collection: {stream.collection_key}")
-                                    except Exception as e:
-                                        logger.warning(f"Failed to add item to collection: {e}")
-                            else:
-                                errors.append(f"Failed to save paper to Zotero: {paper.title[:50]}...")
-                        except Exception as e:
-                            errors.append(f"Error saving paper via create_item: {e}")
-                            logger.error(f"Error saving paper via create_item: {e}")
+                    # Save to Zotero using unified save interface
+                    try:
+                        # Use the unified save method (available on all client types)
+                        created_keys = self.zotero_client.save_items(
+                            items=[zotero_item_data],
+                            collection_key=stream.collection_key
+                        )
+                        
+                        if created_keys:
+                            added_count += 1
+                            logger.info(f"Successfully saved paper to Zotero: {paper.title[:50]}...")
+                        else:
+                            errors.append(f"Failed to save paper to Zotero: {paper.title[:50]}...")
                             
-                    elif hasattr(self.zotero_client, 'save_items'):
-                        # LocalAPIClient method - fallback
-                        try:
-                            save_success = self.zotero_client.save_items([zotero_item_data])
-                            if save_success:
-                                added_count += 1
-                                logger.info(f"Successfully saved paper to Zotero: {paper.title[:50]}...")
-                            else:
-                                errors.append(f"Failed to save paper to Zotero: {paper.title[:50]}...")
-                        except Exception as e:
-                            errors.append(f"Error saving paper via save_items: {e}")
-                            logger.error(f"Error saving paper via save_items: {e}")
-                            
-                    else:
-                        error_msg = f"Zotero client does not support item creation. Current client: {type(self.zotero_client).__name__}"
-                        errors.append(error_msg)
-                        logger.error(error_msg)
+                    except Exception as e:
+                        errors.append(f"Error saving paper to Zotero: {e}")
+                        logger.error(f"Error saving paper to Zotero: {e}")
+                        continue
                 
                 except Exception as e:
                     paper_title = getattr(paper, 'title', 'unknown')[:50]
@@ -600,6 +563,51 @@ class ResearchStreamManager:
             streams_due_update=len(due_streams),
             last_global_update=max((s.last_updated for s in streams if s.last_updated), default=None)
         )
+    
+    def delete_stream(self, stream_id: str, delete_collection: bool = True) -> bool:
+        """
+        Delete a research stream and optionally its Zotero collection
+        
+        Args:
+            stream_id: ID of the stream to delete
+            delete_collection: Whether to also delete the associated Zotero collection
+            
+        Returns:
+            True if deletion was successful
+        """
+        try:
+            # Get the stream to be deleted
+            stream = self._streams_cache.get(stream_id)
+            if not stream:
+                logger.warning(f"Stream {stream_id} not found")
+                return False
+            
+            logger.info(f"🗑️ Deleting research stream: {stream.name} ({stream_id})")
+            
+            # Delete the associated Zotero collection if requested and exists
+            if delete_collection and stream.collection_key:
+                try:
+                    collection_deleted = self.zotero_client.delete_collection(stream.collection_key)
+                    if collection_deleted:
+                        logger.info(f"✅ Deleted Zotero collection: {stream.collection_name}")
+                    else:
+                        logger.warning(f"⚠️ Failed to delete Zotero collection: {stream.collection_key}")
+                except Exception as e:
+                    logger.error(f"❌ Error deleting Zotero collection {stream.collection_key}: {e}")
+                    # Continue with stream deletion even if collection deletion fails
+            
+            # Remove from cache
+            del self._streams_cache[stream_id]
+            
+            # Save updated streams
+            self._save_streams()
+            
+            logger.info(f"✅ Successfully deleted research stream: {stream.name}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to delete stream {stream_id}: {e}")
+            return False
     
     def _generate_stream_id(self, name: str) -> str:
         """Generate a unique stream ID from name"""

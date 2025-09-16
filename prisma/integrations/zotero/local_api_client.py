@@ -247,9 +247,8 @@ class ZoteroLocalAPIClient:
     def add_item_to_collection(self, item_key: str, collection_key: str) -> bool:
         """Add an item to a collection"""
         try:
-            # Note: This might need to be done via connector API or web API
-            # Local API might be read-only for collection membership
-            logger.warning("Adding items to collections via local API may not be supported")
+            # Local API does not support collection assignment - this operation is not available
+            # Return False silently to allow fallback to Web API
             return False
             
         except Exception as e:
@@ -395,3 +394,46 @@ class ZoteroLocalAPIClient:
         except Exception as e:
             logger.error(f"Error deleting item {item_key}: {e}")
             return False
+    
+    def save_items_to_zotero(self, items: List[Dict[str, Any]], 
+                           collection_key: Optional[str] = None,
+                           auto_assign_collection: bool = True) -> List[str]:
+        """
+        🎯 UNIFIED SAVE INTERFACE: Integration-agnostic method for saving items to Zotero
+        
+        This method provides the same interface as HybridClient but uses Local API capabilities.
+        Note: Local API has limitations for writes, so this primarily uses save_items.
+        
+        Args:
+            items: List of item data dictionaries in Zotero format
+            collection_key: Optional collection to add items to (WARNING: Local API has limited collection assignment)
+            auto_assign_collection: Whether to automatically assign to collection after creation
+            
+        Returns:
+            List of created item keys (empty for Local API as keys are not returned)
+            
+        Raises:
+            ZoteroLocalAPIError: If saving fails
+        """
+        logger.warning("⚠️ Using Local API for saves - limited collection assignment capabilities")
+        
+        try:
+            # Use the existing save_items method
+            success = self.save_items(items)
+            
+            if success:
+                logger.info(f"✅ Successfully saved {len(items)} items via Local API")
+                
+                # Note: Local API save_items doesn't return item keys, so we can't do collection assignment
+                if collection_key and auto_assign_collection:
+                    logger.warning(f"⚠️ Collection assignment to '{collection_key}' not supported via Local API save_items")
+                    logger.warning("💡 Use Web API (HybridClient) for reliable collection assignment")
+                
+                # Return empty list since Local API doesn't provide item keys from save_items
+                return []
+            else:
+                raise ZoteroLocalAPIError("Local API save_items returned False")
+                
+        except Exception as e:
+            logger.error(f"❌ Failed to save items via Local API: {e}")
+            raise ZoteroLocalAPIError(f"Failed to save items: {e}")

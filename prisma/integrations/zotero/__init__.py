@@ -1,59 +1,50 @@
 """
-Zotero Integration Package
+Unified Zotero Integration Package
 
-This package provides comprehensive Zotero integration with multiple approaches:
-- Web API client for online access
-- Local HTTP server for offline read operations  
-- Desktop app client for saving items (100% compatible)
-- Hybrid client that intelligently combines all approaches
-- Local API client for enhanced Zotero 7 integration
+This package provides a single, unified Zotero client that encapsulates all 
+implementation details and provides a clean, consistent interface.
 
 Key Features:
-- Read existing library data (Web API/Local HTTP server)
-- Save new items via desktop app (maintains compatibility)
-- Intelligent fallback strategies
-- Full compatibility with Zotero sync and data integrity
+- Single ZoteroClient that handles all Zotero operations
+- Automatic client selection based on configuration
+- Network-aware operation with intelligent fallbacks
+- Unified save interface with collection assignment
+- Integration-agnostic API
+
+Usage:
+    from prisma.integrations.zotero import ZoteroClient
+    
+    client = ZoteroClient.from_config(config)
+    items = client.get_items()
+    client.save_items(items, collection_key="research_stream_key")
 """
 
-# Import core clients
+# Import the unified client - this is the ONLY client that should be used
+from .unified_client import ZoteroClient
+
+# Import core exception types that may be needed
 try:
-    from .client import ZoteroClient, ZoteroAPIConfig, ZoteroClientError
+    from .client import ZoteroClientError
 except ImportError:
-    pass
+    class ZoteroClientError(Exception):
+        pass
 
 try:
-    from .desktop_client import ZoteroDesktopClient, ZoteroDesktopConfig, ZoteroDesktopError
+    from .local_api_client import ZoteroLocalAPIError
 except ImportError:
-    pass
+    class ZoteroLocalAPIError(Exception):
+        pass
 
 try:
-    from .local_api_client import ZoteroLocalAPIClient, ZoteroLocalAPIConfig, ZoteroLocalAPIError
+    from .desktop_client import ZoteroDesktopError
 except ImportError:
-    pass
+    class ZoteroDesktopError(Exception):
+        pass
 
-# Import other clients that may have import issues when running standalone
-try:
-    from .hybrid_client import ZoteroHybridClient, ZoteroHybridConfig
-except ImportError:
-    pass
-
+# Export only the unified interface
 __all__ = [
-    # Web API Client
     "ZoteroClient",
-    "ZoteroAPIConfig", 
     "ZoteroClientError",
-    
-    # Desktop App Client
-    "ZoteroDesktopClient",
-    "ZoteroDesktopConfig", 
+    "ZoteroLocalAPIError", 
     "ZoteroDesktopError",
-    
-    # Local API Client
-    "ZoteroLocalAPIClient",
-    "ZoteroLocalAPIConfig",
-    "ZoteroLocalAPIError",
-    
-    # Hybrid Client (Recommended)
-    "ZoteroHybridClient",
-    "ZoteroHybridConfig",
 ]

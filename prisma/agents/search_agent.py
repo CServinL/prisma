@@ -6,6 +6,7 @@ import requests
 import xml.etree.ElementTree as ET
 import json
 import time
+import logging
 from typing import Dict, List, Any
 from urllib.parse import quote, urljoin
 from datetime import datetime
@@ -16,6 +17,8 @@ from ..storage.models.source_quality import (
     validate_academic_content, get_academic_confidence_score,
     AcademicValidationCriteria, SOURCE_REGISTRY
 )
+
+logger = logging.getLogger(__name__)
 
 
 class SearchAgent:
@@ -194,7 +197,7 @@ class SearchAgent:
             )
             
             if not is_valid:
-                print(f"[REJECTED] arXiv paper rejected: {'; '.join(reasons)}")
+                logger.debug(f"arXiv paper rejected: {'; '.join(reasons)}")
                 return None
             
             # Calculate confidence score
@@ -207,10 +210,10 @@ class SearchAgent:
             )
             
             if confidence < self.min_confidence_score:
-                print(f"[REJECTED] arXiv paper low confidence: {confidence:.2f}")
+                logger.debug(f"arXiv paper low confidence: {confidence:.2f}")
                 return None
             
-            print(f"[ACCEPTED] arXiv paper confidence: {confidence:.2f}")
+            logger.debug(f"arXiv paper accepted with confidence: {confidence:.2f}")
             return paper
             
         except Exception as e:
@@ -629,7 +632,7 @@ class SearchAgent:
             )
             
             if not is_valid:
-                print(f"[REJECTED] Semantic Scholar paper rejected: {'; '.join(reasons)}")
+                logger.debug(f"Semantic Scholar paper rejected: {'; '.join(reasons)}")
                 return None
             
             # Calculate confidence score
@@ -642,14 +645,14 @@ class SearchAgent:
             )
             
             if confidence < self.min_confidence_score:
-                print(f"[REJECTED] Semantic Scholar paper low confidence: {confidence:.2f}")
+                logger.debug(f"Semantic Scholar paper low confidence: {confidence:.2f}")
                 return None
             
-            print(f"[ACCEPTED] Semantic Scholar paper confidence: {confidence:.2f}")
+            logger.debug(f"Semantic Scholar paper accepted with confidence: {confidence:.2f}")
             return paper
             
         except Exception as e:
-            print(f"[ERROR] Failed to parse Semantic Scholar entry: {e}")
+            logger.error(f"Failed to parse Semantic Scholar entry: {e}")
             return None
 
     def _print_quality_summary(self, source_stats: Dict, total_papers: int, total_books: int):

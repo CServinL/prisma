@@ -403,3 +403,127 @@ class ZoteroClient:
         except Exception as e:
             logger.error(f"Failed to delete item {item_key}: {e}")
             return False
+    
+    def save_items_to_zotero(self, items: List[Dict[str, Any]], 
+                           collection_key: Optional[str] = None,
+                           auto_assign_collection: bool = True) -> List[str]:
+        """
+        🎯 UNIFIED SAVE INTERFACE: Integration-agnostic method for saving items to Zotero
+        
+        This method provides the same interface as HybridClient but uses Web API capabilities.
+        
+        Args:
+            items: List of item data dictionaries in Zotero format
+            collection_key: Optional collection to add items to
+            auto_assign_collection: Whether to automatically assign to collection after creation
+            
+        Returns:
+            List of created item keys
+            
+        Raises:
+            ZoteroClientError: If saving fails
+        """
+        created_keys = []
+        
+        for item_data in items:
+            try:
+                # Use the existing create_item method
+                item_key = self.create_item(item_data)
+                
+                if item_key:
+                    created_keys.append(item_key)
+                    logger.info(f"✅ Successfully saved item via Web API: {item_key}")
+                    
+                    # Add to collection if specified and auto-assign is enabled
+                    if collection_key and auto_assign_collection:
+                        try:
+                            # Use add_item_to_collection method if available
+                            if hasattr(self, 'add_item_to_collection'):
+                                self.add_item_to_collection(item_key, collection_key)
+                                logger.info(f"✅ Added item to collection {collection_key}: {item_key}")
+                            else:
+                                logger.warning(f"⚠️ Collection assignment not implemented for Web API client")
+                        except Exception as e:
+                            logger.warning(f"⚠️ Failed to add item to collection {collection_key}: {e}")
+                            # Don't fail the entire operation for collection assignment failures
+                else:
+                    logger.error(f"❌ Failed to save item '{item_data.get('title', 'Unknown')}'")
+                    
+            except Exception as e:
+                logger.error(f"❌ Failed to save item '{item_data.get('title', 'Unknown')}': {e}")
+                # Continue with other items rather than failing the entire batch
+                continue
+        
+        logger.info(f"💾 Save operation complete: {len(created_keys)}/{len(items)} items saved successfully")
+        return created_keys
+    
+    def add_item_to_collection(self, item_key: str, collection_key: str) -> bool:
+        """
+        Add an item to a collection using Web API
+        
+        Args:
+            item_key: Key of the item to add
+            collection_key: Key of the collection
+            
+        Returns:
+            True if addition was successful
+        """
+        try:
+            if self._client is None:
+                logger.error("Zotero client not initialized")
+                return False
+            
+            # Method 1: Use addto_collection (the correct method we found)
+            if hasattr(self._client, 'addto_collection'):
+                try:
+                    # addto_collection expects (collection_id, full_item_payload)
+                    # We need to get the full item first to get the version
+                    item = self._client.item(item_key)
+                    
+                    # Check if item is already in the collection
+                    if 'collections' not in item['data']:
+                        item['data']['collections'] = []
+                    
+                    if collection_key not in item['data']['collections']:
+                        # Use addto_collection which handles the collection addition automatically
+                        self._client.addto_collection(collection_key, item)
+                        logger.info(f"✅ Successfully added item {item_key} to collection {collection_key} using addto_collection")
+                        return True
+                    else:
+                        logger.info(f"Item {item_key} already in collection {collection_key}")
+                        return True
+                        
+                except Exception as e:
+                    logger.warning(f"addto_collection failed: {e}")
+            
+            # Method 2: Use update_item approach (fallback)
+            try:
+                # Get the current item
+                item = self._client.item(item_key)
+                
+                # Ensure collections field exists
+                if 'collections' not in item['data']:
+                    item['data']['collections'] = []
+                
+                # Add collection if not already present
+                if collection_key not in item['data']['collections']:
+                    item['data']['collections'].append(collection_key)
+                    
+                    # Update the item
+                    self._client.update_item(item)
+                    logger.info(f"✅ Successfully added item {item_key} to collection {collection_key} using update_item")
+                    return True
+                else:
+                    logger.info(f"Item {item_key} already in collection {collection_key}")
+                    return True
+                    
+            except Exception as e:
+                logger.error(f"update_item approach failed: {e}")
+            
+            # If all methods failed, log error
+            logger.error(f"❌ No available method to add item {item_key} to collection {collection_key} via Web API")
+            return False
+                
+        except Exception as e:
+            logger.error(f"❌ Failed to add item {item_key} to collection {collection_key}: {e}")
+            return False

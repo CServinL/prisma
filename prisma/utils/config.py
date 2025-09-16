@@ -5,9 +5,12 @@ Load and validate YAML configuration files with robust type validation.
 
 import os
 import yaml
+import logging
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 from pydantic import BaseModel, Field, field_validator, ConfigDict
+
+logger = logging.getLogger(__name__)
 
 
 class ZoteroConfig(BaseModel):
@@ -166,12 +169,12 @@ class ConfigLoader:
             try:
                 with open(self.config_path, 'r', encoding='utf-8') as f:
                     user_data = yaml.safe_load(f) or {}
-                print(f"[INFO] Loaded config from {self.config_path}")
+                logger.debug(f"Loaded config from {self.config_path}")
             except Exception as e:
-                print(f"[ERROR] Failed to load config from {self.config_path}: {e}")
-                print("[WARNING] Using default configuration")
+                logger.error(f"Failed to load config from {self.config_path}: {e}")
+                logger.warning("Using default configuration")
         else:
-            print("[WARNING] No config file found, using defaults")
+            logger.debug("No config file found, using defaults")
         
         try:
             # Create Pydantic config with validation

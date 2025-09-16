@@ -775,36 +775,34 @@ class ZoteroHybridClient:
         if self.local_api_client:
             try:
                 success = self.local_api_client.add_item_to_collection(item_key, collection_key)
-                logger.info(f"Added item {item_key} to collection {collection_key}")
                 
-                # ✅ IMMEDIATE VERIFICATION: Confirm the item is in the collection via web API
-                # Note: Due to sync delays, verification may fail temporarily even when addition succeeded
-                if self.api_client:
-                    try:
-                        collection_items = self.api_client.get_collection_items(collection_key)
-                        item_keys = [item['key'] for item in collection_items if 'key' in item]
-                        
-                        if item_key in item_keys:
-                            logger.info(f"✅ Verified item addition to collection: {item_key} -> {collection_key}")
-                            return True
-                        else:
-                            # Sync delay - item was added but not yet visible via Web API
-                            logger.info(f"ℹ️ Item addition pending sync: {item_key} -> {collection_key} (this is normal)")
-                            return success  # Trust the local API result
-                    except Exception as e:
-                        # Verification failed but item was likely added successfully
-                        logger.warning(f"Collection verification failed (sync delay): {e}")
-                        return success  # Trust the local API result
+                # If Local API succeeded, great!
+                if success:
+                    logger.info(f"✅ Added item {item_key} to collection {collection_key} via Local API")
+                    return True
                 else:
-                    logger.info("No web API client available for verification")
-                    return success
+                    logger.info(f"ℹ️ Local API collection assignment failed, falling back to Web API")
                     
-            except ZoteroLocalAPIError as e:
-                logger.error(f"Local API add to collection failed: {e}")
-                raise
+            except Exception as e:
+                logger.warning(f"⚠️ Local API collection assignment failed: {e}, falling back to Web API")
         
-        # Web API client doesn't have add_items_to_collection method
-        raise ValueError("Local API client required for adding items to collections")
+        # Fall back to Web API if Local API failed or is unavailable
+        if self.api_client and hasattr(self.api_client, 'add_item_to_collection'):
+            try:
+                success = self.api_client.add_item_to_collection(item_key, collection_key)
+                if success:
+                    logger.info(f"✅ Added item {item_key} to collection {collection_key} via Web API")
+                    return True
+                else:
+                    logger.error(f"❌ Web API collection assignment also failed for {item_key}")
+                    return False
+            except Exception as e:
+                logger.error(f"❌ Web API collection assignment failed: {e}")
+                return False
+        
+        # No viable client for collection assignment
+        logger.error(f"❌ No available client supports collection assignment")
+        return False
     
     def get_item(self, item_key: str) -> ZoteroItem:
         """
@@ -857,3 +855,63 @@ class ZoteroHybridClient:
                 raise ZoteroClientError(f"All item retrieval methods failed - last error: {e}")
         
         raise ZoteroClientError("No available item retrieval method")
+    
+    def save_items_to_zotero(self, items: List[Dict[str, Any]], 
+                           collection_key: Optional[str] = None,
+                           auto_assign_collection: bool = True) -> List[str]:
+        """
+        🎯 UNIFIED SAVE INTERFACE: Integration-agnostic method for saving items to Zotero
+        
+        This is the single, unified method that all components should use for saving items.
+        It handles all the complexity internally:
+        - Network detection and appropriate client selection
+        - Collection assignment (if specified)
+        - Deduplication (if configured)
+        - Error handling and fallback strategies
+        
+        Args:
+            items: List of item data dictionaries in Zotero format
+            collection_key: Optional collection to add items to
+            auto_assign_collection: Whether to automatically assign to collection after creation
+            
+        Returns:
+            List of created item keys
+            
+        Raises:
+            ZoteroClientError: If saving fails
+            ValueError: If no suitable client is available or writes are disabled
+        """
+        # Ensure write capability is available
+        self._ensure_write_capability("save_items_to_zotero")
+        
+        created_keys = []
+        
+        for item_data in items:
+            try:
+                # Use create_item for individual items (Web API preferred)
+                if self.api_client:
+                    # Use the existing create_item method which has verification
+                    item_key = self.create_item(item_data)
+                    created_keys.append(item_key)
+                    logger.info(f"✅ Successfully saved item via Web API: {item_key}")
+                    
+                    # Add to collection if specified and auto-assign is enabled
+                    if collection_key and auto_assign_collection:
+                        try:
+                            self.add_item_to_collection(item_key, collection_key)
+                            logger.info(f"✅ Added item to collection {collection_key}: {item_key}")
+                        except Exception as e:
+                            logger.warning(f"⚠️ Failed to add item to collection {collection_key}: {e}")
+                            # Don't fail the entire operation for collection assignment failures
+                            
+                else:
+                    # Fallback: if no Web API available, can't create items
+                    raise ValueError("Web API client required for creating items - no fallback available for writes")
+                    
+            except Exception as e:
+                logger.error(f"❌ Failed to save item '{item_data.get('title', 'Unknown')}': {e}")
+                # Continue with other items rather than failing the entire batch
+                continue
+        
+        logger.info(f"💾 Save operation complete: {len(created_keys)}/{len(items)} items saved successfully")
+        return created_keys

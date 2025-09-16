@@ -232,19 +232,18 @@ class PrismaCoordinator:
                 
                 zotero_items.append(item)
             
-            # Save to Zotero
+            # Save to Zotero using unified interface
             try:
-                # Try to save items (for desktop/local API clients)
-                save_method = getattr(self.zotero_agent.client, 'save_items', None)
-                if save_method:
-                    save_method(zotero_items)
-                else:
-                    if self.debug:
-                        print("[DEBUG] Client doesn't support save_items, skipping Zotero save")
-                    return 0
-            except AttributeError:
+                # Use the unified save method that all clients support
+                created_keys = self.zotero_agent.client.save_items(
+                    items=zotero_items,
+                    collection_key=None  # No specific collection for coordinator saves
+                )
                 if self.debug:
-                    print("[DEBUG] Client doesn't support save_items, skipping Zotero save")
+                    print(f"[DEBUG] Successfully saved {len(zotero_items)} items via unified interface")
+            except Exception as e:
+                if self.debug:
+                    print(f"[DEBUG] Failed to save items to Zotero: {e}")
                 return 0
             
             return len(zotero_items)

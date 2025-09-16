@@ -1,53 +1,128 @@
-# ADR-004: Simple CLI Interface
+# ADR-004: Enhanced CLI Interface with Research Streams
 
-**Date:** 2025-09-14  
+**Date:** 2025-09-14 (Updated: 2025-09-15)  
 **Author:** CServinL
 
 ## Context
 
 The Prisma literature review system needs a command-line interface for researchers to:
 - Configure and start literature reviews using YAML files
-- Check progress and retrieve results
+- Manage Research Streams for persistent topic monitoring
+- Check progress and retrieve results  
 - Use simple commands without complex setup
 
 ## Decision
 
-Use **Typer** for a simple CLI that directly calls our 4-component pipeline.
+Use **Click** for a comprehensive CLI that supports both traditional literature reviews and the new Research Streams architecture.
 
-### Why Typer:
-- ✅ **Easy to use**: Simple commands with good help text
-- ✅ **Type safety**: Validates inputs automatically
-- ✅ **Research-friendly**: Good for academic workflows
-- ✅ **Python native**: Works well with our existing code
+### Why Click (Updated from Typer):
+- ✅ **Industry Standard**: Widely adopted for complex CLI applications
+- ✅ **Command Groups**: Perfect for organizing streams commands
+- ✅ **Rich Features**: Advanced options, help formatting, command chaining
+- ✅ **Extensible**: Easy to add new command groups as system grows
+- ✅ **Research-friendly**: Supports complex academic workflows
 
-### Simple Architecture:
+### Enhanced Architecture:
 ```bash
-# Start literature review
-prisma start my_config.yaml
+# Traditional literature review
+prisma review "machine learning" --output "ml_review.md"
 
-# Check status  
-prisma status my_job_123
-
-# Get results
-prisma results my_job_123
+# Research Streams management
+prisma streams create "Neural Networks 2024" "neural networks transformer"
+prisma streams list --status active
+prisma streams update --all
+prisma streams info neural-networks-2024
+prisma streams summary
 ```
 
 ## Implementation
 
-### Basic CLI Structure
+### CLI Structure
 ```python
-import typer
-from pathlib import Path
+import click
+from .commands.streams import streams_group
 
-app = typer.Typer()
-
-@app.command()
-def start(config_file: Path):
-    """Start a literature review from YAML config."""
-    # Load config, create job, run pipeline
+@click.group()
+@click.version_option()
+def cli():
+    """Prisma - Intelligent Literature Review Tool"""
     pass
 
-@app.command() 
+@cli.command()
+@click.argument('topic', required=True)
+@click.option('--output', '-o', help='Output file path')
+def review(topic: str, output: str):
+    """Generate a literature review for a research topic"""
+    pass
+
+# Add command groups
+cli.add_command(streams_group)
+```
+
+### Research Streams Commands
+```python
+@click.group(name='streams')
+def streams_group():
+    """Manage research streams for continuous literature monitoring"""
+    pass
+
+@streams_group.command('create')
+@click.argument('name', required=True)
+@click.argument('query', required=True) 
+@click.option('--frequency', '-f', type=click.Choice(['daily', 'weekly', 'monthly', 'manual']))
+def create_stream(name: str, query: str, frequency: str):
+    """Create a new research stream"""
+    pass
+```
+
+## Enhanced Features (Day 2 Update)
+
+### Research Streams Integration
+- **Stream Management**: Complete CRUD operations for research streams
+- **Batch Operations**: Update multiple streams simultaneously
+- **Rich Status Display**: Detailed information about stream status and statistics
+- **Flexible Filtering**: Filter streams by status, update schedule, etc.
+
+### User Experience Enhancements
+- **Progress Indicators**: Visual feedback for long-running operations
+- **Error Handling**: Clear error messages with suggested solutions
+- **Help System**: Comprehensive help text and examples
+- **Configuration**: Support for config files and environment variables
+
+## Commands Implemented
+
+### Core Literature Review
+- `prisma review <topic>` - Generate traditional literature review
+- Options: `--output`, `--sources`, `--limit`, `--zotero-only`, `--include-authors`
+
+### Research Streams
+- `prisma streams create <name> <query>` - Create new research stream
+- `prisma streams list [--status]` - List all or filtered streams  
+- `prisma streams update [<stream_id>|--all]` - Update streams
+- `prisma streams info <stream_id>` - Detailed stream information
+- `prisma streams summary` - System-wide statistics
+
+## Benefits Realized
+
+### For Researchers
+- **Intuitive Commands**: Natural language-like command structure
+- **Flexible Workflows**: Support for both one-time and persistent research
+- **Rich Feedback**: Detailed status and progress information
+- **Error Recovery**: Clear guidance when operations fail
+
+### For System Development  
+- **Modular Design**: Command groups enable easy feature addition
+- **Consistent Interface**: Uniform option patterns across commands
+- **Extensible Architecture**: Easy to add new command groups
+- **Professional UX**: Industry-standard CLI patterns
+
+## Status
+
+**Accepted** - Successfully implemented with full Research Streams support in Day 2 development.
+
+## Related ADRs
+- ADR-001: Simple Pipeline Architecture (CLI integrates with pipeline)
+- ADR-007: Research Streams Architecture (CLI provides streams interface) 
 def status(job_id: str):
     """Check job status from database."""
     # Query SQLite for job status

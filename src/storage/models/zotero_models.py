@@ -269,6 +269,200 @@ class ZoteroItem(BaseModel):
         }
 
 
+class ZoteroAttachment(BaseModel):
+    """Represents a Zotero attachment (PDF, snapshot, etc.)"""
+    model_config = ConfigDict(populate_by_name=True)
+    
+    key: str = Field(..., description="Attachment key")
+    parent_item: Optional[str] = Field(None, alias="parentItem", description="Parent item key")
+    item_type: str = Field("attachment", alias="itemType")
+    link_mode: Optional[str] = Field(None, alias="linkMode", description="Link mode: imported_file, imported_url, linked_file, linked_url")
+    title: Optional[str] = Field(None, description="Attachment title")
+    filename: Optional[str] = Field(None, description="Filename")
+    path: Optional[str] = Field(None, description="File path")
+    url: Optional[str] = Field(None, description="URL for linked attachments")
+    content_type: Optional[str] = Field(None, alias="contentType", description="MIME type")
+    charset: Optional[str] = Field(None, description="Character encoding")
+    md5: Optional[str] = Field(None, description="MD5 hash")
+    mtime: Optional[int] = Field(None, description="Modification time")
+    
+    @property
+    def is_pdf(self) -> bool:
+        """Check if this attachment is a PDF"""
+        return (self.content_type == "application/pdf" or 
+                (self.filename and self.filename.lower().endswith('.pdf')))
+    
+    @property
+    def is_snapshot(self) -> bool:
+        """Check if this attachment is a web snapshot"""
+        return self.content_type == "text/html" or self.link_mode == "imported_url"
+    
+    @classmethod
+    def from_zotero_data(cls, data: Dict[str, Any]) -> "ZoteroAttachment":
+        """Create ZoteroAttachment from Zotero API data"""
+        item_data = data.get("data", {})
+        return cls(
+            key=data.get("key", ""),
+            parent_item=item_data.get("parentItem"),
+            item_type=item_data.get("itemType", "attachment"),
+            link_mode=item_data.get("linkMode"),
+            title=item_data.get("title"),
+            filename=item_data.get("filename"),
+            path=item_data.get("path"),
+            url=item_data.get("url"),
+            content_type=item_data.get("contentType"),
+            charset=item_data.get("charset"),
+            md5=item_data.get("md5"),
+            mtime=item_data.get("mtime")
+        )
+
+
+class ZoteroSearchQuery(BaseModel):
+    """Represents a search query for Zotero items"""
+    
+    # Text search fields
+    query: Optional[str] = Field(None, description="General search query")
+    title: Optional[str] = Field(None, description="Search in title")
+    author: Optional[str] = Field(None, description="Search in authors")
+    publication: Optional[str] = Field(None, description="Search in publication")
+    abstract: Optional[str] = Field(None, description="Search in abstract")
+    tags: Optional[List[str]] = Field(None, description="Search for specific tags")
+    
+    # Filters
+    item_types: Optional[List[str]] = Field(None, description="Filter by item types")
+    collections: Optional[List[str]] = Field(None, description="Filter by collection keys")
+    date_from: Optional[str] = Field(None, description="Filter items from this date")
+    date_to: Optional[str] = Field(None, description="Filter items to this date")
+    has_pdf: Optional[bool] = Field(None, description="Filter items with PDF attachments")
+    has_doi: Optional[bool] = Field(None, description="Filter items with DOI")
+    
+    # Query options
+    limit: int = Field(100, description="Maximum number of results")
+    start: int = Field(0, description="Start index for pagination")
+    sort_by: str = Field("date", description="Sort field: date, title, author, dateAdded")
+    sort_direction: str = Field("desc", description="Sort direction: asc, desc")
+    
+    @field_validator('sort_by')
+    @classmethod
+    def sort_by_must_be_valid(cls, v):
+        valid_sorts = {"date", "title", "author", "dateAdded", "dateModified", "itemType"}
+        if v not in valid_sorts:
+            raise ValueError(f'sort_by must be one of {valid_sorts}')
+        return v
+    
+    @field_validator('sort_direction')
+    @classmethod
+    def sort_direction_must_be_valid(cls, v):
+        if v not in ("asc", "desc"):
+            raise ValueError('sort_direction must be "asc" or "desc"')
+        return v
+    
+    def to_sql_where_clause(self) -> str:
+        """Convert query to SQL WHERE clause for SQLite searches"""
+        conditions = []
+        
+        if self.query:
+            conditions.append(
+                "(i.title LIKE ? OR ia.abstractNote LIKE ? OR "
+                "GROUP_CONCAT(c.firstName || ' ' || c.lastName) LIKE ?)"
+            )
+        
+        if self.title:
+            conditions.append("i.title LIKE ?")
+        
+        if self.author:
+            conditions.append(
+                "EXISTS (SELECT 1 FROM itemCreators ic "
+                "JOIN creators c ON ic.creatorID = c.creatorID "
+                "WHERE ic.itemID = i.itemID AND "
+                "(c.firstName LIKE ? OR c.lastName LIKE ?))"
+            )
+        
+        if self.publication:
+            conditions.append("i.publicationTitle LIKE ?")
+        
+        if self.abstract:
+            conditions.append("ia.abstractNote LIKE ?")
+        
+        if self.item_types:
+            placeholders = ",".join("?" for _ in self.item_types)
+            conditions.append(f"it.typeName IN ({placeholders})")
+        
+        if self.has_doi:
+            conditions.append("i.DOI IS NOT NULL AND i.DOI != ''")
+        
+        if self.date_from:
+            conditions.append("i.date >= ?")
+        
+        if self.date_to:
+            conditions.append("i.date <= ?")
+        
+        return " AND ".join(conditions) if conditions else "1=1"
+    
+    def get_sql_params(self) -> List[str]:
+        """Get parameters for SQL query"""
+        params = []
+        
+        if self.query:
+            search_param = f"%{self.query}%"
+            params.extend([search_param, search_param, search_param])
+        
+        if self.title:
+            params.append(f"%{self.title}%")
+        
+        if self.author:
+            author_param = f"%{self.author}%"
+            params.extend([author_param, author_param])
+        
+        if self.publication:
+            params.append(f"%{self.publication}%")
+        
+        if self.abstract:
+            params.append(f"%{self.abstract}%")
+        
+        if self.item_types:
+            params.extend(self.item_types)
+        
+        if self.date_from:
+            params.append(self.date_from)
+        
+        if self.date_to:
+            params.append(self.date_to)
+        
+        return params
+
+
+class ZoteroSearchResult(BaseModel):
+    """Represents search results from Zotero"""
+    
+    items: List[ZoteroItem] = Field(default_factory=list, description="Found items")
+    total_results: int = Field(0, description="Total number of matching items")
+    start: int = Field(0, description="Start index of this page")
+    limit: int = Field(100, description="Items per page")
+    query: Optional[ZoteroSearchQuery] = Field(None, description="Original search query")
+    
+    @property
+    def has_more(self) -> bool:
+        """Check if there are more results available"""
+        return self.start + len(self.items) < self.total_results
+    
+    @property
+    def next_start(self) -> int:
+        """Get start index for next page"""
+        return self.start + len(self.items)
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for serialization"""
+        return {
+            "items": [item.to_dict() for item in self.items],
+            "total_results": self.total_results,
+            "start": self.start,
+            "limit": self.limit,
+            "has_more": self.has_more,
+            "item_count": len(self.items)
+        }
+
+
 class ZoteroLibrary(BaseModel):
     """Represents a Zotero library (user or group)"""
     model_config = ConfigDict(populate_by_name=True)

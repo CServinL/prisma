@@ -3,6 +3,9 @@ __pycache__/
 *.py[codz]
 *$py.class
 
+# Work directory - internal documentation and notes
+work/
+
 # C extensions
 *.so
 

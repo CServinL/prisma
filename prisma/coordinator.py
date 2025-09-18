@@ -1,6 +1,17 @@
 """
 Prisma Coordinator - Main orchestration logic for literature reviews.
-MVP: Fast, simple, working implementation.
+MVP: Fast, simple, working
+
+if relevance_result.is_relevant:
+    relevant_papers.append(paper)
+    if self.debug:
+        level = relevance_result.relevance_level
+        print(f"[DEBUG] Relevant paper: {paper.title[:50]}... ({level})")
+else:
+    discarded_papers += 1
+    if self.debug:
+        level = relevance_result.relevance_level
+        print(f"[DEBUG] Discarded paper: {paper.title[:50]}... ({level})")tion.
 """
 
 import json
@@ -72,7 +83,7 @@ class PrismaCoordinator:
                     success=False,
                     papers_analyzed=0,
                     authors_found=0,
-                    output_file="",
+                    output_file=config.get('output_file', './failed_search.md'),
                     errors=["No papers found for the given query"],
                     total_duration=time.time() - start_time,
                     pipeline_metadata={}
@@ -94,20 +105,20 @@ class PrismaCoordinator:
                     # Use LLM to quickly evaluate document relevance
                     relevance_result = self.analysis_agent.assess_relevance(
                         paper_title=paper.title,
-                        paper_abstract=getattr(paper, 'abstract', ''),
+                        paper_abstract=paper.abstract,  # abstract is required field
                         topic=config['topic']
                     )
                     
                     # Step 3: Filtering - Keep only relevant documents
-                    if relevance_result.get('is_relevant', False):
+                    if relevance_result.is_relevant:
                         relevant_papers.append(paper)
                         if self.debug:
-                            level = relevance_result.get('relevance_level', 'RELEVANT')
+                            level = relevance_result.relevance_level
                             print(f"[DEBUG] ✅ Relevant ({level}): {paper.title[:50]}...")
                     else:
                         discarded_papers += 1
                         if self.debug:
-                            level = relevance_result.get('relevance_level', 'NOT_RELEVANT')
+                            level = relevance_result.relevance_level
                             print(f"[DEBUG] ❌ Filtered ({level}): {paper.title[:50]}...")
                             
                 except Exception as e:
@@ -126,7 +137,7 @@ class PrismaCoordinator:
                     success=False,
                     papers_analyzed=0,
                     authors_found=0,
-                    output_file="",
+                    output_file=config.get('output_file', './no_relevant_papers.md'),
                     errors=[f"No relevant papers found for topic '{config['topic']}' after relevance assessment"],
                     total_duration=time.time() - start_time,
                     pipeline_metadata={
@@ -272,7 +283,7 @@ class PrismaCoordinator:
                 success=False,
                 papers_analyzed=0,
                 authors_found=0,
-                output_file="",
+                output_file=config.get('output_file', './error_output.md'),
                 errors=errors,
                 total_duration=time.time() - start_time,
                 pipeline_metadata={}
@@ -305,13 +316,13 @@ class PrismaCoordinator:
             
         try:
             # Use the search_papers method with title search
-            if hasattr(paper, 'title') and paper.title:
+            if paper.title:  # title is required field, no need for hasattr
                 # Search by title with a reasonable limit
                 criteria = ZoteroSearchCriteria(
                     query=paper.title,
-                    collections=None,
-                    item_types=None,
-                    tags=None,
+                    collections=[],
+                    item_types=[],
+                    tags=[],
                     date_range=None,
                     limit=10  # Small limit since we just need to check existence
                 )
@@ -377,17 +388,17 @@ class PrismaCoordinator:
                                for author in paper.authors],
                     'abstractNote': paper.abstract,
                     'url': paper.url,
-                    'DOI': getattr(paper, 'doi', ''),
-                    'publicationTitle': getattr(paper, 'venue', ''),
-                    'date': str(getattr(paper, 'year', '')),
+                    'DOI': paper.doi or '',  # doi is optional field in model
+                    'publicationTitle': getattr(paper, 'venue', ''),  # venue not in model
+                    'date': str(getattr(paper, 'year', '')),  # year not in model
                     'tags': [{'tag': f'Prisma-Discovery'}, 
-                            {'tag': f'Confidence-{paper.confidence_score:.2f}'},
+                            {'tag': f'Confidence-{getattr(paper, "confidence_score", 0.0):.2f}'},
                             {'tag': f'Source-{paper.source}'},
                             {'tag': f'Topic-{topic}'}]
                 }
                 
                 # Add summary as note if available
-                if hasattr(analysis_results, 'summaries'):
+                if analysis_results.summaries:  # summaries is required field
                     for summary in analysis_results.summaries:
                         if summary.title == paper.title:
                             item['abstractNote'] += f"\n\n[Prisma Summary]\n{summary.summary}"
@@ -398,12 +409,17 @@ class PrismaCoordinator:
             # Save to Zotero using unified interface
             try:
                 # Use the unified save method that all clients support
-                created_keys = self.zotero_agent.client.save_items(
-                    items=zotero_items,
-                    collection_key=None  # No specific collection for coordinator saves
-                )
-                if self.debug:
-                    print(f"[DEBUG] Successfully saved {len(zotero_items)} items via unified interface")
+                if self.zotero_agent.client:
+                    created_keys = self.zotero_agent.client.save_items(
+                        items=zotero_items,
+                        collection_key=None  # No specific collection for coordinator saves
+                    )
+                    if self.debug:
+                        print(f"[DEBUG] Successfully saved {len(zotero_items)} items via unified interface")
+                else:
+                    if self.debug:
+                        print(f"[DEBUG] No Zotero client available for saving")
+                    return 0
             except Exception as e:
                 if self.debug:
                     print(f"[DEBUG] Failed to save items to Zotero: {e}")

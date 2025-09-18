@@ -25,9 +25,17 @@ class TestAnalysisAgent(unittest.TestCase):
             title='Test Paper Title',
             authors=['Author One', 'Author Two'],
             abstract='This is a test abstract with some content about machine learning and neural networks.',
-            source='arxiv',
-            arxiv_id='test.123',
-            url='http://test.com'
+            source='test',
+            url='https://example.com/paper',
+            pdf_url=None,
+            published_date=None,
+            arxiv_id=None,
+            doi=None,
+            connected_papers_url=None,
+            journal=None,
+            volume=None,
+            issue=None,
+            pages=None
         )
     
     def test_initialization(self):
@@ -71,7 +79,10 @@ class TestAnalysisAgent(unittest.TestCase):
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.json.return_value = {
-            'response': 'This paper presents a novel approach to machine learning with significant improvements.'
+            'model': 'llama3.1:8b',
+            'created_at': '2024-01-01T00:00:00Z',
+            'response': 'This paper presents a novel approach to machine learning with significant improvements.',
+            'done': True
         }
         mock_post.return_value = mock_response
         
@@ -94,8 +105,8 @@ class TestAnalysisAgent(unittest.TestCase):
             self.sample_paper.abstract
         )
         
-        # Should handle failure gracefully
-        self.assertIsNone(summary)
+        # Should handle failure gracefully and return empty string
+        self.assertEqual(summary, "")
     
     def test_extract_key_findings(self):
         """Test key findings extraction."""

@@ -1,68 +1,128 @@
-# Prisma Configuration Example with Zotero Integration
+# Prisma Configuration Example with Quality-Based Source Management
 #
 # Copy this file to ~/.config/prisma/config.yaml and customize for your setup
 
 # Data Sources Configuration
 sources:
   zotero:
-    # Enable Zotero Web API integration
+    # Enable Network-Aware Hybrid Zotero integration (recommended)
     enabled: true
+    mode: "hybrid"  # Network-aware mode: online/offline detection
     
-    # Your Zotero API key (get from https://www.zotero.org/settings/keys/new)
-    api_key: "YOUR_ZOTERO_API_KEY_HERE"
+    # Network behavior (new network-aware settings)
+    prefer_web_api_when_online: true      # Use Web API when internet available
+    disable_writes_when_offline: true     # Safety: no writes when offline  
+    auto_detect_network: true             # Automatically detect connectivity
+    network_timeout: 5                    # Network check timeout in seconds
     
-    # Your Zotero library ID (user ID for personal library, group ID for groups)
-    library_id: "YOUR_LIBRARY_ID_HERE"
+    # Local HTTP server (for offline reads)
+    local_server_url: "http://127.0.0.1:23119"
+    local_server_timeout: 5
     
-    # Library type: "user" for personal library, "group" for group library
-    library_type: "user"
+    # Web API (for online reads and all writes) - Optional but recommended
+    api_key: ""        # Your Zotero API key (get from zotero.org/settings/keys)
+    library_id: ""     # Your library ID (user ID or group ID)
+    library_type: "user"  # "user" or "group"
+    
+    # Optional: Desktop app integration 
+    enable_desktop_save: true
+    desktop_server_url: "http://127.0.0.1:23119"
+    collection_key: ""  # Default collection for saving items
+    
+    # Alternative: Local HTTP Only Mode (read-only, no network requests)
+    # mode: "local_api"
+    # server_url: "http://127.0.0.1:23119"
+    # Note: Write operations will always fail in local_api mode
     
     # Optional: Default collections to search (leave empty to search all)
-    # You can specify collection keys or use collection names
     default_collections: []
-    # Example:
-    # default_collections: ["AI_PAPERS", "MACHINE_LEARNING"]
     
     # Include notes and attachments in searches
     include_notes: false
     include_attachments: false
+    
+    # Auto-save discovered papers to Zotero
+    auto_save_papers: true                # Automatically save found papers to Zotero
+    auto_save_collection: "Prisma Discoveries"  # Collection name for auto-saved papers  
+    min_confidence_for_save: 0.5          # Minimum confidence score to save paper (0.0-1.0)
+
+# Search Configuration with Quality-Based Source Management
+search:
+  default_limit: 10
+  
+  # Source Configuration with Quality Ratings:
+  # ⭐⭐⭐⭐⭐ (5-star): Premium APIs with curated content (semanticscholar, arxiv)
+  # ⭐⭐⭐⭐ (4-star): Good APIs with structured data (openlibrary, googlebooks)  
+  # ⭐⭐⭐ (3-star): Basic APIs or reliable targets (zotero)
+  # ⭐⭐ (2-star): HTML scraping with some structure (academia_rss)
+  # ⭐ (1-star): Manual forms, requires LLM extraction (academia_search, researchgate)
+  
+  # Recommended high-quality sources (4-5 stars)
+  sources: ['semanticscholar', 'arxiv', 'openlibrary', 'googlebooks', 'zotero']
+  
+  # Quality settings
+  prefer_high_quality: true          # Prioritize 4-5 star sources
+  min_confidence_score: 0.3          # Minimum academic confidence (0.0-1.0)
+  require_academic_validation: true  # Apply academic content filters
+  
+  # Academic validation criteria
+  validation:
+    require_authors: true             # Must have at least one author
+    require_title: true              # Must have a title
+    require_venue_or_publisher: true # Must have venue/journal/publisher
+    min_authors: 1                   # Minimum number of authors
+    min_title_length: 10             # Minimum title length
+    min_abstract_length: 0           # Minimum abstract length (0 = no requirement)
+    min_publication_year: 1990       # Minimum publication year
+    exclude_non_academic: true       # Filter out blog posts, news, etc.
 
 # LLM Configuration for Analysis
 llm:
   provider: 'ollama'
   model: 'llama3.1:8b'
-  host: '172.29.32.1:11434'  # WSL default host, adjust for your setup
-
-# Output Configuration
+  host: 'localhost:11434'  # LLM service host
+  
+# Output Configuration  
 output:
-  directory: './outputs'
-  format: 'markdown'
-
-# Search Configuration
-search:
-  default_limit: 10
-  # Include 'zotero' to search your Zotero library by default
-  sources: ['arxiv', 'zotero']
+  directory: './outputs'  # Directory for generated reports
+  format: 'markdown'  # Output format (markdown, json, csv)
 
 # Analysis Configuration
 analysis:
-  summary_length: 'medium'
+  summary_length: 'medium'  # Summary detail level
 
-# Logging Configuration
-logging:
-  level: 'INFO'
-  file: './logs/prisma.log'
+# Example Configurations for Different Use Cases:
 
-# Example Usage:
-#
-# Basic search with Zotero:
-#   python src/cli/main.py --topic "neural networks" --zotero
-#
-# Search only in Zotero:
-#   python src/cli/main.py --topic "machine learning" --zotero-only
-#
-# Search specific collections:
-#   python src/cli/main.py --topic "AI" --zotero-collections "Deep Learning,Computer Vision"
-#
-# Recent papers from Zotero (last 2 years):
-#   python src/cli/main.py --topic "transformers" --zotero-recent 2
+# CONFIGURATION 1: High-Quality Research (Recommended)
+# Uncomment and modify the search section above with:
+# search:
+#   sources: ['semanticscholar', 'arxiv', 'openlibrary', 'googlebooks']
+#   prefer_high_quality: true
+#   min_confidence_score: 0.5
+#   validation:
+#     require_authors: true
+#     require_venue_or_publisher: true
+#     min_abstract_length: 100
+#     min_publication_year: 2000
+
+# CONFIGURATION 2: Comprehensive Coverage  
+# search:
+#   sources: ['semanticscholar', 'arxiv', 'openlibrary', 'googlebooks', 'zotero', 'academia_rss']
+#   prefer_high_quality: false
+#   min_confidence_score: 0.2
+#   validation:
+#     require_authors: true
+#     require_venue_or_publisher: false
+#     exclude_non_academic: false
+
+# CONFIGURATION 3: Books and Monographs Focus
+# search:
+#   sources: ['openlibrary', 'googlebooks', 'semanticscholar', 'arxiv']
+#   default_limit: 20
+#   validation:
+#     require_venue_or_publisher: true
+#     min_publication_year: 1980
+
+# Optional: Semantic Scholar API Key for Higher Rate Limits
+# semantic_scholar:
+#   api_key: "YOUR_SEMANTIC_SCHOLAR_API_KEY"  # Optional for > 1000 req/sec

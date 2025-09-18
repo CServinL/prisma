@@ -10,7 +10,8 @@ from datetime import datetime
 import time
 
 from ..utils.config import config
-from ..storage.models.agent_models import AnalysisResult, PaperSummary, PaperMetadata
+from ..storage.models.agent_models import PaperMetadata, PaperSummary, AnalysisResult, ReportMetadata, LiteratureReviewReport
+from ..storage.models.api_response_models import OllamaGenerateResponse, LLMRelevanceResult
 
 
 class AnalysisAgent:
@@ -18,8 +19,8 @@ class AnalysisAgent:
     
     def __init__(self):
         self.llm_config = config.get_llm_config()
-        self.base_url = self.llm_config['base_url']
-        self.model = self.llm_config['model']
+        self.base_url = self.llm_config.base_url
+        self.model = self.llm_config.model
     
     def analyze(self, papers: List[PaperMetadata]) -> AnalysisResult:
         """
@@ -128,15 +129,16 @@ Provide a clear, academic summary focusing on the main contribution and signific
             )
             
             if response.status_code == 200:
-                result = response.json()
-                return result.get('response', '').strip()
+                # Use Pydantic model for response validation
+                ollama_response = OllamaGenerateResponse.model_validate(response.json())
+                return ollama_response.response.strip()
             else:
                 print(f"[WARNING] Ollama request failed: {response.status_code}")
-                return None
+                return ""
                 
         except Exception as e:
             print(f"[WARNING] Ollama analysis failed: {e}")
-            return None
+            return ""
     
     def _extract_key_findings(self, text: str) -> List[str]:
         """Extract key findings from summary text."""
@@ -152,7 +154,138 @@ Provide a clear, academic summary focusing on the main contribution and signific
             return "Methodology identified in analysis"
         return "Methodology analysis from abstract"
     
+    def assess_relevance(self, paper_title: str, paper_abstract: str, topic: str) -> LLMRelevanceResult:
+        """
+        Assess if a paper is relevant to a topic using semantic understanding via LLM.
+        
+        Args:
+            paper_title: Title of the paper
+            paper_abstract: Abstract of the paper
+            topic: Research topic to assess relevance against
+            
+        Returns:
+            Dict with relevance assessment results
+        """
+        try:
+            prompt = f"""Analyze whether this research paper is semantically relevant to the research topic.
+
+Research Topic: {topic}
+
+Paper Title: {paper_title}
+
+Paper Abstract: {paper_abstract}
+
+Please evaluate:
+1. Does this paper contribute knowledge to the research topic?
+2. Are the methods, findings, or applications related to the topic?
+3. Would this paper be valuable for someone researching this topic?
+
+Consider semantic relationships, not just keyword matches. For example, a paper about "neural networks for image recognition" would be relevant to "computer vision" even without exact word matches.
+
+Respond with:
+RELEVANCE: [HIGHLY_RELEVANT/RELEVANT/SOMEWHAT_RELEVANT/NOT_RELEVANT]
+CONFIDENCE: [HIGH/MEDIUM/LOW]
+REASONING: [2-3 sentences explaining the semantic connection or lack thereof]"""
+
+            response = requests.post(
+                f"{self.base_url}/api/generate",
+                json={
+                    "model": self.model,
+                    "prompt": prompt,
+                    "stream": False,
+                    "options": {
+                        "temperature": 0.3,  # Some creativity for nuanced evaluation
+                        "num_predict": 250
+                    }
+                },
+                timeout=45
+            )
+            
+            if response.status_code == 200:
+                result = response.json().get('response', '').strip()
+                return self._parse_semantic_relevance(result)
+            else:
+                print(f"[WARNING] Semantic relevance assessment failed: {response.status_code}")
+                return LLMRelevanceResult(
+                    is_relevant=False,
+                    relevance_level="UNKNOWN",
+                    confidence=0.0,
+                    reasoning=f"LLM request failed with status {response.status_code}",
+                    semantic_score=0.0
+                )
+                
+        except Exception as e:
+            print(f"[WARNING] Semantic relevance assessment failed: {e}")
+            return LLMRelevanceResult(
+                is_relevant=False,
+                relevance_level="UNKNOWN", 
+                confidence=0.0,
+                reasoning=f"Assessment failed due to error: {e}",
+                semantic_score=0.0
+            )
+    
+    def _parse_semantic_relevance(self, response: str) -> LLMRelevanceResult:
+        """Parse LLM response for semantic relevance assessment."""
+        try:
+            lines = response.split('\n')
+            relevance_level = "NOT_RELEVANT"
+            confidence = "LOW"
+            reasoning = "Unable to parse reasoning"
+            
+            for line in lines:
+                if line.startswith("RELEVANCE:"):
+                    relevance_level = line.split(":", 1)[1].strip()
+                elif line.startswith("CONFIDENCE:"):
+                    confidence = line.split(":", 1)[1].strip()
+                elif line.startswith("REASONING:"):
+                    reasoning = line.split(":", 1)[1].strip()
+            
+            # Convert to boolean and numeric score
+            is_relevant = relevance_level in ["HIGHLY_RELEVANT", "RELEVANT", "SOMEWHAT_RELEVANT"]
+            
+            # Semantic score based on relevance level
+            score_map = {
+                "HIGHLY_RELEVANT": 0.9,
+                "RELEVANT": 0.7,
+                "SOMEWHAT_RELEVANT": 0.5,
+                "NOT_RELEVANT": 0.1
+            }
+            semantic_score = score_map.get(relevance_level, 0.0)
+            
+            # Convert confidence to float
+            confidence_value = 0.5  # Default
+            if confidence.upper() in ["LOW", "MEDIUM", "HIGH"]:
+                confidence_map = {"LOW": 0.3, "MEDIUM": 0.6, "HIGH": 0.9}
+                confidence_value = confidence_map[confidence.upper()]
+            
+            return LLMRelevanceResult(
+                is_relevant=is_relevant,
+                relevance_level=relevance_level,
+                confidence=confidence_value,
+                reasoning=reasoning,
+                semantic_score=semantic_score
+            )
+            
+        except Exception as e:
+            return LLMRelevanceResult(
+                is_relevant=False,
+                relevance_level="NOT_RELEVANT",
+                confidence=0.3, 
+                reasoning=f"Failed to parse LLM response: {e}",
+                semantic_score=0.0
+            )
+    
+    def _simple_relevance_check(self, title: str, abstract: str, topic: str) -> Dict[str, Any]:
+        """This method is deprecated - semantic evaluation should be used instead."""
+        return {
+            "is_relevant": False,
+            "relevance_level": "NOT_RELEVANT",
+            "confidence": "LOW",
+            "reasoning": "Fallback method - semantic evaluation unavailable",
+            "semantic_score": 0.0
+        }
+    
     def _fetch_full_text(self, paper: dict) -> str:
         """Fetch full text of paper if available."""
         # TODO: Implement paper fetching from various sources
-        pass
+        return ""

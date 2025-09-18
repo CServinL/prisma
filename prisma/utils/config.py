@@ -5,9 +5,12 @@ Load and validate YAML configuration files with robust type validation.
 
 import os
 import yaml
+import logging
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 from pydantic import BaseModel, Field, field_validator, ConfigDict
+
+logger = logging.getLogger(__name__)
 
 
 class ZoteroConfig(BaseModel):
@@ -15,12 +18,16 @@ class ZoteroConfig(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
     
     enabled: bool = Field(False, description="Whether Zotero integration is enabled")
+    mode: str = Field("hybrid", description="Zotero client mode: 'hybrid', 'local_api', 'sqlite', 'web'")
     api_key: Optional[str] = Field(None, description="Zotero API key")
     library_id: Optional[str] = Field(None, description="Zotero library ID")
     library_type: str = Field("user", description="Library type: 'user' or 'group'")
     default_collections: List[str] = Field(default_factory=list, description="Default collections to search")
     include_notes: bool = Field(False, description="Include notes in results")
     include_attachments: bool = Field(False, description="Include attachments in results")
+    
+    # Local API configuration
+    server_url: str = Field("http://127.0.0.1:23119", description="Zotero Local API server URL")
     
     # Legacy local database support
     library_path: str = Field(
@@ -74,7 +81,7 @@ class SearchConfig(BaseModel):
     @field_validator('sources')
     @classmethod
     def validate_sources(cls, v):
-        valid_sources = ['arxiv', 'zotero', 'pubmed', 'google_scholar']
+        valid_sources = ['arxiv', 'zotero', 'pubmed', 'google_scholar', 'semanticscholar', 'openlibrary', 'googlebooks', 'academia']
         for source in v:
             if source not in valid_sources:
                 raise ValueError(f'source "{source}" not in valid sources: {valid_sources}')
@@ -110,19 +117,19 @@ class LoggingConfig(BaseModel):
 
 class SourcesConfig(BaseModel):
     """Sources configuration"""
-    zotero: ZoteroConfig = Field(default_factory=ZoteroConfig)
+    zotero: ZoteroConfig = Field(default_factory=lambda: ZoteroConfig())
 
 
 class PrismaConfig(BaseModel):
     """Complete Prisma configuration with validation"""
     model_config = ConfigDict(arbitrary_types_allowed=True)
     
-    sources: SourcesConfig = Field(default_factory=SourcesConfig)
-    llm: LLMConfig = Field(default_factory=LLMConfig)
-    output: OutputConfig = Field(default_factory=OutputConfig)
-    search: SearchConfig = Field(default_factory=SearchConfig)
-    analysis: AnalysisConfig = Field(default_factory=AnalysisConfig)
-    logging: LoggingConfig = Field(default_factory=LoggingConfig)
+    sources: SourcesConfig = Field(default_factory=lambda: SourcesConfig())
+    llm: LLMConfig = Field(default_factory=lambda: LLMConfig())
+    output: OutputConfig = Field(default_factory=lambda: OutputConfig())
+    search: SearchConfig = Field(default_factory=lambda: SearchConfig())
+    analysis: AnalysisConfig = Field(default_factory=lambda: AnalysisConfig())
+    logging: LoggingConfig = Field(default_factory=lambda: LoggingConfig())
 
 
 class ConfigLoader:
@@ -162,12 +169,12 @@ class ConfigLoader:
             try:
                 with open(self.config_path, 'r', encoding='utf-8') as f:
                     user_data = yaml.safe_load(f) or {}
-                print(f"[INFO] Loaded config from {self.config_path}")
+                logger.debug(f"Loaded config from {self.config_path}")
             except Exception as e:
-                print(f"[ERROR] Failed to load config from {self.config_path}: {e}")
-                print("[WARNING] Using default configuration")
+                logger.error(f"Failed to load config from {self.config_path}: {e}")
+                logger.warning("Using default configuration")
         else:
-            print("[WARNING] No config file found, using defaults")
+            logger.debug("No config file found, using defaults")
         
         try:
             # Create Pydantic config with validation
@@ -199,44 +206,21 @@ class ConfigLoader:
         except (AttributeError, TypeError):
             return default
     
-    def get_llm_config(self) -> Dict[str, Any]:
+    def get_llm_config(self) -> LLMConfig:
         """Get LLM configuration for Ollama integration."""
-        llm_config = self.config.llm
-        return {
-            'provider': llm_config.provider,
-            'model': llm_config.model,
-            'host': llm_config.host,
-            'base_url': llm_config.base_url
-        }
+        return self.config.llm
     
-    def get_search_config(self) -> Dict[str, Any]:
+    def get_search_config(self) -> SearchConfig:
         """Get search configuration."""
-        search_config = self.config.search
-        return {
-            'default_limit': search_config.default_limit,
-            'sources': search_config.sources
-        }
+        return self.config.search
     
-    def get_output_config(self) -> Dict[str, Any]:
+    def get_output_config(self) -> OutputConfig:
         """Get output configuration."""
-        output_config = self.config.output
-        return {
-            'directory': output_config.directory,
-            'format': output_config.format
-        }
+        return self.config.output
     
-    def get_zotero_config(self) -> Dict[str, Any]:
+    def get_zotero_config(self) -> ZoteroConfig:
         """Get Zotero configuration for API integration."""
-        zotero_config = self.config.sources.zotero
-        return {
-            'enabled': zotero_config.enabled,
-            'api_key': zotero_config.api_key,
-            'library_id': zotero_config.library_id,
-            'library_type': zotero_config.library_type,
-            'default_collections': zotero_config.default_collections,
-            'include_notes': zotero_config.include_notes,
-            'include_attachments': zotero_config.include_attachments
-        }
+        return self.config.sources.zotero
     
     def has_zotero_credentials(self) -> bool:
         """Check if Zotero API credentials are configured."""

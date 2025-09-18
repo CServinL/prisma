@@ -21,6 +21,19 @@ from .agent_models import (
     CoordinatorResult
 )
 
+from .api_response_models import (
+    OpenLibraryDocument,
+    OpenLibraryResponse,
+    SemanticScholarPaper,
+    SemanticScholarResponse,
+    GoogleBooksItem,
+    GoogleBooksResponse,
+    ArXivEntry,
+    LLMRelevanceResult,
+    OllamaGenerateResponse,
+    ZoteroItemCreationData
+)
+
 __all__ = [
     # Zotero models
     "ZoteroItem", 
@@ -37,5 +50,17 @@ __all__ = [
     "AnalysisResult",
     "ReportMetadata",
     "LiteratureReviewReport",
-    "CoordinatorResult"
+    "CoordinatorResult",
+    
+    # API response models
+    "OpenLibraryDocument",
+    "OpenLibraryResponse", 
+    "SemanticScholarPaper",
+    "SemanticScholarResponse",
+    "GoogleBooksItem",
+    "GoogleBooksResponse",
+    "ArXivEntry",
+    "LLMRelevanceResult",
+    "OllamaGenerateResponse",
+    "ZoteroItemCreationData"
 ]

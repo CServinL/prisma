@@ -3,8 +3,11 @@ __pycache__/
 *.py[codz]
 *$py.class
 
-# Work directory - internal documentation and notes
-work/
+# Scratch directory - temporary files, dev scripts, and test outputs
+.scratch/
+
+# Data directory - research streams and user-specific data
+data/
 
 # C extensions
 *.so
@@ -217,6 +220,10 @@ outputs/*
 config.yaml
 .ai-approval.json
 .copilot-approval.json
+
+# Home directory config files (contain API keys)
+~/.config/prisma/config.yaml
+/c/Users/*/. config/prisma/config.yaml
 
 # User-specific VS Code settings that shouldn't be shared
 .vscode/launch.json

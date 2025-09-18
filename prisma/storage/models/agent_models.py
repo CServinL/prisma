@@ -45,12 +45,63 @@ class PaperMetadata(BaseModel):
         return v.strip().replace('\n', ' ') if v else ""
 
 
+class BookMetadata(BaseModel):
+    """Standardized book metadata structure for search results"""
+    model_config = ConfigDict(populate_by_name=True)
+    
+    title: str = Field(..., description="Book title")
+    authors: List[str] = Field(default_factory=list, description="List of author names")
+    description: str = Field(default="", description="Book description or summary")
+    source: str = Field(..., description="Source database (openlibrary, googlebooks, etc.)")
+    url: str = Field(..., description="Primary URL to book")
+    
+    # Book-specific identifiers
+    isbn_10: Optional[str] = Field(None, description="ISBN-10 identifier")
+    isbn_13: Optional[str] = Field(None, description="ISBN-13 identifier")
+    oclc: Optional[str] = Field(None, description="OCLC identifier")
+    lccn: Optional[str] = Field(None, description="Library of Congress Control Number")
+    
+    # Publication details
+    publisher: Optional[str] = Field(None, description="Publisher name")
+    published_date: Optional[str] = Field(None, description="Publication date")
+    edition: Optional[str] = Field(None, description="Edition information")
+    page_count: Optional[int] = Field(None, description="Number of pages")
+    
+    # Classification and subjects
+    subjects: List[str] = Field(default_factory=list, description="Subject classifications/topics")
+    categories: List[str] = Field(default_factory=list, description="Categories or genres")
+    language: Optional[str] = Field(None, description="Primary language")
+    
+    # Additional metadata
+    preview_url: Optional[str] = Field(None, description="URL for book preview/excerpt")
+    cover_url: Optional[str] = Field(None, description="URL to book cover image")
+    
+    @field_validator('authors')
+    @classmethod
+    def validate_authors(cls, v):
+        """Ensure authors list contains only non-empty strings"""
+        return [author.strip() for author in v if author and author.strip()]
+    
+    @field_validator('title')
+    @classmethod
+    def validate_title(cls, v):
+        """Clean and validate title"""
+        return v.strip().replace('\n', ' ') if v else ""
+    
+    @field_validator('subjects', 'categories')
+    @classmethod
+    def validate_lists(cls, v):
+        """Ensure lists contain only non-empty strings"""
+        return [item.strip() for item in v if item and item.strip()]
+
+
 class SearchResult(BaseModel):
-    """Search agent response model"""
+    """Search agent response model supporting both papers and books"""
     model_config = ConfigDict(populate_by_name=True)
     
     papers: List[PaperMetadata] = Field(default_factory=list, description="List of found papers")
-    total_found: int = Field(..., ge=0, description="Total number of papers found")
+    books: List[BookMetadata] = Field(default_factory=list, description="List of found books")
+    total_found: int = Field(..., ge=0, description="Total number of items found")
     sources_searched: List[str] = Field(default_factory=list, description="Sources that were searched")
     query: str = Field(..., description="Original search query")
     timestamp: datetime = Field(default_factory=datetime.now, description="Search timestamp")
@@ -58,8 +109,13 @@ class SearchResult(BaseModel):
     @field_validator('total_found')
     @classmethod
     def validate_total(cls, v, info):
-        """Ensure total_found is consistent with papers list"""
+        """Ensure total_found is consistent with papers and books lists"""
         return max(v, 0)  # Ensure non-negative
+    
+    @property
+    def total_items(self) -> int:
+        """Total papers and books combined"""
+        return len(self.papers) + len(self.books)
 
 
 class PaperSummary(BaseModel):

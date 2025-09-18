@@ -16,20 +16,60 @@ Key Features:
 import logging
 import json
 import time
+import uuid
 from typing import List, Dict, Any, Optional
 from pathlib import Path
 import requests
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict, field_validator
 
 logger = logging.getLogger(__name__)
 
 
 class ZoteroDesktopConfig(BaseModel):
     """Configuration for Zotero desktop app integration"""
-    server_url: str = Field("http://127.0.0.1:23119", description="Zotero HTTP server URL")
-    timeout: float = Field(10.0, description="Request timeout in seconds")
-    check_running: bool = Field(True, description="Check if Zotero is running before operations")
-    collection_key: Optional[str] = Field(None, description="Default collection to save items to")
+    
+    model_config = ConfigDict(
+        validate_assignment=True,
+        str_strip_whitespace=True,
+        frozen=False
+    )
+    
+    server_url: str = "http://127.0.0.1:23119"
+    timeout: float = 10.0
+    check_running: bool = True
+    collection_key: Optional[str] = None
+    
+    @field_validator('server_url')
+    @classmethod
+    def validate_server_url(cls, v: str) -> str:
+        """Validate server URL is well-formed"""
+        if not v.startswith(('http://', 'https://')):
+            raise ValueError('Server URL must start with http:// or https://')
+        if not v.replace('http://', '').replace('https://', '').strip():
+            raise ValueError('Server URL cannot be empty after protocol')
+        return v
+    
+    @field_validator('timeout')
+    @classmethod
+    def validate_timeout(cls, v: float) -> float:
+        """Validate timeout is positive"""
+        if v <= 0:
+            raise ValueError('Timeout must be positive')
+        if v > 300:  # 5 minutes max
+            raise ValueError('Timeout must be 300 seconds or less')
+        return v
+    
+    @field_validator('collection_key')
+    @classmethod
+    def validate_collection_key(cls, v: Optional[str]) -> Optional[str]:
+        """Validate collection key format if provided"""
+        if v is not None and v.strip():
+            # Zotero collection keys are typically 8 characters
+            if len(v) != 8:
+                raise ValueError('Collection key must be exactly 8 characters')
+            if not v.isalnum():
+                raise ValueError('Collection key must be alphanumeric')
+        return v
 
 
 class ZoteroDesktopError(Exception):
@@ -49,7 +89,7 @@ class ZoteroDesktopClient:
         """Initialize desktop client"""
         self.config = config
         self.session = requests.Session()
-        self.session.timeout = config.timeout
+        # Note: Session doesn't have a timeout attribute, we'll use it per request
         
         if config.check_running:
             self._check_zotero_running()
@@ -57,7 +97,10 @@ class ZoteroDesktopClient:
     def _check_zotero_running(self) -> bool:
         """Check if Zotero desktop app is running and accessible"""
         try:
-            response = self.session.get(f"{self.config.server_url}/connector/ping")
+            response = self.session.get(
+                f"{self.config.server_url}/connector/ping",
+                timeout=self.config.timeout
+            )
             if response.status_code == 200:
                 logger.info("Zotero desktop app is running and accessible")
                 return True
@@ -106,7 +149,7 @@ class ZoteroDesktopClient:
             request_data = {
                 "items": formatted_items,
                 "uri": "https://prisma.ai/literature-review",  # Source identifier
-                "sessionID": f"prisma-{int(time.time())}"
+                "sessionID": f"prisma-{uuid.uuid4().hex[:12]}-{int(time.time())}"
             }
             
             # Add collection if specified
@@ -120,7 +163,8 @@ class ZoteroDesktopClient:
                 headers={
                     "Content-Type": "application/json",
                     "X-Zotero-Connector-API-Version": "3"
-                }
+                },
+                timeout=self.config.timeout
             )
             
             if response.status_code in [200, 201]:
@@ -224,11 +268,8 @@ class ZoteroDesktopClient:
 def example_save_to_zotero():
     """Example of saving items to Zotero desktop app"""
     
-    # Configure desktop client
-    config = ZoteroDesktopConfig(
-        check_running=True,
-        collection_key=None  # Save to root library
-    )
+    # Configure desktop client (all parameters have defaults)
+    config = ZoteroDesktopConfig()
     
     try:
         client = ZoteroDesktopClient(config)

@@ -1,55 +1,82 @@
-# ADR-003: Simple Direct Composition
+# ADR-003: Enhanced Composition for Research Library Management
 
-**Date:** 2025-09-15  
-**Author:** CServinL
+**Date:** 2025-09-15 (Updated: 2025-09-17)  
+**Author:** CServinL  
+**Status:** Evolved
 
 ## Context
 
-Our simplified literature review system has only 4 core components (Coordinator, Search Agent, Analysis Agent, Report Agent) that work together in a linear pipeline. We need a straightforward way to wire these components together without over-engineering.
+Our Research Library Assistant has evolved from simple document processing to a comprehensive library management system with Research Streams, Zotero integration, and AI-powered research organization. We need a composition approach that handles this research-focused complexity while maintaining clarity.
 
-## Decision
+## Decision Evolution
 
-Use **direct composition** with no dependency injection, registries, or complex wiring:
+**Original**: Simple direct composition for document processing pipeline  
+**Current**: Enhanced composition with research library services and intelligent curation
 
-### Implementation Approach
-- Components are instantiated directly in the Coordinator
-- Configuration is passed as parameters to component constructors
-- No abstract interfaces or dependency injection frameworks
-- Each component is a simple Python class with clear methods
+### Current Implementation Approach
+- Components organized around research library management workflows
+- Research Stream Manager as core persistent service for library organization
+- Zotero clients managed as research collection infrastructure
+- AI components focused on research assistance and library curation
 
-### Example Structure
+### Enhanced Research Library Structure
 ```python
-class Coordinator:
-    def __init__(self, config):
-        self.search_agent = SearchAgent(config.sources)
-        self.analysis_agent = AnalysisAgent(config.execution)
-        self.report_agent = ReportAgent(config.output)
+class ResearchLibraryAssistant:
+    def __init__(self, debug: bool = False):
+        # Core research discovery and organization
+        self.discovery_engine = ResearchDiscoveryEngine()
+        self.ai_assistant = AIResearchAssistant()
+        self.library_organizer = LibraryOrganizationSystem()
+        
+        # Enhanced Zotero integration for research collections
+        self.zotero_manager = None
+        if config.get('sources.zotero.enabled', False):
+            self.zotero_manager = ZoteroLibraryManager(config.get('sources.zotero'))
     
-    def run_review(self):
-        papers = self.search_agent.search(self.config.research.topic)
-        analysis = self.analysis_agent.analyze(papers)
-        report = self.report_agent.generate(analysis)
-        return report
+    def curate_research_stream(self, stream_config):
+        # Enhanced research library workflow
+        discovered_research = self.discovery_engine.discover_multi_source(stream_config)
+        relevant_research = self.ai_assistant.assess_research_relevance(discovered_research)
+        curated_research = self._organize_research_collection(relevant_research)
+        new_research = self._manage_library_duplicates(curated_research)
+        research_insights = self.ai_assistant.generate_research_insights(new_research)
+        organized_library = self.library_organizer.update_collections(research_insights, stream_config)
+        return organized_library
+
+class ResearchStreamManager:
+    def __init__(self, zotero_manager: ZoteroLibraryManager):
+        self.zotero_manager = zotero_manager
+        self._research_streams_cache = {}
+    
+    def create_research_stream(self, config: ResearchStreamConfig) -> ResearchStream:
+        # Enhanced research stream creation with library organization
+        pass
 ```
 
-## Benefits
-- **Ultra-simple**: No frameworks or patterns to learn
-- **Fast development**: Direct instantiation is quick to implement
-- **Easy debugging**: Clear call stack and data flow
-- **No magic**: Everything is explicit and visible
+## Enhanced Benefits for Research Library Management
+- **Research-focused architecture**: Components organized around library management workflows
+- **Persistent research organization**: Research streams maintain long-term library state
+- **AI-powered curation**: Intelligent research discovery and organization assistance
+- **Zotero-centric design**: Deep integration with researcher's existing library infrastructure
 
-## Trade-offs
-- **Less flexible**: Changes require code modifications
-- **Limited testability**: Harder to mock dependencies without interfaces
-- **Not suitable for complex systems**: Works for simple 4-component pipeline
+## Current Trade-offs
+- **Research domain complexity**: More sophisticated than generic document processing
+- **Library integration dependency**: Requires Zotero for full research organization capabilities
+- **AI dependency**: Relies on AI for research curation and insights generation
 
-## Rationale
-For our Phase 0 MVP with 4 components in a linear pipeline, direct composition is the simplest approach that gets us working software quickly. We can add abstraction layers later if the system grows in complexity.
+## Evolution Rationale for Research Assistance
+The system has evolved to become a true Research Library Assistant:
+- **Research Streams**: Persistent research topic monitoring and library building
+- **Library Management**: Sophisticated Zotero collection organization and curation
+- **AI Research Assistance**: Intelligent research discovery, relevance assessment, and insights
+- **Research Workflows**: Designed specifically for academic and professional researchers
+
+Direct composition still works effectively, but now operates as a research-focused service layer rather than generic document processing.
 
 ## When to Revisit
-- If we add more than 8-10 components
-- If we need complex configuration-driven behavior
-- If testing becomes difficult due to tight coupling
-- If we need runtime component swapping  
+- If we add collaborative research features requiring distributed architecture
+- If we need complex research workflow orchestration beyond current library management
+- If research collection management becomes significantly more complex
+- If we need runtime switching between different research methodologies or approaches  
 **Author**: Development Team  
 **Reviewers**: Architecture Review Board

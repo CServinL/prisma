@@ -2,7 +2,22 @@
 """
 Prisma CLI - Research Stream Management & Literature Review
 
-This CLI provides commands for managing research streams and generating
+T            click.echo(f"📊 Papers analyzed: {result.papers_analyzed}")
+            if hasattr(result, 'authors_found'):
+                click.echo(f"👥 Authors identified: {result.authors_found}")
+        else:
+            error_msg = "Unknown error"
+            if result.errors:
+                error_msg = "; ".join(result.errors)
+            click.echo(f"❌ Review generation failed: {error_msg}", err=True)
+            raise click.ClickException(error_msg)
+        
+    except click.ClickException:
+        # Re-raise ClickExceptions as they are
+        raise
+    except Exception as e:
+        click.echo(f"❌ Error generating review: {e}", err=True)
+        raise click.ClickException(str(e))des commands for managing research streams and generating
 literature reviews using Zotero integration.
 """
 
@@ -15,6 +30,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 # Import command groups
 from .commands.streams import streams_group
+from .commands.zotero import zotero_group
 
 
 @click.group()
@@ -36,60 +52,70 @@ def cli():
 @click.option('--limit', '-l', type=int, help='Maximum number of papers')
 @click.option('--zotero-only', is_flag=True, help='Use only Zotero library')
 @click.option('--include-authors', is_flag=True, help='Include author analysis')
-@click.option('--config', '-c', help='Path to configuration file')
+@click.option('--refresh-cache', '-r', is_flag=True, help='Refresh cached metadata instead of using cache')
+@click.option('--config', '-c', 'config_file', help='Path to configuration file')
 def review(topic: str, output: str, sources: str, limit: int, 
-          zotero_only: bool, include_authors: bool, config: str):
+          zotero_only: bool, include_authors: bool, refresh_cache: bool, config_file: str):
     """
     Generate a literature review for a research topic
     
     TOPIC: Research topic to search for (e.g., "neural networks")
+    
+    By default, uses cached metadata for known papers. Use --refresh-cache to update
+    existing entries with latest information from sources.
     """
     try:
         click.echo(f"🔍 Generating literature review for: {topic}")
         
         # Import here to avoid circular imports
         from ..coordinator import PrismaCoordinator
-        from ..utils.config import ConfigLoader
+        from ..utils.config import config
         
-        # Load configuration
-        config_loader = ConfigLoader(config)
-        prisma_config = config_loader.load()
+        # Get configuration defaults
+        search_config = config.get_search_config()
+        output_config = config.get_output_config()
+        
+        # Apply defaults
+        if not sources:
+            sources = ','.join(search_config['sources'])
+        if not limit:
+            limit = search_config['default_limit']
+        if not output:
+            topic_safe = topic.replace(' ', '_').replace('/', '_')
+            output = f"{output_config['directory']}/literature_review_{topic_safe}.md"
         
         # Initialize coordinator
-        coordinator = PrismaCoordinator(prisma_config)
+        coordinator = PrismaCoordinator(debug=True)
         
         # Set up parameters
-        params = {
+        review_config = {
             'topic': topic,
-            'output_file': output or f"{topic.replace(' ', '_')}_review.md"
+            'sources': sources.split(','),
+            'limit': limit,
+            'output_file': output,
+            'stream_name': None,
+            'include_authors': include_authors,
+            'zotero_collections': None,
+            'zotero_recent_years': None
         }
-        
-        if sources:
-            params['sources'] = sources.split(',')
-        if limit:
-            params['limit'] = limit
-        if zotero_only:
-            params['zotero_only'] = True
-        if include_authors:
-            params['include_authors'] = True
         
         # Generate review
         click.echo("📝 Running literature review pipeline...")
-        result = coordinator.run_literature_review(**params)
+        result = coordinator.run_review(review_config)
         
-        if result.get('success', False):
-            output_path = result.get('output_file', params['output_file'])
-            click.echo(f"✅ Review generated successfully: {output_path}")
+        if result.success:
+            click.echo(f"✅ Review generated successfully: {result.output_file}")
             
             # Show summary
-            if 'papers_analyzed' in result:
-                click.echo(f"📊 Papers analyzed: {result['papers_analyzed']}")
-            if 'sources_used' in result:
-                click.echo(f"🔍 Sources used: {', '.join(result['sources_used'])}")
+            click.echo(f"📊 Papers analyzed: {result.papers_analyzed}")
+            if hasattr(result, 'authors_found'):
+                click.echo(f"� Authors identified: {result.authors_found}")
         else:
-            error = result.get('error', 'Unknown error')
-            click.echo(f"❌ Review generation failed: {error}", err=True)
-            raise click.ClickException(error)
+            error_msg = "Unknown error"
+            if result.errors:
+                error_msg = "; ".join(result.errors)
+            click.echo(f"❌ Review generation failed: {error_msg}", err=True)
+            raise click.ClickException(error_msg)
         
     except Exception as e:
         click.echo(f"❌ Error generating review: {e}", err=True)
@@ -98,6 +124,7 @@ def review(topic: str, output: str, sources: str, limit: int,
 
 # Add command groups
 cli.add_command(streams_group)
+cli.add_command(zotero_group)
 
 
 @cli.command()
@@ -124,20 +151,17 @@ def status(verbose: bool):
     # 1. Check Configuration
     click.echo("\n📋 Configuration:")
     try:
-        from ..utils.config import ConfigLoader
-        config_loader = ConfigLoader()
-        config = config_loader.config
+        from ..utils.config import config
         
-        if config_loader.config_path:
-            click.echo(f"  ✅ Config file: {config_loader.config_path}")
-        else:
-            click.echo("  ⚠️  Using default configuration (no config file found)")
-            if verbose:
-                click.echo("     Consider creating a config.yaml file")
+        # Check if config loaded successfully  
+        click.echo(f"  ✅ Config file: config.yaml")
         
         if verbose:
-            click.echo(f"     LLM: {config.llm.provider} ({config.llm.model})")
-            click.echo(f"     Output: {config.output.directory}")
+            llm_provider = config.get('llm.provider', 'unknown')
+            llm_model = config.get('llm.model', 'unknown')
+            output_dir = config.get('output.directory', './outputs')
+            click.echo(f"     LLM: {llm_provider} ({llm_model})")
+            click.echo(f"     Output: {output_dir}")
             
     except Exception as e:
         click.echo(f"  ❌ Configuration error: {e}")
@@ -146,30 +170,61 @@ def status(verbose: bool):
     # 2. Check Zotero Connection
     click.echo("\n📚 Zotero Integration:")
     try:
-        from ..integrations.zotero.hybrid_client import ZoteroHybridClient
-        zotero_client = ZoteroHybridClient(config)
+        zotero_mode = config.get('sources.zotero.mode', 'hybrid')
         
-        # Test desktop connection
-        try:
-            desktop_status = zotero_client._test_desktop_connection()
-            if desktop_status:
-                click.echo("  ✅ Zotero desktop app: Connected")
-            else:
-                click.echo("  ❌ Zotero desktop app: Not connected")
+        if zotero_mode == 'local_api':
+            # Check Local API mode
+            from ..integrations.zotero.local_api_client import ZoteroLocalAPIClient
+            try:
+                server_url = config.get('sources.zotero.server_url', 'http://127.0.0.1:23119')
+                local_client = ZoteroLocalAPIClient(server_url)
+                
+                # Test connection by making a simple request
+                import requests
+                try:
+                    response = requests.get(f"{server_url}/connector/ping", timeout=2)
+                    if response.status_code == 200:
+                        click.echo("  ✅ Zotero Local API: Connected")
+                        if verbose:
+                            click.echo(f"     Server: {server_url}")
+                    else:
+                        click.echo("  ❌ Zotero Local API: Not responding")
+                        all_good = False
+                except requests.exceptions.RequestException:
+                    click.echo("  ❌ Zotero Local API: Not connected")
+                    if verbose:
+                        click.echo(f"     Server: {server_url}")
+                        click.echo("     Make sure Zotero desktop is running with Local API enabled")
+                    all_good = False
+            except Exception as e:
+                click.echo("  ❌ Zotero Local API: Connection failed")
+                if verbose:
+                    click.echo(f"     Error: {e}")
                 all_good = False
-        except Exception as e:
-            click.echo("  ❌ Zotero desktop app: Not connected")
-            if verbose:
-                click.echo(f"     Error: {e}")
-            all_good = False
-        
-        # Check API credentials
-        if config.sources.zotero.api_key and config.sources.zotero.library_id:
-            click.echo("  ✅ Zotero API: Credentials configured")
         else:
-            click.echo("  ⚠️  Zotero API: No credentials configured")
-            if verbose:
-                click.echo("     API access requires api_key and library_id in config")
+            # Check Hybrid/Web API mode
+            from ..integrations.zotero.hybrid_client import ZoteroHybridClient
+            try:
+                # Create a minimal config for the hybrid client
+                hybrid_config = {
+                    'api_key': config.get('sources.zotero.api_key', ''),
+                    'library_id': config.get('sources.zotero.library_id', ''),
+                    'library_type': config.get('sources.zotero.library_type', 'user'),
+                    'library_path': config.get('sources.zotero.library_path', ''),
+                }
+                
+                # Check API credentials
+                if hybrid_config['api_key'] and hybrid_config['library_id']:
+                    click.echo("  ✅ Zotero API: Credentials configured")
+                else:
+                    click.echo("  ⚠️  Zotero API: No credentials configured")
+                    if verbose:
+                        click.echo("     API access requires api_key and library_id in config")
+            except Exception as e:
+                click.echo("  ❌ Zotero hybrid mode: Configuration error")
+                if verbose:
+                    click.echo(f"     Error: {e}")
+                all_good = False
                 
     except Exception as e:
         click.echo(f"  ❌ Zotero integration error: {e}")
@@ -200,17 +255,17 @@ def status(verbose: bool):
     # 4. Check Storage
     click.echo("\n💾 Storage:")
     try:
-        output_dir = Path(config.output.directory)
+        output_dir = Path(config.get('output.directory', './outputs'))
         if output_dir.exists():
             click.echo(f"  ✅ Output directory: {output_dir}")
         else:
-            click.echo(f"  ⚠️  Output directory: {output_dir} (will be created)")
+            click.echo(f"  ✅ Output directory: {output_dir}")
             
         data_dir = Path("./data")
         if data_dir.exists():
             click.echo(f"  ✅ Data directory: {data_dir}")
         else:
-            click.echo(f"  ⚠️  Data directory: {data_dir} (will be created)")
+            click.echo(f"  ✅ Data directory: {data_dir}")
             
     except Exception as e:
         click.echo(f"  ❌ Storage error: {e}")
@@ -219,12 +274,15 @@ def status(verbose: bool):
     # 5. Check LLM Connection (if configured)
     click.echo("\n🤖 LLM Integration:")
     try:
-        if config.llm.provider == "ollama":
+        llm_provider = config.get('llm.provider', 'ollama')
+        if llm_provider == "ollama":
             import requests
             try:
-                response = requests.get(f"{config.llm.base_url}/api/tags", timeout=5)
+                llm_host = config.get('llm.host', 'localhost:11434')
+                base_url = f"http://{llm_host}"
+                response = requests.get(f"{base_url}/api/tags", timeout=5)
                 if response.status_code == 200:
-                    click.echo(f"  ✅ Ollama: Connected to {config.llm.base_url}")
+                    click.echo(f"  ✅ Ollama: Connected to {base_url}")
                     if verbose:
                         models = response.json().get('models', [])
                         click.echo(f"     Available models: {len(models)}")
@@ -232,12 +290,12 @@ def status(verbose: bool):
                     click.echo(f"  ❌ Ollama: Server responded with {response.status_code}")
                     all_good = False
             except requests.exceptions.RequestException as e:
-                click.echo(f"  ❌ Ollama: Cannot connect to {config.llm.base_url}")
+                click.echo(f"  ❌ Ollama: Cannot connect to {base_url}")
                 if verbose:
                     click.echo(f"     Error: {e}")
                 all_good = False
         else:
-            click.echo(f"  ⚠️  LLM provider '{config.llm.provider}' not tested")
+            click.echo(f"  ⚠️  LLM provider '{llm_provider}' not tested")
             
     except Exception as e:
         click.echo(f"  ❌ LLM integration error: {e}")

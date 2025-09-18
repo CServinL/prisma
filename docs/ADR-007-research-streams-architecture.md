@@ -1,4 +1,4 @@
-# ADR-007: Research Streams Architecture for Persistent Topic Monitoring
+# ADR-007: Research Streams Architecture for Intelligent Library Management
 
 **Date:** 2025-09-15  
 **Author:** CServinL  
@@ -6,29 +6,29 @@
 
 ## Context
 
-Literature review is typically a one-time activity, but researchers often need to **continuously monitor** specific research topics for new papers. The traditional approach requires manual searches and lacks persistence. Researchers need a way to:
+Research library management is typically a manual, time-intensive activity, but researchers need **continuous, intelligent organization** of their research collections. The traditional approach requires manual searches and lacks intelligent curation. Researchers need a Research Library Assistant that can:
 
-- Create persistent research topics that automatically find new papers
-- Organize papers using existing tools (Zotero) without disruption  
-- Leverage both Collections and Tags for smart organization
-- Maintain continuous awareness of evolving research areas
+- Create persistent research topics that automatically discover and organize relevant research
+- Intelligently curate research collections using existing tools (Zotero) without disruption  
+- Leverage both Collections and Tags for smart research organization
+- Maintain continuous awareness and organization of evolving research areas
 
 ## Decision
 
-We will implement **Research Streams** - a persistent topic monitoring architecture that leverages Zotero Collections and smart tagging for continuous literature discovery.
+We will implement **Research Streams** - an intelligent research library management architecture that leverages Zotero Collections and smart tagging for continuous research discovery and organization.
 
 ### Core Concept
 ```
-Research Stream = Zotero Collection + Search Criteria + Smart Tags + Auto-Monitoring
+Research Stream = Zotero Collection + Research Criteria + Smart Tags + AI Curation + Auto-Monitoring
 ```
 
-### Architectural Principles
+### Research Library Management Principles
 
-1. **Persistence**: Research topics persist beyond single literature reviews
-2. **Automation**: Streams automatically discover new papers on schedule
-3. **Organization**: Leverage Zotero's Collections + Tags for smart categorization
-4. **Non-disruptive**: Works within existing Zotero workflows
-5. **Intelligence**: Smart tagging based on content analysis
+1. **Persistent Research Organization**: Research topics persist and evolve beyond single discovery sessions
+2. **Intelligent Automation**: Streams automatically discover and curate relevant research on schedule
+3. **Smart Organization**: Leverage Zotero's Collections + Tags for intelligent research categorization
+4. **Non-disruptive Integration**: Works within existing research workflows and library infrastructure
+5. **AI-Powered Curation**: Smart research assessment and organization based on content analysis
 
 ## Research Streams Components
 
@@ -61,27 +61,27 @@ ResearchStream(
 - **Status Tags**: `to-read`, `key-paper`, `cited-in-report`
 - **Quality Tags**: `high-impact`, `peer-reviewed`
 
-### 3. Automated Workflow
-1. **Stream Creation**: User defines topic and search criteria
-2. **Initial Population**: Search and save relevant papers to collection
-3. **Continuous Monitoring**: Scheduled searches for new papers
-4. **Smart Tagging**: Automatic categorization based on content analysis
-5. **Deduplication**: Prevent redundant papers across streams
-6. **Report Generation**: Generate literature reviews from stream contents
+### 3. Automated Library Management Workflow
+1. **Stream Creation**: User defines research topic and criteria
+2. **Initial Population**: Discover and organize relevant research into collections
+3. **Continuous Monitoring**: Scheduled discovery for new research content
+4. **Smart Organization**: Automatic categorization based on content analysis
+5. **Deduplication**: Prevent redundant research across streams
+6. **Library Enhancement**: Generate insights and organization improvements from stream contents
 
 ## Benefits
 
 ### For Researchers
-- **Continuous Awareness**: Stay updated on research areas automatically
-- **Organized Discovery**: Papers automatically sorted into collections
-- **Cross-topic Analysis**: Tags enable queries across multiple streams
-- **Reduced Manual Work**: Automated search and organization
+- **Continuous Organization**: Research library stays updated automatically
+- **Intelligent Discovery**: Research automatically sorted into collections
+- **Cross-topic Analysis**: Tags enable queries across multiple research areas
+- **Reduced Manual Work**: Automated discovery and organization
 
-### For Prisma System
-- **Persistent Data**: Research topics become long-lived entities
-- **Better Organization**: Collections + Tags provide flexible querying
-- **Incremental Updates**: Only process new papers, not entire corpus
-- **User Engagement**: Researchers interact with system over time
+### For Research Library Assistant System
+- **Persistent Research Topics**: Research areas become long-lived, managed entities
+- **Better Organization**: Collections + Tags provide flexible research management
+- **Incremental Updates**: Only process new research, not entire library
+- **User Engagement**: Researchers interact with system for ongoing library management
 
 ## Implementation
 
@@ -106,24 +106,24 @@ prisma streams info neural-networks-2024
 
 ## Alternatives Considered
 
-### 1. **One-time Literature Reviews Only**
-- **Rejected**: Doesn't meet researcher needs for continuous monitoring
-- **Problem**: Researchers lose track of new developments
+### 1. **One-time Research Discovery Only**
+- **Rejected**: Doesn't meet researcher needs for continuous library management
+- **Problem**: Researchers lose track of new developments in their research areas
 
-### 2. **External Notification Systems**
+### 2. **External Research Management Systems**
 - **Rejected**: Adds complexity and doesn't integrate with existing tools
-- **Problem**: Creates tool fragmentation
+- **Problem**: Creates tool fragmentation and workflow disruption
 
 ### 3. **Manual Zotero Collections**
-- **Rejected**: Lacks automation and smart organization
-- **Problem**: Still requires manual search and categorization
+- **Rejected**: Lacks automation and intelligent organization
+- **Problem**: Still requires manual discovery and categorization
 
 ## Consequences
 
 ### Positive
-- **Enhanced User Value**: Continuous monitoring vs. one-time reviews
+- **Enhanced User Value**: Continuous library management vs. one-time discovery
 - **Better Organization**: Structured approach to research topic management
-- **Zotero Integration**: Leverages existing user workflows and data
+- **Zotero Integration**: Leverages existing user workflows and research libraries
 - **Scalable**: Can handle many streams with automated processing
 
 ### Negative

@@ -53,3 +53,7 @@ markers = [
     "unit: marks tests as unit tests",
     "zotero_api: marks tests that use real Zotero API",
 ]
+[dependency-groups]
+dev = [
+    "pytest-cov (>=7.0.0,<8.0.0)"
+]

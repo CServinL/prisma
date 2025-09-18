@@ -107,24 +107,37 @@ sources:
         config_loader = ConfigLoader()
         llm_config = config_loader.get_llm_config()
         
-        self.assertIn('provider', llm_config)
-        self.assertIn('model', llm_config)
-        self.assertIn('base_url', llm_config)
-        self.assertEqual(llm_config['provider'], 'ollama')
+        # Test that we get a Pydantic model with proper attributes
+        self.assertTrue(hasattr(llm_config, 'provider'))
+        self.assertTrue(hasattr(llm_config, 'model'))
+        self.assertTrue(hasattr(llm_config, 'host'))
+        self.assertEqual(llm_config.provider, 'ollama')
     
     def test_validation_errors(self):
         """Test that Pydantic validation catches invalid configurations."""
         # Test invalid output format
         with self.assertRaises(ValidationError):
-            PrismaConfig(output={'format': 'invalid_format'})
+            from prisma.utils.config import OutputConfig
+            OutputConfig(format='invalid_format', directory='outputs')
         
-        # Test invalid library type
+        # Test invalid library type  
         with self.assertRaises(ValidationError):
-            PrismaConfig(sources={'zotero': {'library_type': 'invalid'}})
+            from prisma.utils.config import ZoteroConfig
+            ZoteroConfig(
+                enabled=True,
+                mode="web", 
+                api_key="test",
+                library_id="123",
+                library_type='invalid',
+                include_notes=False,
+                include_attachments=False,
+                server_url="http://127.0.0.1:23119"
+            )
         
         # Test invalid search limit
         with self.assertRaises(ValidationError):
-            PrismaConfig(search={'default_limit': -1})
+            from prisma.utils.config import SearchConfig
+            SearchConfig(default_limit=-1)
     
     def test_zotero_credentials_check(self):
         """Test Zotero credentials validation."""

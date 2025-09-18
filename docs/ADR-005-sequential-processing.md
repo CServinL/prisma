@@ -1,26 +1,53 @@
-# ADR-005: Simple Sequential Processing
+# ADR-005: Enhanced Sequential Processing for Research Library Curation
 
-**Date:** 2025-09-15  
-**Author:** CServinL
+**Date:** 2025-09-15 (Updated: 2025-09-17)  
+**Author:** CServinL  
+**Status:** Evolved
 
 ## Context
 
-Our literature review system uses a simple 4-component pipeline (Coordinator → Search Agent → Analysis Agent → Report Agent). We need to determine how these components communicate and coordinate their work.
+Our Research Library Assistant has evolved from simple document processing to an intelligent research curation workflow that includes relevance assessment, library organization, and duplicate management. We need to update our processing model to reflect the current research-focused workflow.
 
-## Decision
+## Decision Evolution
 
-Use **direct sequential function calls** with no complex messaging or async coordination:
+**Original**: Direct sequential function calls for document processing pipeline  
+**Current**: Enhanced sequential processing for intelligent research library curation and organization
 
-### Communication Approach
-- **Sequential Processing**: Each component completes its work before the next begins
-- **Direct Function Calls**: Components call each other's methods directly
-- **Shared Data Structures**: Results passed as Python objects between components
-- **Simple Progress Tracking**: Coordinator updates job status in SQLite database
+### Enhanced Research Library Workflow
+- **6-Step Research Curation**: Discover → Assess → Curate → Organize → Analyze → Enhance
+- **Research-Focused Processing**: Only relevant research proceeds to expensive AI analysis
+- **Intelligent Library Curation**: AI-based research relevance assessment and organization
+- **Zotero Library Integration**: Dual role as research source and organization backend
 
-### Implementation
+### Current Research Library Implementation
 ```python
-class Coordinator:
-    def run_review(self, config):
+class ResearchLibraryAssistant:
+    def curate_research_stream(self, stream_config):
+        # Step 1: Multi-source research discovery
+        discovered_research = self.discovery_engine.discover_research(stream_config)
+        
+        # Step 2: Research relevance assessment (fast AI evaluation)
+        relevant_research = []
+        for item in discovered_research:
+            if self.ai_assistant.assess_research_relevance(item, stream_config.topic):
+                relevant_research.append(item)
+        
+        # Step 3: Curate research collection (organize relevant items)
+        # Only relevant research proceeds to library organization
+        
+        # Step 4: Library duplicate management
+        new_research = []
+        for item in relevant_research:
+            if not self._check_library_duplicate(item):
+                new_research.append(item)
+        
+        # Step 5: Deep research analysis (expensive, only for relevant new items)
+        research_insights = self.ai_assistant.analyze_research_content(new_research)
+        
+        # Step 6: Enhance research library organization
+        enhanced_library = self.library_organizer.organize_collections(research_insights, stream_config)
+        return enhanced_library
+```
         # Update status: Starting search
         self.update_job_status("searching")
         papers = self.search_agent.search(config.research.topic)
@@ -38,27 +65,49 @@ class Coordinator:
         return report
 ```
 
-## Benefits
-- **Ultra-simple**: No message queues, brokers, or async complexity
-- **Easy to debug**: Linear execution with clear call stack
-- **Reliable**: Fewer moving parts means fewer failure points
-- **Fast development**: No async/await complexity to manage
+## Enhanced Benefits for Research Library Management
+- **Research-focused efficiency**: Relevance assessment prevents wasted compute on non-research content
+- **Library cost optimization**: Expensive AI analysis only for relevant, non-duplicate research
+- **Quality research curation**: Academic validation and research confidence scoring
+- **Integrated library management**: Seamless duplicate management and collection organization
 
-## Trade-offs
-- **No parallelism**: Components run one at a time
-- **Blocking**: Long-running operations block the entire pipeline
-- **Limited scalability**: Cannot process multiple papers simultaneously
+## Current Trade-offs for Research Assistant
+- **Research domain complexity**: 6 research-focused steps vs original generic processing
+- **AI dependency**: Relies on AI for research relevance assessment and content analysis
+- **Library integration dependency**: Requires Zotero for full research organization capabilities
 
-## Why This Approach?
-For Phase 0 MVP, simplicity trumps performance. We can:
-1. Get working software quickly
-2. Understand the real performance bottlenecks
-3. Add parallelism in Phase 1 where it actually matters
+## Enhanced Research Library Error Handling
+```python
+# Comprehensive error handling with research-focused fallbacks
+try:
+    # Attempt research relevance assessment
+    relevant_research = self._assess_research_relevance(discovered_items)
+except AIAssistantError:
+    # Fallback: treat all as relevant research
+    relevant_research = discovered_items
+    warnings.append("Research assessment failed, organizing all discovered items")
 
-## Future Considerations
-- **Phase 1**: Add async processing within components (e.g., parallel paper analysis)
-- **Phase 2**: Consider message queues if we need true distributed processing
-- **Performance monitoring**: Measure where time is actually spent before optimizing
+try:
+    # Attempt library duplicate management
+    new_research = self._manage_library_duplicates(relevant_research)
+except ZoteroLibraryError:
+    # Fallback: treat all as new research
+    new_research = relevant_research
+    warnings.append("Library duplicate check failed, treating all as new research")
+```
+
+## Research Library Performance Optimization
+- **Early research curation**: Remove non-research content before expensive AI processing
+- **Batch research processing**: Process multiple research items in single AI calls
+- **Research caching**: Cache research assessments and library organization
+- **Incremental library updates**: Research streams only process new research discoveries
+
+## Why This Research-Focused Approach?
+The evolution reflects real-world research library management needs:
+1. **Research cost efficiency**: AI analysis is expensive, curate early for research relevance
+2. **Quality research focus**: Academic validation ensures relevant research results  
+3. **Researcher workflows**: Integration with existing research library infrastructure (Zotero)
+4. **Continuous research monitoring**: Research streams require sophisticated library state management
 ```
 
 #### Workflow Coordination Messages

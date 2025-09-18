@@ -1,54 +1,99 @@
 # Prisma
-*AI-Driven Systematic Literature Review System*
+*Research Library Assistant with Zotero Integration*
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Contributor Covenant](https://img.shields.io/badge/Contributor%20Covenant-2.1-4baaaa.svg)](CODE_OF_CONDUCT.md)
 
-## Executive Abstract
+## Overview
 
-**Prisma** is an AI-driven system that automates comprehensive literature reviews for academic research. Given a research topic, it searches academic databases, analyzes papers, books, conference proceedings, theses, and reports using language models, and generates comprehensive reports with key findings and recommendations.
+**Prisma** is a Research Library Assistant that helps researchers intelligently organize, curate, and enhance their research libraries using **Zotero as the primary organization tool**. It discovers research content, assesses relevance, and provides intelligent library management.
 
-**Core Goal:** Input a research topic (e.g., "LLMs for small, low‑power devices") → Output an executive report with synthesis, trends, gaps, and recommendations.
+**Architecture:** CLI → Coordinator → Source Integrations (External APIs + Zotero Libraries) → Zotero Storage → LLM Analysis → Library Enhancement
 
-### Key Features
+## System Requirements
+
+**Required (Offline):**
+- **Zotero Desktop** with Local HTTP API enabled (library management operations)
+- **Ollama** with local LLM (research analysis and curation)
+
+**Optional (Online):**
+- **Zotero Web API** access (for discovering and saving new research)
+- **Internet** access to source APIs (arXiv, Semantic Scholar, etc.)
+
+## Key Features
+
 - **📚 Multi-Document Support**: Papers, books, chapters, theses, reports, and grey literature
 - **🔗 Zotero Integration**: Leverages existing research libraries and bibliographic data  
-- **🌊 Research Streams**: Persistent topic monitoring with automatic discovery
-- **� Quality-Based Sources**: 1-5 star rating system prioritizing reliable academic databases
+- **🌊 Research Streams**: Persistent topic monitoring with automatic discovery and organization
+- **⭐ Quality-Based Sources**: 1-5 star rating system prioritizing reliable academic databases
 - **🛡️ Academic Validation**: Filters out non-academic content with confidence scoring
 - **🌐 Multi-Source Search**: Combines premium APIs with structured data sources
 - **📖 Full-Text Analysis**: Processes PDFs, abstracts, and metadata across all document types
-- **🤖 AI-Powered Synthesis**: Uses local LLMs for cross-document analysis and comparison
+- **🤖 AI-Powered Curation**: Uses local LLMs for intelligent research assessment and organization
 - **👥 Author Analysis**: Identifies key researchers and creates academic contact directory
-- **📊 Structured Output**: Generates both human-readable reports and machine-readable data
+- **📊 Library Organization**: Generates structured research organization and enhanced library management
 
-### 🌟 **Quality-Based Source Management**
+## Research Library Management Process
 
-Prisma uses a **1-5 star rating system** to ensure high-quality academic content:
+**Prisma's research library management workflow:**
 
-- **⭐⭐⭐⭐⭐ (5-star)**: Premium APIs with curated content
-  - **Semantic Scholar**: AI-powered search with 214M+ papers
-  - **arXiv**: High-quality preprint server with full metadata
+1. **Discover Research** - Query external APIs and Zotero libraries using stream's search criteria
+   - **External Sources**: arXiv, Semantic Scholar, PubMed, etc.
+   - **Zotero Libraries**: Existing research collections and newly imported items
+2. **Assess Relevance** - Use LLM to quickly evaluate research relevance to the topic
+3. **Curate Content** - Filter and organize relevant research immediately
+4. **For Relevant Research:**
+   - **Check Zotero Storage** - Search local Zotero library for duplicates (offline HTTP API)
+   - **Save to Zotero** - Store new research and add to stream collection (if online)
+   - **Mark Unsaved** - Flag research that couldn't be saved (if offline)
+5. **Analyze Content** - Comprehensive LLM analysis for research assessment
+6. **Enhance Library** - Improve organization and provide research insights (noting any unsaved research)
 
-- **⭐⭐⭐⭐ (4-star)**: Good APIs with structured data  
-  - **Open Library**: Internet Archive's millions of academic books
-  - **Google Books**: Comprehensive book catalog with rich metadata
+**Note**: Zotero serves dual roles as both a **source integration** (for discovering existing relevant research) and **primary organization tool** (for organizing and managing research collections).
 
-- **⭐⭐⭐ (3-star)**: Basic APIs and reliable sources
-  - **Zotero**: User's personal research library
+## CLI Commands
 
-**Academic Validation**: Automatically filters content requiring authors, venues, and proper academic indicators while excluding blog posts, news articles, and social media content.
+> 📖 **Complete CLI Reference**: See [CLI Documentation](docs/cli.md) for detailed command options, examples, and advanced usage.
 
-### 🔍 **Comprehensive Document Discovery**
-- **Academic Papers**: Journal articles, conference papers, preprints
-- **Books & Monographs**: Academic books, textbooks, reference works
-- **Book Chapters**: Individual chapters from edited volumes
-- **Conference Proceedings**: Full conference publications and presentations
-- **Theses & Dissertations**: PhD dissertations, Master's theses
-- **Reports**: Technical reports, government publications, white papers
-- **Grey Literature**: Working papers, institutional reports, policy documents
+### Research Streams
+```bash
+# Create a new research stream
+prisma streams create "Stream Name" "search query" --frequency weekly
 
-## 🚀 Quick Start
+# List all streams
+prisma streams list
+
+# Update streams (find new papers)
+prisma streams update --all
+prisma streams update stream-id --force
+
+# Get stream details
+prisma streams info stream-id
+```
+
+### Research Analysis
+```bash
+# Generate research analysis
+prisma review "neural networks" --output report.md
+
+# Use specific sources
+prisma review "AI ethics" --sources arxiv,scholar --limit 50
+
+# Zotero-only mode
+prisma review "machine learning" --zotero-only
+```
+
+### System Management
+```bash
+# Check system status
+prisma status --verbose
+
+# Zotero integration
+prisma zotero test-connection
+prisma zotero list-collections
+```
+
+## Quick Start
 
 ```bash
 # Clone and install
@@ -56,7 +101,7 @@ git clone https://github.com/CServinL/prisma.git
 cd prisma
 poetry install
 
-# Create your first research stream
+# Create your first research stream for library management
 poetry run prisma streams create "AI Research" "artificial intelligence machine learning" --frequency weekly
 
 # List and update streams
@@ -64,7 +109,7 @@ poetry run prisma streams list
 poetry run prisma streams update --all
 ```
 
-## 📖 Documentation
+## Documentation
 
 ### Getting Started
 - 🚀 **[Quick Start Guide](docs/quick-start.md)** - Get up and running in minutes
@@ -75,42 +120,13 @@ poetry run prisma streams update --all
 - 🏗️ **[Architecture Overview](docs/architecture.md)** - System design and data flow
 - ⚙️ **[Configuration Guide](docs/configuration.md)** - YAML configuration and options
 - 🔗 **[Zotero Integration](docs/zotero-integration.md)** - Complete Zotero setup and usage
+- ⭐ **[Quality Rating System](docs/rating-system.md)** - Source quality management and academic validation
+- 📖 **[CLI Documentation](docs/cli.md)** - Complete command-line interface reference
 
 ### Development
 - 📅 **[Development Timeline](docs/development-timeline.md)** - 8-day MVP progress
 - 🗺️ **[Roadmap](docs/roadmap.md)** - Future features and phases
 - 🏛️ **[Architecture Decision Records](docs/)** - Technical decisions and rationale
-
-## ⚡ Development Status
-
-**Current**: Day 2 - Research Streams ✅ **COMPLETED WITH ENHANCEMENTS**
-
-| Status | Component | Description |
-|--------|-----------|-------------|
-| ✅ | **Infrastructure** | CLI + basic file I/O |
-| ✅ | **Research Streams** | Revolutionary persistent topic monitoring |
-| 🔄 | **Multi-Source Search** | arXiv + PubMed APIs integration |
-| 🔄 | **AI Analysis** | LLM integration (Ollama) |
-| 🔄 | **Report Generation** | Enhanced markdown reports |
-| 🔄 | **Author Analysis** | Research directory creation |
-
-See [Development Timeline](docs/development-timeline.md) for detailed progress.
-
-## Contributing
-
-We welcome contributions from the community! Please see our [Contributing Guidelines](CONTRIBUTING.md) for details on:
-
-- 🤝 [Code of Conduct](CODE_OF_CONDUCT.md)
-- 📋 [Contribution Process](CONTRIBUTING.md)
-- 🏛️ [Project Governance](GOVERNANCE.md)
-- 🔒 [Security Policy](SECURITY.md)
-
-### Quick Start for Contributors
-
-1. Read our [Code of Conduct](CODE_OF_CONDUCT.md)
-2. Review [Contributing Guidelines](CONTRIBUTING.md)
-3. Check out [open issues](https://github.com/CServinL/prisma/issues)
-4. Join the discussion in [GitHub Discussions](https://github.com/CServinL/prisma/discussions)
 
 ## Technology Stack
 
@@ -122,33 +138,15 @@ We welcome contributions from the community! Please see our [Contributing Guidel
 
 See [Architecture Overview](docs/architecture.md) for complete technical details.
 
-## 📚 Project Governance
+## Contributing
 
-This project follows a structured governance model to ensure quality, sustainability, and community collaboration:
+We welcome contributions from the community! Please see our [Contributing Guidelines](CONTRIBUTING.md) for details on:
 
-### 📋 Documentation
-- **[Governance Model](GOVERNANCE.md)** - Project structure, roles, and decision-making processes
-- **[Contributing Guidelines](CONTRIBUTING.md)** - How to contribute effectively
-- **[Code of Conduct](CODE_OF_CONDUCT.md)** - Community standards and behavior expectations
-- **[Security Policy](SECURITY.md)** - Security practices and vulnerability reporting
+- 🤝 [Code of Conduct](CODE_OF_CONDUCT.md)
+- 📋 [Contribution Process](CONTRIBUTING.md)
+- 🏛️ [Project Governance](GOVERNANCE.md)
+- 🔒 [Security Policy](SECURITY.md)
 
-### 🏛️ Project Structure
-- **Project Lead**: @CServinL
-- **Core Maintainers**: To be established as project grows
-- **Subject Matter Experts**: Academic research methodology, NLP, research ethics
-- **Contributors**: Community developers and researchers
-
-### 📞 Getting Help
-- **Issues**: [GitHub Issues](https://github.com/CServinL/prisma/issues) for bugs and features
-- **Discussions**: [GitHub Discussions](https://github.com/CServinL/prisma/discussions) for questions
-- **Security**: See [Security Policy](SECURITY.md) for security-related concerns
-
-## 📄 License
+## License
 
 This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENSE) file for details.
-
-## 🙏 Acknowledgments
-
-- Contributors and maintainers who make this project possible
-- The academic research community for guidance and requirements
-- Open source projects and tools that enable this work

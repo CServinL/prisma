@@ -117,19 +117,19 @@ class LoggingConfig(BaseModel):
 
 class SourcesConfig(BaseModel):
     """Sources configuration"""
-    zotero: ZoteroConfig = Field(default_factory=ZoteroConfig)
+    zotero: ZoteroConfig = Field(default_factory=lambda: ZoteroConfig())
 
 
 class PrismaConfig(BaseModel):
     """Complete Prisma configuration with validation"""
     model_config = ConfigDict(arbitrary_types_allowed=True)
     
-    sources: SourcesConfig = Field(default_factory=SourcesConfig)
-    llm: LLMConfig = Field(default_factory=LLMConfig)
-    output: OutputConfig = Field(default_factory=OutputConfig)
-    search: SearchConfig = Field(default_factory=SearchConfig)
-    analysis: AnalysisConfig = Field(default_factory=AnalysisConfig)
-    logging: LoggingConfig = Field(default_factory=LoggingConfig)
+    sources: SourcesConfig = Field(default_factory=lambda: SourcesConfig())
+    llm: LLMConfig = Field(default_factory=lambda: LLMConfig())
+    output: OutputConfig = Field(default_factory=lambda: OutputConfig())
+    search: SearchConfig = Field(default_factory=lambda: SearchConfig())
+    analysis: AnalysisConfig = Field(default_factory=lambda: AnalysisConfig())
+    logging: LoggingConfig = Field(default_factory=lambda: LoggingConfig())
 
 
 class ConfigLoader:
@@ -206,44 +206,21 @@ class ConfigLoader:
         except (AttributeError, TypeError):
             return default
     
-    def get_llm_config(self) -> Dict[str, Any]:
+    def get_llm_config(self) -> LLMConfig:
         """Get LLM configuration for Ollama integration."""
-        llm_config = self.config.llm
-        return {
-            'provider': llm_config.provider,
-            'model': llm_config.model,
-            'host': llm_config.host,
-            'base_url': llm_config.base_url
-        }
+        return self.config.llm
     
-    def get_search_config(self) -> Dict[str, Any]:
+    def get_search_config(self) -> SearchConfig:
         """Get search configuration."""
-        search_config = self.config.search
-        return {
-            'default_limit': search_config.default_limit,
-            'sources': search_config.sources
-        }
+        return self.config.search
     
-    def get_output_config(self) -> Dict[str, Any]:
+    def get_output_config(self) -> OutputConfig:
         """Get output configuration."""
-        output_config = self.config.output
-        return {
-            'directory': output_config.directory,
-            'format': output_config.format
-        }
+        return self.config.output
     
-    def get_zotero_config(self) -> Dict[str, Any]:
+    def get_zotero_config(self) -> ZoteroConfig:
         """Get Zotero configuration for API integration."""
-        zotero_config = self.config.sources.zotero
-        return {
-            'enabled': zotero_config.enabled,
-            'api_key': zotero_config.api_key,
-            'library_id': zotero_config.library_id,
-            'library_type': zotero_config.library_type,
-            'default_collections': zotero_config.default_collections,
-            'include_notes': zotero_config.include_notes,
-            'include_attachments': zotero_config.include_attachments
-        }
+        return self.config.sources.zotero
     
     def has_zotero_credentials(self) -> bool:
         """Check if Zotero API credentials are configured."""

@@ -1,70 +1,86 @@
-# ADR-001: Simple Pipeline Architecture for Literature Review Automation
+# ADR-001: Enhanced Pipeline Architecture for Research Library Assistance
 
-**Date:** 2025-09-15  
-**Author:** CServinL
+**Date:** 2025-09-15 (Updated: 2025-09-17)  
+**Author:** CServinL  
+**Status:** Evolved
 
 ## Context
 
-The Prisma AI-driven literature review system needs a straightforward architecture that automates the core literature review process: search, analyze, and report. The architecture should be simple to understand, implement, and maintain while providing the essential functionality for academic researchers.
+The Prisma Research Library Assistant needs a sophisticated architecture that automates research library management: discover, organize, analyze, and maintain research collections. The architecture has evolved from a simple document processing pipeline to a comprehensive research assistance system that includes Zotero integration, research streams, and intelligent library curation.
 
-## Decision
+## Decision Evolution
 
-We will implement a **simple pipeline architecture** with four core components that work together in a linear workflow. This approach prioritizes simplicity and maintainability over complex orchestration.
+**Original Decision (Phase 0)**: Simple document processing pipeline  
+**Current Architecture**: Enhanced research library management system with persistent monitoring and intelligent organization
 
-### Architectural Rationale
-- **Simplicity First**: Direct function calls between components, no complex messaging
-- **Linear Pipeline**: Clear sequential flow from search to analysis to reporting
-- **Component Specialization**: Each component has a single, well-defined responsibility
-- **Academic Focus**: Designed specifically for literature review workflows
-- **Local-First**: Self-contained system with minimal external dependencies
-
-## Core Architecture Components
-
-### 1. Coordinator
-- **Responsibility**: Orchestrates the entire workflow
-- **Functions**: Job management, error handling, progress tracking
-- **Implementation**: Simple Python class with direct method calls
-
-### 2. Search Agent
-- **Responsibility**: Literature discovery and content acquisition
-- **Functions**: Zotero integration, external API queries, PDF processing, deduplication
-- **Implementation**: Unified component handling all search-related tasks
-
-### 3. Analysis Agent
-- **Responsibility**: Paper analysis and synthesis
-- **Functions**: LLM-based summarization, thematic classification, comparison analysis
-- **Implementation**: LLM integration for structured analysis tasks
-
-### 4. Report Agent
-- **Responsibility**: Output generation
-- **Functions**: Markdown report generation, data export (CSV/JSON)
-- **Implementation**: Template-based report generation
-
-## Data Flow
+### Current Architecture
 ```
-Config File → Coordinator → Search Agent → Analysis Agent → Report Agent → Results
+CLI → Research Stream Manager → Source Discovery (External APIs + Zotero Libraries) → Zotero Organization → AI Analysis → Research Insights
 ```
 
-## Implementation Plan
-- **Phase 0**: Basic pipeline with essential functionality
-- **Phase 1**: Enhanced analysis and output options
-- **Phase 2**: Optional collaborative features
+### Research Library Assistant Workflow
 
-## Benefits
-- **Easy to Understand**: Simple linear flow that maps to research workflow
-- **Quick to Implement**: Minimal complexity means faster development
-- **Easy to Debug**: Clear component boundaries and data flow
-- **Maintainable**: Simple architecture reduces maintenance overhead
-- **Testable**: Each component can be tested independently
+1. **Multi-Source Discovery**: External APIs + existing Zotero library search
+2. **Relevance Assessment**: AI-based evaluation of research relevance to topics  
+3. **Intelligent Curation**: Filter and organize relevant research automatically
+4. **Duplicate Management**: Prevent redundant papers across research collections
+5. **Content Analysis**: AI-powered insights and summaries for researchers
+6. **Research Organization**: Structured collections, tags, and metadata management
 
-## Trade-offs
-- **Limited Parallelism**: Sequential processing may be slower than parallel approaches
-- **Less Flexibility**: Simpler than complex agent orchestration systems
-- **Scalability Limits**: May need rework for very large-scale processing
+## Data Flow (Current)
+```
+Research Stream Config → Research Assistant → 
+  1. Multi-Source Discovery (External APIs + Zotero) → 
+  2. Relevance Assessment (AI) → 
+  3. Library Curation (Organize relevant research) → 
+  4. Duplicate Management (Zotero integration) → 
+  5. Content Analysis (AI insights) → 
+  6. Research Organization → Enhanced Research Library + Insights
+```
 
-## References
-- Inspired by Unix pipeline philosophy: simple components working together
-- Academic literature review best practices and workflows
+## Core Components (Updated)
+
+### 1. Research Stream Manager (Core)
+- **Responsibility**: Persistent research topic monitoring and library management
+- **Functions**: Stream lifecycle, topic organization, collection management
+- **Implementation**: Service layer for long-term research library curation
+
+### 2. Research Discovery Engine
+- **Responsibility**: Intelligent research discovery across multiple sources
+- **Functions**: External API queries, Zotero library mining, result normalization
+- **Implementation**: Zotero serves dual role as source AND organization backend
+
+### 3. AI Research Assistant
+- **Responsibility**: Intelligent research evaluation and content analysis
+- **Functions**: Relevance assessment, research insights, cross-document analysis
+- **Implementation**: Two-phase AI processing (quick curation + deep analysis)
+
+### 4. Library Organization System
+- **Responsibility**: Research collection management and organization
+- **Functions**: Collection structuring, tagging, metadata management
+- **Implementation**: Zotero-based organization with smart categorization
+
+### 5. Research Insights Generator
+- **Responsibility**: Research summaries and analytical insights
+- **Functions**: Topic summaries, author analysis, research trend identification
+- **Implementation**: AI-powered research assistance and knowledge extraction
+
+## Key Architectural Evolution
+
+### Research Library Focus
+- **Persistent Research**: Research streams enable continuous library building vs one-time document processing
+- **Zotero Collections**: Each research topic maps to organized library collections
+- **Smart Organization**: Leverages Collections + Tags for research categorization
+
+### Dual Zotero Role in Research Management
+- **Source Integration**: Mine existing Zotero libraries for relevant research
+- **Organization Backend**: Structure and organize research collections systematically
+- **Offline Research**: Local HTTP API for library access, Web API for expansion
+
+### AI-Powered Research Assistance
+- **Research Curation**: AI evaluation of research relevance and quality
+- **Content Organization**: Automatic categorization and organization of research
+- **Knowledge Extraction**: AI insights and summaries for research comprehension
 ## Consequences
 
 ### Positive

@@ -16,6 +16,7 @@ from ..storage.models.research_stream_models import (
     SearchCriteria, StreamUpdateResult, StreamSummary
 )
 from ..storage.models.zotero_models import ZoteroItem, ZoteroCollection, ZoteroSearchQuery, ZoteroSearchResult
+from ..storage.models.api_response_models import LLMRelevanceResult, ZoteroItemCreationData
 from ..utils.config import ConfigLoader
 
 logger = logging.getLogger(__name__)
@@ -352,7 +353,7 @@ class ResearchStreamManager:
                         logger.warning(f"Could not get collection items: {e}")
                 
                 new_papers = []
-                existing_papers_to_add = []  # Papers that exist but may not be in collection
+                # NOTE: No longer tracking papers to add to collections
                 
                 for paper in internet_papers:
                     # Check if we have this paper in the entire library (by DOI or title)
@@ -363,28 +364,21 @@ class ResearchStreamManager:
                         new_papers.append(paper)
                     else:
                         logger.info(f"Paper already exists in library: {paper.title[:50]}...")
-                        
-                        # If we have a collection and this existing item is not in it, add it to our list
-                        if stream.collection_key and existing_key not in collection_items:
-                            # This existing paper is not in our stream collection yet
-                            existing_papers_to_add.append(existing_key)
-                            logger.info(f"Will add existing paper to collection: {paper.title[:50]}...")
-                        elif stream.collection_key and existing_key in collection_items:
-                            logger.info(f"Paper already in collection, skipping: {paper.title[:50]}...")
+                        # NOTE: No longer adding existing papers to collections automatically
                 
-                # Add existing papers to the stream collection if needed
-                if stream.collection_key and existing_papers_to_add:
-                    logger.info(f"Adding {len(existing_papers_to_add)} existing papers to collection {stream.collection_key}")
-                    for item_key in existing_papers_to_add:
-                        try:
-                            success = self.zotero_client.add_item_to_collection(item_key, stream.collection_key)
-                            if success:
-                                logger.info(f"Added existing item {item_key} to collection")
-                            else:
-                                logger.warning(f"Failed to add existing item {item_key} to collection")
-                        except Exception as e:
-                            logger.error(f"Error adding existing item {item_key} to collection: {e}")
-                            errors.append(f"Error adding existing item to collection: {e}")
+                # NOTE: Disabled automatic collection addition - papers remain in library only
+                # if stream.collection_key and existing_papers_to_add:
+                #     logger.info(f"Adding {len(existing_papers_to_add)} existing papers to collection {stream.collection_key}")
+                #     for item_key in existing_papers_to_add:
+                #         try:
+                #             success = self.zotero_client.add_item_to_collection(item_key, stream.collection_key)
+                #             if success:
+                #                 logger.info(f"Added existing item {item_key} to collection")
+                #             else:
+                #                 logger.warning(f"Failed to add existing item {item_key} to collection")
+                #         except Exception as e:
+                #             logger.error(f"Error adding existing item {item_key} to collection: {e}")
+                #             errors.append(f"Error adding existing item to collection: {e}")
             
             # Save new papers to Zotero and add to collection
             added_count = 0
@@ -394,40 +388,19 @@ class ResearchStreamManager:
                     # Convert PaperMetadata to Zotero item and save it
                     logger.info(f"Saving new paper to Zotero: {paper.title[:50]}...")
                     
-                    # Create Zotero item data from PaperMetadata
-                    zotero_item_data = {
-                        "itemType": "journalArticle",
-                        "title": paper.title,
-                        "abstractNote": getattr(paper, 'abstract', '') or '',
-                        "DOI": getattr(paper, 'doi', '') or '',
-                        "url": getattr(paper, 'url', '') or '',
-                        "date": getattr(paper, 'publication_date', '') or '',
-                        "publicationTitle": getattr(paper, 'journal', '') or '',
-                        "creators": []
-                    }
-                    
-                    # Add authors if available
-                    if hasattr(paper, 'authors') and paper.authors:
-                        for author in paper.authors:
-                            if isinstance(author, str):
-                                # Simple string author
-                                zotero_item_data["creators"].append({
-                                    "creatorType": "author",
-                                    "name": author
-                                })
-                            elif hasattr(author, 'name'):
-                                # Author object with name
-                                zotero_item_data["creators"].append({
-                                    "creatorType": "author", 
-                                    "name": author.name
-                                })
+                    # Create Zotero item data using Pydantic model
+                    zotero_item_data = ZoteroItemCreationData.from_paper_metadata(
+                        paper, 
+                        collection_key=stream.collection_key
+                    )
                     
                     # Save to Zotero using unified save interface
                     try:
                         # Use the unified save method (available on all client types)
+                        # NOTE: Not adding to collection automatically - papers saved to library only
                         created_keys = self.zotero_client.save_items(
-                            items=[zotero_item_data],
-                            collection_key=stream.collection_key
+                            items=[zotero_item_data.model_dump()],
+                            collection_key=None
                         )
                         
                         if created_keys:
@@ -446,6 +419,88 @@ class ResearchStreamManager:
                     errors.append(f"Error processing paper {paper_title}: {e}")
                     logger.error(f"Error processing paper {paper_title}: {e}")
             
+            # PHASE 2: Semantic relevance analysis of library papers
+            relevant_papers_added = 0
+            papers_analyzed = 0
+            
+            if stream.collection_key:  # Only if we have a collection to organize into
+                try:
+                    logger.info("🧠 Starting semantic relevance analysis of library papers...")
+                    
+                    # Import AnalysisAgent for semantic evaluation
+                    from ..agents.analysis_agent import AnalysisAgent
+                    analysis_agent = AnalysisAgent()
+                    
+                    # Get recent papers from library for analysis (limit to avoid long processing)
+                    all_library_items = self.zotero_client.search_items("")
+                    library_items = all_library_items if isinstance(all_library_items, list) else []
+                    
+                    # Also get current collection items to avoid re-analyzing
+                    collection_items = set()
+                    try:
+                        collection_item_list = self.zotero_client.get_collection_items(stream.collection_key)
+                        collection_items = {getattr(item, 'key', '') for item in collection_item_list}
+                    except Exception as e:
+                        logger.warning(f"Could not get collection items: {e}")
+                    
+                    # Analyze papers for semantic relevance (limit to recent ones)
+                    for item in library_items[:50]:  # Limit to 50 most recent papers
+                        try:
+                            papers_analyzed += 1
+                            item_key = getattr(item, 'key', '')
+                            
+                            # Skip if already in collection
+                            if item_key in collection_items:
+                                continue
+                                
+                            title = getattr(item, 'title', '') or ''
+                            abstract = getattr(item, 'abstract', '') or getattr(item, 'abstractNote', '') or ''
+                            
+                            if not title or not abstract:
+                                continue
+                            
+                            # Perform semantic relevance assessment
+                            logger.debug(f"Analyzing semantic relevance: {title[:40]}...")
+                            relevance_result = analysis_agent.assess_relevance(
+                                paper_title=title,
+                                paper_abstract=abstract,
+                                topic=stream.search_criteria.query
+                            )
+                            
+                            # Add to collection if semantically relevant
+                            if relevance_result.is_relevant:
+                                try:
+                                    success = self.zotero_client.add_item_to_collection(item_key, stream.collection_key)
+                                    if success:
+                                        relevant_papers_added += 1
+                                        level = relevance_result.relevance_level
+                                        score = relevance_result.semantic_score
+                                        reasoning = relevance_result.reasoning[:100]
+                                        
+                                        logger.info(f"✅ Added semantically relevant paper: {title[:40]}...")
+                                        logger.info(f"   🎯 {level} (score: {score:.2f}) - {reasoning}")
+                                    else:
+                                        logger.warning(f"Failed to add relevant paper to collection")
+                                except Exception as e:
+                                    logger.error(f"Error adding relevant paper to collection: {e}")
+                                    errors.append(f"Error organizing relevant paper: {e}")
+                            else:
+                                level = relevance_result.relevance_level
+                                logger.debug(f"📉 {level}: {title[:30]}...")
+                                
+                        except Exception as e:
+                            logger.error(f"Error in semantic analysis: {e}")
+                            errors.append(f"Semantic analysis error: {e}")
+                            continue
+                    
+                    logger.info(f"🎯 Semantic analysis complete: {relevant_papers_added} relevant papers added from {papers_analyzed} analyzed")
+                    
+                except Exception as e:
+                    logger.error(f"Semantic analysis phase failed: {e}")
+                    errors.append(f"Semantic analysis error: {e}")
+            else:
+                logger.info("⏭️  Skipping semantic analysis - no collection configured")
+            
             # Update stream metadata
             stream.last_updated = datetime.utcnow()
             stream.next_update = stream.calculate_next_update()
@@ -459,9 +514,9 @@ class ResearchStreamManager:
             duration = (datetime.utcnow() - start_time).total_seconds()
             
             if refresh_cache:
-                logger.info(f"Updated stream {stream_id}: {added_count} new papers, {updated_count} items refreshed")
+                logger.info(f"Updated stream {stream_id}: {added_count} new papers, {updated_count} items refreshed, {relevant_papers_added} semantically relevant papers organized")
             else:
-                logger.info(f"Updated stream {stream_id}: {added_count} new papers")
+                logger.info(f"Updated stream {stream_id}: {added_count} new papers found, {relevant_papers_added} semantically relevant papers organized from {papers_analyzed} analyzed")
             
             return StreamUpdateResult(
                 stream_id=stream_id,
@@ -653,8 +708,8 @@ class ResearchStreamManager:
         
         return tags
     
-    def _apply_smart_tags(self, item: ZoteroItem, stream: ResearchStream) -> ZoteroItem:
-        """Apply smart tags to a paper based on stream configuration"""
+    def _apply_smart_tags(self, item: ZoteroItem, stream: ResearchStream, relevance_result: Optional[LLMRelevanceResult] = None) -> ZoteroItem:
+        """Apply smart tags to a paper based on stream configuration and relevance analysis"""
         # Get existing tags
         existing_tags = set(tag.name for tag in item.tags)
         
@@ -676,11 +731,39 @@ class ResearchStreamManager:
             elif any(word in text for word in ['theoretical', 'theory', 'framework']):
                 prisma_tags.append("type-theoretical")
         
+        # Add semantic relevance tags if analysis result is provided
+        if relevance_result:
+            relevance_level = relevance_result.relevance_level
+            semantic_score = relevance_result.semantic_score
+            confidence = relevance_result.confidence
+            
+            # Add relevance level tag
+            prisma_tags.append(f"relevance-{relevance_level.lower()}")
+            
+            # Add confidence tag (convert float to string category)
+            if confidence >= 0.8:
+                confidence_str = "high"
+            elif confidence >= 0.6:
+                confidence_str = "medium"
+            else:
+                confidence_str = "low"
+            prisma_tags.append(f"confidence-{confidence_str}")
+            
+            # Add score range tag
+            if semantic_score >= 0.8:
+                prisma_tags.append("score-high")
+            elif semantic_score >= 0.6:
+                prisma_tags.append("score-medium")
+            elif semantic_score >= 0.3:
+                prisma_tags.append("score-low")
+            else:
+                prisma_tags.append("score-minimal")
+        
         # Combine with existing tags
         all_tags = existing_tags.union(set(prisma_tags))
         
         # Update item tags
         from ..storage.models.zotero_models import ZoteroTag
-        item.tags = [ZoteroTag(name=tag) for tag in sorted(all_tags)]
+        item.tags = [ZoteroTag(tag=tag, type=0) for tag in sorted(all_tags)]
         
         return item

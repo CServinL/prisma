@@ -12,6 +12,10 @@ from urllib.parse import quote, urljoin
 from datetime import datetime
 
 from ..storage.models.agent_models import SearchResult, PaperMetadata, BookMetadata
+from ..storage.models.api_response_models import (
+    OpenLibraryResponse, SemanticScholarResponse, GoogleBooksResponse,
+    ArXivEntry, LLMRelevanceResult
+)
 from ..storage.models.source_quality import (
     SourceQuality, get_source_quality, requires_llm_extraction,
     validate_academic_content, get_academic_confidence_score,
@@ -269,50 +273,41 @@ class SearchAgent:
             response = requests.get(url, timeout=30)
             response.raise_for_status()
             
-            # Parse JSON response
-            data = response.json()
+            # Parse JSON response using Pydantic model
+            api_response = OpenLibraryResponse.model_validate(response.json())
             
             books = []
-            docs = data.get('docs', [])
-            
-            for doc in docs:
+            for doc in api_response.docs:
                 book = self._parse_openlibrary_doc(doc)
                 if book:
                     books.append(book)
-            
+
             return books
             
         except Exception as e:
             print(f"[ERROR] Open Library search failed: {e}")
             return []
     
-    def _parse_openlibrary_doc(self, doc: Dict) -> BookMetadata | None:
+    def _parse_openlibrary_doc(self, doc) -> BookMetadata | None:
         """Parse a single Open Library document into book metadata."""
         try:
-            # Extract basic fields
-            title = doc.get('title', '').strip()
+            # Extract basic fields from validated Pydantic model
+            title = doc.title.strip()
             if not title:
-                return None
-            
-            # Extract authors
+                return None            # Extract authors from validated model
             authors = []
-            author_names = doc.get('author_name', [])
-            if isinstance(author_names, list):
-                authors = [name.strip() for name in author_names if name.strip()]
-            elif isinstance(author_names, str):
-                authors = [author_names.strip()]
+            if doc.author_name:
+                authors = [name.strip() for name in doc.author_name if name.strip()]
             
             # Extract description/summary
             description = ""
-            if 'first_sentence' in doc and doc['first_sentence']:
-                description = doc['first_sentence'][0] if isinstance(doc['first_sentence'], list) else str(doc['first_sentence'])
+            # Note: first_sentence is not in our Pydantic model, so we'll skip this for now
             
-            # Extract ISBNs
+            # Extract ISBNs from validated model
             isbn_10 = None
             isbn_13 = None
-            if 'isbn' in doc:
-                isbns = doc['isbn'] if isinstance(doc['isbn'], list) else [doc['isbn']]
-                for isbn in isbns:
+            if doc.isbn:
+                for isbn in doc.isbn:
                     isbn_clean = isbn.replace('-', '').replace(' ', '')
                     if len(isbn_clean) == 10:
                         isbn_10 = isbn_clean
@@ -320,25 +315,23 @@ class SearchAgent:
                         isbn_13 = isbn_clean
             
             # Extract publication info
-            publisher = doc.get('publisher', [])
-            if isinstance(publisher, list) and publisher:
-                publisher = publisher[0]
-            elif not isinstance(publisher, str):
-                publisher = None
+            # Extract publisher from validated model
+            publisher = None
+            if doc.publisher:
+                if isinstance(doc.publisher, list) and doc.publisher:
+                    publisher = doc.publisher[0]
+                elif isinstance(doc.publisher, str):
+                    publisher = doc.publisher
             
             published_date = None
-            if 'first_publish_year' in doc:
-                published_date = str(doc['first_publish_year'])
+            if doc.first_publish_year:
+                published_date = str(doc.first_publish_year)
             
-            # Extract subjects and classification
-            subjects = []
-            if 'subject' in doc:
-                subj_list = doc['subject'] if isinstance(doc['subject'], list) else [doc['subject']]
-                subjects = [s.strip() for s in subj_list if s.strip()][:10]  # Limit to 10 subjects
+            # Extract subjects from validated model
+            subjects = doc.subject[:10] if doc.subject else []  # Limit to 10 subjects
             
             # Build Open Library URL
-            key = doc.get('key', '')
-            ol_url = f"https://openlibrary.org{key}" if key else f"https://openlibrary.org/search?q={quote(title)}"
+            ol_url = f"https://openlibrary.org{doc.key}" if doc.key else f"https://openlibrary.org/search?q={quote(title)}"
             
             # Build book metadata using Pydantic model
             book = BookMetadata(
@@ -352,7 +345,7 @@ class SearchAgent:
                 publisher=publisher,
                 published_date=published_date,
                 subjects=subjects,
-                page_count=doc.get('number_of_pages_median'),
+                page_count=None,  # Not easily available in current model
                 language=doc.get('language', [None])[0] if doc.get('language') else None,
                 oclc=None,
                 lccn=None,

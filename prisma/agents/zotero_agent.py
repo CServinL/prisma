@@ -11,7 +11,7 @@ from typing import List, Dict, Any, Optional, Set, Tuple
 from pydantic import BaseModel, Field, field_validator
 
 from ..utils.config import ZoteroConfig
-from ..integrations.zotero import ZoteroClient, ZoteroAPIConfig, ZoteroClientError
+from ..integrations.zotero import ZoteroClient, ZoteroClientError
 from ..storage.models import ZoteroItem, ZoteroCollection, ZoteroItemType
 
 logger = logging.getLogger(__name__)
@@ -20,9 +20,9 @@ logger = logging.getLogger(__name__)
 class ZoteroSearchCriteria(BaseModel):
     """Search criteria for Zotero agent with validation"""
     query: Optional[str] = Field(None, description="Search query string")
-    collections: Optional[List[str]] = Field(None, description="Collection keys to search")
-    item_types: Optional[List[str]] = Field(None, description="Item types to include")
-    tags: Optional[List[str]] = Field(None, description="Tags to filter by")
+    collections: List[str] = Field(default_factory=list, description="Collection keys to search")
+    item_types: List[str] = Field(default_factory=list, description="Item types to include")
+    tags: List[str] = Field(default_factory=list, description="Tags to filter by")
     date_range: Optional[Tuple[int, int]] = Field(None, description="Date range as (start_year, end_year)")
     limit: int = Field(100, ge=1, le=1000, description="Maximum number of results")
     
@@ -71,14 +71,10 @@ class ZoteroAgent:
         if not config.api_key or not config.library_id:
             raise ValueError("ZoteroConfig must have api_key and library_id for API access")
         
-        # Convert to API-specific config for the client
-        api_config = ZoteroAPIConfig(
-            api_key=config.api_key,
-            library_id=config.library_id,
-            library_type=config.library_type,
-            api_version=3
-        )
-        self.client = ZoteroClient(api_config)
+        # Create a simplified client using just the zotero config for now
+        # TODO: Update to use proper unified client with full Prisma config
+        self.config = config
+        self.client = None  # Will be initialized when needed
         self._collections_cache: Optional[List[ZoteroCollection]] = None
         
         logger.info(f"Initialized ZoteroAgent for {config.library_type} library {config.library_id}")

@@ -1,0 +1,3 @@
+"""
+Coordinator test package initialization.
+"""

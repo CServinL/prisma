@@ -74,18 +74,17 @@ class TestCoordinatorZoteroIntegration(CoordinatorTestBase):
         coordinator.zotero_agent = mock_zotero_agent
         mock_zotero_agent.client.save_items.side_effect = Exception("Zotero save failed")
         
-        # Create test papers with high confidence scores
+        # Create test paper with high confidence score
         papers = []
-        for i in range(1):
-            paper = Mock()
-            paper.title = f"Test Paper {i+1}"
-            paper.authors = [f"Author {i+1}"]
-            paper.abstract = f"Abstract {i+1}"
-            paper.url = f"http://example.com/paper{i+1}"
-            paper.doi = f"10.1000/doi{i+1}"
-            paper.source = "test"
-            paper.confidence_score = 0.8  # Above threshold
-            papers.append(paper)
+        paper = Mock()
+        paper.title = "Test Paper 1"
+        paper.authors = ["Author 1"]
+        paper.abstract = "Abstract 1"
+        paper.url = "http://example.com/paper1"
+        paper.doi = "10.1000/doi1"
+        paper.source = "test"
+        paper.confidence_score = 0.8  # Above threshold
+        papers.append(paper)
         
         # Mock analysis results
         mock_analysis_results = Mock()

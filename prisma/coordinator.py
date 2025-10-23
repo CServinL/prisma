@@ -381,7 +381,7 @@ class PrismaCoordinator:
                     'publicationTitle': paper.journal or '',  # journal field from model
                     'date': paper.published_date or '',  # published_date field from model
                     'tags': [{'tag': f'Prisma-Discovery'}, 
-                            {'tag': f'Confidence-{getattr(paper, "confidence_score", 0.0):.2f}'},
+                            {'tag': f'Confidence-{(getattr(paper, "confidence_score", None) or 0.0):.2f}'},
                             {'tag': f'Source-{paper.source}'},
                             {'tag': f'Topic-{topic}'}]
                 }

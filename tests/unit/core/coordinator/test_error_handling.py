@@ -181,7 +181,7 @@ class TestCoordinatorErrorHandling(CoordinatorTestBase):
             # Should have warning about duplicate checking failure
             self.assertIn('Duplicate checking failed', str(result.warnings))
             
-            # Verify debug print for duplicate checking error (lines 170-178)
+            # Verify that a debug print was made for the duplicate checking error
             debug_calls = [call.args[0] for call in mock_print.call_args_list if 'DEBUG' in str(call.args)]
             self.assertTrue(any('Duplicate checking failed, treating all as new' in call for call in debug_calls))
 

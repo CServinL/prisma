@@ -106,3 +106,18 @@ class CoordinatorTestBase(unittest.TestCase):
             top_authors=['Alice Smith', 'Bob Jones', 'Carol Brown', 'David Wilson'],
             common_themes=['neural networks', 'deep learning']
         )
+    
+    def assert_debug_message_printed(self, mock_print, message: str, msg: str | None = None):
+        """
+        Helper method to assert that a debug message was printed.
+        
+        Args:
+            mock_print: The mocked print function
+            message: The message string to look for in debug output
+            msg: Optional custom failure message
+        """
+        debug_calls = [call.args[0] for call in mock_print.call_args_list if 'DEBUG' in str(call.args)]
+        self.assertTrue(
+            any(message in call for call in debug_calls),
+            msg or f"Expected debug message containing '{message}' not found. Debug calls: {debug_calls}"
+        )

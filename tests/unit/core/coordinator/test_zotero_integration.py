@@ -105,8 +105,7 @@ class TestCoordinatorZoteroIntegration(CoordinatorTestBase):
             self.assertEqual(result, 0)
             
             # Verify debug print for error
-            debug_calls = [call.args[0] for call in mock_print.call_args_list if 'DEBUG' in str(call.args)]
-            self.assertTrue(any('Failed to save items to Zotero' in call for call in debug_calls))
+            self.assert_debug_message_printed(mock_print, 'Failed to save items to Zotero')
     
     def test_save_papers_to_zotero_no_papers(self):
         """Test _save_papers_to_zotero with no papers."""
@@ -271,5 +270,4 @@ class TestCoordinatorZoteroIntegration(CoordinatorTestBase):
             self.assertEqual(result, 0)
             
             # Verify debug message about no papers meeting threshold
-            debug_calls = [call.args[0] for call in mock_print.call_args_list if 'DEBUG' in str(call.args)]
-            self.assertTrue(any('No papers meet minimum confidence threshold' in call for call in debug_calls))
+            self.assert_debug_message_printed(mock_print, 'No papers meet minimum confidence threshold')

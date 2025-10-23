@@ -111,9 +111,9 @@ class TestCoordinatorErrorHandling(CoordinatorTestBase):
             self.assertTrue(result.success)
             self.assertEqual(result.papers_analyzed, 1)
             
-            # Verify debug print for relevance assessment error (line 128)
-            debug_calls = [call.args[0] for call in mock_print.call_args_list if 'DEBUG' in str(call.args)]
-            self.assertTrue(any('Relevance assessment failed' in call and 'keeping paper' in call for call in debug_calls))
+            # Verify debug print for relevance assessment error
+            self.assert_debug_message_printed(mock_print, 'Relevance assessment failed')
+            self.assert_debug_message_printed(mock_print, 'keeping paper')
 
     def test_duplicate_checking_error_with_debug(self):
         """Test duplicate checking error handling with debug output in main workflow."""

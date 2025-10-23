@@ -398,18 +398,18 @@ class PrismaCoordinator:
             # Save to Zotero using unified interface
             try:
                 # Use the unified save method that all clients support
-                if self.zotero_agent.client:
-                    saved_count = self.zotero_agent.client.save_items(
-                        items=zotero_items,
-                        collection_key=None  # No specific collection for coordinator saves
-                    )
-                    if self.debug:
-                        print(f"[DEBUG] Successfully saved {saved_count} items via unified interface")
-                    return saved_count if saved_count is not None else len(zotero_items)
-                else:
+                if not self.zotero_agent.client:
                     if self.debug:
                         print(f"[DEBUG] No Zotero client available for saving")
                     return 0
+                
+                saved_count = self.zotero_agent.client.save_items(
+                    items=zotero_items,
+                    collection_key=None  # No specific collection for coordinator saves
+                )
+                if self.debug:
+                    print(f"[DEBUG] Successfully saved {saved_count} items via unified interface")
+                return saved_count if saved_count is not None else len(zotero_items)
             except Exception as e:
                 if self.debug:
                     print(f"[DEBUG] Failed to save items to Zotero: {e}")

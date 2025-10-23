@@ -248,6 +248,6 @@ class TestCoordinatorErrorHandling(CoordinatorTestBase):
             self.assertTrue(result.success)
             self.assertEqual(result.papers_analyzed, 1)
             
-            # Verify debug print for duplicate found (lines 170-172)
+            # Verify debug print for duplicate found
             debug_calls = [call.args[0] for call in mock_print.call_args_list if 'DEBUG' in str(call.args)]
             self.assertTrue(any('📚 Duplicate found in Zotero' in call for call in debug_calls))

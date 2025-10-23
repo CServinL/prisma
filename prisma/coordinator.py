@@ -377,7 +377,7 @@ class PrismaCoordinator:
                                for author in paper.authors],
                     'abstractNote': paper.abstract,
                     'url': paper.url,
-                    'DOI': paper.doi or '',  # doi is optional field in model
+                    'DOI': paper.doi or '',  # doi is optional field; use empty string if None
                     'publicationTitle': getattr(paper, 'venue', ''),  # venue not in model
                     'date': str(getattr(paper, 'year', '')),  # year not in model
                     'tags': [{'tag': f'Prisma-Discovery'}, 

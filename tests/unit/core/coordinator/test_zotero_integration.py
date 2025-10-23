@@ -211,7 +211,7 @@ class TestCoordinatorZoteroIntegration(CoordinatorTestBase):
             
             # Verify the item structure
             call_args = mock_zotero_agent.client.save_items.call_args
-            items = call_args[1]['items']  # keyword argument
+            items = call_args.kwargs['items']  # keyword argument
             
             self.assertEqual(len(items), 1)
             item = items[0]

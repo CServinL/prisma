@@ -378,8 +378,8 @@ class PrismaCoordinator:
                     'abstractNote': paper.abstract,
                     'url': paper.url,
                     'DOI': paper.doi or '',  # doi is optional field; use empty string if None
-                    'publicationTitle': getattr(paper, 'venue', ''),  # venue not in model
-                    'date': str(getattr(paper, 'year', '')),  # year not in model
+                    'publicationTitle': paper.journal or '',  # journal field from model
+                    'date': paper.published_date or '',  # published_date field from model
                     'tags': [{'tag': f'Prisma-Discovery'}, 
                             {'tag': f'Confidence-{getattr(paper, "confidence_score", 0.0):.2f}'},
                             {'tag': f'Source-{paper.source}'},
@@ -405,7 +405,7 @@ class PrismaCoordinator:
                     )
                     if self.debug:
                         print(f"[DEBUG] Successfully saved {saved_count} items via unified interface")
-                    return saved_count if saved_count else len(zotero_items)
+                    return saved_count if saved_count is not None else len(zotero_items)
                 else:
                     if self.debug:
                         print(f"[DEBUG] No Zotero client available for saving")

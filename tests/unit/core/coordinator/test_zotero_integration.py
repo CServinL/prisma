@@ -147,7 +147,7 @@ class TestCoordinatorZoteroIntegration(CoordinatorTestBase):
         mock_zotero_agent = Mock()
         coordinator.zotero_agent = mock_zotero_agent
         mock_zotero_agent.client = Mock()
-        mock_zotero_agent.client.save_items.return_value = ['item1', 'item2']
+        mock_zotero_agent.client.save_items.return_value = 1  # Return count of items saved
         
         # Test papers with different confidence scores
         papers = [
@@ -215,11 +215,12 @@ class TestCoordinatorZoteroIntegration(CoordinatorTestBase):
             
             self.assertEqual(len(items), 1)
             item = items[0]
-            self.assertEqual(item['title'], 'Test Paper 2')  # Updated to match mock data
+            # Should save the second paper (Test Paper 2 with 0.8 confidence, above 0.5 threshold)
+            self.assertEqual(item['title'], 'Test Paper 2')
             self.assertEqual(item['itemType'], 'journalArticle')
             self.assertIn('Prisma-Discovery', [tag['tag'] for tag in item['tags']])
             self.assertIn('Confidence-0.80', [tag['tag'] for tag in item['tags']])
-            self.assertIn('Source-test', [tag['tag'] for tag in item['tags']])  # Updated source
+            self.assertIn('Source-test', [tag['tag'] for tag in item['tags']])
             self.assertIn('Topic-test topic', [tag['tag'] for tag in item['tags']])
             
             # Since we don't have matching summaries in our mock, check base abstract

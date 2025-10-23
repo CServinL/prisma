@@ -1,17 +1,6 @@
 """
 Prisma Coordinator - Main orchestration logic for literature reviews.
-MVP: Fast, simple, working
-
-if relevance_result.is_relevant:
-    relevant_papers.append(paper)
-    if self.debug:
-        level = relevance_result.relevance_level
-        print(f"[DEBUG] Relevant paper: {paper.title[:50]}... ({level})")
-else:
-    discarded_papers += 1
-    if self.debug:
-        level = relevance_result.relevance_level
-        print(f"[DEBUG] Discarded paper: {paper.title[:50]}... ({level})")tion.
+MVP: Fast, simple, working implementation.
 """
 
 import json
@@ -410,7 +399,7 @@ class PrismaCoordinator:
             try:
                 # Use the unified save method that all clients support
                 if self.zotero_agent.client:
-                    created_keys = self.zotero_agent.client.save_items(
+                    self.zotero_agent.client.save_items(
                         items=zotero_items,
                         collection_key=None  # No specific collection for coordinator saves
                     )

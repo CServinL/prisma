@@ -78,7 +78,7 @@ class TestResearchStreamManager:
     def manager(self, mock_config, mock_zotero_client):
         """Create a ResearchStreamManager instance for testing."""
         with patch('prisma.services.research_stream_manager.ConfigLoader') as mock_config_loader, \
-             patch.object(ResearchStreamManager, '_create_zotero_client') as mock_create_client, \
+             patch.object(ResearchStreamManager, '_try_create_zotero_client') as mock_create_client, \
              patch.object(ResearchStreamManager, '_load_streams') as mock_load:
             
             mock_config_loader.return_value.config = mock_config
@@ -94,7 +94,7 @@ class TestResearchStreamManager:
         assert manager.streams_file == Path("./data") / "research_streams.json"
         assert isinstance(manager._streams_cache, dict)
     
-    def test_create_zotero_client_success(self, mock_config):
+    def test_try_create_zotero_client_success(self, mock_config):
         """Test successful Zotero client creation."""
         with patch('prisma.services.research_stream_manager.ConfigLoader') as mock_config_loader, \
              patch('prisma.integrations.zotero.ZoteroClient') as mock_zotero_client_class, \
@@ -109,24 +109,24 @@ class TestResearchStreamManager:
             manager = ResearchStreamManager()
             assert manager.zotero_client == mock_client
     
-    def test_create_zotero_client_failure(self, mock_config):
-        """Test Zotero client creation failure."""
+    def test_try_create_zotero_client_failure(self, mock_config):
+        """Test Zotero client creation failure degrades gracefully (returns None, no raise)."""
         with patch('prisma.services.research_stream_manager.ConfigLoader') as mock_config_loader, \
              patch('prisma.integrations.zotero.ZoteroClient') as mock_zotero_client_class, \
              patch.object(ResearchStreamManager, '_load_streams'):
-            
+
             mock_config_loader.return_value.config = mock_config
             mock_zotero_client_class.from_config.side_effect = Exception("Client creation failed")
-            
-            with pytest.raises(ValueError, match="Failed to initialize Zotero client"):
-                ResearchStreamManager()
+
+            manager = ResearchStreamManager()
+            assert manager.zotero_client is None
 
     def test_load_streams_success(self, mock_config, sample_stream_data):
         """Test successful loading of streams from file."""
         mock_file_content = json.dumps(sample_stream_data)
         
         with patch('prisma.services.research_stream_manager.ConfigLoader') as mock_config_loader, \
-             patch.object(ResearchStreamManager, '_create_zotero_client'), \
+             patch.object(ResearchStreamManager, '_try_create_zotero_client'), \
              patch('builtins.open', mock_open(read_data=mock_file_content)), \
              patch('pathlib.Path.exists', return_value=True):
             
@@ -141,7 +141,7 @@ class TestResearchStreamManager:
     def test_load_streams_file_not_exists(self, mock_config):
         """Test loading when streams file doesn't exist."""
         with patch('prisma.services.research_stream_manager.ConfigLoader') as mock_config_loader, \
-             patch.object(ResearchStreamManager, '_create_zotero_client'), \
+             patch.object(ResearchStreamManager, '_try_create_zotero_client'), \
              patch('pathlib.Path.exists', return_value=False):
             
             mock_config_loader.return_value.config = mock_config
@@ -152,7 +152,7 @@ class TestResearchStreamManager:
     def test_load_streams_invalid_json(self, mock_config):
         """Test loading with invalid JSON file."""
         with patch('prisma.services.research_stream_manager.ConfigLoader') as mock_config_loader, \
-             patch.object(ResearchStreamManager, '_create_zotero_client'), \
+             patch.object(ResearchStreamManager, '_try_create_zotero_client'), \
              patch('builtins.open', mock_open(read_data="invalid json")), \
              patch('pathlib.Path.exists', return_value=True):
             
@@ -454,3 +454,152 @@ class TestResearchStreamManager:
         
         # Check auto_generated flag
         assert all(tag.auto_generated for tag in tags)
+
+
+class TestUpdateStreamConnectivityOrder:
+    """
+    Connectivity check must fire BEFORE _ensure_stream_collection() so we never
+    touch Zotero when offline and only then discover we can't search.
+    """
+
+    @pytest.fixture
+    def manager_for_update(self, mock_config, mock_zotero_client):
+        with patch('prisma.services.research_stream_manager.ConfigLoader') as mock_config_loader, \
+             patch.object(ResearchStreamManager, '_try_create_zotero_client') as mock_create_client, \
+             patch.object(ResearchStreamManager, '_load_streams'):
+            mock_config_loader.return_value.config = mock_config
+            mock_create_client.return_value = mock_zotero_client
+            mgr = ResearchStreamManager()
+        return mgr
+
+    @pytest.fixture
+    def mock_config(self):
+        return {
+            'sources': {
+                'zotero': {
+                    'enabled': True,
+                    'library_type': 'user',
+                    'library_id': '12345',
+                    'api_key': 'test_key',
+                }
+            }
+        }
+
+    @pytest.fixture
+    def mock_zotero_client(self):
+        client = Mock()
+        client.client_type = "test"
+        client.client_info = "test client"
+        client.create_collection.return_value = Mock(key="TEST123")
+        return client
+
+    def _active_stream(self, overdue=True):
+        from datetime import timedelta
+        next_upd = datetime.utcnow() - timedelta(hours=1) if overdue else datetime.utcnow() + timedelta(days=7)
+        return ResearchStream(
+            id="s1",
+            name="S1",
+            description="desc",
+            collection_key="C1",
+            collection_name="Prisma: S1",
+            parent_collection_key=None,
+            search_criteria=SearchCriteria(query="transformers", since_date=None),
+            smart_tags=[],
+            refresh_frequency=RefreshFrequency.WEEKLY,
+            status=StreamStatus.ACTIVE,
+            last_updated=datetime.utcnow() - timedelta(days=8),
+            next_update=next_upd,
+        )
+
+    def test_offline_returns_failure_without_touching_collection(self, manager_for_update):
+        mgr = manager_for_update
+        stream = self._active_stream(overdue=True)
+        mgr._streams_cache["s1"] = stream
+
+        with patch('prisma.services.research_stream_manager.connectivity') as mock_conn, \
+             patch.object(mgr, '_ensure_stream_collection') as mock_ensure:
+            mock_conn.is_online = False
+            result = mgr.update_stream("s1")
+
+        assert result.success is False
+        assert any("offline" in e.lower() for e in result.errors)
+        mock_ensure.assert_not_called()
+
+    def test_online_proceeds_to_collection_check(self, manager_for_update):
+        mgr = manager_for_update
+        stream = self._active_stream(overdue=True)
+        mgr._streams_cache["s1"] = stream
+
+        mock_search_result = Mock()
+        mock_search_result.papers = []
+
+        with patch('prisma.services.research_stream_manager.connectivity') as mock_conn, \
+             patch.object(mgr, '_ensure_stream_collection', return_value="C1") as mock_ensure, \
+             patch('prisma.agents.search_agent.SearchAgent') as mock_sa_cls, \
+             patch.object(mgr, '_save_streams'):
+            mock_conn.is_online = True
+            mock_sa = Mock()
+            mock_sa.search.return_value = mock_search_result
+            mock_sa_cls.return_value = mock_sa
+            mgr.zotero_client.search_items.return_value = []
+            result = mgr.update_stream("s1")
+
+        mock_ensure.assert_called_once_with(stream)
+
+    def test_not_due_returns_early_without_connectivity_check(self, manager_for_update):
+        mgr = manager_for_update
+        stream = self._active_stream(overdue=False)
+        mgr._streams_cache["s1"] = stream
+
+        with patch('prisma.services.research_stream_manager.connectivity') as mock_conn:
+            mock_conn.is_online = False  # even offline, "not due" fires first
+            result = mgr.update_stream("s1", force=False)
+
+        assert result.success is False
+        assert any("not due" in e.lower() for e in result.errors)
+
+    def test_force_skips_due_check_but_still_checks_connectivity(self, manager_for_update):
+        mgr = manager_for_update
+        stream = self._active_stream(overdue=False)
+        mgr._streams_cache["s1"] = stream
+
+        with patch('prisma.services.research_stream_manager.connectivity') as mock_conn, \
+             patch.object(mgr, '_ensure_stream_collection'):
+            mock_conn.is_online = False
+            result = mgr.update_stream("s1", force=True)
+
+        assert result.success is False
+        assert any("offline" in e.lower() for e in result.errors)
+
+    def test_unknown_stream_raises_error(self, manager_for_update):
+        mgr = manager_for_update
+        with patch('prisma.services.research_stream_manager.connectivity') as mock_conn:
+            mock_conn.is_online = True
+            result = mgr.update_stream("does-not-exist")
+        assert result.success is False
+
+    def test_update_all_streams_online(self, manager_for_update):
+        """update_stream called for each active overdue stream."""
+        mgr = manager_for_update
+        s1 = self._active_stream(overdue=True)
+        s2 = self._active_stream(overdue=True)
+        s2.id = "s2"
+        mgr._streams_cache["s1"] = s1
+        mgr._streams_cache["s2"] = s2
+
+        mock_search_result = Mock()
+        mock_search_result.papers = []
+
+        with patch('prisma.services.research_stream_manager.connectivity') as mock_conn, \
+             patch.object(mgr, '_ensure_stream_collection', return_value="C1"), \
+             patch('prisma.agents.search_agent.SearchAgent') as mock_sa_cls, \
+             patch.object(mgr, '_save_streams'):
+            mock_conn.is_online = True
+            mock_sa = Mock()
+            mock_sa.search.return_value = mock_search_result
+            mock_sa_cls.return_value = mock_sa
+            mgr.zotero_client.search_items.return_value = []
+
+            results = [mgr.update_stream(sid) for sid in ("s1", "s2")]
+
+        assert all(r.success for r in results)

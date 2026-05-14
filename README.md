@@ -95,38 +95,41 @@ prisma zotero list-collections
 
 ## Quick Start
 
+### Regular users (install from PyPI)
+
 ```bash
-# Clone and install
+pip install prisma
+prisma streams create "AI Research" "artificial intelligence machine learning" --frequency weekly
+prisma streams list
+prisma streams update --all
+```
+
+### Developers (install from source, editable)
+
+```bash
 git clone https://github.com/CServinL/prisma.git
 cd prisma
-poetry install
-
-# Create your first research stream for library management
-poetry run prisma streams create "AI Research" "artificial intelligence machine learning" --frequency weekly
-
-# List and update streams
-poetry run prisma streams list
-poetry run prisma streams update --all
+python3 -m venv ~/prisma
+source ~/prisma/bin/activate
+pip install -e ".[dev]"
+prisma --help
 ```
+
+Changes to source files are immediately active — no reinstall needed.
 
 ## Documentation
 
-### Getting Started
-- 🚀 **[Quick Start Guide](docs/quick-start.md)** - Get up and running in minutes
-- 🌊 **[Research Streams Guide](docs/research-streams-guide.md)** - Complete streams documentation
-- 🔧 **[Development Setup](docs/development-setup.md)** - Full development environment setup
+**[📖 Wiki](docs/wiki/README.md)** — complete documentation
 
-### Core Features
-- 🏗️ **[Architecture Overview](docs/architecture.md)** - System design and data flow
-- ⚙️ **[Configuration Guide](docs/configuration.md)** - YAML configuration and options
-- 🔗 **[Zotero Integration](docs/zotero-integration.md)** - Complete Zotero setup and usage
-- ⭐ **[Quality Rating System](docs/rating-system.md)** - Source quality management and academic validation
-- 📖 **[CLI Documentation](docs/cli.md)** - Complete command-line interface reference
-
-### Development
-- 📅 **[Development Timeline](docs/development-timeline.md)** - 8-day MVP progress
-- 🗺️ **[Roadmap](docs/roadmap.md)** - Future features and phases
-- 🏛️ **[Architecture Decision Records](docs/)** - Technical decisions and rationale
+- [Features](docs/wiki/features.md) — what Prisma does and how
+- [Installation](docs/wiki/installation.md) — user and developer setup
+- [CLI Reference](docs/wiki/cli.md) — all commands and options
+- [Configuration](docs/wiki/configuration.md) — YAML reference
+- [Research Streams](docs/wiki/streams.md) — persistent topic monitoring
+- [Sources](docs/wiki/sources.md) — quality ratings and academic validation
+- [Zotero Integration](docs/wiki/zotero.md) — read/write split, offline mode
+- [Architecture](docs/wiki/architecture.md) — components and data flow
+- [Roadmap](docs/wiki/roadmap.md) — planned features
 
 ## Technology Stack
 

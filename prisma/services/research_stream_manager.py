@@ -11,12 +11,14 @@ from typing import List, Dict, Any, Optional, Set
 from datetime import datetime
 from pathlib import Path
 
+from ..connectivity import monitor as connectivity
 from ..storage.models.research_stream_models import (
     ResearchStream, StreamStatus, RefreshFrequency, SmartTag, TagCategory,
     SearchCriteria, StreamUpdateResult, StreamSummary
 )
 from ..storage.models.zotero_models import ZoteroItem, ZoteroCollection, ZoteroSearchQuery, ZoteroSearchResult
 from ..storage.models.api_response_models import LLMRelevanceResult, ZoteroItemCreationData
+from ..storage.pending_queue import PendingWriteQueue
 from ..utils.config import ConfigLoader
 
 logger = logging.getLogger(__name__)
@@ -40,28 +42,51 @@ class ResearchStreamManager:
     
     def __init__(self, config_path: Optional[str] = None):
         """Initialize the research stream manager"""
+        if config_path:
+            import os
+            os.environ['PRISMA_CONFIG'] = config_path
         self.config = ConfigLoader().config
-        self.zotero_client = self._create_zotero_client()
+        self.zotero_client = self._try_create_zotero_client()
+        self._pending_queue = PendingWriteQueue()
         self.streams_file = Path("./data") / "research_streams.json"
         self._streams_cache: Dict[str, ResearchStream] = {}
         self._load_streams()
+
+        # Try to sync pending writes if we're online and have a client
+        if connectivity.is_online and self.zotero_client and self._pending_queue:
+            self._flush_pending()
     
-    def _create_zotero_client(self):
-        """Create and configure Zotero client"""
-        # Use the unified ZoteroClient that handles all implementation details
+    def _try_create_zotero_client(self):
+        """Create and configure Zotero client, returning None if unavailable."""
         from ..integrations.zotero import ZoteroClient
-        
+
         logger.info("🔧 Creating unified Zotero client")
-        
         try:
             client = ZoteroClient.from_config(self.config)
-            logger.info(f"✅ Successfully created {client.client_type} Zotero client")
-            logger.info(f"📊 Client info: {client.client_info}")
+            logger.info("✅ Successfully created %s Zotero client", client.client_type)
             return client
-            
-        except Exception as e:
-            logger.error(f"❌ Failed to create Zotero client: {e}")
-            raise ValueError(f"Failed to initialize Zotero client: {e}")
+        except Exception as exc:
+            logger.warning("⚠️  Zotero client unavailable (offline or unconfigured): %s", exc)
+            logger.info("Prisma will continue in offline mode — writes queued for later sync")
+            return None
+
+    def _flush_pending(self):
+        """Flush pending write queue to Zotero (called on start when online)."""
+        if not self.zotero_client:
+            return
+        ok, fail = self._pending_queue.flush(self.zotero_client)
+        if ok or fail:
+            logger.info("Sync on start: %d flushed, %d failed", ok, fail)
+
+    def sync_pending(self) -> tuple[int, int]:
+        """Public method for `prisma sync` CLI command. Returns (success, failed)."""
+        if not connectivity.is_online:
+            logger.warning("Cannot sync: offline")
+            return 0, 0
+        if not self.zotero_client:
+            logger.warning("Cannot sync: no Zotero client")
+            return 0, 0
+        return self._pending_queue.flush(self.zotero_client)
     
     def _load_streams(self):
         """Load research streams from storage"""
@@ -151,16 +176,28 @@ class ResearchStreamManager:
                 status=StreamStatus.ACTIVE
             )
             
-            # Create Zotero collection (if supported by client)
+            # Create Zotero collection — queue if offline or client unavailable
             collection_data = stream.to_zotero_collection()
-            created_collection = self.zotero_client.create_collection(collection_data)
-            
-            if created_collection:
-                stream.collection_key = created_collection.key
-                logger.info(f"Created Zotero collection: {created_collection.key}")
+            if self.zotero_client and connectivity.is_online:
+                try:
+                    created_collection = self.zotero_client.create_collection(collection_data)
+                    if created_collection:
+                        stream.collection_key = created_collection.key
+                        logger.info("Created Zotero collection: %s", created_collection.key)
+                    else:
+                        logger.warning(
+                            "Failed to create Zotero collection '%s' - local API may not support collection creation",
+                            stream.collection_name,
+                        )
+                except Exception as exc:
+                    logger.warning("Collection creation failed (%s) — queued for sync", exc)
+                    self._pending_queue.enqueue("create_collection", collection_data)
             else:
-                logger.warning(f"Failed to create Zotero collection '{stream.collection_name}' - local API may not support collection creation")
-                logger.info("Items will be saved to library without collection organization")
+                logger.info(
+                    "Offline or no Zotero client — collection '%s' creation queued for sync",
+                    stream.collection_name,
+                )
+                self._pending_queue.enqueue("create_collection", collection_data)
             
             # Store the stream
             self._streams_cache[stream_id] = stream
@@ -259,13 +296,6 @@ class ResearchStreamManager:
             if not stream:
                 raise ResearchStreamError(f"Stream not found: {stream_id}")
             
-            # Ensure the stream's collection exists in Zotero
-            collection_key = self._ensure_stream_collection(stream)
-            if collection_key:
-                logger.info(f"Using collection: {stream.collection_name} -> {collection_key}")
-            else:
-                logger.warning(f"No collection available for stream {stream_id}")
-            
             # Check if update is due
             if not force and not stream.is_due_for_update():
                 return StreamUpdateResult(
@@ -273,7 +303,24 @@ class ResearchStreamManager:
                     success=False,
                     errors=["Update not due"]
                 )
-            
+
+            # Searching arXiv / Semantic Scholar requires internet
+            if not connectivity.is_online:
+                logger.warning("Cannot update stream %s: offline (no internet)", stream_id)
+                return StreamUpdateResult(
+                    stream_id=stream_id,
+                    success=False,
+                    errors=["Offline — stream update requires internet access"],
+                    duration_seconds=0.0,
+                )
+
+            # Ensure the stream's collection exists in Zotero
+            collection_key = self._ensure_stream_collection(stream)
+            if collection_key:
+                logger.info(f"Using collection: {stream.collection_name} -> {collection_key}")
+            else:
+                logger.warning(f"No collection available for stream {stream_id}")
+
             # Import SearchAgent for internet searches
             from ..agents.search_agent import SearchAgent
             search_agent = SearchAgent()

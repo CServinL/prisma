@@ -78,7 +78,7 @@ class TestResearchStreamManager:
     def manager(self, mock_config, mock_zotero_client):
         """Create a ResearchStreamManager instance for testing."""
         with patch('prisma.services.research_stream_manager.ConfigLoader') as mock_config_loader, \
-             patch.object(ResearchStreamManager, '_create_zotero_client') as mock_create_client, \
+             patch.object(ResearchStreamManager, '_try_create_zotero_client') as mock_create_client, \
              patch.object(ResearchStreamManager, '_load_streams') as mock_load:
             
             mock_config_loader.return_value.config = mock_config
@@ -94,7 +94,7 @@ class TestResearchStreamManager:
         assert manager.streams_file == Path("./data") / "research_streams.json"
         assert isinstance(manager._streams_cache, dict)
     
-    def test_create_zotero_client_success(self, mock_config):
+    def test_try_create_zotero_client_success(self, mock_config):
         """Test successful Zotero client creation."""
         with patch('prisma.services.research_stream_manager.ConfigLoader') as mock_config_loader, \
              patch('prisma.integrations.zotero.ZoteroClient') as mock_zotero_client_class, \
@@ -109,24 +109,24 @@ class TestResearchStreamManager:
             manager = ResearchStreamManager()
             assert manager.zotero_client == mock_client
     
-    def test_create_zotero_client_failure(self, mock_config):
-        """Test Zotero client creation failure."""
+    def test_try_create_zotero_client_failure(self, mock_config):
+        """Test Zotero client creation failure degrades gracefully (returns None, no raise)."""
         with patch('prisma.services.research_stream_manager.ConfigLoader') as mock_config_loader, \
              patch('prisma.integrations.zotero.ZoteroClient') as mock_zotero_client_class, \
              patch.object(ResearchStreamManager, '_load_streams'):
-            
+
             mock_config_loader.return_value.config = mock_config
             mock_zotero_client_class.from_config.side_effect = Exception("Client creation failed")
-            
-            with pytest.raises(ValueError, match="Failed to initialize Zotero client"):
-                ResearchStreamManager()
+
+            manager = ResearchStreamManager()
+            assert manager.zotero_client is None
 
     def test_load_streams_success(self, mock_config, sample_stream_data):
         """Test successful loading of streams from file."""
         mock_file_content = json.dumps(sample_stream_data)
         
         with patch('prisma.services.research_stream_manager.ConfigLoader') as mock_config_loader, \
-             patch.object(ResearchStreamManager, '_create_zotero_client'), \
+             patch.object(ResearchStreamManager, '_try_create_zotero_client'), \
              patch('builtins.open', mock_open(read_data=mock_file_content)), \
              patch('pathlib.Path.exists', return_value=True):
             
@@ -141,7 +141,7 @@ class TestResearchStreamManager:
     def test_load_streams_file_not_exists(self, mock_config):
         """Test loading when streams file doesn't exist."""
         with patch('prisma.services.research_stream_manager.ConfigLoader') as mock_config_loader, \
-             patch.object(ResearchStreamManager, '_create_zotero_client'), \
+             patch.object(ResearchStreamManager, '_try_create_zotero_client'), \
              patch('pathlib.Path.exists', return_value=False):
             
             mock_config_loader.return_value.config = mock_config
@@ -152,7 +152,7 @@ class TestResearchStreamManager:
     def test_load_streams_invalid_json(self, mock_config):
         """Test loading with invalid JSON file."""
         with patch('prisma.services.research_stream_manager.ConfigLoader') as mock_config_loader, \
-             patch.object(ResearchStreamManager, '_create_zotero_client'), \
+             patch.object(ResearchStreamManager, '_try_create_zotero_client'), \
              patch('builtins.open', mock_open(read_data="invalid json")), \
              patch('pathlib.Path.exists', return_value=True):
             

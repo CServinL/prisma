@@ -9,10 +9,12 @@ from typing import Dict, List, Any
 import time
 
 from .agents.search_agent import SearchAgent
-from .agents.analysis_agent import AnalysisAgent  
+from .agents.analysis_agent import AnalysisAgent
 from .agents.report_agent import ReportAgent
 from .agents.zotero_agent import ZoteroAgent, ZoteroSearchCriteria
+from .connectivity import monitor as connectivity
 from .storage.models.agent_models import CoordinatorResult
+from .storage.pending_queue import PendingWriteQueue
 from .utils.config import config
 
 
@@ -24,7 +26,8 @@ class PrismaCoordinator:
         self.search_agent = SearchAgent()
         self.analysis_agent = AnalysisAgent()
         self.report_agent = ReportAgent()
-        
+        self._pending_queue = PendingWriteQueue()
+
         # Initialize Zotero agent for saving papers
         self.zotero_agent = None
         if config.get('sources.zotero.enabled', False) and config.get('sources.zotero.auto_save_papers', False):
@@ -36,9 +39,12 @@ class PrismaCoordinator:
             except Exception as e:
                 if debug:
                     print(f"[DEBUG] Failed to initialize Zotero agent: {e}")
-        
+
         if debug:
             print("[DEBUG] Coordinator initialized")
+            print(f"[DEBUG] Connectivity: {'online' if connectivity.is_online else 'offline'}")
+            if self._pending_queue:
+                print(f"[DEBUG] Pending queue: {self._pending_queue.pending_count} action(s)")
     
     def run_review(self, config: Dict[str, Any]) -> CoordinatorResult:
         """
@@ -53,7 +59,19 @@ class PrismaCoordinator:
         start_time = time.time()
         errors = []
         warnings = []
-        
+
+        # Literature review requires internet (arXiv, Semantic Scholar)
+        if not connectivity.is_online:
+            return CoordinatorResult(
+                success=False,
+                papers_analyzed=0,
+                authors_found=0,
+                output_file=config.get('output_file', './offline_error.md'),
+                errors=["Offline — literature review requires internet access"],
+                total_duration=0.0,
+                pipeline_metadata={"online": False},
+            )
+
         try:
             # Step 1: Search for papers
             if self.debug:

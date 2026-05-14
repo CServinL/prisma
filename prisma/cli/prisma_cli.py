@@ -6,11 +6,9 @@ Commands for managing research streams and generating literature reviews
 using Zotero integration and multi-source academic search.
 """
 
+import os
 import sys
 import click
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from .commands.streams import streams_group
 from .commands.zotero import zotero_group
@@ -45,18 +43,22 @@ def review(topic: str, output: str, sources: str, limit: int,
     TOPIC: Research topic to search for (e.g., "mechanistic interpretability")
     """
     try:
+        if config_file:
+            os.environ['PRISMA_CONFIG'] = config_file
+
         from ..coordinator import PrismaCoordinator
         from ..connectivity import monitor as connectivity
-        from ..utils.config import config
+        from ..utils.config import ConfigLoader
+        cfg = ConfigLoader()
 
-        if not connectivity.is_online:
+        if not zotero_only and not connectivity.is_online:
             click.echo("⚠️  Offline — literature review requires internet access.", err=True)
             raise click.ClickException("No internet connection")
 
         click.echo(f"🔍 Generating literature review for: {topic}")
 
-        search_config = config.get_search_config()
-        output_config = config.get_output_config()
+        search_config = cfg.get_search_config()
+        output_config = cfg.get_output_config()
 
         if not sources:
             sources = ','.join(search_config.sources)
@@ -65,6 +67,9 @@ def review(topic: str, output: str, sources: str, limit: int,
         if not output:
             topic_safe = topic.replace(' ', '_').replace('/', '_')
             output = f"{output_config.directory}/literature_review_{topic_safe}.md"
+
+        if zotero_only:
+            sources = 'zotero'
 
         coordinator = PrismaCoordinator(debug=True)
 
@@ -122,9 +127,11 @@ def status(verbose: bool):
         click.echo("  ⚠️  Internet: offline (stream updates and reviews unavailable)")
 
     # 1. Configuration
+    config = None
     click.echo("\n📋 Configuration:")
     try:
-        from ..utils.config import config
+        from ..utils.config import ConfigLoader
+        config = ConfigLoader()
         click.echo("  ✅ Config loaded")
         if verbose:
             click.echo(f"     LLM: {config.get('llm.provider', 'ollama')} ({config.get('llm.model', 'llama3.1:8b')})")
@@ -147,33 +154,36 @@ def status(verbose: bool):
 
     # 3. Zotero
     click.echo("\n📚 Zotero Integration:")
-    try:
-        zotero_mode = config.get('sources.zotero.mode', 'hybrid')
-        if zotero_mode == 'local_api':
-            import requests as _req
-            server_url = config.get('sources.zotero.server_url', 'http://127.0.0.1:23119')
-            try:
-                resp = _req.get(f"{server_url}/connector/ping", timeout=2)
-                if resp.status_code == 200:
-                    click.echo("  ✅ Zotero Local API: connected")
-                    if verbose:
-                        click.echo(f"     Server: {server_url}")
-                else:
-                    click.echo("  ❌ Zotero Local API: not responding")
+    if config is None:
+        click.echo("  ⚠️  Skipped — config not loaded")
+    else:
+        try:
+            zotero_mode = config.get('sources.zotero.mode', 'hybrid')
+            if zotero_mode == 'local_api':
+                import requests as _req
+                server_url = config.get('sources.zotero.server_url', 'http://127.0.0.1:23119')
+                try:
+                    resp = _req.get(f"{server_url}/connector/ping", timeout=2)
+                    if resp.status_code == 200:
+                        click.echo("  ✅ Zotero Local API: connected")
+                        if verbose:
+                            click.echo(f"     Server: {server_url}")
+                    else:
+                        click.echo("  ❌ Zotero Local API: not responding")
+                        all_good = False
+                except Exception:
+                    click.echo("  ❌ Zotero Local API: not connected (start Zotero desktop)")
                     all_good = False
-            except Exception:
-                click.echo("  ❌ Zotero Local API: not connected (start Zotero desktop)")
-                all_good = False
-        else:
-            api_key = config.get('sources.zotero.api_key', '')
-            library_id = config.get('sources.zotero.library_id', '')
-            if api_key and library_id:
-                click.echo("  ✅ Zotero API: credentials configured")
             else:
-                click.echo("  ⚠️  Zotero API: no credentials (set api_key + library_id)")
-    except Exception as exc:
-        click.echo(f"  ❌ Zotero error: {exc}")
-        all_good = False
+                api_key = config.get('sources.zotero.api_key', '')
+                library_id = config.get('sources.zotero.library_id', '')
+                if api_key and library_id:
+                    click.echo("  ✅ Zotero API: credentials configured")
+                else:
+                    click.echo("  ⚠️  Zotero API: no credentials (set api_key + library_id)")
+        except Exception as exc:
+            click.echo(f"  ❌ Zotero error: {exc}")
+            all_good = False
 
     # 4. Dependencies
     click.echo("\n📦 Dependencies:")
@@ -192,21 +202,24 @@ def status(verbose: bool):
 
     # 5. LLM
     click.echo("\n🤖 LLM (Ollama):")
-    try:
-        import requests as _req
-        llm_host = config.get('llm.host', 'localhost:11434')
-        resp = _req.get(f"http://{llm_host}/api/tags", timeout=5)
-        if resp.status_code == 200:
-            click.echo(f"  ✅ Ollama: connected ({llm_host})")
-            if verbose:
-                models = resp.json().get('models', [])
-                click.echo(f"     Models available: {len(models)}")
-        else:
-            click.echo(f"  ❌ Ollama: server error {resp.status_code}")
+    if config is None:
+        click.echo("  ⚠️  Skipped — config not loaded")
+    else:
+        try:
+            import requests as _req
+            llm_host = config.get('llm.host', 'localhost:11434')
+            resp = _req.get(f"http://{llm_host}/api/tags", timeout=5)
+            if resp.status_code == 200:
+                click.echo(f"  ✅ Ollama: connected ({llm_host})")
+                if verbose:
+                    models = resp.json().get('models', [])
+                    click.echo(f"     Models available: {len(models)}")
+            else:
+                click.echo(f"  ❌ Ollama: server error {resp.status_code}")
+                all_good = False
+        except Exception:
+            click.echo(f"  ❌ Ollama: cannot connect to {llm_host} (start Ollama)")
             all_good = False
-    except Exception:
-        click.echo(f"  ❌ Ollama: cannot connect to {llm_host} (start Ollama)")
-        all_good = False
 
     click.echo("\n" + "=" * 40)
     if all_good:

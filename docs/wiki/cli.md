@@ -2,7 +2,7 @@
 
 All commands follow the pattern: `prisma [COMMAND] [SUBCOMMAND] [OPTIONS]`
 
-Global option available on all commands: `--config PATH` to override the default config file.
+Use `--config PATH` on `prisma review` and `prisma streams` commands to override the default config file (`~/.config/prisma/config.yaml`). Alternatively set the `PRISMA_CONFIG` environment variable.
 
 ---
 
@@ -16,10 +16,10 @@ prisma review TOPIC [OPTIONS]
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--output, -o PATH` | stdout | Output file path |
+| `--output, -o PATH` | `./outputs/literature_review_<topic>.md` | Output file path |
 | `--sources, -s TEXT` | config value | Comma-separated sources: `arxiv,semanticscholar,...` |
 | `--limit, -l INT` | 10 | Max papers per source |
-| `--zotero-only` | false | Search only your Zotero library |
+| `--zotero-only` | false | Search only your Zotero library (works offline) |
 | `--include-authors` | false | Add author analysis to report |
 | `--refresh-cache, -r` | false | Bypass cached metadata |
 | `--config, -c PATH` | `~/.config/prisma/config.yaml` | Config file |
@@ -29,6 +29,7 @@ Examples:
 prisma review "explainable AI" --output xai_review.md
 prisma review "transformers" --sources arxiv,semanticscholar --limit 30
 prisma review "federated learning" --include-authors
+prisma review "mechanistic interpretability" --zotero-only   # works offline
 ```
 
 ---
@@ -48,6 +49,7 @@ prisma streams create NAME QUERY [OPTIONS]
 | `--description, -d TEXT` | — | Stream description |
 | `--frequency, -f` | `weekly` | `daily`, `weekly`, `monthly`, `manual` |
 | `--parent-collection, -p TEXT` | — | Parent Zotero collection key |
+| `--config, -c PATH` | — | Config file |
 
 ### `prisma streams list`
 
@@ -89,23 +91,55 @@ Check system status.
 prisma status [--verbose]
 ```
 
-Checks: config loaded, Zotero connectivity, storage available, Ollama/LLM reachable.
+Checks: internet connectivity, config loaded, pending write queue, Zotero connectivity, dependencies, Ollama/LLM reachable.
+
+---
+
+## `prisma sync`
+
+Flush the offline pending write queue to Zotero.
+
+```bash
+prisma sync
+```
+
+Prisma queues Zotero write actions (save paper, create collection) when offline or when Zotero is unavailable. Run this once connectivity is restored to push all queued actions. The queue is also flushed automatically on startup when online.
 
 ---
 
 ## `prisma zotero`
 
-### `prisma zotero test-connection`
+### `prisma zotero status`
 
-Tests both local HTTP and Web API connections and reports which are available.
+Check Zotero integration: internet connectivity, Web API credentials, local HTTP server, desktop app, current mode.
 
-### `prisma zotero list-collections`
+```bash
+prisma zotero status
+```
 
-Lists all collections in your Zotero library.
+### `prisma zotero duplicates`
 
-### `prisma zotero sync-status`
+Find and clean up duplicate items in your Zotero library.
 
-Shows pending offline write queue status and flushes if online.
+```bash
+prisma zotero duplicates [OPTIONS]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--collection, -c TEXT` | Specific collection to clean |
+| `--dry-run, -n` | Show what would be deleted without deleting |
+| `--auto-select, -a` | Automatically keep oldest item |
+| `--export-report, -e FILE` | Export analysis to JSON |
+| `--verbose, -v` | Show detailed info per duplicate |
+
+### `prisma zotero stats`
+
+Show library statistics: item counts by type, items missing metadata, collection organization, recent additions.
+
+```bash
+prisma zotero stats [--collection TEXT]
+```
 
 ---
 
@@ -113,9 +147,7 @@ Shows pending offline write queue status and flushes if online.
 
 | Variable | Description |
 |----------|-------------|
-| `PRISMA_CONFIG_PATH` | Override default config path |
-| `PRISMA_DEBUG` | Set to `1` for debug output |
-| `ZOTERO_API_KEY` | Override config API key |
+| `PRISMA_CONFIG` | Override default config file path |
 | `OLLAMA_HOST` | Override LLM host (e.g. `172.x.x.x:11434`) |
 
 ---

@@ -7,7 +7,8 @@ Usage:
     if monitor.is_online:
         ...  # safe to call Zotero API / arXiv / Semantic Scholar
 
-The singleton starts polling immediately on import (daemon thread, 30s interval).
+The singleton is lazy-initialized on first access via `monitor`, so importing
+this module does not start any thread or make any network call.
 """
 
 import logging
@@ -34,13 +35,25 @@ class ConnectivityMonitor:
     """
     Polls internet reachability every POLL_INTERVAL seconds.
     Exposes `is_online: bool` and calls registered callbacks on status change.
+
+    Call `start()` explicitly (or use the module-level `monitor` proxy which
+    starts on first attribute access) to begin polling.
     """
 
     def __init__(self):
-        self.is_online: bool = _is_reachable()
+        self.is_online: bool = False
         self._lock = threading.Lock()
         self._callbacks: list = []
         self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._started = False
+
+    def start(self):
+        """Perform initial probe and start background polling thread."""
+        if self._started:
+            return
+        self._started = True
+        self.is_online = _is_reachable()
         self._thread = threading.Thread(target=self._loop, daemon=True, name="connectivity-monitor")
         self._thread.start()
         logger.info("ConnectivityMonitor started — initial status: %s", "online" if self.is_online else "offline")
@@ -68,5 +81,17 @@ class ConnectivityMonitor:
         self._stop.set()
 
 
-# Module-level singleton — imported everywhere as `from prisma.connectivity import monitor`
-monitor = ConnectivityMonitor()
+class _LazyMonitor:
+    """Proxy that starts ConnectivityMonitor on first attribute access."""
+
+    def __init__(self):
+        self._monitor = ConnectivityMonitor()
+
+    def __getattr__(self, name):
+        if not self._monitor._started:
+            self._monitor.start()
+        return getattr(self._monitor, name)
+
+
+# Module-level singleton — lazy, starts on first use
+monitor = _LazyMonitor()

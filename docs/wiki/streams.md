@@ -23,7 +23,7 @@ prisma streams create "Neural Networks" "neural networks transformer attention" 
   --parent-collection "AI Research"
 ```
 
-The stream is saved immediately. No Zotero collection is created yet — that happens on first `update`.
+The stream is saved immediately. Prisma attempts to create the Zotero collection at this point; if offline, the creation is queued and will be flushed on next online startup.
 
 ## Updating Streams
 

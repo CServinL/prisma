@@ -60,14 +60,17 @@ class PrismaCoordinator:
         errors = []
         warnings = []
 
-        # Literature review requires internet (arXiv, Semantic Scholar)
-        if not connectivity.is_online:
+        # Block offline only when internet-dependent sources are requested
+        _internet_sources = {'arxiv', 'semanticscholar', 'openlibrary', 'googlebooks', 'academia'}
+        _requested_sources = set(config.get('sources', []))
+        _needs_internet = bool(_requested_sources & _internet_sources)
+        if _needs_internet and not connectivity.is_online:
             return CoordinatorResult(
                 success=False,
                 papers_analyzed=0,
                 authors_found=0,
                 output_file=config.get('output_file', './offline_error.md'),
-                errors=["Offline — literature review requires internet access"],
+                errors=["Offline — selected sources require internet access"],
                 total_duration=0.0,
                 pipeline_metadata={"online": False},
             )

@@ -18,30 +18,29 @@ Prisma splits Zotero access into two separate concerns: **reads** come from Zote
 
 ### `hybrid` (recommended)
 
-Online: reads prefer Web API (freshest data), writes go to Web API.  
-Offline: reads fall back to local HTTP, writes are queued.
+- **Online reads**: local HTTP API (`WINDOWS_IP:23119`) — always used for reads regardless of internet status
+- **Writes**: Zotero Web API — requires internet; queued offline
+- **Offline**: reads still work via local HTTP; writes queued until next online startup
 
 ```yaml
 sources:
   zotero:
     mode: "hybrid"
-    local_server_url: "http://172.x.x.x:23119"   # Windows host IP from WSL
+    server_url: "http://172.x.x.x:23119"   # Windows host IP from WSL (ZoteroConfig field name)
     api_key: "YOUR_API_KEY"
     library_id: "YOUR_USER_ID"
     library_type: "user"
-    prefer_web_api_when_online: true
-    disable_writes_when_offline: true
 ```
 
 ### `local_api`
 
-Read-only. Useful when you have no Zotero API key or internet.
+Read-only. No writes, no API key needed.
 
 ```yaml
 sources:
   zotero:
     mode: "local_api"
-    local_server_url: "http://172.x.x.x:23119"
+    server_url: "http://172.x.x.x:23119"
 ```
 
 ## WSL Setup
@@ -64,7 +63,7 @@ When Prisma tries to write to Zotero while offline, the operation is added to a 
 
 Manual flush via CLI:
 ```bash
-prisma zotero sync-status
+prisma sync
 ```
 
 ## Client Hierarchy

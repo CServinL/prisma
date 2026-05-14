@@ -1,6 +1,6 @@
 # Configuration
 
-Prisma loads configuration from `~/.config/prisma/config.yaml` by default. Override with `--config PATH` or `PRISMA_CONFIG_PATH`.
+Prisma loads configuration from `~/.config/prisma/config.yaml` by default. Override with `--config PATH` or the `PRISMA_CONFIG` environment variable.
 
 Start from the example:
 ```bash
@@ -19,7 +19,7 @@ sources:
     mode: "hybrid"                        # "hybrid" | "local_api"
 
     # Reads: Zotero Desktop local HTTP (Windows host IP from WSL)
-    local_server_url: "http://172.x.x.x:23119"
+    server_url: "http://172.x.x.x:23119"
     local_server_timeout: 5
 
     # Writes: Zotero Web API
@@ -111,7 +111,7 @@ search:
 sources:
   zotero:
     mode: "local_api"
-    local_server_url: "http://172.x.x.x:23119"
+    server_url: "http://172.x.x.x:23119"
 ```
 
 ### WSL + Windows Ollama

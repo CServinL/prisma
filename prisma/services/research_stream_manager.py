@@ -42,6 +42,9 @@ class ResearchStreamManager:
     
     def __init__(self, config_path: Optional[str] = None):
         """Initialize the research stream manager"""
+        if config_path:
+            import os
+            os.environ['PRISMA_CONFIG'] = config_path
         self.config = ConfigLoader().config
         self.zotero_client = self._try_create_zotero_client()
         self._pending_queue = PendingWriteQueue()
@@ -293,13 +296,6 @@ class ResearchStreamManager:
             if not stream:
                 raise ResearchStreamError(f"Stream not found: {stream_id}")
             
-            # Ensure the stream's collection exists in Zotero
-            collection_key = self._ensure_stream_collection(stream)
-            if collection_key:
-                logger.info(f"Using collection: {stream.collection_name} -> {collection_key}")
-            else:
-                logger.warning(f"No collection available for stream {stream_id}")
-            
             # Check if update is due
             if not force and not stream.is_due_for_update():
                 return StreamUpdateResult(
@@ -317,6 +313,13 @@ class ResearchStreamManager:
                     errors=["Offline — stream update requires internet access"],
                     duration_seconds=0.0,
                 )
+
+            # Ensure the stream's collection exists in Zotero
+            collection_key = self._ensure_stream_collection(stream)
+            if collection_key:
+                logger.info(f"Using collection: {stream.collection_name} -> {collection_key}")
+            else:
+                logger.warning(f"No collection available for stream {stream_id}")
 
             # Import SearchAgent for internet searches
             from ..agents.search_agent import SearchAgent

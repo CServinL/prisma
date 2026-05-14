@@ -96,8 +96,12 @@ class PendingWriteQueue:
 
         Returns (success_count, failed_count).
         Actions that succeed are removed; actions that fail keep their slot
-        and increment their attempt counter.  Actions that exceed MAX_ATTEMPTS
+        and increment their attempt counter. Actions that exceed MAX_ATTEMPTS
         are dropped with a warning.
+
+        Conflict detection: save_paper actions are checked against Zotero
+        by DOI (if present) and normalised title before saving. Duplicates
+        are silently dropped — Zotero wins.
         """
         if not self._actions:
             return 0, 0
@@ -114,6 +118,16 @@ class PendingWriteQueue:
                 )
                 continue
 
+            # Conflict detection for save_paper actions
+            if action["type"] == "save_paper":
+                if self._already_in_zotero(action["data"], zotero_client):
+                    logger.info(
+                        "Dropping save_paper action %s — item already exists in Zotero",
+                        action["id"],
+                    )
+                    success += 1  # treated as resolved, not failed
+                    continue
+
             action["attempts"] += 1
             try:
                 self._dispatch(action, zotero_client)
@@ -128,6 +142,35 @@ class PendingWriteQueue:
         self._actions = remaining
         self._save()
         return success, failed
+
+    def _already_in_zotero(self, item_data: dict, zotero_client) -> bool:
+        """
+        Check if item already exists in Zotero by DOI or normalised title.
+        Returns True if a match is found (Zotero wins, skip the write).
+        """
+        try:
+            doi = item_data.get("DOI", "").strip()
+            title = item_data.get("title", "").strip().lower()
+
+            if doi:
+                results = zotero_client.search_items(doi)
+                if results:
+                    for r in results:
+                        r_doi = (getattr(r, "doi", None) or "").strip()
+                        if r_doi and r_doi.lower() == doi.lower():
+                            return True
+
+            if title:
+                results = zotero_client.search_items(title)
+                if results:
+                    for r in results:
+                        r_title = (getattr(r, "title", None) or "").strip().lower()
+                        if r_title == title:
+                            return True
+        except Exception as exc:
+            logger.debug("Conflict check failed (will proceed with write): %s", exc)
+
+        return False
 
     def _dispatch(self, action: dict, zotero_client):
         t = action["type"]

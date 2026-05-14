@@ -137,21 +137,21 @@ class PendingWriteQueue:
                 items=[action["data"]],
                 collection_key=action.get("collection_key"),
             )
-            if not result:
-                raise RuntimeError("save_items returned empty result")
+            if result is None:
+                raise RuntimeError("save_items returned None")
 
         elif t == "create_collection":
             result = zotero_client.create_collection(action["data"])
-            if not result:
-                raise RuntimeError("create_collection returned empty result")
+            if result is None:
+                raise RuntimeError("create_collection returned None")
 
         elif t == "add_to_collection":
             result = zotero_client.add_item_to_collection(
                 action["data"]["item_key"],
                 action["data"]["collection_key"],
             )
-            if not result:
-                raise RuntimeError("add_item_to_collection failed")
+            if result is None:
+                raise RuntimeError("add_item_to_collection returned None")
 
         else:
             raise ValueError(f"Unknown action type: {t!r}")

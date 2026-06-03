@@ -31,6 +31,12 @@ prisma = "prisma.cli.prisma_cli:cli"
 where = ["."]
 include = ["prisma*"]
 
+[project.urls]
+Homepage   = "https://github.com/CServinL/prisma"
+Repository = "https://github.com/CServinL/prisma"
+Issues     = "https://github.com/CServinL/prisma/issues"
+Funding    = "https://github.com/sponsors/CServinL"
+
 [build-system]
 requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"

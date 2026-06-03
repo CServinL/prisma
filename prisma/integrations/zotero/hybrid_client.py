@@ -104,13 +104,12 @@ class ZoteroHybridConfig(BaseModel):
     library_id: Optional[str] = None
     library_type: str = "user"
     
-    # Local HTTP server configuration (for offline read operations)
-    local_server_url: str = "http://127.0.0.1:23119"
+    # Local HTTP API (serves both connector/* and api/*, used for reads and desktop save)
+    local_api_url: str = "http://localhost:23119"
     local_server_timeout: int = 5
-    
+
     # Desktop app configuration (for saving new items)
     enable_desktop_save: bool = True
-    desktop_server_url: str = "http://127.0.0.1:23119"
     collection_key: Optional[str] = None
     
     # Network-aware behavior settings
@@ -137,14 +136,14 @@ class ZoteroHybridConfig(BaseModel):
             raise ValueError('Timeout values must be 300 seconds or less')
         return v
     
-    @field_validator('local_server_url', 'desktop_server_url')
+    @field_validator('local_api_url')
     @classmethod
     def validate_server_url(cls, v: str) -> str:
-        """Validate server URLs are well-formed"""
+        """Validate server URL is well-formed"""
         if not v.startswith(('http://', 'https://')):
-            raise ValueError('Server URLs must start with http:// or https://')
+            raise ValueError('local_api_url must start with http:// or https://')
         if not v.replace('http://', '').replace('https://', '').strip():
-            raise ValueError('Server URLs cannot be empty after protocol')
+            raise ValueError('local_api_url cannot be empty after protocol')
         return v
     
     @field_validator('api_key')
@@ -174,7 +173,7 @@ class ZoteroHybridConfig(BaseModel):
     
     def has_local_server_config(self) -> bool:
         """Check if local HTTP server configuration is available"""
-        return bool(self.local_server_url)
+        return bool(self.local_api_url)
     
     def has_desktop_config(self) -> bool:
         """Check if desktop app integration is enabled"""
@@ -201,20 +200,7 @@ class ZoteroHybridClient:
         """Initialize hybrid client with Network-Aware behavior"""
         # Use provided config or create default config with new network-aware settings
         if config is None:
-            config = ZoteroHybridConfig(
-                api_key=None,
-                library_id=None,
-                library_type="user",
-                local_server_url="http://127.0.0.1:23119",
-                local_server_timeout=5,
-                enable_desktop_save=True,
-                desktop_server_url="http://127.0.0.1:23119",
-                collection_key=None,
-                network_timeout=5,
-                prefer_web_api_when_online=True,
-                disable_writes_when_offline=True,
-                auto_detect_network=True
-            )
+            config = ZoteroHybridConfig()
         self.zotero_config = config
         
         # Network state
@@ -251,12 +237,12 @@ class ZoteroHybridClient:
         if self._has_local_server_config():
             try:
                 local_config = ZoteroLocalAPIConfig(
-                    server_url=self.zotero_config.local_server_url,
+                    server_url=self.zotero_config.local_api_url,
                     timeout=self.zotero_config.local_server_timeout,
-                    user_id="0"  # Default user ID for local API
+                    user_id="0"
                 )
                 self.local_api_client = ZoteroLocalAPIClient(local_config)
-                logger.info(f"Local HTTP server client ready: {self.zotero_config.local_server_url}")
+                logger.info(f"Local HTTP server client ready: {self.zotero_config.local_api_url}")
             except Exception as e:
                 logger.warning(f"Local HTTP server client failed: {e}")
         
@@ -278,13 +264,13 @@ class ZoteroHybridClient:
         if self.zotero_config.has_desktop_config():
             try:
                 desktop_config = ZoteroDesktopConfig(
-                    server_url=self.zotero_config.desktop_server_url,
+                    server_url=self.zotero_config.local_api_url,
                     timeout=5,
                     check_running=True,
                     collection_key=self.zotero_config.collection_key
                 )
                 self.desktop_client = ZoteroDesktopClient(desktop_config)
-                logger.info(f"Desktop app client ready: {self.zotero_config.desktop_server_url}")
+                logger.info(f"Desktop app client ready: {self.zotero_config.local_api_url}")
             except Exception as e:
                 logger.warning(f"Desktop app client failed: {e}")
         

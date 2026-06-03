@@ -27,7 +27,7 @@ class ZoteroConfig(BaseModel):
     include_attachments: bool = Field(False, description="Include attachments in results")
     
     # Local API configuration
-    server_url: str = Field("http://127.0.0.1:23119", description="Zotero Local API server URL")
+    local_api_url: str = Field("http://localhost:23119", description="Zotero Local HTTP API URL")
     
     # Legacy local database support
     library_path: str = Field(

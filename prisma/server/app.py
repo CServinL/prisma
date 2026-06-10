@@ -69,9 +69,14 @@ def _run_review(job_id: str, req: ReviewRequest) -> None:
         content_html = ""
         if result.success and result.output_file:
             try:
+                from docu_craft.themes import ThemeManager
                 from docu_craft.workflow import graph as workflow
+                theme = ThemeManager.load("prisma")
                 md = Path(result.output_file).read_text(encoding="utf-8")
-                content_html = workflow.run(md, from_fmt="md", to_fmt="html")
+                content_html = workflow.run(
+                    md, from_fmt="md", to_fmt="html",
+                    css=theme.css, style=theme.style,
+                )
             except Exception:
                 pass
 

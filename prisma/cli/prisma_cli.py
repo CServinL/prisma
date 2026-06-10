@@ -338,6 +338,20 @@ def sync():
         raise click.ClickException(str(exc))
 
 
+@cli.command()
+@click.option("--host", default="127.0.0.1", show_default=True, help="Bind address")
+@click.option("--port", default=8765, show_default=True, help="Port")
+@click.option("--reload", is_flag=True, help="Auto-reload on code changes (dev only)")
+def serve(host: str, port: int, reload: bool):
+    """Start the Prisma HTTP server."""
+    try:
+        import uvicorn
+    except ImportError:
+        raise click.ClickException("uvicorn not installed — run: pip install 'prisma[server]'")
+    click.echo(f"Starting Prisma server on http://{host}:{port}")
+    uvicorn.run("prisma.server.app:app", host=host, port=port, reload=reload)
+
+
 cli.add_command(streams_group)
 cli.add_command(zotero_group)
 

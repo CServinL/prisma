@@ -8,12 +8,14 @@ authors = [
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "pyyaml", 
+    "pyyaml",
     "requests",
     "pyzotero",
     "pydantic",
     "click (>=8.2.1,<9.0.0)",
-    "colorama"
+    "colorama",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
 ]
 
 [project.optional-dependencies]

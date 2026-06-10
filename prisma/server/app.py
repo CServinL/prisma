@@ -1,8 +1,9 @@
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, BackgroundTasks, HTTPException
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -37,6 +38,7 @@ class JobStatus(BaseModel):
     papers_analyzed: int = 0
     authors_found: int = 0
     output_file: str = ""
+    content_html: str = ""
     errors: list[str] = []
 
 
@@ -63,11 +65,22 @@ def _run_review(job_id: str, req: ReviewRequest) -> None:
         }
 
         result = PrismaCoordinator().run_review(review_config)
+
+        content_html = ""
+        if result.success and result.output_file:
+            try:
+                from docu_craft.workflow import graph as workflow
+                md = Path(result.output_file).read_text(encoding="utf-8")
+                content_html = workflow.run(md, from_fmt="md", to_fmt="html")
+            except Exception:
+                pass
+
         _jobs[job_id].update(
             status="done" if result.success else "error",
             papers_analyzed=result.papers_analyzed,
             authors_found=result.authors_found,
             output_file=result.output_file,
+            content_html=content_html,
             errors=result.errors,
         )
     except Exception as exc:
@@ -103,7 +116,7 @@ def status():
 def start_review(req: ReviewRequest):
     job_id = str(uuid.uuid4())
     _jobs[job_id] = {"status": "pending", "papers_analyzed": 0, "authors_found": 0,
-                     "output_file": "", "errors": []}
+                     "output_file": "", "content_html": "", "errors": []}
     _executor.submit(_run_review, job_id, req)
     return JobStatus(job_id=job_id, status="pending")
 

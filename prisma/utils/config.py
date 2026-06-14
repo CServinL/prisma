@@ -75,9 +75,17 @@ class OutputConfig(BaseModel):
 
 class SearchConfig(BaseModel):
     """Search configuration"""
+    model_config = ConfigDict(extra="ignore")
+
     default_limit: int = Field(10, ge=1, le=1000, description="Default search limit")
-    sources: List[str] = Field(default_factory=lambda: ['arxiv'], description="Search sources")
-    
+    sources: List[str] = Field(
+        default_factory=lambda: ['semanticscholar', 'arxiv'],
+        description="Search sources",
+    )
+    min_confidence_score: float = Field(0.5, ge=0.0, le=1.0)
+    prefer_high_quality: bool = Field(True)
+    require_academic_validation: bool = Field(True)
+
     @field_validator('sources')
     @classmethod
     def validate_sources(cls, v):

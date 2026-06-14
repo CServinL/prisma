@@ -17,6 +17,9 @@ dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",
     "docu-craft>=0.3.1",
+    "graphifyy>=0.8",
+    "watchdog>=6.0",
+    "openai>=1.0",
 ]
 
 [project.optional-dependencies]

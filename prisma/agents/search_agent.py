@@ -25,24 +25,58 @@ from ..storage.models.source_quality import (
 logger = logging.getLogger(__name__)
 
 
+_SOURCE_PROBE_URLS: dict[str, str] = {
+    "arxiv": "http://export.arxiv.org/api/query?search_query=test&max_results=1",
+    "semanticscholar": "https://api.semanticscholar.org/graph/v1/paper/search?query=test&limit=1",
+    "openlibrary": "https://openlibrary.org/search.json?q=test&limit=1",
+    "googlebooks": "https://www.googleapis.com/books/v1/volumes?q=test&maxResults=1",
+    "academia": "https://www.academia.edu",
+    "zotero": "http://localhost:23119",
+}
+
+
 class SearchAgent:
     """Search for academic papers and books across multiple quality-rated sources."""
-    
+
     def __init__(self):
         self.arxiv_base_url = "http://export.arxiv.org/api/query"
         self.openlibrary_base_url = "https://openlibrary.org"
         self.googlebooks_base_url = "https://www.googleapis.com/books/v1/volumes"
         self.academia_base_url = "https://www.academia.edu"
         self.semantic_scholar_base_url = "https://api.semanticscholar.org/graph/v1"
-        
-        # Initialize academic validation criteria
+
         self.validation_criteria = AcademicValidationCriteria()
-        
-        # Quality thresholds
-        self.min_confidence_score = 0.3  # Minimum confidence for including results
-        self.prefer_high_quality = True  # Prioritize 4-5 star sources
-        
-    def search(self, query: str, sources: List[str], limit: int = 10) -> SearchResult:
+
+        try:
+            from ..utils.config import ConfigLoader
+            cfg = ConfigLoader().get_search_config()
+            self.default_sources: List[str] = list(cfg.sources)
+            self.min_confidence_score: float = cfg.min_confidence_score
+            self.prefer_high_quality: bool = cfg.prefer_high_quality
+        except Exception:
+            self.default_sources = ["semanticscholar", "arxiv"]
+            self.min_confidence_score = 0.5
+            self.prefer_high_quality = True
+
+    def preflight(self, sources: List[str], timeout: float = 5.0) -> List[str]:
+        """Return only sources that respond within *timeout* seconds."""
+        available: List[str] = []
+        for source in sources:
+            probe = _SOURCE_PROBE_URLS.get(source.lower())
+            if probe is None:
+                logger.warning("preflight: unknown source %r — skipping", source)
+                continue
+            try:
+                r = requests.get(probe, timeout=timeout)
+                if r.status_code < 500:
+                    available.append(source)
+                else:
+                    logger.warning("preflight: %s returned %d — skipping", source, r.status_code)
+            except Exception as exc:
+                logger.warning("preflight: %s unreachable (%s) — skipping", source, exc)
+        return available
+
+    def search(self, query: str, sources: List[str] | None = None, limit: int = 10) -> SearchResult:
         """
         Search for papers and books across specified sources with quality prioritization.
         
@@ -54,10 +88,11 @@ class SearchAgent:
         Returns:
             SearchResult with papers and books lists and metadata
         """
-        # Sort sources by quality (highest first) if prefer_high_quality is enabled
+        if sources is None:
+            sources = list(self.default_sources)
         if self.prefer_high_quality:
             sources = sorted(sources, key=lambda s: get_source_quality(s).value, reverse=True)
-            print(f"[INFO] Searching sources by quality: {sources}")
+            logger.info("Searching sources by quality: %s", sources)
         
         all_papers = []
         all_books = []

@@ -95,3 +95,16 @@ ResearchStreamManager.update_stream()
 - **Config accessed via dot-path** — `config.get('sources.zotero.enabled', False)`
 - **Offline-first for reads** — writes queued, reads degrade gracefully to local Zotero HTTP
 - **Entry point** — `prisma.cli.prisma_cli:cli` registered in `pyproject.toml [project.scripts]`
+
+## Desktop App Architecture (Tauri)
+
+The planned desktop app wraps Prisma + Graphify in a Tauri shell. Responsibility is split between Rust (Tauri backend) and Python (Prisma sidecar):
+
+| Rust (Tauri backend)     | Python (Prisma sidecar)    |
+|--------------------------|----------------------------|
+| File system access       | Zotero API (local + web)   |
+| Window/tray management   | Ollama/LLM calls           |
+| Graph rendering commands | Graphify corpus extraction |
+| Caching, config          | Prisma stream coordination |
+
+The frontend (JS/Svelte) calls Tauri commands → Rust handles natively or delegates to the Python sidecar over a local socket. Python is never called directly from the frontend.

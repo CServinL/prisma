@@ -366,6 +366,9 @@ class ZoteroLocalAPIClient:
     def is_available(self) -> bool:
         """Check if the local API is available"""
         return self._check_connection()
+
+    def ping(self) -> bool:
+        return self._check_connection()
     
     def delete_item(self, item_key: str) -> bool:
         """

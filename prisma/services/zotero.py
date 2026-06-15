@@ -307,6 +307,12 @@ class ZoteroService:
             raise NotImplementedError("add_item requires web_api mode")
         return self._webapi_add_item(paper, collection_key)
 
+    def delete_collection(self, collection_key: str) -> None:
+        """Delete a Zotero collection by key. Web API only."""
+        if self.mode != ZoteroMode.web_api:
+            raise NotImplementedError("delete_collection requires web_api mode")
+        self._webapi_delete_collection(collection_key)
+
     # ── Web API ───────────────────────────────────────────────────────────────
 
     def _webapi_get(self, path: str, params: dict | None = None) -> list[dict]:
@@ -422,6 +428,22 @@ class ZoteroService:
                 return resp.read()
         except Exception:
             return None
+
+    def _webapi_delete_collection(self, collection_key: str) -> None:
+        import urllib.request
+
+        url = f"https://api.zotero.org/users/{self._user_id}/collections/{collection_key}"
+        headers = {"Zotero-API-Key": self._api_key or "", "Zotero-API-Version": "3"}
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            version = resp.headers.get("Last-Modified-Version", "0")
+        req2 = urllib.request.Request(
+            url,
+            headers={**headers, "If-Unmodified-Since-Version": version},
+            method="DELETE",
+        )
+        with urllib.request.urlopen(req2, timeout=10):
+            pass
 
     def _webapi_post(self, path: str, body: list[dict]) -> dict:
         import json

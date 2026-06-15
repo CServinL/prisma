@@ -10,6 +10,7 @@ def _ep_safe(**kw):
 _imeta.entry_points = _ep_safe
 
 import logging
+import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -123,12 +124,66 @@ _zotero = _build_zotero()
 _t("module-level init done")
 
 
+class _StreamScheduler:
+    """Background thread that runs streams when their next_update is past."""
+
+    _CHECK_INTERVAL = 5 * 60  # seconds between scans
+
+    def __init__(self) -> None:
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        self._thread = threading.Thread(target=self._loop, daemon=True, name="stream-scheduler")
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop_event.set()
+
+    def _loop(self) -> None:
+        self._stop_event.wait(timeout=30)  # let server finish starting up
+        while not self._stop_event.is_set():
+            self._tick()
+            self._stop_event.wait(timeout=self._CHECK_INTERVAL)
+
+    def _tick(self) -> None:
+        from datetime import datetime
+        from prisma.storage.models.vault_models import StreamStatus
+        try:
+            streams = _vault.list_streams()
+        except Exception as exc:
+            _log.warning("stream-scheduler: list_streams failed: %s", exc)
+            return
+        now = datetime.now()
+        for stream in streams:
+            if stream.status != StreamStatus.active:
+                continue
+            if stream.next_update is not None and stream.next_update > now:
+                continue
+            if stream.refresh_frequency.value == "manual":
+                continue
+            _log.info("stream-scheduler: running %r", stream.slug)
+            try:
+                result = _run_stream(stream.slug, force=False)
+                _log.info(
+                    "stream-scheduler: %r done — found=%d saved=%d",
+                    stream.slug, result.papers_found, result.papers_saved,
+                )
+            except Exception as exc:
+                _log.warning("stream-scheduler: %r failed: %s", stream.slug, exc)
+
+
+_scheduler = _StreamScheduler()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     _log.info("startup  lifespan: starting indexer")
     _indexer.start()
-    _log.info("startup  lifespan: indexer started — server ready")
+    _scheduler.start()
+    _log.info("startup  lifespan: indexer + stream scheduler started — server ready")
     yield
+    _scheduler.stop()
     _indexer.stop()
 
 

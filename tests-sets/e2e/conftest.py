@@ -25,4 +25,6 @@ def pytest_collection_modifyitems(items):
             reason="e2e requires internet + Ollama + ZOTERO_API_KEY/ZOTERO_LIBRARY_ID"
         )
         for item in items:
-            item.add_marker(skip)
+            # stream flow tests manage their own skip logic (internet-only gate)
+            if "test_stream_flow" not in item.nodeid:
+                item.add_marker(skip)

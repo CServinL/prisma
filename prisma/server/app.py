@@ -971,9 +971,9 @@ def _run_stream(slug: str, force: bool = False) -> StreamRunResult:
         try:
             from prisma.services.vault import _slugify as sl
             citekey_base = sl(f"{(paper.authors[0].split()[-1] if paper.authors else 'unknown')}-{paper.title[:40]}")
-            paper_slug = _vault._unique_slug(citekey_base)
-            if paper_slug in existing_slugs:
+            if citekey_base in existing_slugs:
                 continue
+            paper_slug = _vault._unique_slug(citekey_base)
             lines = []
             if paper.abstract:
                 lines.append(paper.abstract)

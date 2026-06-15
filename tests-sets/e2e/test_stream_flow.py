@@ -59,6 +59,8 @@ def client(vault):
     cfg_mock = MagicMock()
     cfg_mock.sources = ["arxiv"]
     cfg_mock.default_limit = 5
+    cfg_mock.min_confidence_score = 0.5
+    cfg_mock.prefer_high_quality = True
 
     loader_mock = MagicMock(
         return_value=MagicMock(get_search_config=MagicMock(return_value=cfg_mock))

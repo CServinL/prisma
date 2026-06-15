@@ -287,6 +287,26 @@ class ZoteroService:
     def _desktop_items(self, collection_key: str | None, q: str | None) -> list[ZoteroItem]:
         raise NotImplementedError("desktop mode not yet implemented")
 
+    # ── Write operations (Web API only) ──────────────────────────────────────
+
+    def create_collection(self, name: str, parent_key: str | None = None) -> ZoteroCollection:
+        if self.mode != ZoteroMode.web_api:
+            raise NotImplementedError("create_collection requires web_api mode")
+        return self._webapi_create_collection(name, parent_key)
+
+    def ensure_collection(self, name: str, parent_key: str | None = None) -> ZoteroCollection:
+        """Return existing collection with this name, or create it."""
+        for c in self.list_collections():
+            if c.name == name:
+                return c
+        return self.create_collection(name, parent_key)
+
+    def add_item(self, paper: "object", collection_key: str) -> ZoteroItem:
+        """Add a PaperMetadata to a Zotero collection. Web API only."""
+        if self.mode != ZoteroMode.web_api:
+            raise NotImplementedError("add_item requires web_api mode")
+        return self._webapi_add_item(paper, collection_key)
+
     # ── Web API ───────────────────────────────────────────────────────────────
 
     def _webapi_get(self, path: str, params: dict | None = None) -> list[dict]:
@@ -402,3 +422,65 @@ class ZoteroService:
                 return resp.read()
         except Exception:
             return None
+
+    def _webapi_post(self, path: str, body: list[dict]) -> dict:
+        import json
+        import urllib.request
+
+        url = f"https://api.zotero.org{path}"
+        data = json.dumps(body).encode()
+        headers = {
+            "Zotero-API-Key": self._api_key or "",
+            "Zotero-API-Version": "3",
+            "Content-Type": "application/json",
+        }
+        req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return json.loads(resp.read())
+
+    def _webapi_create_collection(self, name: str, parent_key: str | None) -> ZoteroCollection:
+        body = [{"name": name, "parentCollection": parent_key or False}]
+        result = self._webapi_post(f"/users/{self._user_id}/collections", body)
+        successful = result.get("successful", {})
+        if not successful:
+            raise RuntimeError(f"Zotero create_collection failed: {result}")
+        data = next(iter(successful.values())).get("data", {})
+        return ZoteroCollection(
+            key=data["key"],
+            name=data.get("name", name),
+            parent_key=parent_key,
+        )
+
+    def _webapi_add_item(self, paper: "object", collection_key: str) -> ZoteroItem:
+        authors = getattr(paper, "authors", []) or []
+        arxiv_id = getattr(paper, "arxiv_id", None)
+        item_type = "preprint" if arxiv_id else "journalArticle"
+        body = [{
+            "itemType": item_type,
+            "title": getattr(paper, "title", ""),
+            "creators": [{"creatorType": "author", "name": a} for a in authors],
+            "abstractNote": getattr(paper, "abstract", "") or "",
+            "url": getattr(paper, "url", "") or "",
+            "DOI": getattr(paper, "doi", "") or "",
+            "date": getattr(paper, "published_date", "") or "",
+            "collections": [collection_key],
+            "tags": [],
+        }]
+        result = self._webapi_post(f"/users/{self._user_id}/items", body)
+        successful = result.get("successful", {})
+        if not successful:
+            raise RuntimeError(f"Zotero add_item failed: {result}")
+        data = next(iter(successful.values())).get("data", {})
+        return ZoteroItem(
+            key=data["key"],
+            title=getattr(paper, "title", ""),
+            item_type=item_type,
+            authors=authors,
+            year=_extract_year(getattr(paper, "published_date", None)),
+            abstract=getattr(paper, "abstract", None),
+            doi=getattr(paper, "doi", None),
+            url=getattr(paper, "url", None),
+            publication=getattr(paper, "journal", None),
+            tags=[],
+            collection_keys=[collection_key],
+        )

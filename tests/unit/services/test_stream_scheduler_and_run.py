@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from prisma.services.vault import VaultService
+from prisma.services.zotero import ZoteroCollection, ZoteroItem, ZoteroMode
 from prisma.storage.models.vault_models import StreamStatus, RefreshFrequency
 from prisma.storage.models.agent_models import PaperMetadata, SearchResult
 
@@ -202,7 +203,16 @@ class TestRunStream:
         cfg.default_limit = 10
         return cfg
 
-    def _patched_run(self, vault, indexer, cfg, agent_mock):
+    @pytest.fixture
+    def mock_zotero(self):
+        z = MagicMock()
+        z.mode = ZoteroMode.web_api
+        z.ensure_collection.return_value = ZoteroCollection(key="TESTCOLL", name="Test")
+        z.list_items.return_value = []
+        z.add_item.return_value = MagicMock(key="ITEM1")
+        return z
+
+    def _patched_run(self, vault, indexer, cfg, agent_mock, zotero=None):
         """Return patches for all globals _run_stream touches."""
         import prisma.server.app as app_mod
 
@@ -211,9 +221,17 @@ class TestRunStream:
 
         agent_cls_mock = MagicMock(return_value=agent_mock)
 
+        if zotero is None:
+            zotero = MagicMock()
+            zotero.mode = ZoteroMode.web_api
+            zotero.ensure_collection.return_value = ZoteroCollection(key="TESTCOLL", name="Test")
+            zotero.list_items.return_value = []
+            zotero.add_item.return_value = MagicMock(key="ITEM1")
+
         return (
             patch.object(app_mod, "_vault", vault),
             patch.object(app_mod, "_indexer", indexer),
+            patch.object(app_mod, "_zotero", zotero),
             patch("prisma.utils.config.ConfigLoader", loader_mock),
             patch("prisma.agents.search_agent.SearchAgent", agent_cls_mock),
         )
@@ -225,7 +243,7 @@ class TestRunStream:
 
         agent = MagicMock()
         patches = self._patched_run(vault, mock_indexer, mock_cfg, agent)
-        with patches[0], patches[1], patches[2], patches[3]:
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
             from prisma.server.app import _run_stream
             result = _run_stream("soon", force=False)
 
@@ -243,7 +261,7 @@ class TestRunStream:
         agent.search.return_value = _make_search_result()
 
         patches = self._patched_run(vault, mock_indexer, mock_cfg, agent)
-        with patches[0], patches[1], patches[2], patches[3]:
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
             from prisma.server.app import _run_stream
             result = _run_stream("soon", force=True)
 
@@ -253,7 +271,7 @@ class TestRunStream:
         from fastapi import HTTPException
         agent = MagicMock()
         patches = self._patched_run(vault, mock_indexer, mock_cfg, agent)
-        with patches[0], patches[1], patches[2], patches[3]:
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
             from prisma.server.app import _run_stream
             with pytest.raises(HTTPException) as exc_info:
                 _run_stream("does-not-exist")
@@ -266,7 +284,7 @@ class TestRunStream:
         agent.preflight.return_value = []  # all fail
 
         patches = self._patched_run(vault, mock_indexer, mock_cfg, agent)
-        with patches[0], patches[1], patches[2], patches[3]:
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
             from prisma.server.app import _run_stream
             result = _run_stream("net", force=True)
 
@@ -275,7 +293,7 @@ class TestRunStream:
         assert any("preflight" in e for e in result.errors)
         agent.search.assert_not_called()
 
-    def test_saves_new_papers_as_vault_sources(self, vault, mock_indexer, mock_cfg):
+    def test_saves_new_papers_to_zotero(self, vault, mock_indexer, mock_cfg):
         vault.create_stream(title="AI", query="artificial intelligence")
 
         paper = _make_paper(title="Attention Is All You Need", authors=["Vaswani A"])
@@ -283,19 +301,24 @@ class TestRunStream:
         agent.preflight.return_value = ["arxiv"]
         agent.search.return_value = _make_search_result(papers=[paper])
 
-        patches = self._patched_run(vault, mock_indexer, mock_cfg, agent)
-        with patches[0], patches[1], patches[2], patches[3]:
+        import prisma.server.app as app_mod
+        zotero = MagicMock()
+        zotero.mode = ZoteroMode.web_api
+        zotero.ensure_collection.return_value = ZoteroCollection(key="TESTCOLL", name="AI")
+        zotero.list_items.return_value = []
+        zotero.add_item.return_value = MagicMock(key="ITEM1")
+
+        patches = self._patched_run(vault, mock_indexer, mock_cfg, agent, zotero=zotero)
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
             from prisma.server.app import _run_stream
             result = _run_stream("ai", force=True)
 
         assert result.papers_found == 1
         assert result.papers_saved == 1
-        sources = list((vault.default_dirs[__import__('prisma.storage.models.vault_models',
-                        fromlist=['NodeType']).NodeType.source]).glob("*.md"))
-        assert len(sources) == 1
+        zotero.ensure_collection.assert_called_once()
+        zotero.add_item.assert_called_once()
 
     def test_does_not_save_duplicate_papers(self, vault, mock_indexer, mock_cfg):
-        from prisma.storage.models.vault_models import NodeType
         vault.create_stream(title="AI", query="q")
 
         paper = _make_paper(title="Attention Is All You Need", authors=["Vaswani A"])
@@ -303,13 +326,25 @@ class TestRunStream:
         agent.preflight.return_value = ["arxiv"]
         agent.search.return_value = _make_search_result(papers=[paper])
 
-        patches = self._patched_run(vault, mock_indexer, mock_cfg, agent)
-        with patches[0], patches[1], patches[2], patches[3]:
-            from prisma.server.app import _run_stream
-            _run_stream("ai", force=True)
-            result2 = _run_stream("ai", force=True)
+        existing = ZoteroItem(
+            key="EXISTING", title="Attention Is All You Need",
+            item_type="preprint", authors=["Vaswani A"],
+            year=2017, abstract=None, doi=None, url=None,
+            publication=None, tags=[], collection_keys=["TESTCOLL"],
+        )
+        import prisma.server.app as app_mod
+        zotero = MagicMock()
+        zotero.mode = ZoteroMode.web_api
+        zotero.ensure_collection.return_value = ZoteroCollection(key="TESTCOLL", name="AI")
+        zotero.list_items.return_value = [existing]
 
-        assert result2.papers_saved == 0
+        patches = self._patched_run(vault, mock_indexer, mock_cfg, agent, zotero=zotero)
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
+            from prisma.server.app import _run_stream
+            result = _run_stream("ai", force=True)
+
+        assert result.papers_saved == 0
+        zotero.add_item.assert_not_called()
 
     def test_updates_stream_metadata_after_run(self, vault, mock_indexer, mock_cfg):
         vault.create_stream(title="Meta", query="q", refresh_frequency="weekly")
@@ -320,7 +355,7 @@ class TestRunStream:
         agent.search.return_value = _make_search_result(papers=[paper])
 
         patches = self._patched_run(vault, mock_indexer, mock_cfg, agent)
-        with patches[0], patches[1], patches[2], patches[3]:
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
             from prisma.server.app import _run_stream
             _run_stream("meta", force=True)
 
@@ -330,7 +365,8 @@ class TestRunStream:
         assert updated.next_update is not None
         assert updated.next_update > datetime.now()
 
-    def test_marks_indexer_stale_when_papers_saved(self, vault, mock_indexer, mock_cfg):
+    def test_does_not_mark_indexer_stale_on_stream_run(self, vault, mock_indexer, mock_cfg):
+        # Stream runs write to Zotero, not the vault — indexer is never marked stale here.
         vault.create_stream(title="Index", query="q")
 
         paper = _make_paper(title="New Finding", authors=["Jones B"])
@@ -339,23 +375,9 @@ class TestRunStream:
         agent.search.return_value = _make_search_result(papers=[paper])
 
         patches = self._patched_run(vault, mock_indexer, mock_cfg, agent)
-        with patches[0], patches[1], patches[2], patches[3]:
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
             from prisma.server.app import _run_stream
             _run_stream("index", force=True)
-
-        mock_indexer.mark_stale.assert_called_once()
-
-    def test_does_not_mark_indexer_stale_when_no_papers_saved(self, vault, mock_indexer, mock_cfg):
-        vault.create_stream(title="Empty", query="q")
-
-        agent = MagicMock()
-        agent.preflight.return_value = ["arxiv"]
-        agent.search.return_value = _make_search_result(papers=[])
-
-        patches = self._patched_run(vault, mock_indexer, mock_cfg, agent)
-        with patches[0], patches[1], patches[2], patches[3]:
-            from prisma.server.app import _run_stream
-            _run_stream("empty", force=True)
 
         mock_indexer.mark_stale.assert_not_called()
 
@@ -368,7 +390,7 @@ class TestRunStream:
         agent.search.return_value = _make_search_result()
 
         patches = self._patched_run(vault, mock_indexer, mock_cfg, agent)
-        with patches[0], patches[1], patches[2], patches[3]:
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
             from prisma.server.app import _run_stream
             result = _run_stream("sources", force=True)
 

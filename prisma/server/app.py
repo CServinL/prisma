@@ -927,7 +927,6 @@ class StreamRunResult(BaseModel):
 def _run_stream(slug: str, force: bool = False) -> StreamRunResult:
     from datetime import datetime, timedelta
     from prisma.agents.search_agent import SearchAgent
-    from prisma.services.vault import _slugify, _render_frontmatter
     from prisma.utils.config import ConfigLoader
 
     try:
@@ -965,43 +964,36 @@ def _run_stream(slug: str, force: bool = False) -> StreamRunResult:
     papers_saved = 0
     errors: list[str] = []
 
-    existing_slugs = {n.slug for n in _vault.list_nodes().sources}
+    # Ensure the stream's ZoteroCollection exists
+    collection_key = stream.collection_key
+    if _zotero.mode != ZoteroMode.offline:
+        try:
+            collection = _zotero.ensure_collection(stream.title)
+            collection_key = collection.key
+            if collection_key != stream.collection_key:
+                _vault.save_stream(slug, collection_key=collection_key)
+        except Exception as exc:
+            errors.append(f"zotero collection: {exc}")
+    else:
+        errors.append("Zotero not configured for writes (offline mode) — papers found but not saved")
+
+    # Existing item titles in this collection for dedup
+    existing_titles: set[str] = set()
+    if collection_key and _zotero.mode != ZoteroMode.offline:
+        try:
+            for item in _zotero.list_items(collection_key=collection_key):
+                existing_titles.add(item.title.lower().strip())
+        except Exception:
+            pass
 
     for paper in result.papers:
+        if paper.title.lower().strip() in existing_titles:
+            continue
+        if _zotero.mode == ZoteroMode.offline or not collection_key:
+            continue
         try:
-            from prisma.services.vault import _slugify as sl
-            citekey_base = sl(f"{(paper.authors[0].split()[-1] if paper.authors else 'unknown')}-{paper.title[:40]}")
-            if citekey_base in existing_slugs:
-                continue
-            paper_slug = _vault._unique_slug(citekey_base)
-            lines = []
-            if paper.abstract:
-                lines.append(paper.abstract)
-                lines.append("")
-            if paper.url:
-                lines.append(f"URL: {paper.url}")
-            if paper.doi:
-                lines.append(f"DOI: {paper.doi}")
-            fm: dict = {
-                "type": "source",
-                "title": paper.title,
-                "authors": paper.authors,
-                "stream": slug,
-            }
-            if paper.published_date:
-                try:
-                    fm["year"] = int(paper.published_date[:4])
-                except (ValueError, TypeError):
-                    pass
-            if paper.doi:
-                fm["doi"] = paper.doi
-            if paper.url:
-                fm["url"] = paper.url
-            _vault.ensure_dirs()
-            from prisma.storage.models.vault_models import NodeType as NT
-            from prisma.services.vault import _render_frontmatter
-            path = _vault.default_dirs[NT.source] / f"{paper_slug}.md"
-            path.write_text(_render_frontmatter(fm) + "\n".join(lines), encoding="utf-8")
+            _zotero.add_item(paper, collection_key)
+            existing_titles.add(paper.title.lower().strip())
             papers_saved += 1
         except Exception as exc:
             errors.append(str(exc))
@@ -1016,8 +1008,6 @@ def _run_stream(slug: str, force: bool = False) -> StreamRunResult:
         next_update=next_update,
         total_papers=stream.total_papers + papers_saved,
     )
-    if papers_saved:
-        _indexer.mark_stale()
 
     return StreamRunResult(
         slug=slug,

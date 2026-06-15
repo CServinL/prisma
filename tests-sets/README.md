@@ -11,6 +11,8 @@ Tests are organized by what they need to run, not by layer.
 
 `bash tests-sets/run-all.sh` runs everything; missing dependencies produce clean skips.
 
+See [`e2e/README.md`](e2e/README.md) for the full index of E2E tests (existing + planned).
+
 ## Rule
 
 **Only our code is tested.** Mocked and local-zotero sets do not assert on Pydantic

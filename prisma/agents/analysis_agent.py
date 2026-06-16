@@ -11,7 +11,7 @@ import time
 
 from ..utils.config import config
 from ..storage.models.agent_models import PaperMetadata, PaperSummary, AnalysisResult, ReportMetadata, LiteratureReviewReport
-from ..storage.models.api_response_models import OllamaGenerateResponse, LLMRelevanceResult
+from ..storage.models.api_response_models import OllamaGenerateResponse, LLMRelevanceResult, LLMIdentityResult
 
 
 class AnalysisAgent:
@@ -275,6 +275,189 @@ REASONING: [2-3 sentences explaining the semantic connection or lack thereof]"""
                 semantic_score=0.0
             )
     
+    _IDENTITY_THRESHOLD = 8  # candidates per incoming paper; above this, switch to parallel
+
+    def check_identity_batch(
+        self,
+        incoming_title: str,
+        incoming_abstract: str,
+        candidates: list[tuple[str, str]],  # list of (title, abstract)
+    ) -> list[LLMIdentityResult]:
+        """
+        Check whether the incoming paper is the same work as any of the candidates.
+
+        Sends all candidates in a single prompt when len(candidates) <= _IDENTITY_THRESHOLD.
+        Falls back to parallel single-pair requests for larger sets.
+
+        Returns one LLMIdentityResult per candidate, in the same order.
+        If LLM is unavailable, returns all are_same=False (assume different).
+        """
+        if not candidates:
+            return []
+        if len(candidates) <= self._IDENTITY_THRESHOLD:
+            return self._batch_prompt(incoming_title, incoming_abstract, candidates)
+        return self._parallel_checks(incoming_title, incoming_abstract, candidates)
+
+    def _batch_prompt(
+        self,
+        incoming_title: str,
+        incoming_abstract: str,
+        candidates: list[tuple[str, str]],
+    ) -> list[LLMIdentityResult]:
+        """Single LLM call comparing incoming paper against N candidates."""
+        candidate_block = "\n\n".join(
+            f"CANDIDATE {i + 1}\nTitle: {t}\nAbstract: {a or '(no abstract)'}"
+            for i, (t, a) in enumerate(candidates)
+        )
+        expected_lines = "\n".join(
+            f"CANDIDATE {i + 1}: [YES/NO] | CONFIDENCE: [HIGH/MEDIUM/LOW] | REASON: [one sentence]"
+            for i in range(len(candidates))
+        )
+        prompt = f"""You are checking whether an incoming academic paper is the same work as each candidate.
+
+Papers are the SAME WORK when they share the same core contribution and authors, even if the title
+was reworded (e.g. arXiv preprint vs published journal version).
+Papers are DIFFERENT when they merely share a topic or keyword.
+
+INCOMING PAPER
+Title: {incoming_title}
+Abstract: {incoming_abstract or "(no abstract)"}
+
+CANDIDATES
+{candidate_block}
+
+Respond with exactly one line per candidate:
+{expected_lines}"""
+
+        try:
+            response = requests.post(
+                f"{self.base_url}/api/generate",
+                json={
+                    "model": self.model,
+                    "prompt": prompt,
+                    "stream": False,
+                    "options": {"temperature": 0.1, "num_predict": 30 * len(candidates)},
+                },
+                timeout=10 + 15 * len(candidates),
+            )
+            if response.status_code != 200:
+                return [LLMIdentityResult(are_same=False, confidence=0.0, reason="LLM unavailable")] * len(candidates)
+            text = response.json().get("response", "").strip()
+            return self._parse_batch_response(text, len(candidates))
+        except Exception as exc:
+            return [LLMIdentityResult(are_same=False, confidence=0.0, reason=f"error: {exc}")] * len(candidates)
+
+    def _parse_batch_response(self, text: str, n: int) -> list[LLMIdentityResult]:
+        results: list[LLMIdentityResult] = []
+        lines_by_candidate: dict[int, str] = {}
+        for line in text.splitlines():
+            for i in range(1, n + 1):
+                if line.upper().startswith(f"CANDIDATE {i}:"):
+                    lines_by_candidate[i] = line
+                    break
+        for i in range(1, n + 1):
+            line = lines_by_candidate.get(i, "")
+            results.append(self._parse_inline_identity(line))
+        return results
+
+    def _parse_inline_identity(self, line: str) -> LLMIdentityResult:
+        # Expected: "CANDIDATE N: YES | CONFIDENCE: HIGH | REASON: ..."
+        are_same = False
+        confidence = 0.5
+        reason = ""
+        if not line:
+            return LLMIdentityResult(are_same=False, confidence=0.0, reason="no response")
+        upper = line.upper()
+        # Check for YES/NO after the colon
+        after_colon = line.split(":", 1)[-1] if ":" in line else line
+        are_same = "YES" in after_colon.upper().split("|")[0]
+        parts = [p.strip() for p in after_colon.split("|")]
+        for part in parts:
+            pupper = part.upper()
+            if pupper.startswith("CONFIDENCE:"):
+                val = part.split(":", 1)[1].strip().upper()
+                confidence = {"HIGH": 0.9, "MEDIUM": 0.6, "LOW": 0.3}.get(val, 0.5)
+            elif pupper.startswith("REASON:"):
+                reason = part.split(":", 1)[1].strip()
+        return LLMIdentityResult(are_same=are_same, confidence=confidence, reason=reason)
+
+    def _parallel_checks(
+        self,
+        incoming_title: str,
+        incoming_abstract: str,
+        candidates: list[tuple[str, str]],
+    ) -> list[LLMIdentityResult]:
+        """Fire one LLM request per candidate in parallel threads."""
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        def _check_one(args):
+            idx, title_b, abstract_b = args
+            result = self._single_pair_check(incoming_title, incoming_abstract, title_b, abstract_b)
+            return idx, result
+
+        results: list[LLMIdentityResult] = [
+            LLMIdentityResult(are_same=False, confidence=0.0, reason="pending")
+        ] * len(candidates)
+
+        with ThreadPoolExecutor(max_workers=min(len(candidates), 6)) as pool:
+            futures = {
+                pool.submit(_check_one, (i, t, a)): i
+                for i, (t, a) in enumerate(candidates)
+            }
+            for future in as_completed(futures):
+                try:
+                    idx, result = future.result()
+                    results[idx] = result
+                except Exception as exc:
+                    results[futures[future]] = LLMIdentityResult(
+                        are_same=False, confidence=0.0, reason=f"error: {exc}"
+                    )
+        return results
+
+    def _single_pair_check(
+        self, title_a: str, abstract_a: str, title_b: str, abstract_b: str
+    ) -> LLMIdentityResult:
+        prompt = f"""Are these two academic papers the same work? (Same paper may have different titles: preprint vs journal version, reordered words.)
+
+Paper A — Title: {title_a}
+Abstract: {abstract_a or "(no abstract)"}
+
+Paper B — Title: {title_b}
+Abstract: {abstract_b or "(no abstract)"}
+
+SAME: [YES/NO]
+CONFIDENCE: [HIGH/MEDIUM/LOW]
+REASON: [one sentence]"""
+        try:
+            response = requests.post(
+                f"{self.base_url}/api/generate",
+                json={
+                    "model": self.model,
+                    "prompt": prompt,
+                    "stream": False,
+                    "options": {"temperature": 0.1, "num_predict": 60},
+                },
+                timeout=20,
+            )
+            if response.status_code != 200:
+                return LLMIdentityResult(are_same=False, confidence=0.0, reason="LLM unavailable")
+            text = response.json().get("response", "").strip()
+            are_same = False
+            confidence = 0.5
+            reason = ""
+            for line in text.splitlines():
+                upper = line.upper()
+                if upper.startswith("SAME:"):
+                    are_same = "YES" in upper
+                elif upper.startswith("CONFIDENCE:"):
+                    val = line.split(":", 1)[1].strip().upper()
+                    confidence = {"HIGH": 0.9, "MEDIUM": 0.6, "LOW": 0.3}.get(val, 0.5)
+                elif upper.startswith("REASON:"):
+                    reason = line.split(":", 1)[1].strip()
+            return LLMIdentityResult(are_same=are_same, confidence=confidence, reason=reason)
+        except Exception as exc:
+            return LLMIdentityResult(are_same=False, confidence=0.0, reason=f"error: {exc}")
+
     def _simple_relevance_check(self, title: str, abstract: str, topic: str) -> Dict[str, Any]:
         """This method is deprecated - semantic evaluation should be used instead."""
         return {

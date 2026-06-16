@@ -161,21 +161,30 @@ class ArXivEntry(BaseModel):
 class LLMRelevanceResult(BaseModel):
     """LLM relevance analysis result model"""
     model_config = ConfigDict(populate_by_name=True)
-    
+
     is_relevant: bool = Field(..., description="Whether the content is relevant")
     relevance_level: str = Field("NOT_RELEVANT", description="Relevance level")
     semantic_score: float = Field(0.0, ge=0.0, le=1.0, description="Semantic relevance score")
     reasoning: str = Field("", description="Reasoning for the relevance decision")
     confidence: float = Field(0.0, ge=0.0, le=1.0, description="Confidence in the assessment")
-    
+
     @field_validator('relevance_level')
     @classmethod
     def validate_relevance_level(cls, v):
         """Validate relevance level"""
-        valid_levels = ['NOT_RELEVANT', 'LOW_RELEVANCE', 'RELEVANT', 'HIGHLY_RELEVANT']
+        valid_levels = ['NOT_RELEVANT', 'LOW_RELEVANCE', 'RELEVANT', 'HIGHLY_RELEVANT', 'SOMEWHAT_RELEVANT', 'UNKNOWN']
         if v not in valid_levels:
-            raise ValueError(f'relevance_level must be one of {valid_levels}')
+            return 'UNKNOWN'
         return v
+
+
+class LLMIdentityResult(BaseModel):
+    """Result of asking the LLM whether two papers are the same work."""
+    model_config = ConfigDict(populate_by_name=True)
+
+    are_same: bool = Field(..., description="True if the two papers are the same work")
+    confidence: float = Field(0.0, ge=0.0, le=1.0, description="Confidence in the answer")
+    reason: str = Field("", description="One-line explanation")
 
 
 class OllamaGenerateResponse(BaseModel):

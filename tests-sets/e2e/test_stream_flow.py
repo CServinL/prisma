@@ -1,23 +1,27 @@
 """
-E2E stream tests: create → run → dedup → force → metadata → quality → delete.
-Skipped automatically when arxiv is unreachable.
+E2E stream tests — real Zotero Web API, real arxiv, real config.
 
-Tests share state (slug, Zotero items) across the module — intentional for E2E.
-_zotero is replaced with a stateful fake that mirrors the Web API contract so the
-orchestration logic is exercised against real arxiv results without needing Zotero creds.
+_vault uses tmp_path for test isolation (clean state, no vault pollution).
+Everything else is the production stack unchanged.
+
+Prerequisites:
+  - internet (arxiv reachable)
+  - api_key + library_id in ~/.config/prisma/config.yaml (sources.zotero)
+
+Cleanup: Zotero collection created during the run is deleted at teardown.
 
 Run: .venv/bin/python -m pytest tests-sets/e2e/test_stream_flow.py -v
 """
 
-import uuid
 import pytest
+from unittest.mock import patch
 from fastapi.testclient import TestClient
-from unittest.mock import MagicMock, patch
 
-from prisma.services.zotero import ZoteroCollection, ZoteroItem, ZoteroMode
+from prisma.services.vault import VaultService
+from prisma.services.zotero import ZoteroMode
 
 
-# ── Connectivity checks ───────────────────────────────────────────────────────
+# ── Availability checks ───────────────────────────────────────────────────────
 
 def _arxiv_reachable() -> bool:
     try:
@@ -28,64 +32,22 @@ def _arxiv_reachable() -> bool:
         return False
 
 
-def _zotero_local_reachable() -> bool:
+def _zotero_web_api_configured() -> bool:
     try:
-        import urllib.request
-        urllib.request.urlopen("http://localhost:23119", timeout=2)
-        return True
+        import yaml
+        from pathlib import Path
+        cfg = yaml.safe_load(
+            (Path.home() / ".config" / "prisma" / "config.yaml").read_text()
+        ) or {}
+        return bool(cfg.get("sources", {}).get("zotero", {}).get("api_key"))
     except Exception:
         return False
 
 
 pytestmark = pytest.mark.skipif(
-    not _arxiv_reachable(),
-    reason="stream e2e requires internet (arxiv unreachable)",
+    not _arxiv_reachable() or not _zotero_web_api_configured(),
+    reason="stream e2e requires internet + Zotero Web API configured in config.yaml",
 )
-
-
-# ── Stateful Zotero fake ──────────────────────────────────────────────────────
-
-class _FakeZotero:
-    """Mirrors ZoteroService Web API contract with in-memory state."""
-
-    def __init__(self):
-        self.mode = ZoteroMode.web_api
-        self._collections: dict[str, ZoteroCollection] = {}  # name → collection
-        self._items: dict[str, list[ZoteroItem]] = {}         # collection_key → items
-
-    def ensure_collection(self, name, parent_key=None):
-        if name not in self._collections:
-            key = f"FAKE{uuid.uuid4().hex[:6].upper()}"
-            self._collections[name] = ZoteroCollection(key=key, name=name)
-        return self._collections[name]
-
-    def list_collections(self):
-        return list(self._collections.values())
-
-    def list_items(self, collection_key=None, q=None):
-        if collection_key:
-            return list(self._items.get(collection_key, []))
-        return [item for items in self._items.values() for item in items]
-
-    def add_item(self, paper, collection_key):
-        item = ZoteroItem(
-            key=uuid.uuid4().hex[:8].upper(),
-            title=getattr(paper, "title", ""),
-            item_type="preprint",
-            authors=getattr(paper, "authors", []),
-            year=None,
-            abstract=getattr(paper, "abstract", None),
-            doi=getattr(paper, "doi", None),
-            url=getattr(paper, "url", None),
-            publication=None,
-            tags=[],
-            collection_keys=[collection_key],
-        )
-        self._items.setdefault(collection_key, []).append(item)
-        return item
-
-    def status(self):
-        return {"mode": "web-api", "available": True}
 
 
 # ── Shared state ──────────────────────────────────────────────────────────────
@@ -96,43 +58,38 @@ _state: dict = {}
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
 @pytest.fixture(scope="module")
-def fake_zotero():
-    return _FakeZotero()
-
-
-@pytest.fixture(scope="module")
 def vault(tmp_path_factory):
-    from prisma.services.vault import VaultService
     v = VaultService(tmp_path_factory.mktemp("vault"))
     v.ensure_dirs()
     return v
 
 
 @pytest.fixture(scope="module")
-def client(vault, fake_zotero):
+def zotero():
     import prisma.server.app as app_mod
+    z = app_mod._zotero
+    if z.mode != ZoteroMode.web_api:
+        pytest.skip("Zotero not in web_api mode — check config.yaml api_key")
+    return z
 
-    cfg_mock = MagicMock()
-    cfg_mock.sources = ["arxiv"]
-    cfg_mock.default_limit = 5
-    cfg_mock.min_confidence_score = 0.5
-    cfg_mock.prefer_high_quality = True
 
-    loader_mock = MagicMock(
-        return_value=MagicMock(get_search_config=MagicMock(return_value=cfg_mock))
-    )
-
-    noop = MagicMock()
-    noop.start = noop.stop = noop.mark_stale = MagicMock()
-    noop.status = MagicMock(return_value={})
-
-    with patch.object(app_mod, "_vault", vault), \
-         patch.object(app_mod, "_indexer", noop), \
-         patch.object(app_mod, "_zotero", fake_zotero), \
-         patch.object(app_mod, "_scheduler", MagicMock()), \
-         patch("prisma.utils.config.ConfigLoader", loader_mock):
+@pytest.fixture(scope="module")
+def client(vault):
+    import prisma.server.app as app_mod
+    with patch.object(app_mod, "_vault", vault):
         with TestClient(app_mod.app, raise_server_exceptions=True) as tc:
             yield tc
+
+
+@pytest.fixture(scope="module", autouse=True)
+def cleanup(zotero):
+    yield
+    key = _state.get("collection_key")
+    if key:
+        try:
+            zotero.delete_collection(key)
+        except Exception as exc:
+            print(f"Warning: could not delete test collection {key}: {exc}")
 
 
 # ── Tests ─────────────────────────────────────────────────────────────────────
@@ -150,26 +107,37 @@ def test_create_stream_returns_slug(client):
     _state["slug"] = data["slug"]
 
 
-def test_run_stream_finds_papers(client, fake_zotero):
+def test_run_stream_finds_papers(client):
     slug = _state["slug"]
     resp = client.post(f"/streams/{slug}/run", params={"force": True})
     assert resp.status_code == 200
     data = resp.json()
     assert data["papers_found"] > 0, f"expected papers from arxiv, got: {data}"
-    assert data["papers_saved"] > 0, f"expected Zotero items saved, got: {data}"
+    assert data["papers_saved"] > 0, f"expected items saved to Zotero, got: {data}"
     _state["run1"] = data
 
 
-def test_run_stream_saves_items_to_zotero(client, fake_zotero):
-    run = _state["run1"]
-    stream_resp = client.get(f"/streams/{_state['slug']}")
-    collection_key = stream_resp.json().get("collection_key") or \
-        next(iter(fake_zotero._collections.values())).key
+def test_run_stream_creates_zotero_collection(client, vault, zotero):
+    slug = _state["slug"]
+    stream = vault.get_stream(slug)
+    assert stream.collection_key, "stream.collection_key should be set after run"
+    _state["collection_key"] = stream.collection_key
 
-    items = fake_zotero.list_items(collection_key=collection_key)
-    assert len(items) == run["papers_saved"]
-    for item in items:
-        assert item.title
+    collections = zotero.list_collections()
+    keys = {c.key for c in collections}
+    assert stream.collection_key in keys, (
+        f"collection {stream.collection_key!r} not found in Zotero; "
+        f"found: {[c.name for c in collections]}"
+    )
+
+
+def test_run_stream_saves_items_to_zotero(zotero):
+    key = _state["collection_key"]
+    items = zotero.list_items(collection_key=key)
+    assert len(items) == _state["run1"]["papers_saved"], (
+        f"expected {_state['run1']['papers_saved']} items in Zotero collection, "
+        f"got {len(items)}"
+    )
 
 
 def test_rerun_stream_deduplicates(client):
@@ -178,7 +146,7 @@ def test_rerun_stream_deduplicates(client):
     assert resp.status_code == 200
     data = resp.json()
     assert data["papers_saved"] == 0, (
-        f"second run saved {data['papers_saved']} duplicate(s)"
+        f"second run saved {data['papers_saved']} duplicate(s) to Zotero"
     )
 
 
@@ -193,19 +161,6 @@ def test_rerun_with_force_bypasses_schedule(client):
     assert not any("not due" in e for e in resp_force.json().get("errors", []))
 
 
-@pytest.mark.skipif(
-    not _zotero_local_reachable(),
-    reason="Zotero Desktop not running at localhost:23119",
-)
-def test_zotero_collection_created_on_run(client, fake_zotero):
-    slug = _state["slug"]
-    stream_resp = client.get(f"/streams/{slug}")
-    stream_title = stream_resp.json()["title"]
-    assert stream_title in fake_zotero._collections, (
-        f"no collection for {stream_title!r}, found: {list(fake_zotero._collections)}"
-    )
-
-
 def test_stream_metadata_updated_after_run(client):
     slug = _state["slug"]
     resp = client.get(f"/streams/{slug}")
@@ -216,11 +171,12 @@ def test_stream_metadata_updated_after_run(client):
     assert data["next_update"] is not None
 
 
-def test_source_evaluation_quality(client, fake_zotero):
-    items = fake_zotero.list_items()
-    assert items, "no items saved to Zotero"
+def test_zotero_items_have_required_fields(zotero):
+    key = _state["collection_key"]
+    items = zotero.list_items(collection_key=key)
+    assert items, "no items in Zotero collection"
 
-    for item in items[:3]:
+    for item in items:
         assert item.title, f"{item.key}: missing title"
         assert item.authors, f"{item.key}: missing authors"
         assert item.abstract and len(item.abstract.strip()) > 50, (
@@ -228,14 +184,14 @@ def test_source_evaluation_quality(client, fake_zotero):
         )
 
 
-def test_source_confidence_above_threshold(client, fake_zotero):
-    # SearchAgent filters by confidence before papers reach _run_stream.
-    # Verify all saved items have non-empty content (quality proxy).
-    # Full confidence-score persistence is tracked in ADR-009.
-    items = fake_zotero.list_items()
+def test_zotero_items_above_confidence_threshold(zotero):
+    # SearchAgent filters by min_confidence_score before items reach _run_stream.
+    # All items in Zotero passed the filter — verify they have non-trivial content.
+    key = _state["collection_key"]
+    items = zotero.list_items(collection_key=key)
     assert items
     for item in items:
-        assert item.title.strip(), f"{item.key}: empty title saved"
+        assert item.title.strip(), f"{item.key}: empty title"
 
 
 def test_delete_stream_removes_from_listing(client):
@@ -245,5 +201,4 @@ def test_delete_stream_removes_from_listing(client):
 
     resp = client.get("/streams")
     assert resp.status_code == 200
-    slugs = [s["slug"] for s in resp.json()]
-    assert slug not in slugs
+    assert slug not in [s["slug"] for s in resp.json()]

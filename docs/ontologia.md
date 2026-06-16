@@ -11,34 +11,45 @@ invariants; code enforces them.
 
 ---
 
-## Entity Map
+## Mental model
 
 ```
-Stream ─────── SearchCriteria
-  │
-  │  on each run: SearchAgent fetches PaperMetadata
-  │
-  ▼
-ZoteroCollection                          ← bookmark layer
-  │
-  │  + ZoteroItem per paper found
-  │
-  │  deliberate import: POST /zotero/import/{key}
-  ▼
-Source (.md in vault)                     ← second brain
-  │  zotero_key back-links to ZoteroItem
-  │
-  ▼
-Note  ·  Chat  ·  LiteratureReviewReport  ← personal layer
-  │         │
-  └────┬────┘
-       │  all indexed by
-       ▼
-  GraphNode (Graphify)
-  WikiLink · Transclusion · Citation      ← graph edges
-       │
-  GraphCluster
+                   DISCOVERY LAYER (automatic)
+        ┌──────────────────────────────────────────┐
+        │  internet sources: arxiv, semanticscholar │
+        │  library search: Zotero (shared cache)    │
+        └──────────────────┬───────────────────────┘
+                           │  PaperMetadata (transient)
+                           │  ① bookmark-first: save to library
+                           │  ② relevance gate: LLM evaluates vs stream.query
+                           ▼
+        ┌─────────────────────────────────────────────────┐
+        │  Zotero Library (shared across ALL streams)      │
+        │                                                   │
+        │   ZoteroItem ──── ZoteroCollection (stream A)    │
+        │       │       └── ZoteroCollection (stream B)    │
+        │       │                                           │
+        │  same item, different collections = different    │
+        │  perspectives on the same paper                  │
+        └───────────────────┬─────────────────────────────┘
+                            │  deliberate import: POST /zotero/import/{key}
+                            ▼
+        ┌─────────────────────────────────────────────────┐
+        │  Vault (personal second brain)                   │
+        │  Source  Note  Chat  LiteratureReviewReport      │
+        │                                                   │
+        │  WikiLink · Transclusion · Citation → GraphNode  │
+        └──────────────────────────────────────────────────┘
 ```
+
+The key separation:
+
+| Layer | What it holds | Who writes | Who reads |
+|---|---|---|---|
+| Internet / library | raw academic papers | external APIs | SearchAgent |
+| Zotero library | bookmarks of discovered papers | streams (automatic) | user, streams |
+| Zotero collection | papers accepted by ONE stream | stream run | user |
+| Vault | things you actively work with | user (via import) | Graphify, Chat |
 
 ---
 
@@ -48,11 +59,11 @@ Note  ·  Chat  ·  LiteratureReviewReport  ← personal layer
 |---|---|---|
 | [Stream](concepts/stream.md) | Named, persistent search subscription | concepts/stream.md |
 | [SearchCriteria](concepts/search-criteria.md) | Query + source filters for a stream | concepts/search-criteria.md |
-| [PaperMetadata](concepts/paper-metadata.md) | Raw search result from an academic source | concepts/paper-metadata.md |
+| [PaperMetadata](concepts/paper-metadata.md) | Raw search result from any source (transient) | concepts/paper-metadata.md |
 | [PaperSummary](concepts/paper-summary.md) | LLM-analyzed paper with key findings | concepts/paper-summary.md |
 | [SmartTag](concepts/smart-tag.md) | Auto-applied label derived from paper content | concepts/smart-tag.md |
-| [ZoteroCollection](concepts/zotero-collection.md) | Folder in Zotero grouping a stream's items | concepts/zotero-collection.md |
-| [ZoteroItem](concepts/zotero-item.md) | Full Zotero record — the bookmark layer | concepts/zotero-item.md |
+| [ZoteroItem](concepts/zotero-item.md) | Bookmark — "we know this paper exists" | concepts/zotero-item.md |
+| [ZoteroCollection](concepts/zotero-collection.md) | Stream acceptance journal — papers a stream's LLM gate approved | concepts/zotero-collection.md |
 | [Source](concepts/source.md) | External content deliberately imported into the vault | concepts/source.md |
 | [Note](concepts/note.md) | Personal, editable synthesis — the intellectual layer | concepts/note.md |
 | [Chat](concepts/chat.md) | Saved LLM session grounded in vault nodes | concepts/chat.md |
@@ -69,7 +80,9 @@ Note  ·  Chat  ·  LiteratureReviewReport  ← personal layer
 
 | Mechanic | What it does |
 |---|---|
-| **Stream run** | `Stream.query` → `SearchAgent` → `PaperMetadata[]` → confidence filter → `ZoteroCollection` + `ZoteroItem` per paper |
+| **Stream run** | `Stream.query` → search sources (internet + Zotero library) → per-candidate pipeline (see below) → `ZoteroCollection` updated |
+| **Per-candidate pipeline** | ① collection check (already in this stream?) → ② bookmark (add to Zotero library if new) → ③ LLM relevance gate (title + abstract vs stream.query) → ④ add to stream's collection |
+| **Library search** | `ZoteroService.search(query)` — queries the Zotero library before (or in parallel with) internet sources; results already have enriched metadata; used as a cheap first pass |
 | **Vault import** | `POST /zotero/import/{key}` → `ZoteroItem` + optional PDF → `Source` (.md + companion) |
 | **Literature review** | topic → `SearchAgent` → `AnalysisAgent` → `ReportAgent` → `LiteratureReviewReport` → `Note` |
 | **DSL rendering** | markdown body → resolve `WikiLink` / `Transclusion` / `Citation` → HTML (server-side, before display) |
@@ -77,6 +90,41 @@ Note  ·  Chat  ·  LiteratureReviewReport  ← personal layer
 | **Note promotion** | chat excerpt selected by user → new `Note` (back-linked via `promoted_from_chat`) |
 | **Stream scheduling** | `_StreamScheduler` daemon checks every 5 min; runs any `Stream` where `next_update ≤ now` and `status == active` and `refresh_frequency != manual` |
 | **docu-craft conversion** | companion file (PDF, HTML, …) → docu-craft → `.md` body for Graphify + HTML view for UI |
+
+### Stream run — per-candidate pipeline (detailed)
+
+```
+For each PaperMetadata from any search source:
+
+  Gate 0 — cross-source dedup:
+    Normalize title (lowercase, strip). If already seen in this batch, skip.
+
+  Gate 1 — collection check (fast, no LLM):
+    Is this paper already in stream.collection?
+    → yes: skip (this stream already accepted it in a prior run)
+    → no: proceed
+
+    Note: being in ANY OTHER collection does not count — a paper in the
+    "Super Resolution" collection is still a fresh candidate for "Computer Vision".
+
+  Step 2 — bookmark (write to Zotero library if new):
+    Is this paper already in the Zotero library?
+    → yes: library entry exists, nothing to create
+    → no: add_item to Zotero — save bookmark with all available metadata
+
+    Bookmark is saved BEFORE the relevance gate. Finding a paper via academic
+    search is sufficient evidence of academic value (Axiom 12).
+
+  Gate 3 — LLM relevance gate (slow, only for candidates that passed Gate 1):
+    AnalysisAgent.assess_relevance(title, abstract, stream.query)
+    → HIGHLY_RELEVANT / RELEVANT / SOMEWHAT_RELEVANT: accept
+    → NOT_RELEVANT: skip (item stays in Zotero library; just not in this collection)
+    → UNKNOWN (LLM unavailable): accept by default (fail open, not fail closed)
+
+  Step 4 — accept:
+    Add ZoteroItem to stream's ZoteroCollection.
+    Increment stream.total_papers.
+```
 
 ---
 
@@ -106,16 +154,23 @@ Rules that are always true. Not preferences — invariants.
 
 11. **Every `Source` has a `zotero_key`.** Sources enter the vault only via Zotero import. The key is the permanent back-link to the `ZoteroItem`.
 
+12. **Bookmark-first.** Any paper discovered via academic search (internet or library) is saved to the Zotero library before relevance evaluation. Discovery via a targeted query is sufficient evidence of academic value. The relevance gate decides which collection the paper joins — not whether it gets bookmarked.
+
+13. **Relevance is per-stream.** A `ZoteroItem` in collection A is not assumed relevant to stream B. Every stream evaluates every candidate independently against its own query, even if the paper is already bookmarked or in another collection. The same paper can and should appear in multiple collections if relevant to multiple perspectives.
+
+14. **Library search is a first-class source.** The Zotero library is a valid search source for stream runs, equivalent to internet sources. It is preferred for re-runs because its results are already enriched (metadata populated, PDFs attached). New streams should search the library first — a relevant paper may already be bookmarked from another stream.
+
+15. **Collection membership is the acceptance record.** A `ZoteroItem` being in a stream's collection is the only record that the stream's LLM gate accepted it. Absence from a collection means either: the stream hasn't run yet, the paper wasn't found, or the LLM rejected it. These three cases are not distinguished — they are all "not accepted by this stream."
+
 ---
 
 ## Not yet implemented (in ontology, not in code)
 
 Concepts that belong to the domain and are defined here, but whose code support is partial or missing:
 
-- **`Stream.collection_key`** — field exists on the model; `_run_stream` does not yet create the `ZoteroCollection` or add items. Stream runs write nothing to Zotero today. This violates Axiom 4 and must be corrected.
-- **`SmartTag`** — defined in ontology; not yet applied during stream runs or import.
-- **`PaperSummary`** — produced during `prisma review`; not yet generated per-item during stream runs.
-- **`Chat`** — data model defined; chat API routes not yet implemented.
+- **SmartTag** — defined in ontology; not yet applied during stream runs or import.
+- **PaperSummary per stream item** — produced during `prisma review`; not yet generated per-item during stream runs.
+- **Chat** — data model defined; chat API routes not yet implemented.
 - **ChromaDB / semantic search** — ADR-009 written; not yet integrated.
 - **Async rewrite** — `PrismaCoordinator` and agents are synchronous; `ThreadPoolExecutor` offloads blocking I/O. Full async rewrite deferred.
 - **Encryption at rest** — vault files are plaintext. `fscrypt` / `gocryptfs` / `age` deferred.

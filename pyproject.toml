@@ -20,6 +20,7 @@ dependencies = [
     "graphifyy>=0.8",
     "watchdog>=6.0",
     "openai>=1.0",
+    "nltk>=3.9",
 ]
 
 [project.optional-dependencies]

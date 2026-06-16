@@ -34,6 +34,7 @@ class ZoteroItem(BaseModel):
     tags: list[str]
     collection_keys: list[str]
     pdf_path: Path | None = None
+    version: int = 0
 
 
 def _detect_db_path() -> Path | None:
@@ -123,6 +124,41 @@ class ZoteroService:
         for item in items:
             if item.key == key:
                 return item
+        return None
+
+    def find_by_identifier(
+        self,
+        doi: str | None = None,
+        title: str | None = None,
+        collection_key: str | None = None,
+    ) -> ZoteroItem | None:
+        """
+        Ask Zotero's own search index whether a paper already exists.
+
+        Tries DOI first (strongest identity signal — Zotero treats it as unique).
+        Falls back to title search and returns the first result whose title is an
+        exact case-insensitive match.
+
+        Pass collection_key to scope the search to one collection; omit it to
+        search the entire library (bookmark check before add_item).
+
+        Returns None if Zotero can't find a match — callers should then fall
+        through to NLTK stem overlap and LLM checks.
+        """
+        if doi:
+            results = self.list_items(collection_key=collection_key, q=doi)
+            doi_norm = doi.lower().strip()
+            for item in results:
+                if item.doi and item.doi.lower().strip() == doi_norm:
+                    return item
+
+        if title:
+            results = self.list_items(collection_key=collection_key, q=title)
+            title_norm = title.lower().strip()
+            for item in results:
+                if item.title.lower().strip() == title_norm:
+                    return item
+
         return None
 
     def get_pdf_bytes(self, key: str) -> bytes | None:
@@ -230,8 +266,16 @@ class ZoteroService:
                 continue
             f = fields.get(item_id, {})
             title = f.get("title", "(no title)")
-            if q and q.lower() not in title.lower() and q.lower() not in f.get("abstractNote", "").lower():
-                continue
+            if q:
+                q_low = q.lower()
+                searchable = " ".join([
+                    title.lower(),
+                    f.get("abstractNote", "").lower(),
+                    f.get("DOI", "").lower(),
+                    f.get("url", "").lower(),
+                ])
+                if q_low not in searchable:
+                    continue
             result.append(ZoteroItem(
                 key=key,
                 title=title,
@@ -301,11 +345,24 @@ class ZoteroService:
                 return c
         return self.create_collection(name, parent_key)
 
-    def add_item(self, paper: "object", collection_key: str) -> ZoteroItem:
-        """Add a PaperMetadata to a Zotero collection. Web API only."""
+    def add_item(self, paper: "object", collection_key: str | None = None) -> ZoteroItem:
+        """Add a PaperMetadata to the library. Pass collection_key to also add to a collection."""
         if self.mode != ZoteroMode.web_api:
             raise NotImplementedError("add_item requires web_api mode")
         return self._webapi_add_item(paper, collection_key)
+
+    def add_to_collection(
+        self,
+        item_key: str,
+        version: int,
+        collection_key: str,
+        current_collection_keys: list[str] | None = None,
+    ) -> None:
+        """Add an existing library item to a collection via PATCH. Web API only."""
+        if self.mode != ZoteroMode.web_api:
+            raise NotImplementedError("add_to_collection requires web_api mode")
+        updated = list(current_collection_keys or []) + [collection_key]
+        self._webapi_patch_item(item_key, version, {"collections": updated})
 
     def delete_collection(self, collection_key: str) -> None:
         """Delete a Zotero collection by key. Web API only."""
@@ -390,6 +447,7 @@ class ZoteroService:
                 publication=d.get("publicationTitle") or d.get("conferenceName") or None,
                 tags=[t["tag"] for t in d.get("tags", [])],
                 collection_keys=d.get("collections", []),
+                version=r.get("version", 0),
             ))
         return sorted(out, key=lambda x: x.title.lower())
 
@@ -473,7 +531,23 @@ class ZoteroService:
             parent_key=parent_key,
         )
 
-    def _webapi_add_item(self, paper: "object", collection_key: str) -> ZoteroItem:
+    def _webapi_patch_item(self, item_key: str, version: int, fields: dict) -> None:
+        import json
+        import urllib.request
+
+        url = f"https://api.zotero.org/users/{self._user_id}/items/{item_key}"
+        data = json.dumps(fields).encode()
+        headers = {
+            "Zotero-API-Key": self._api_key or "",
+            "Zotero-API-Version": "3",
+            "Content-Type": "application/json",
+            "If-Unmodified-Since-Version": str(version),
+        }
+        req = urllib.request.Request(url, data=data, headers=headers, method="PATCH")
+        with urllib.request.urlopen(req, timeout=15):
+            pass
+
+    def _webapi_add_item(self, paper: "object", collection_key: str | None) -> ZoteroItem:
         authors = getattr(paper, "authors", []) or []
         arxiv_id = getattr(paper, "arxiv_id", None)
         item_type = "preprint" if arxiv_id else "journalArticle"
@@ -485,14 +559,15 @@ class ZoteroService:
             "url": getattr(paper, "url", "") or "",
             "DOI": getattr(paper, "doi", "") or "",
             "date": getattr(paper, "published_date", "") or "",
-            "collections": [collection_key],
+            "collections": [collection_key] if collection_key else [],
             "tags": [],
         }]
         result = self._webapi_post(f"/users/{self._user_id}/items", body)
         successful = result.get("successful", {})
         if not successful:
             raise RuntimeError(f"Zotero add_item failed: {result}")
-        data = next(iter(successful.values())).get("data", {})
+        entry = next(iter(successful.values()))
+        data = entry.get("data", {})
         return ZoteroItem(
             key=data["key"],
             title=getattr(paper, "title", ""),
@@ -504,5 +579,6 @@ class ZoteroService:
             url=getattr(paper, "url", None),
             publication=getattr(paper, "journal", None),
             tags=[],
-            collection_keys=[collection_key],
+            collection_keys=data.get("collections", []),
+            version=entry.get("version", 0),
         )

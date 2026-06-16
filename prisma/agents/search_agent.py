@@ -9,7 +9,9 @@ import time
 import logging
 from typing import Dict, List, Any
 from urllib.parse import quote, urljoin
-from datetime import datetime
+from datetime import datetime, timezone
+
+from ..utils.text import significant_words
 
 from ..storage.models.agent_models import SearchResult, PaperMetadata, BookMetadata
 from ..storage.models.api_response_models import (
@@ -76,15 +78,23 @@ class SearchAgent:
                 logger.warning("preflight: %s unreachable (%s) — skipping", source, exc)
         return available
 
-    def search(self, query: str, sources: List[str] | None = None, limit: int = 10) -> SearchResult:
+    def search(
+        self,
+        query: str,
+        sources: List[str] | None = None,
+        limit: int = 10,
+        published_after: datetime | None = None,
+    ) -> SearchResult:
         """
         Search for papers and books across specified sources with quality prioritization.
-        
+
         Args:
             query: Search query string
             sources: List of sources to search ('arxiv', 'semanticscholar', etc.)
             limit: Maximum number of items to return per source
-            
+            published_after: Only return papers published after this date (stream re-runs
+                             use stream.last_updated so we never re-fetch old papers)
+
         Returns:
             SearchResult with papers and books lists and metadata
         """
@@ -93,27 +103,27 @@ class SearchAgent:
         if self.prefer_high_quality:
             sources = sorted(sources, key=lambda s: get_source_quality(s).value, reverse=True)
             logger.info("Searching sources by quality: %s", sources)
-        
+
         all_papers = []
         all_books = []
         source_stats = {}
-        
+
         for source in sources:
             source_quality = get_source_quality(source)
             print(f"[INFO] Searching {source} (Quality: {source_quality.value}⭐)")
-            
+
             source_stats[source] = {
                 'quality': source_quality.value,
                 'papers_found': 0,
                 'books_found': 0,
                 'rejected': 0
             }
-            
+
             papers_before = len(all_papers)
             books_before = len(all_books)
-            
+
             if source.lower() == 'arxiv':
-                papers = self._search_arxiv(query, limit)
+                papers = self._search_arxiv(query, limit, published_after=published_after)
                 all_papers.extend(papers)
             elif source.lower() == 'openlibrary':
                 books = self._search_openlibrary(query, limit)
@@ -125,7 +135,7 @@ class SearchAgent:
                 papers = self._search_academia(query, limit)
                 all_papers.extend(papers)
             elif source.lower() == 'semanticscholar':
-                papers = self._search_semantic_scholar(query, limit)
+                papers = self._search_semantic_scholar(query, limit, published_after=published_after)
                 all_papers.extend(papers)
             elif source.lower() == 'zotero':
                 print(f"[INFO] Zotero local search - used for caching/deduplication")
@@ -155,14 +165,21 @@ class SearchAgent:
             timestamp=datetime.now()
         )
     
-    def _search_arxiv(self, query: str, limit: int) -> List[PaperMetadata]:
+    def _search_arxiv(
+        self, query: str, limit: int, published_after: datetime | None = None
+    ) -> List[PaperMetadata]:
         """Search arXiv API for papers."""
         try:
-            # Format query for arXiv API
             search_query = f"all:{quote(query)}"
-            
-            # Build request URL
-            url = f"{self.arxiv_base_url}?search_query={search_query}&start=0&max_results={limit}"
+            if published_after is not None:
+                date_str = published_after.strftime("%Y%m%d%H%M%S")
+                search_query += f"+AND+submittedDate:[{date_str}+TO+99991231235959]"
+
+            url = (
+                f"{self.arxiv_base_url}?search_query={search_query}"
+                f"&start=0&max_results={limit}"
+                f"&sortBy=submittedDate&sortOrder=descending"
+            )
             
             # Make request
             response = requests.get(url, timeout=30)
@@ -259,21 +276,62 @@ class SearchAgent:
             print(f"[ERROR] Failed to parse arXiv entry: {e}")
             return None
     
+    # Within-run dedup: ≥5 shared stems → same paper (no LLM; sources are different APIs for same content)
+    _STEM_DEDUP_THRESHOLD = 5
+
     def _deduplicate_papers(self, papers: List[PaperMetadata]) -> List[PaperMetadata]:
-        """Remove duplicate papers based on title similarity."""
+        """
+        Remove duplicate papers across sources in a single search run.
+
+        Priority:
+          1. arxiv_id (arxiv preprint identifier — globally unique for arxiv papers)
+          2. DOI (globally unique for published papers)
+          3. Exact normalized title
+          4. NLTK stem overlap >= threshold (same paper, different API title)
+
+        No LLM used here — duplicates within a single run are near-certain
+        when any of these signals fire.
+        """
         if not papers:
             return []
-        
-        unique_papers = []
-        seen_titles = set()
-        
+
+        seen_arxiv: set[str] = set()
+        seen_doi: set[str] = set()
+        seen_title: set[str] = set()
+        seen_stems: list[frozenset[str]] = []
+        unique: list[PaperMetadata] = []
+
         for paper in papers:
+            # arxiv_id dedup
+            arxiv_id = getattr(paper, "arxiv_id", None)
+            if arxiv_id and arxiv_id in seen_arxiv:
+                continue
+            # DOI dedup
+            doi = getattr(paper, "doi", None)
+            if doi and doi.lower().strip() in seen_doi:
+                continue
+            # Exact title dedup
             title_key = paper.title.lower().strip()
-            if title_key not in seen_titles:
-                seen_titles.add(title_key)
-                unique_papers.append(paper)
-        
-        return unique_papers
+            if title_key in seen_title:
+                continue
+            # NLTK stem overlap dedup
+            stems = significant_words(paper.title)
+            is_dup = any(
+                len(stems & existing) >= self._STEM_DEDUP_THRESHOLD
+                for existing in seen_stems
+            )
+            if is_dup:
+                continue
+
+            if arxiv_id:
+                seen_arxiv.add(arxiv_id)
+            if doi:
+                seen_doi.add(doi.lower().strip())
+            seen_title.add(title_key)
+            seen_stems.append(stems)
+            unique.append(paper)
+
+        return unique
     
     def _deduplicate_books(self, books: List[BookMetadata]) -> List[BookMetadata]:
         """Remove duplicate books based on title and ISBN similarity."""
@@ -566,16 +624,20 @@ class SearchAgent:
             print(f"[ERROR] Failed to parse Academia.edu entry: {e}")
             return None
 
-    def _search_semantic_scholar(self, query: str, limit: int) -> List[PaperMetadata]:
+    def _search_semantic_scholar(
+        self, query: str, limit: int, published_after: datetime | None = None
+    ) -> List[PaperMetadata]:
         """Search Semantic Scholar API for academic papers."""
         try:
-            # Build request URL - using paper search endpoint
             url = f"{self.semantic_scholar_base_url}/paper/search"
-            params = {
+            params: dict = {
                 'query': query,
-                'limit': min(limit, 100),  # Max 100 per request
-                'fields': 'paperId,title,abstract,authors,venue,year,doi,url'
+                'limit': min(limit, 100),
+                'fields': 'paperId,title,abstract,authors,venue,year,doi,url',
             }
+            if published_after is not None:
+                # Semantic Scholar only has year-level granularity
+                params['year'] = f"{published_after.year}-"
             
             # Make request with rate limiting
             time.sleep(0.1)  # Respectful rate limiting for API

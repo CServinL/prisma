@@ -209,12 +209,14 @@ class TestRunStream:
         z.mode = ZoteroMode.web_api
         z.ensure_collection.return_value = ZoteroCollection(key="TESTCOLL", name="Test")
         z.list_items.return_value = []
-        z.add_item.return_value = MagicMock(key="ITEM1")
+        z.find_by_identifier.return_value = None
+        z.add_item.return_value = MagicMock(key="ITEM1", version=0, collection_keys=[])
         return z
 
     def _patched_run(self, vault, indexer, cfg, agent_mock, zotero=None):
         """Return patches for all globals _run_stream touches."""
         import prisma.server.app as app_mod
+        from prisma.storage.models.api_response_models import LLMRelevanceResult
 
         loader_mock = MagicMock()
         loader_mock.return_value.get_search_config.return_value = cfg
@@ -226,7 +228,27 @@ class TestRunStream:
             zotero.mode = ZoteroMode.web_api
             zotero.ensure_collection.return_value = ZoteroCollection(key="TESTCOLL", name="Test")
             zotero.list_items.return_value = []
-            zotero.add_item.return_value = MagicMock(key="ITEM1")
+            zotero.find_by_identifier.return_value = None
+            zotero.add_item.return_value = MagicMock(key="ITEM1", version=0, collection_keys=[])
+
+        # AnalysisAgent makes real Ollama HTTP calls — mock it; all papers are relevant by default
+        from prisma.storage.models.api_response_models import LLMIdentityResult
+        analysis_mock = MagicMock()
+        analysis_mock.assess_relevance.return_value = LLMRelevanceResult(
+            is_relevant=True,
+            relevance_level="RELEVANT",
+            confidence=0.9,
+            reasoning="mock",
+            semantic_score=0.9,
+        )
+        # check_identity_batch returns one result per candidate — default to not-same
+        analysis_mock.check_identity_batch.side_effect = (
+            lambda title, abstract, candidates: [
+                LLMIdentityResult(are_same=False, confidence=0.9, reason="mock")
+                for _ in candidates
+            ]
+        )
+        analysis_cls_mock = MagicMock(return_value=analysis_mock)
 
         return (
             patch.object(app_mod, "_vault", vault),
@@ -234,6 +256,7 @@ class TestRunStream:
             patch.object(app_mod, "_zotero", zotero),
             patch("prisma.utils.config.ConfigLoader", loader_mock),
             patch("prisma.agents.search_agent.SearchAgent", agent_cls_mock),
+            patch("prisma.agents.analysis_agent.AnalysisAgent", analysis_cls_mock),
         )
 
     def test_returns_not_due_when_next_update_in_future(self, vault, mock_indexer, mock_cfg):
@@ -243,7 +266,7 @@ class TestRunStream:
 
         agent = MagicMock()
         patches = self._patched_run(vault, mock_indexer, mock_cfg, agent)
-        with patches[0], patches[1], patches[2], patches[3], patches[4]:
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
             from prisma.server.app import _run_stream
             result = _run_stream("soon", force=False)
 
@@ -261,7 +284,7 @@ class TestRunStream:
         agent.search.return_value = _make_search_result()
 
         patches = self._patched_run(vault, mock_indexer, mock_cfg, agent)
-        with patches[0], patches[1], patches[2], patches[3], patches[4]:
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
             from prisma.server.app import _run_stream
             result = _run_stream("soon", force=True)
 
@@ -271,7 +294,7 @@ class TestRunStream:
         from fastapi import HTTPException
         agent = MagicMock()
         patches = self._patched_run(vault, mock_indexer, mock_cfg, agent)
-        with patches[0], patches[1], patches[2], patches[3], patches[4]:
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
             from prisma.server.app import _run_stream
             with pytest.raises(HTTPException) as exc_info:
                 _run_stream("does-not-exist")
@@ -284,7 +307,7 @@ class TestRunStream:
         agent.preflight.return_value = []  # all fail
 
         patches = self._patched_run(vault, mock_indexer, mock_cfg, agent)
-        with patches[0], patches[1], patches[2], patches[3], patches[4]:
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
             from prisma.server.app import _run_stream
             result = _run_stream("net", force=True)
 
@@ -306,10 +329,11 @@ class TestRunStream:
         zotero.mode = ZoteroMode.web_api
         zotero.ensure_collection.return_value = ZoteroCollection(key="TESTCOLL", name="AI")
         zotero.list_items.return_value = []
-        zotero.add_item.return_value = MagicMock(key="ITEM1")
+        zotero.find_by_identifier.return_value = None
+        zotero.add_item.return_value = MagicMock(key="ITEM1", version=0, collection_keys=[])
 
         patches = self._patched_run(vault, mock_indexer, mock_cfg, agent, zotero=zotero)
-        with patches[0], patches[1], patches[2], patches[3], patches[4]:
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
             from prisma.server.app import _run_stream
             result = _run_stream("ai", force=True)
 
@@ -317,6 +341,7 @@ class TestRunStream:
         assert result.papers_saved == 1
         zotero.ensure_collection.assert_called_once()
         zotero.add_item.assert_called_once()
+        zotero.add_to_collection.assert_called_once()
 
     def test_does_not_save_duplicate_papers(self, vault, mock_indexer, mock_cfg):
         vault.create_stream(title="AI", query="q")
@@ -339,7 +364,7 @@ class TestRunStream:
         zotero.list_items.return_value = [existing]
 
         patches = self._patched_run(vault, mock_indexer, mock_cfg, agent, zotero=zotero)
-        with patches[0], patches[1], patches[2], patches[3], patches[4]:
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
             from prisma.server.app import _run_stream
             result = _run_stream("ai", force=True)
 
@@ -355,7 +380,7 @@ class TestRunStream:
         agent.search.return_value = _make_search_result(papers=[paper])
 
         patches = self._patched_run(vault, mock_indexer, mock_cfg, agent)
-        with patches[0], patches[1], patches[2], patches[3], patches[4]:
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
             from prisma.server.app import _run_stream
             _run_stream("meta", force=True)
 
@@ -375,7 +400,7 @@ class TestRunStream:
         agent.search.return_value = _make_search_result(papers=[paper])
 
         patches = self._patched_run(vault, mock_indexer, mock_cfg, agent)
-        with patches[0], patches[1], patches[2], patches[3], patches[4]:
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
             from prisma.server.app import _run_stream
             _run_stream("index", force=True)
 
@@ -390,7 +415,7 @@ class TestRunStream:
         agent.search.return_value = _make_search_result()
 
         patches = self._patched_run(vault, mock_indexer, mock_cfg, agent)
-        with patches[0], patches[1], patches[2], patches[3], patches[4]:
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
             from prisma.server.app import _run_stream
             result = _run_stream("sources", force=True)
 

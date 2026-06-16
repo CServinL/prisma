@@ -113,6 +113,9 @@ def _index_extensions() -> tuple[str, ...]:
     return DEFAULT_INDEX_EXTENSIONS
 
 
+from prisma.utils.text import significant_words as _significant_words
+
+
 _t("building vault")
 _vault = VaultService(vault_root=_resolve_vault_root())
 _t(f"vault root: {_vault.root}")
@@ -919,6 +922,7 @@ class StreamRunResult(BaseModel):
     slug: str
     papers_found: int
     papers_saved: int
+    papers_skipped_llm: int = 0
     sources_used: list[str]
     sources_skipped: list[str]
     errors: list[str] = []
@@ -960,8 +964,13 @@ def _run_stream(slug: str, force: bool = False) -> StreamRunResult:
             errors=["all sources failed preflight"],
         )
 
-    result = agent.search(stream.query, sources=available, limit=cfg.default_limit)
+    result = agent.search(
+        stream.query,
+        sources=available,
+        limit=cfg.default_limit,
+    )
     papers_saved = 0
+    papers_skipped_llm = 0
     errors: list[str] = []
 
     # Ensure the stream's ZoteroCollection exists
@@ -977,23 +986,186 @@ def _run_stream(slug: str, force: bool = False) -> StreamRunResult:
     else:
         errors.append("Zotero not configured for writes (offline mode) — papers found but not saved")
 
-    # Existing item titles in this collection for dedup
-    existing_titles: set[str] = set()
+    # Load collection state once — indexes for fast O(1) dedup before any LLM call
+    collection_items: list = []
+    collection_item_keys: set[str] = set()
+    collection_by_doi: dict[str, object] = {}    # normalized DOI → ZoteroItem
+    collection_by_title: dict[str, object] = {}  # normalized title → ZoteroItem
     if collection_key and _zotero.mode != ZoteroMode.offline:
         try:
             for item in _zotero.list_items(collection_key=collection_key):
-                existing_titles.add(item.title.lower().strip())
+                collection_items.append(item)
+                collection_item_keys.add(item.key)
+                if item.doi:
+                    collection_by_doi[item.doi.lower().strip()] = item
+                collection_by_title[item.title.lower().strip()] = item
         except Exception:
             pass
 
+    # Lazy-initialise the analysis agent only when needed
+    _analysis: object = None
+
+    def _get_analysis():
+        nonlocal _analysis
+        if _analysis is None:
+            from prisma.agents.analysis_agent import AnalysisAgent
+            _analysis = AnalysisAgent()
+        return _analysis
+
+    # Pre-compute stems for existing collection items once (paid on collection load, not per paper)
+    _item_stems: list[tuple[frozenset[str], object]] = [
+        (_significant_words(item.title), item)
+        for item in collection_items
+    ]
+
+    # Stem-overlap thresholds for identity decisions:
+    #   >= CERTAIN  → NLTK alone is confident enough; skip LLM
+    #   [AMBIGUOUS, CERTAIN) → NLTK suggests possible identity; confirm with LLM
+    #   < AMBIGUOUS → clearly different texts; skip LLM
+    _STEM_CERTAIN   = 5  # ≥5 shared stems → same paper, no LLM needed
+    _STEM_AMBIGUOUS = 2  # 2-4 shared stems → ask LLM
+
+    def _already_in_collection(paper) -> bool:
+        # Gate 1a — local DOI index (free, O(1))
+        if paper.doi and paper.doi.lower().strip() in collection_by_doi:
+            return True
+        # Gate 1b — local exact normalized title (free, O(1))
+        if paper.title.lower().strip() in collection_by_title:
+            return True
+
+        # Gate 1c — Zotero's own search index (handles fuzzy title matching,
+        # DOI fields, and any other metadata Zotero indexed internally)
+        try:
+            hit = _zotero.find_by_identifier(
+                doi=paper.doi,
+                title=paper.title,
+                collection_key=collection_key,
+            )
+            if hit is not None:
+                _log.info("zotero search dedup: %r matched %r", paper.title, hit.title)
+                return True
+        except Exception as exc:
+            _log.warning("zotero search dedup failed: %s — continuing to NLTK", exc)
+
+        # Gate 1d — NLTK stem overlap (catches preprint→journal renames and similar)
+        incoming_stems = _significant_words(paper.title)
+        certain_match = False
+        llm_candidates: list[tuple[str, str, object]] = []
+        for item_stems, item in _item_stems:
+            overlap = len(incoming_stems & item_stems)
+            if overlap >= _STEM_CERTAIN:
+                _log.info(
+                    "stem dedup (certain): %r matched %r (overlap=%d)",
+                    paper.title, item.title, overlap,
+                )
+                certain_match = True
+                break
+            if overlap >= _STEM_AMBIGUOUS:
+                llm_candidates.append((item.title, item.abstract or "", item))
+
+        if certain_match:
+            return True
+        if not llm_candidates:
+            return False
+
+        # Gate 1e — LLM batch (only for the ambiguous middle zone that NLTK couldn't decide)
+        try:
+            results = _get_analysis().check_identity_batch(
+                paper.title,
+                paper.abstract or "",
+                [(t, a) for t, a, _ in llm_candidates],
+            )
+            for identity_result, (_, _, item) in zip(results, llm_candidates):
+                if identity_result.are_same:
+                    _log.info(
+                        "LLM dedup: %r matched %r (confidence=%.2f)",
+                        paper.title, item.title, identity_result.confidence,
+                    )
+                    return True
+        except Exception as exc:
+            _log.warning("identity batch check failed: %s — treating as new paper", exc)
+        return False
+
+    def _is_relevant(paper) -> bool:
+        try:
+            result = _get_analysis().assess_relevance(
+                paper.title,
+                paper.abstract or "",
+                stream.query,
+            )
+            if result.relevance_level == "UNKNOWN":
+                _log.warning("LLM unavailable for relevance check — accepting %r", paper.title)
+                return True
+            return result.is_relevant
+        except Exception as exc:
+            _log.warning("relevance check error for %r: %s — accepting", paper.title, exc)
+            return True
+
+    # Source 1: Zotero library — papers already saved that may be relevant to this stream
+    library_papers_found = 0
+    if collection_key and _zotero.mode != ZoteroMode.offline:
+        try:
+            library_candidates = _zotero.list_items(q=stream.query)
+            library_papers_found = len(library_candidates)
+        except Exception as exc:
+            errors.append(f"zotero library search: {exc}")
+            library_candidates = []
+
+        for lib_item in library_candidates:
+            if lib_item.key in collection_item_keys:
+                continue  # already accepted into this stream
+            if not _is_relevant(lib_item):
+                papers_skipped_llm += 1
+                continue
+            try:
+                _zotero.add_to_collection(
+                    lib_item.key, lib_item.version, collection_key,
+                    current_collection_keys=lib_item.collection_keys,
+                )
+                collection_item_keys.add(lib_item.key)
+                collection_by_title[lib_item.title.lower().strip()] = lib_item
+                if lib_item.doi:
+                    collection_by_doi[lib_item.doi.lower().strip()] = lib_item
+                papers_saved += 1
+            except Exception as exc:
+                errors.append(str(exc))
+
+    # Source 2: Internet search results
     for paper in result.papers:
-        if paper.title.lower().strip() in existing_titles:
-            continue
         if _zotero.mode == ZoteroMode.offline or not collection_key:
             continue
+
+        # Gate 1 — already in this stream's collection?
+        if _already_in_collection(paper):
+            continue
+
+        # Bookmark-first: ensure the paper exists in the library before the relevance gate.
+        # Avoids creating duplicates when the same paper was found before by a different stream.
         try:
-            _zotero.add_item(paper, collection_key)
-            existing_titles.add(paper.title.lower().strip())
+            existing_in_library = _zotero.find_by_identifier(doi=paper.doi, title=paper.title)
+            library_item = existing_in_library if existing_in_library is not None else _zotero.add_item(paper)
+        except Exception as exc:
+            errors.append(f"bookmark: {exc}")
+            continue
+
+        # Gate 2 — LLM relevance
+        if not _is_relevant(paper):
+            papers_skipped_llm += 1
+            _log.info("LLM rejected %r as not relevant to %r", paper.title, stream.query)
+            continue
+
+        # Accept: add the library item to this stream's collection
+        try:
+            _zotero.add_to_collection(
+                library_item.key,
+                library_item.version,
+                collection_key,
+                current_collection_keys=library_item.collection_keys,
+            )
+            collection_item_keys.add(library_item.key)
+            collection_by_title[paper.title.lower().strip()] = library_item
+            if paper.doi:
+                collection_by_doi[paper.doi.lower().strip()] = library_item
             papers_saved += 1
         except Exception as exc:
             errors.append(str(exc))
@@ -1011,8 +1183,9 @@ def _run_stream(slug: str, force: bool = False) -> StreamRunResult:
 
     return StreamRunResult(
         slug=slug,
-        papers_found=len(result.papers),
+        papers_found=len(result.papers) + library_papers_found,
         papers_saved=papers_saved,
+        papers_skipped_llm=papers_skipped_llm,
         sources_used=available,
         sources_skipped=skipped,
         errors=errors,

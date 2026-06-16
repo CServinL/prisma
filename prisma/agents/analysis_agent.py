@@ -4,6 +4,7 @@ Analysis Agent - Analyzes and summarizes academic papers using LLM.
 
 import requests
 import json
+import threading
 from typing import Dict, List, Any
 from pathlib import Path
 from datetime import datetime
@@ -21,6 +22,7 @@ class AnalysisAgent:
         self.llm_config = config.get_llm_config()
         self.base_url = self.llm_config.base_url
         self.model = self.llm_config.model
+        self._inference_sem = threading.Semaphore(self.llm_config.max_concurrent_inferences)
     
     def analyze(self, papers: List[PaperMetadata]) -> AnalysisResult:
         """
@@ -187,19 +189,20 @@ RELEVANCE: [HIGHLY_RELEVANT/RELEVANT/SOMEWHAT_RELEVANT/NOT_RELEVANT]
 CONFIDENCE: [HIGH/MEDIUM/LOW]
 REASONING: [2-3 sentences explaining the semantic connection or lack thereof]"""
 
-            response = requests.post(
-                f"{self.base_url}/api/generate",
-                json={
-                    "model": self.model,
-                    "prompt": prompt,
-                    "stream": False,
-                    "options": {
-                        "temperature": 0.3,  # Some creativity for nuanced evaluation
-                        "num_predict": 250
-                    }
-                },
-                timeout=45
-            )
+            with self._inference_sem:
+                response = requests.post(
+                    f"{self.base_url}/api/generate",
+                    json={
+                        "model": self.model,
+                        "prompt": prompt,
+                        "stream": False,
+                        "options": {
+                            "temperature": 0.3,
+                            "num_predict": 250
+                        }
+                    },
+                    timeout=45
+                )
             
             if response.status_code == 200:
                 result = response.json().get('response', '').strip()
@@ -275,6 +278,53 @@ REASONING: [2-3 sentences explaining the semantic connection or lack thereof]"""
                 semantic_score=0.0
             )
     
+    def batch_relevance_check(
+        self,
+        query: str,
+        candidates: list[tuple[str, str, str | None]],  # (key, title, abstract)
+    ) -> list[bool]:
+        """
+        Check which candidates are relevant to query in a single LLM call.
+
+        candidates: list of (key, title, abstract) — abstract may be None.
+        Returns: list of bool in the same order as candidates.
+        On LLM failure, returns all True (fail open).
+        """
+        if not candidates:
+            return []
+
+        def _entry(title: str, abstract: str | None) -> str:
+            if abstract:
+                return f"---\n{title}\n{abstract}"
+            return f"---\n{title}"
+
+        items_block = "\n".join(_entry(title, abstract) for _, title, abstract in candidates)
+        prompt = (
+            f'Topic: "{query}"\n\n'
+            f"Which of these items are relevant to this topic? "
+            f"Reply with only the titles of relevant items, one per line. No explanations.\n\n"
+            f"{items_block}\n---"
+        )
+
+        try:
+            with self._inference_sem:
+                response = requests.post(
+                    f"{self.base_url}/api/generate",
+                    json={
+                        "model": self.model,
+                        "prompt": prompt,
+                        "stream": False,
+                        "options": {"temperature": 0.1, "num_predict": 20 * len(candidates)},
+                    },
+                    timeout=15 + 5 * len(candidates),
+                )
+            if response.status_code != 200:
+                return [True] * len(candidates)
+            text = response.json().get("response", "").strip().lower()
+            return [title.lower() in text for _, title, _ in candidates]
+        except Exception:
+            return [True] * len(candidates)
+
     _IDENTITY_THRESHOLD = 8  # candidates per incoming paper; above this, switch to parallel
 
     def check_identity_batch(
@@ -330,16 +380,17 @@ Respond with exactly one line per candidate:
 {expected_lines}"""
 
         try:
-            response = requests.post(
-                f"{self.base_url}/api/generate",
-                json={
-                    "model": self.model,
-                    "prompt": prompt,
-                    "stream": False,
-                    "options": {"temperature": 0.1, "num_predict": 30 * len(candidates)},
-                },
-                timeout=10 + 15 * len(candidates),
-            )
+            with self._inference_sem:
+                response = requests.post(
+                    f"{self.base_url}/api/generate",
+                    json={
+                        "model": self.model,
+                        "prompt": prompt,
+                        "stream": False,
+                        "options": {"temperature": 0.1, "num_predict": 30 * len(candidates)},
+                    },
+                    timeout=10 + 15 * len(candidates),
+                )
             if response.status_code != 200:
                 return [LLMIdentityResult(are_same=False, confidence=0.0, reason="LLM unavailable")] * len(candidates)
             text = response.json().get("response", "").strip()
@@ -399,7 +450,7 @@ Respond with exactly one line per candidate:
             LLMIdentityResult(are_same=False, confidence=0.0, reason="pending")
         ] * len(candidates)
 
-        with ThreadPoolExecutor(max_workers=min(len(candidates), 6)) as pool:
+        with ThreadPoolExecutor(max_workers=self.llm_config.max_concurrent_inferences) as pool:
             futures = {
                 pool.submit(_check_one, (i, t, a)): i
                 for i, (t, a) in enumerate(candidates)
@@ -429,16 +480,17 @@ SAME: [YES/NO]
 CONFIDENCE: [HIGH/MEDIUM/LOW]
 REASON: [one sentence]"""
         try:
-            response = requests.post(
-                f"{self.base_url}/api/generate",
-                json={
-                    "model": self.model,
-                    "prompt": prompt,
-                    "stream": False,
-                    "options": {"temperature": 0.1, "num_predict": 60},
-                },
-                timeout=20,
-            )
+            with self._inference_sem:
+                response = requests.post(
+                    f"{self.base_url}/api/generate",
+                    json={
+                        "model": self.model,
+                        "prompt": prompt,
+                        "stream": False,
+                        "options": {"temperature": 0.1, "num_predict": 60},
+                    },
+                    timeout=20,
+                )
             if response.status_code != 200:
                 return LLMIdentityResult(are_same=False, confidence=0.0, reason="LLM unavailable")
             text = response.json().get("response", "").strip()

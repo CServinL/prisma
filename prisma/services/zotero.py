@@ -110,13 +110,14 @@ class ZoteroService:
     # ── Items ─────────────────────────────────────────────────────────────────
 
     def list_items(self, collection_key: str | None = None,
-                   q: str | None = None) -> list[ZoteroItem]:
+                   q: str | None = None,
+                   limit: int | None = None) -> list[ZoteroItem]:
         if self.mode == ZoteroMode.offline:
-            return self._sqlite_items(collection_key, q)
+            return self._sqlite_items(collection_key, q, limit)
         if self.mode == ZoteroMode.desktop:
             return self._desktop_items(collection_key, q)
         if self.mode == ZoteroMode.web_api:
-            return self._webapi_items(collection_key, q)
+            return self._webapi_items(collection_key, q, limit)
         return []
 
     def get_item(self, key: str) -> ZoteroItem | None:
@@ -196,7 +197,7 @@ class ZoteroService:
                 ))
         return raw
 
-    def _sqlite_items(self, collection_key: str | None, q: str | None) -> list[ZoteroItem]:
+    def _sqlite_items(self, collection_key: str | None, q: str | None, limit: int | None = None) -> list[ZoteroItem]:
         with self._db() as con:
             # Resolve collection → item IDs
             collection_item_ids: set[int] | None = None
@@ -290,6 +291,8 @@ class ZoteroService:
                 collection_keys=coll_map.get(item_id, []),
             ))
         result.sort(key=lambda x: x.title.lower())
+        if limit is not None:
+            result = result[:limit]
         return result
 
     def _sqlite_pdf(self, key: str) -> bytes | None:
@@ -411,7 +414,7 @@ class ZoteroService:
             ))
         return sorted(out, key=lambda c: c.name.lower())
 
-    def _webapi_items(self, collection_key: str | None, q: str | None) -> list[ZoteroItem]:
+    def _webapi_items(self, collection_key: str | None, q: str | None, limit: int | None = None) -> list[ZoteroItem]:
         _EXCLUDED = {"attachment", "note", "annotation"}
         if collection_key:
             path = f"/users/{self._user_id}/collections/{collection_key}/items"
@@ -420,6 +423,8 @@ class ZoteroService:
         params: dict = {}
         if q:
             params["q"] = q
+        if limit is not None:
+            params["limit"] = limit
         rows = self._webapi_get(path, params)
         out: list[ZoteroItem] = []
         for r in rows:

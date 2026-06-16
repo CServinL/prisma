@@ -44,26 +44,33 @@ class TestAnalysisAgent(unittest.TestCase):
         self.assertIsNotNone(self.analysis_agent.base_url)
         self.assertIsNotNone(self.analysis_agent.model)
     
-    def test_analyze_papers(self):
+    @patch('prisma.agents.analysis_agent.requests.post')
+    def test_analyze_papers(self, mock_post):
         """Test paper analysis functionality."""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {'response': 'Summary of the paper.', 'done': True}
+        mock_post.return_value = mock_response
+
         papers = [self.sample_paper]
-        
         result = self.analysis_agent.analyze(papers)
-        
-        # Verify result is AnalysisResult instance
+
         self.assertIsInstance(result, AnalysisResult)
         self.assertEqual(len(result.summaries), 1)
         self.assertEqual(result.author_count, 2)
         self.assertIsInstance(result.summaries[0], PaperSummary)
-    
-    def test_summarize_paper_structure(self):
+
+    @patch('prisma.agents.analysis_agent.requests.post')
+    def test_summarize_paper_structure(self, mock_post):
         """Test paper summary structure."""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {'response': 'Summary of the paper.', 'done': True}
+        mock_post.return_value = mock_response
+
         summary = self.analysis_agent._summarize_paper(self.sample_paper)
-        
-        # Verify result is PaperSummary instance
+
         self.assertIsInstance(summary, PaperSummary)
-        
-        # Verify required fields
         self.assertEqual(summary.title, self.sample_paper.title)
         self.assertEqual(summary.authors, self.sample_paper.authors)
         self.assertEqual(summary.abstract, self.sample_paper.abstract)

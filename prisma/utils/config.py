@@ -52,7 +52,8 @@ class LLMConfig(BaseModel):
     provider: str = Field("ollama", description="LLM provider")
     model: str = Field("llama3.1:8b", description="Model name")
     host: str = Field("localhost:11434", description="Host and port")
-    
+    max_concurrent_inferences: int = Field(1, ge=1, le=16, description="Max simultaneous Ollama requests")
+
     @property
     def base_url(self) -> str:
         """Generate base URL for API calls"""

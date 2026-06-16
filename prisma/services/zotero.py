@@ -377,8 +377,10 @@ class ZoteroService:
 
     def _webapi_get(self, path: str, params: dict | None = None, max_results: int | None = None) -> list[dict]:
         import json
+        import time
         import urllib.parse
         import urllib.request
+        import urllib.error
 
         base = f"https://api.zotero.org{path}"
         headers = {
@@ -398,9 +400,20 @@ class ZoteroService:
             p = {**(params or {}), "format": "json", "limit": fetch, "start": start}
             url = f"{base}?{urllib.parse.urlencode(p)}"
             req = urllib.request.Request(url, headers=headers)
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                total = int(resp.headers.get("Total-Results", "0"))
-                batch = json.loads(resp.read())
+            for attempt in range(3):
+                try:
+                    with urllib.request.urlopen(req, timeout=15) as resp:
+                        total = int(resp.headers.get("Total-Results", "0"))
+                        batch = json.loads(resp.read())
+                    break
+                except urllib.error.HTTPError as exc:
+                    if exc.code == 429:
+                        backoff = int(exc.headers.get("Retry-After", 2 ** attempt * 2))
+                        time.sleep(backoff)
+                        continue
+                    raise
+            else:
+                raise RuntimeError(f"Zotero GET {path} failed after retries (429)")
             results.extend(batch)
             start += len(batch)
             if not batch or start >= total:
@@ -514,7 +527,9 @@ class ZoteroService:
 
     def _webapi_post(self, path: str, body: list[dict]) -> dict:
         import json
+        import time
         import urllib.request
+        import urllib.error
 
         url = f"https://api.zotero.org{path}"
         data = json.dumps(body).encode()
@@ -523,9 +538,20 @@ class ZoteroService:
             "Zotero-API-Version": "3",
             "Content-Type": "application/json",
         }
-        req = urllib.request.Request(url, data=data, headers=headers, method="POST")
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            return json.loads(resp.read())
+        for attempt in range(3):
+            req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+            try:
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    result = json.loads(resp.read())
+                time.sleep(0.5)  # stay under Zotero's ~2 writes/sec limit
+                return result
+            except urllib.error.HTTPError as exc:
+                if exc.code == 429:
+                    backoff = int(exc.headers.get("Retry-After", 2 ** attempt * 2))
+                    time.sleep(backoff)
+                    continue
+                raise
+        raise RuntimeError(f"Zotero POST {path} failed after retries (429)")
 
     def _webapi_create_collection(self, name: str, parent_key: str | None) -> ZoteroCollection:
         body = [{"name": name, "parentCollection": parent_key or False}]
@@ -542,7 +568,9 @@ class ZoteroService:
 
     def _webapi_patch_item(self, item_key: str, version: int, fields: dict) -> None:
         import json
+        import time
         import urllib.request
+        import urllib.error
 
         url = f"https://api.zotero.org/users/{self._user_id}/items/{item_key}"
         data = json.dumps(fields).encode()
@@ -552,9 +580,20 @@ class ZoteroService:
             "Content-Type": "application/json",
             "If-Unmodified-Since-Version": str(version),
         }
-        req = urllib.request.Request(url, data=data, headers=headers, method="PATCH")
-        with urllib.request.urlopen(req, timeout=15):
-            pass
+        for attempt in range(3):
+            req = urllib.request.Request(url, data=data, headers=headers, method="PATCH")
+            try:
+                with urllib.request.urlopen(req, timeout=15):
+                    pass
+                time.sleep(0.5)  # stay under Zotero's ~2 writes/sec limit
+                return
+            except urllib.error.HTTPError as exc:
+                if exc.code == 429:
+                    backoff = int(exc.headers.get("Retry-After", 2 ** attempt * 2))
+                    time.sleep(backoff)
+                    continue
+                raise
+        raise RuntimeError(f"Zotero PATCH {item_key} failed after retries (429)")
 
     def _webapi_add_item(self, paper: "object", collection_key: str | None) -> ZoteroItem:
         authors = getattr(paper, "authors", []) or []

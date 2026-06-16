@@ -248,6 +248,10 @@ class TestRunStream:
                 for _ in candidates
             ]
         )
+        # batch_relevance_check returns True for each candidate — all relevant by default
+        analysis_mock.batch_relevance_check.side_effect = (
+            lambda query, candidates: [True for _ in candidates]
+        )
         analysis_cls_mock = MagicMock(return_value=analysis_mock)
 
         return (

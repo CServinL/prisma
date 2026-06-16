@@ -309,17 +309,22 @@ REASONING: [2-3 sentences explaining the semantic connection or lack thereof]"""
         query: str,
         candidates: list[tuple[str, str, str | None]],
     ) -> list[bool]:
-        def _entry(title: str, abstract: str | None) -> str:
+        def _entry(i: int, title: str, abstract: str | None) -> str:
             if abstract:
-                return f"---\n{title}\n{abstract}"
-            return f"---\n{title}"
+                return f"{i}. {title}\n{abstract}"
+            return f"{i}. {title}"
 
-        items_block = "\n".join(_entry(title, abstract) for _, title, abstract in candidates)
+        items_block = "\n\n".join(
+            _entry(i + 1, title, abstract)
+            for i, (_, title, abstract) in enumerate(candidates)
+        )
         prompt = (
             f'Topic: "{query}"\n\n'
-            f"Which of these items are relevant to this topic? "
-            f"Reply with only the titles of relevant items, one per line. No explanations.\n\n"
-            f"{items_block}\n---"
+            f"Which items are relevant to this topic? "
+            f"Reply with only the numbers of relevant items, comma-separated. "
+            f"Example: 1, 4, 7\n"
+            f"If none are relevant, reply: none\n\n"
+            f"{items_block}"
         )
 
         try:
@@ -330,14 +335,18 @@ REASONING: [2-3 sentences explaining the semantic connection or lack thereof]"""
                         "model": self.model,
                         "prompt": prompt,
                         "stream": False,
-                        "options": {"temperature": 0.1, "num_predict": 20 * len(candidates)},
+                        "options": {"temperature": 0.1, "num_predict": 60},
                     },
-                    timeout=15 + 5 * len(candidates),
+                    timeout=30,
                 )
             if response.status_code != 200:
                 return [True] * len(candidates)
             text = response.json().get("response", "").strip().lower()
-            return [title.lower() in text for _, title, _ in candidates]
+            if "none" in text and not any(ch.isdigit() for ch in text):
+                return [False] * len(candidates)
+            import re
+            selected = {int(n) for n in re.findall(r"\d+", text) if 1 <= int(n) <= len(candidates)}
+            return [i + 1 in selected for i in range(len(candidates))]
         except Exception:
             return [True] * len(candidates)
 

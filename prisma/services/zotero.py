@@ -375,7 +375,7 @@ class ZoteroService:
 
     # ── Web API ───────────────────────────────────────────────────────────────
 
-    def _webapi_get(self, path: str, params: dict | None = None) -> list[dict]:
+    def _webapi_get(self, path: str, params: dict | None = None, max_results: int | None = None) -> list[dict]:
         import json
         import urllib.parse
         import urllib.request
@@ -387,9 +387,15 @@ class ZoteroService:
         }
         results: list[dict] = []
         start = 0
-        limit = 100
+        page_size = 100
         while True:
-            p = {**(params or {}), "format": "json", "limit": limit, "start": start}
+            fetch = page_size
+            if max_results is not None:
+                remaining = max_results - len(results)
+                if remaining <= 0:
+                    break
+                fetch = min(page_size, remaining)
+            p = {**(params or {}), "format": "json", "limit": fetch, "start": start}
             url = f"{base}?{urllib.parse.urlencode(p)}"
             req = urllib.request.Request(url, headers=headers)
             with urllib.request.urlopen(req, timeout=15) as resp:
@@ -423,9 +429,7 @@ class ZoteroService:
         params: dict = {}
         if q:
             params["q"] = q
-        if limit is not None:
-            params["limit"] = limit
-        rows = self._webapi_get(path, params)
+        rows = self._webapi_get(path, params, max_results=limit)
         out: list[ZoteroItem] = []
         for r in rows:
             d = r.get("data", {})

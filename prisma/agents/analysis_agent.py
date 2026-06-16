@@ -278,21 +278,37 @@ REASONING: [2-3 sentences explaining the semantic connection or lack thereof]"""
                 semantic_score=0.0
             )
     
+    _RELEVANCE_BATCH_SIZE = 50  # items per LLM call — stays within 7B context window
+
     def batch_relevance_check(
         self,
         query: str,
         candidates: list[tuple[str, str, str | None]],  # (key, title, abstract)
     ) -> list[bool]:
         """
-        Check which candidates are relevant to query in a single LLM call.
+        Check which candidates are relevant to query.
+
+        Chunks candidates into groups of _RELEVANCE_BATCH_SIZE and makes one
+        LLM call per chunk so the prompt never exceeds the model's context window.
 
         candidates: list of (key, title, abstract) — abstract may be None.
         Returns: list of bool in the same order as candidates.
-        On LLM failure, returns all True (fail open).
+        On LLM failure for a chunk, returns True for that chunk (fail open).
         """
         if not candidates:
             return []
 
+        results: list[bool] = []
+        for i in range(0, len(candidates), self._RELEVANCE_BATCH_SIZE):
+            chunk = candidates[i : i + self._RELEVANCE_BATCH_SIZE]
+            results.extend(self._relevance_chunk(query, chunk))
+        return results
+
+    def _relevance_chunk(
+        self,
+        query: str,
+        candidates: list[tuple[str, str, str | None]],
+    ) -> list[bool]:
         def _entry(title: str, abstract: str | None) -> str:
             if abstract:
                 return f"---\n{title}\n{abstract}"

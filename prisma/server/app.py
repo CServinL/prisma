@@ -1105,22 +1105,6 @@ def _run_stream(slug: str, force: bool = False) -> StreamRunResult:
             _log.warning("identity batch check failed: %s — treating as new paper", exc)
         return False
 
-    def _is_relevant(paper) -> bool:
-        _log.info("relevance gate: evaluating %r", paper.title)
-        try:
-            result = _get_analysis().assess_relevance(
-                paper.title,
-                paper.abstract or "",
-                stream.query,
-            )
-            if result.relevance_level == "UNKNOWN":
-                _log.warning("relevance gate: LLM unavailable — accepting %r by default", paper.title)
-                return True
-            _log.info("relevance gate: %r → %s (relevant=%s)", paper.title, result.relevance_level, result.is_relevant)
-            return result.is_relevant
-        except Exception as exc:
-            _log.warning("relevance gate error for %r: %s — accepting by default", paper.title, exc)
-            return True
 
     # Source 1: Zotero library — papers already saved that may be relevant to this stream
     library_papers_found = 0
@@ -1172,58 +1156,66 @@ def _run_stream(slug: str, force: bool = False) -> StreamRunResult:
                     _log.error("stream %r: add_to_collection failed for %r: %s", slug, lib_item.key, exc)
                     errors.append(str(exc))
 
-    # Source 2: Internet search results
+    # Source 2: Internet search results — batch pipeline
+    # Phase 2a: dedup + bookmark for all papers before any LLM call
     _log.info("stream %r: source 2 — processing %d internet papers", slug, len(result.papers))
+    bookmarked: list[tuple[object, object]] = []  # (paper, library_item)
     for paper in result.papers:
         _log.info("stream %r: internet paper %r (doi=%s)", slug, paper.title, paper.doi or "none")
         if _zotero.mode == ZoteroMode.offline or not collection_key:
-            _log.info("stream %r: skipping %r — Zotero offline or no collection", slug, paper.title)
-            continue
+            _log.info("stream %r: skipping — Zotero offline or no collection", slug)
+            break
 
-        # Gate 1 — already in this stream's collection?
         if _already_in_collection(paper):
             continue
 
-        # Bookmark-first: ensure the paper exists in the library before the relevance gate.
         _log.info("stream %r: bookmark-first check for %r", slug, paper.title)
         try:
             existing_in_library = _zotero.find_by_identifier(doi=paper.doi, title=paper.title)
             if existing_in_library is not None:
+                if collection_key and collection_key in (existing_in_library.collection_keys or []):
+                    _log.info("stream %r: %r already in collection (item.collections) — skipping", slug, paper.title)
+                    continue
                 _log.info("stream %r: %r already in library (key=%r) — reusing", slug, paper.title, existing_in_library.key)
                 library_item = existing_in_library
             else:
                 _log.info("stream %r: bookmarking new paper %r", slug, paper.title)
                 library_item = _zotero.add_item(paper)
                 _log.info("stream %r: bookmarked %r → key=%r", slug, paper.title, library_item.key)
+            bookmarked.append((paper, library_item))
         except Exception as exc:
             _log.error("stream %r: bookmark failed for %r: %s", slug, paper.title, exc)
             errors.append(f"bookmark: {exc}")
-            continue
 
-        # Gate 2 — LLM relevance
-        if not _is_relevant(paper):
-            papers_skipped_llm += 1
-            _log.info("stream %r: rejected %r — not relevant to query", slug, paper.title)
-            continue
-
-        # Accept: add the library item to this stream's collection
-        _log.info("stream %r: accepting %r — adding to collection", slug, paper.title)
-        try:
-            _zotero.add_to_collection(
-                library_item.key,
-                library_item.version,
-                collection_key,
-                current_collection_keys=library_item.collection_keys,
-            )
-            collection_item_keys.add(library_item.key)
-            collection_by_title[paper.title.lower().strip()] = library_item
-            if paper.doi:
-                collection_by_doi[paper.doi.lower().strip()] = library_item
-            papers_saved += 1
-            _log.info("stream %r: saved %r (total saved=%d)", slug, paper.title, papers_saved)
-        except Exception as exc:
-            _log.error("stream %r: add_to_collection failed for %r: %s", slug, paper.title, exc)
-            errors.append(str(exc))
+    # Phase 2b: batch relevance check on all bookmarked survivors
+    if bookmarked:
+        _log.info("stream %r: batch relevance check for %d internet papers (single LLM call)", slug, len(bookmarked))
+        relevance_flags = _get_analysis().batch_relevance_check(
+            stream.query,
+            [(lib.key, paper.title, paper.abstract) for paper, lib in bookmarked],
+        )
+        for (paper, library_item), is_relevant in zip(bookmarked, relevance_flags):
+            _log.info("stream %r: internet paper %r → relevant=%s", slug, paper.title, is_relevant)
+            if not is_relevant:
+                papers_skipped_llm += 1
+                continue
+            _log.info("stream %r: accepting %r — adding to collection", slug, paper.title)
+            try:
+                _zotero.add_to_collection(
+                    library_item.key,
+                    library_item.version,
+                    collection_key,
+                    current_collection_keys=library_item.collection_keys,
+                )
+                collection_item_keys.add(library_item.key)
+                collection_by_title[paper.title.lower().strip()] = library_item
+                if paper.doi:
+                    collection_by_doi[paper.doi.lower().strip()] = library_item
+                papers_saved += 1
+                _log.info("stream %r: saved %r (total saved=%d)", slug, paper.title, papers_saved)
+            except Exception as exc:
+                _log.error("stream %r: add_to_collection failed for %r: %s", slug, paper.title, exc)
+                errors.append(str(exc))
 
     freq_map = {"daily": 1, "weekly": 7, "monthly": 30, "manual": 0}
     days = freq_map.get(stream.refresh_frequency.value, 7)

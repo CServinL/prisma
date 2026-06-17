@@ -23,6 +23,15 @@ class CoordinatorTestBase(unittest.TestCase):
     def setUp(self):
         """Set up test fixtures."""
         self.coordinator = PrismaCoordinator(debug=False)
+        self.coordinator.analysis_agent.assess_relevance = Mock(
+            return_value=LLMRelevanceResult(
+                is_relevant=True,
+                relevance_level="RELEVANT",
+                confidence=0.9,
+                reasoning="mocked",
+                semantic_score=0.7,
+            )
+        )
         
         # Sample paper metadata for testing
         self.sample_papers = [

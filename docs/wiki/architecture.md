@@ -4,7 +4,7 @@
 
 ```
 prisma/                        # Python package (pip install prisma)
-├── coordinator.py             # Pipeline orchestrator
+├── coordinator.py             # Literature review pipeline orchestrator
 ├── connectivity.py            # Network monitor (online/offline detection)
 ├── agents/
 │   ├── search_agent.py        # Multi-source paper/book search
@@ -18,13 +18,21 @@ prisma/                        # Python package (pip install prisma)
 │       ├── local_api_client.py  # Offline reads via Zotero Desktop HTTP
 │       ├── desktop_client.py  # Desktop-specific operations
 │       └── unified_client.py  # Common interface all clients implement
+├── server/
+│   ├── app.py                 # FastAPI application — all REST endpoints
+│   └── log_setup.py           # Rotating log files per concern (server, chroma, ollama…)
 ├── services/
+│   ├── vault.py               # Vault CRUD: notes, sources, chats, streams
+│   ├── zotero_service.py      # Zotero integration (offline/online)
+│   ├── graphify_service.py    # Graphify knowledge graph indexer (watchdog + Ollama)
+│   ├── chroma_service.py      # ChromaDB semantic index (watchdog + nomic-embed-text)
 │   └── research_stream_manager.py  # Stream lifecycle management
 ├── storage/
 │   ├── models/
-│   │   ├── agent_models.py          # PaperMetadata, BookMetadata, SearchResult, CoordinatorResult
+│   │   ├── agent_models.py          # PaperMetadata, BookMetadata, SearchResult
 │   │   ├── research_stream_models.py  # ResearchStream, StreamStatus, RefreshFrequency
-│   │   ├── zotero_models.py         # ZoteroItem, ZoteroCollection, ZoteroSearchQuery
+│   │   ├── vault_models.py          # VaultNode, RenderedNode, VaultListing, StreamStatus
+│   │   ├── zotero_models.py         # ZoteroItem, ZoteroCollection
 │   │   ├── api_response_models.py   # Typed API response models (Pydantic)
 │   │   └── source_quality.py        # SourceQuality enum, SOURCE_REGISTRY, validation
 │   └── pending_queue.py       # Offline write queue (flushed on next online start)
@@ -35,7 +43,8 @@ prisma/                        # Python package (pip install prisma)
 │       ├── zotero.py          # prisma zotero subcommands
 │       └── cleanup.py         # prisma cleanup subcommands
 └── utils/
-    └── config.py              # YAML config loader with dot-path access
+    ├── config.py              # YAML config loader, Pydantic-validated models
+    └── text.py                # Text utilities (significant_words, etc.)
 ```
 
 ## Pipeline Data Flow
@@ -87,11 +96,65 @@ ResearchStreamManager.update_stream()
        └─ Smart tag application + stream state saved to data/research_streams.json
 ```
 
+## Server (REST API)
+
+`prisma serve` starts a FastAPI server on `localhost:7799`. The desktop app and any client use this API exclusively — there is no direct Python import path from the frontend.
+
+Key endpoints:
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| GET | `/health` | Liveness check |
+| GET | `/status` | Config, vault stats, Graphify state, ChromaDB state, Zotero |
+| GET | `/logs` | Tail a log file (`?concern=server\|chroma\|ollama\|activity\|stream&slug=…`) |
+| GET | `/notes` | List vault notes (filterable by type) |
+| GET | `/notes/{slug}` | Fetch and render a note (HTML or raw) |
+| PUT | `/notes/{slug}` | Save note content |
+| POST | `/notes` | Create note |
+| DELETE | `/notes/{slug}` | Delete note |
+| GET | `/tree` | Vault directory tree |
+| GET | `/search` | Fast text search (in-memory index, OR scoring with title boost) |
+| GET | `/search/deep` | Semantic search via ChromaDB + Graphify re-ranking |
+| GET | `/home` | Render the vault home/dashboard note |
+| POST | `/render` | Render arbitrary markdown to HTML |
+| POST | `/graphify/taint` | Force full re-index of knowledge graph |
+| GET | `/vault/assets/{path}` | Serve vault static assets |
+
+## Background Services
+
+Three daemon threads start at server startup and stop at shutdown:
+
+| Service | Class | What it does |
+|---------|-------|--------------|
+| Graphify indexer | `GraphifyIndexer` | Watchdog on vault root; on change, extracts knowledge-graph nodes via Ollama and persists to `graphify-out/` |
+| ChromaDB indexer | `ChromaIndexer` | Watchdog on vault root; on change, embeds changed `.md` files via `nomic-embed-text` and upserts into a persistent ChromaDB collection at `{vault_root}/chromadb/` |
+| Stream scheduler | `_StreamScheduler` | Polls every 5 min; runs active streams whose `next_update` is past |
+
+Both indexers wait 20 s after startup before the initial full scan, so the server is responsive immediately.
+
+## Search Strategy
+
+**Regular search (`GET /search`):** keyword scoring against an in-memory mtime-keyed index. Files are stat'd on every request; only files whose mtime changed are re-read from disk. Scoring: each matching term +1.0, title match +4.0, all-terms match (AND bonus) +3.0. Returns up to 30 results sorted by score.
+
+**Deep search (`GET /search/deep`):** ChromaDB semantic query (top 60 chunks) → file-level best-chunk scoring → Graphify node titles used for title-boost re-ranking → top 20 results. Slower but semantics-aware.
+
 ## Key Design Decisions
 
 - **No message queue or microservices** — direct function calls between components (ADR-001, ADR-003, ADR-005)
-- **SQLite not used for streams** — streams stored as JSON in `data/research_streams.json`
+- **Vault stored as flat Markdown files** — no database; `VaultService` reads/writes `.md` files in a structured folder layout
 - **Pydantic models throughout** — all API responses and internal data validated with Pydantic v2
-- **Config accessed via dot-path** — `config.get('sources.zotero.enabled', False)`
-- **Offline-first for reads** — writes queued, reads degrade gracefully to local Zotero HTTP
-- **Entry point** — `prisma.cli.prisma_cli:cli` registered in `pyproject.toml [project.scripts]`
+- **Offline-first for reads** — Zotero writes queued, reads degrade gracefully to local Zotero HTTP
+- **Entry points** — `prisma.cli.prisma_cli:cli` (CLI) and `prisma.server.app:app` (ASGI server) in `pyproject.toml`
+
+## Desktop App Architecture (Tauri)
+
+The desktop app (`prisma-desktop/`) wraps Prisma + Graphify in a Tauri shell.
+
+| Rust (Tauri backend) | Python (Prisma server) |
+|----------------------|------------------------|
+| Window / tray management | Vault CRUD via REST |
+| File system access | Zotero API (local + web) |
+| Settings persistence | Ollama/LLM calls |
+| Native OS integration | Graphify + ChromaDB indexing |
+
+The SvelteKit frontend calls the Python REST API directly over `localhost:7799`. Tauri Rust backend handles window lifecycle and OS-level concerns only.

@@ -15,24 +15,20 @@ sources:
     auto_detect_network: true             # Automatically detect connectivity
     network_timeout: 5                    # Network check timeout in seconds
     
-    # Local HTTP server (for offline reads)
-    local_server_url: "http://127.0.0.1:23119"
+    # Local HTTP API — used for offline reads and desktop save (connector/*)
+    # Default localhost works with WSL2 mirrored networking; if unreachable,
+    # run: ip route show | grep default   and use that IP instead.
+    local_api_url: "http://localhost:23119"
     local_server_timeout: 5
-    
+
     # Web API (for online reads and all writes) - Optional but recommended
     api_key: ""        # Your Zotero API key (get from zotero.org/settings/keys)
     library_id: ""     # Your library ID (user ID or group ID)
     library_type: "user"  # "user" or "group"
-    
-    # Optional: Desktop app integration 
+
+    # Desktop app integration (uses local_api_url above)
     enable_desktop_save: true
-    desktop_server_url: "http://127.0.0.1:23119"
     collection_key: ""  # Default collection for saving items
-    
-    # Alternative: Local HTTP Only Mode (read-only, no network requests)
-    # mode: "local_api"
-    # server_url: "http://127.0.0.1:23119"
-    # Note: Write operations will always fail in local_api mode
     
     # Optional: Default collections to search (leave empty to search all)
     default_collections: []

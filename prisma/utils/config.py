@@ -27,7 +27,7 @@ class ZoteroConfig(BaseModel):
     include_attachments: bool = Field(False, description="Include attachments in results")
     
     # Local API configuration
-    server_url: str = Field("http://127.0.0.1:23119", description="Zotero Local API server URL")
+    local_api_url: str = Field("http://localhost:23119", description="Zotero Local HTTP API URL")
     
     # Legacy local database support
     library_path: str = Field(
@@ -52,7 +52,8 @@ class LLMConfig(BaseModel):
     provider: str = Field("ollama", description="LLM provider")
     model: str = Field("llama3.1:8b", description="Model name")
     host: str = Field("localhost:11434", description="Host and port")
-    
+    max_concurrent_inferences: int = Field(1, ge=1, le=16, description="Max simultaneous Ollama requests")
+
     @property
     def base_url(self) -> str:
         """Generate base URL for API calls"""
@@ -75,9 +76,17 @@ class OutputConfig(BaseModel):
 
 class SearchConfig(BaseModel):
     """Search configuration"""
+    model_config = ConfigDict(extra="ignore")
+
     default_limit: int = Field(10, ge=1, le=1000, description="Default search limit")
-    sources: List[str] = Field(default_factory=lambda: ['arxiv'], description="Search sources")
-    
+    sources: List[str] = Field(
+        default_factory=lambda: ['semanticscholar', 'arxiv'],
+        description="Search sources",
+    )
+    min_confidence_score: float = Field(0.5, ge=0.0, le=1.0)
+    prefer_high_quality: bool = Field(True)
+    require_academic_validation: bool = Field(True)
+
     @field_validator('sources')
     @classmethod
     def validate_sources(cls, v):
@@ -120,16 +129,22 @@ class SourcesConfig(BaseModel):
     zotero: ZoteroConfig = Field(default_factory=lambda: ZoteroConfig())
 
 
+class RetrievalConfig(BaseModel):
+    embedding_model: str = Field("nomic-embed-text", description="Ollama embedding model for ChromaDB semantic search")
+    ollama_base_url: str = Field("http://localhost:11434", description="Ollama base URL for embeddings")
+
+
 class PrismaConfig(BaseModel):
     """Complete Prisma configuration with validation"""
     model_config = ConfigDict(arbitrary_types_allowed=True)
-    
+
     sources: SourcesConfig = Field(default_factory=lambda: SourcesConfig())
     llm: LLMConfig = Field(default_factory=lambda: LLMConfig())
     output: OutputConfig = Field(default_factory=lambda: OutputConfig())
     search: SearchConfig = Field(default_factory=lambda: SearchConfig())
     analysis: AnalysisConfig = Field(default_factory=lambda: AnalysisConfig())
     logging: LoggingConfig = Field(default_factory=lambda: LoggingConfig())
+    retrieval: RetrievalConfig = Field(default_factory=lambda: RetrievalConfig())
 
 
 class ConfigLoader:
@@ -222,6 +237,9 @@ class ConfigLoader:
         """Get Zotero configuration for API integration."""
         return self.config.sources.zotero
     
+    def get_retrieval_config(self) -> RetrievalConfig:
+        return self.config.retrieval
+
     def has_zotero_credentials(self) -> bool:
         """Check if Zotero API credentials are configured."""
         zotero_config = self.config.sources.zotero

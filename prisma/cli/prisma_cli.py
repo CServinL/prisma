@@ -103,6 +103,29 @@ def review(topic: str, output: str, sources: str, limit: int,
         raise click.ClickException(str(exc))
 
 
+def _is_wsl() -> bool:
+    try:
+        with open('/proc/version') as f:
+            return 'microsoft' in f.read().lower()
+    except OSError:
+        return False
+
+
+def _wsl_windows_ip() -> str:
+    """Best-effort: return the Windows host IP as seen from WSL."""
+    import subprocess
+    try:
+        out = subprocess.check_output(
+            ['ip', 'route', 'show'], text=True, stderr=subprocess.DEVNULL
+        )
+        for line in out.splitlines():
+            if line.startswith('default'):
+                return line.split()[2]
+    except Exception:
+        pass
+    return '<windows-host-ip>'
+
+
 @cli.command()
 @click.option('--verbose', '-v', is_flag=True, help='Show detailed status information')
 def status(verbose: bool):
@@ -112,11 +135,14 @@ def status(verbose: bool):
     Verifies configuration, Zotero connection, dependencies, storage, and LLM.
     """
     import importlib.util
+    import requests as _req
+    from pathlib import Path
 
     click.echo("🔬 Prisma System Status Check")
     click.echo("=" * 40)
 
     all_good = True
+    wsl = _is_wsl()
 
     # 0. Connectivity
     click.echo("\n🌐 Connectivity:")
@@ -128,17 +154,37 @@ def status(verbose: bool):
 
     # 1. Configuration
     config = None
+    config_path = None
     click.echo("\n📋 Configuration:")
-    try:
-        from ..utils.config import ConfigLoader
-        config = ConfigLoader()
-        click.echo("  ✅ Config loaded")
-        if verbose:
-            click.echo(f"     LLM: {config.get('llm.provider', 'ollama')} ({config.get('llm.model', 'llama3.1:8b')})")
-            click.echo(f"     Output: {config.get('output.directory', './outputs')}")
-    except Exception as exc:
-        click.echo(f"  ❌ Config error: {exc}")
+
+    default_config = Path.home() / '.config' / 'prisma' / 'config.yaml'
+    env_config = os.getenv('PRISMA_CONFIG')
+
+    if env_config:
+        p = Path(env_config).expanduser()
+        config_path = p if p.exists() else None
+    elif default_config.exists():
+        config_path = default_config
+
+    if config_path is None:
+        click.echo("  ❌ No config file found")
+        click.echo(f"     Expected: {default_config}")
+        click.echo("     Create it:")
+        click.echo("       mkdir -p ~/.config/prisma")
+        click.echo("       cp /path/to/repo/config.example.yaml ~/.config/prisma/config.yaml")
         all_good = False
+    else:
+        try:
+            from ..utils.config import ConfigLoader
+            config = ConfigLoader()
+            click.echo(f"  ✅ Config loaded: {config_path}")
+            if verbose:
+                click.echo(f"     LLM:    {config.get('llm.provider', 'ollama')} / {config.get('llm.model', 'llama3.1:8b')}")
+                click.echo(f"     Output: {config.get('output.directory', './outputs')}")
+                click.echo(f"     Zotero: mode={config.get('sources.zotero.mode', 'hybrid')}")
+        except Exception as exc:
+            click.echo(f"  ❌ Config error: {exc}")
+            all_good = False
 
     # 2. Pending write queue
     click.echo("\n📬 Pending Write Queue:")
@@ -155,45 +201,66 @@ def status(verbose: bool):
     # 3. Zotero
     click.echo("\n📚 Zotero Integration:")
     if config is None:
-        click.echo("  ⚠️  Skipped — config not loaded")
+        click.echo("  ⚠️  Skipped — fix config first")
     else:
-        try:
-            zotero_mode = config.get('sources.zotero.mode', 'hybrid')
-            if zotero_mode == 'local_api':
-                import requests as _req
-                server_url = config.get('sources.zotero.server_url', 'http://127.0.0.1:23119')
-                try:
-                    resp = _req.get(f"{server_url}/connector/ping", timeout=2)
-                    if resp.status_code == 200:
-                        click.echo("  ✅ Zotero Local API: connected")
-                        if verbose:
-                            click.echo(f"     Server: {server_url}")
-                    else:
-                        click.echo("  ❌ Zotero Local API: not responding")
-                        all_good = False
-                except Exception:
-                    click.echo("  ❌ Zotero Local API: not connected (start Zotero desktop)")
-                    all_good = False
-            else:
-                api_key = config.get('sources.zotero.api_key', '')
-                library_id = config.get('sources.zotero.library_id', '')
-                if api_key and library_id:
-                    click.echo("  ✅ Zotero API: credentials configured")
+        zotero_mode = config.get('sources.zotero.mode', 'hybrid')
+        local_api_url = config.get('sources.zotero.local_api_url', '')
+        api_key = config.get('sources.zotero.api_key', '')
+        library_id = config.get('sources.zotero.library_id', '')
+
+        click.echo(f"  Mode: {zotero_mode}")
+
+        # Local API reachability (needed in both hybrid and local_api modes)
+        if local_api_url:
+            click.echo(f"  Local API: {local_api_url}")
+            try:
+                resp = _req.get(f"{local_api_url}/connector/ping", timeout=2)
+                if resp.status_code == 200:
+                    click.echo("    ✅ Reachable — Zotero Desktop is running")
                 else:
-                    click.echo("  ⚠️  Zotero API: no credentials (set api_key + library_id)")
-        except Exception as exc:
-            click.echo(f"  ❌ Zotero error: {exc}")
+                    click.echo(f"    ❌ Responded with HTTP {resp.status_code}")
+                    all_good = False
+            except Exception:
+                click.echo("    ❌ Unreachable")
+                if wsl:
+                    windows_ip = _wsl_windows_ip()
+                    click.echo("    You are running in WSL. Zotero Desktop runs on Windows,")
+                    click.echo("    so 127.0.0.1 / localhost may not reach it depending on")
+                    click.echo("    your WSL networking mode.")
+                    click.echo("    Find your Windows host IP and test:")
+                    click.echo(f"      WINDOWS_IP=$(ip route show | grep default | awk '{{print $3}}')")
+                    click.echo(f"      curl http://${{WINDOWS_IP}}:23119/connector/ping")
+                    click.echo("    Then update local_api_url in ~/.config/prisma/config.yaml:")
+                    click.echo(f"      local_api_url: \"http://{windows_ip}:23119\"")
+                else:
+                    click.echo("    Make sure Zotero Desktop is open and")
+                    click.echo("    Edit → Preferences → Advanced → Allow other applications")
+                    click.echo("    to communicate with Zotero is checked.")
+                all_good = False
+        else:
+            click.echo("  ⚠️  local_api_url not set in config")
+            if wsl:
+                windows_ip = _wsl_windows_ip()
+                click.echo(f"     Add to config: local_api_url: \"http://{windows_ip}:23119\"")
             all_good = False
+
+        # Web API credentials (hybrid mode)
+        if zotero_mode == 'hybrid':
+            if api_key and library_id:
+                click.echo(f"  Web API: library_id={library_id} ✅")
+            else:
+                missing = []
+                if not api_key:
+                    missing.append('api_key')
+                if not library_id:
+                    missing.append('library_id')
+                click.echo(f"  Web API: ⚠️  missing {', '.join(missing)}")
+                click.echo("    Get your key at: https://www.zotero.org/settings/keys/new")
+                click.echo("    Get your user ID at: https://www.zotero.org/settings/keys")
 
     # 4. Dependencies
     click.echo("\n📦 Dependencies:")
-    for pkg, desc in [
-        ('requests', 'HTTP requests'),
-        ('pydantic', 'Data validation'),
-        ('yaml', 'Config parsing'),
-        ('pyzotero', 'Zotero API client'),
-        ('click', 'CLI framework'),
-    ]:
+    for pkg in ['requests', 'pydantic', 'yaml', 'pyzotero', 'click']:
         spec = importlib.util.find_spec(pkg)
         mark = "✅" if spec else "❌"
         click.echo(f"  {mark} {pkg}")
@@ -203,11 +270,10 @@ def status(verbose: bool):
     # 5. LLM
     click.echo("\n🤖 LLM (Ollama):")
     if config is None:
-        click.echo("  ⚠️  Skipped — config not loaded")
+        click.echo("  ⚠️  Skipped — fix config first")
     else:
+        llm_host = config.get('llm.host', 'localhost:11434')
         try:
-            import requests as _req
-            llm_host = config.get('llm.host', 'localhost:11434')
             resp = _req.get(f"http://{llm_host}/api/tags", timeout=5)
             if resp.status_code == 200:
                 click.echo(f"  ✅ Ollama: connected ({llm_host})")
@@ -218,7 +284,13 @@ def status(verbose: bool):
                 click.echo(f"  ❌ Ollama: server error {resp.status_code}")
                 all_good = False
         except Exception:
-            click.echo(f"  ❌ Ollama: cannot connect to {llm_host} (start Ollama)")
+            click.echo(f"  ❌ Ollama: cannot connect to {llm_host}")
+            if wsl:
+                windows_ip = _wsl_windows_ip()
+                click.echo("    In WSL, Ollama must run on Windows with OLLAMA_HOST=0.0.0.0:11434")
+                click.echo(f"    Then set in config: host: \"{windows_ip}:11434\"")
+                click.echo("    Or add to ~/.bashrc:")
+                click.echo("      export OLLAMA_HOST=$(ip route show | grep default | awk '{print $3}'):11434")
             all_good = False
 
     click.echo("\n" + "=" * 40)
@@ -264,6 +336,20 @@ def sync():
     except Exception as exc:
         click.echo(f"❌ Sync error: {exc}", err=True)
         raise click.ClickException(str(exc))
+
+
+@cli.command()
+@click.option("--host", default="127.0.0.1", show_default=True, help="Bind address")
+@click.option("--port", default=8765, show_default=True, help="Port")
+@click.option("--reload", is_flag=True, help="Auto-reload on code changes (dev only)")
+def serve(host: str, port: int, reload: bool):
+    """Start the Prisma HTTP server."""
+    try:
+        import uvicorn
+    except ImportError:
+        raise click.ClickException("uvicorn not installed — run: pip install 'prisma[server]'")
+    click.echo(f"Starting Prisma server on http://{host}:{port}")
+    uvicorn.run("prisma.server.app:app", host=host, port=port, reload=reload)
 
 
 cli.add_command(streams_group)

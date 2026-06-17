@@ -31,24 +31,54 @@ pip install "prisma==0.2.1"
 
 Editable mode installs a pointer to the repo instead of copying files. Changes to source are immediately active — no reinstall needed.
 
+The runtime venv lives at the XDG data path. `docu-craft` is also a local package and must be installed first.
+
 ```bash
-git clone https://github.com/CServinL/prisma.git
-cd prisma
-python3 -m venv ~/prisma
-source ~/prisma/bin/activate
-pip install -e ".[dev]"
+# 1. Create the runtime venv (XDG standard location)
+python3 -m venv ~/.local/share/prisma/venv
+
+# 2. Upgrade pip first (avoids a Python 3.14 MetadataFile bug in older pip)
+~/.local/share/prisma/venv/bin/python3 -m pip install --upgrade pip
+
+# 3. Install docu-craft then prisma (both editable)
+~/.local/share/prisma/venv/bin/pip install \
+    -e /path/to/docu-craft \
+    -e /path/to/prisma
+
+# 4. Expose the CLI via ~/.local/bin (XDG user executables)
+mkdir -p ~/.local/bin
+ln -sf ~/.local/share/prisma/venv/bin/prisma ~/.local/bin/prisma
+
+# 5. Add ~/.local/bin to PATH (add to ~/.bashrc if not already there)
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
+source ~/.bashrc
+
 prisma --help
 ```
 
-Daily workflow:
+Daily workflow — no activation needed, the symlink handles it:
 ```bash
-source ~/prisma/bin/activate
 # edit files, run prisma — changes are live
+prisma serve
 prisma streams list
-pytest tests/unit/
 ```
 
-How it works: `pip install -e .` creates `__editable__.prisma-*.pth` in the venv's `site-packages/`, pointing Python at your repo root. The `prisma` binary in `~/prisma/bin/` calls `prisma.cli.prisma_cli:cli` which resolves directly to your repo.
+For running tests, use the project's own `.venv` instead:
+```bash
+cd /path/to/prisma
+.venv/bin/pytest tests/
+```
+
+How it works: `pip install -e .` creates `__editable__.prisma-*.pth` in the venv's `site-packages/`, pointing Python at your repo root. The symlink at `~/.local/bin/prisma` calls into the venv without needing `source activate`.
+
+XDG paths used:
+
+| Path | Purpose |
+|---|---|
+| `~/.local/share/prisma/venv` | Runtime venv |
+| `~/.local/bin/prisma` | CLI symlink |
+| `~/.config/prisma-desktop/settings.json` | Desktop app settings |
+| `~/prisma-vault` | Default vault root (configurable) |
 
 ---
 
@@ -65,6 +95,16 @@ setx OLLAMA_HOST "0.0.0.0:11434"   # allow WSL to connect
 # restart Ollama, then:
 ollama pull llama3.1:8b
 ```
+
+Pull the required models (once, after install and after each Ollama upgrade):
+
+| Model | Purpose |
+|---|---|
+| `ollama pull llama3.1:8b` | Default LLM for analysis and chat |
+| `ollama pull qwen2.5-graphify:7b` | Knowledge graph extraction (Graphify) |
+| `ollama pull nomic-embed-text` | Semantic embeddings (ChromaDB vector search) |
+
+> **Upgrade note:** after `pip install --upgrade prisma`, re-run `ollama pull nomic-embed-text` if the configured embedding model changes — check `retrieval.embedding_model` in `config.yaml`.
 
 **From WSL:**
 ```bash
@@ -109,7 +149,6 @@ Full reference: [Configuration](configuration.md)
 ## Verify Everything
 
 ```bash
-source ~/prisma/bin/activate   # or your venv
 prisma status --verbose
 prisma zotero test-connection
 ```

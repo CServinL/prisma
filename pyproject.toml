@@ -8,12 +8,20 @@ authors = [
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "pyyaml", 
+    "pyyaml",
     "requests",
     "pyzotero",
     "pydantic",
     "click (>=8.2.1,<9.0.0)",
-    "colorama"
+    "colorama",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "docu-craft>=0.3.1",
+    "graphifyy>=0.8",
+    "watchdog>=6.0",
+    "openai>=1.0",
+    "nltk>=3.9",
+    "chromadb>=0.6",
 ]
 
 [project.optional-dependencies]
@@ -42,7 +50,7 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["tests-sets", "tests"]
 python_files = ["test_*.py", "*_test.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
@@ -62,6 +70,10 @@ markers = [
     "integration: marks tests as integration tests",
     "unit: marks tests as unit tests",
     "zotero_api: marks tests that use real Zotero API",
+    "local_zotero: marks tests that need Zotero Desktop running",
+    "web_api: marks tests that need Zotero Web API credentials",
+    "online: marks tests that need internet access",
+    "e2e: marks end-to-end tests",
 ]
 [dependency-groups]
 dev = [

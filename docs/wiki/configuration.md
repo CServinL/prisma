@@ -82,6 +82,15 @@ output:
 # ── Analysis ─────────────────────────────────────────────────────────────────
 analysis:
   summary_length: "medium"             # "short" | "medium" | "long"
+
+# ── Retrieval (ChromaDB semantic search) ─────────────────────────────────────
+retrieval:
+  embedding_model: "nomic-embed-text"  # Ollama model used for vault embeddings
+  ollama_base_url: "http://localhost:11434"  # WSL: use Windows host IP
+
+# ── Graphify (knowledge graph) ────────────────────────────────────────────────
+graphify:
+  index_extensions: [".md", ".txt"]   # file types included in the graph index
 ```
 
 ---
@@ -118,4 +127,7 @@ sources:
 ```yaml
 llm:
   host: "172.x.x.x:11434"   # get with: ip route show | grep default | awk '{print $3}'
+
+retrieval:
+  ollama_base_url: "http://172.x.x.x:11434"  # same Windows host IP, for ChromaDB embeddings
 ```

@@ -1,0 +1,21 @@
+sources:
+  zotero:
+    enabled: true
+    mode: "hybrid"
+    local_api_url: "http://localhost:23119"
+    api_key: ""
+    library_id: ""
+    library_type: "user"
+
+llm:
+  provider: "ollama"
+  model: "llama3.1:8b"
+  host: "localhost:11434"
+
+output:
+  directory: "./outputs"
+  format: "markdown"
+
+search:
+  default_limit: 10
+  sources: ["arxiv"]

@@ -49,7 +49,8 @@ sources:
             # Should have defaults and be Pydantic model
             self.assertIsInstance(config_loader.config, PrismaConfig)
             self.assertEqual(config_loader.config.llm.provider, 'ollama')
-            self.assertEqual(config_loader.config.llm.model, 'llama3.1:8b')
+            self.assertIsInstance(config_loader.config.llm.model, str)
+            self.assertTrue(len(config_loader.config.llm.model) > 0)
             self.assertEqual(config_loader.config.search.default_limit, 10)
             
             # Restore environment

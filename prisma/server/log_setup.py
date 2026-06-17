@@ -13,6 +13,7 @@ class LogPaths(BaseModel):
     maintenance: Path
     ollama: Path
     activity: Path
+    chroma: Path
     streams_dir: Path
 
     model_config = {"arbitrary_types_allowed": True}
@@ -56,6 +57,7 @@ def configure(level: int = logging.INFO) -> LogPaths:
         ("prisma.maintenance", "maintenance.log"),
         ("prisma.ollama", "ollama.log"),
         ("prisma.activity", "activity.log"),
+        ("prisma.chroma", "chroma.log"),
     ]:
         lgr = logging.getLogger(name)
         lgr.propagate = True
@@ -75,6 +77,7 @@ def configure(level: int = logging.INFO) -> LogPaths:
         maintenance=base / "maintenance.log",
         ollama=base / "ollama.log",
         activity=base / "activity.log",
+        chroma=base / "chroma.log",
         streams_dir=streams_dir,
     )
     return _paths

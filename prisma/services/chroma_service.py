@@ -95,12 +95,14 @@ class ChromaIndexer:
         self._observer.start()
         self._thread = threading.Thread(target=self._loop, daemon=True, name="chroma-indexer")
         self._thread.start()
+        _log.info("chroma started: model=%s vault=%s", self._model, self._vault.root)
 
     def stop(self) -> None:
         self._stop_event.set()
         if self._observer is not None:
             self._observer.stop()
             self._observer.join(timeout=2)
+        _log.info("chroma stopped")
 
     def status(self) -> dict:
         try:
@@ -124,6 +126,7 @@ class ChromaIndexer:
             return []
         embeddings = _embed_texts([question], self._model, self._base_url)
         if not embeddings:
+            _log.warning("chroma query: embedding failed for question, skipping")
             return []
         try:
             results = self._collection.query(
@@ -144,6 +147,7 @@ class ChromaIndexer:
             if score > file_scores.get(path, 0.0):
                 file_scores[path] = score
         ranked = sorted(file_scores.items(), key=lambda x: -x[1])[:top_k]
+        _log.info("chroma query: q=%r chunks_searched=%d files_returned=%d", question[:60], total, len(ranked))
         return [{"source_file": sf, "score": score} for sf, score in ranked]
 
     # ── Internal ──────────────────────────────────────────────────────────────
@@ -171,6 +175,7 @@ class ChromaIndexer:
                 pending = self._pending.copy()
                 self._pending.clear()
             if pending:
+                _log.info("chroma incremental update: %d files changed", len(pending))
                 dirty = False
                 for path in pending:
                     if path.exists():
@@ -181,14 +186,36 @@ class ChromaIndexer:
                     self._save_manifest()
             self._stop_event.wait(timeout=60)
 
+    def _probe_model(self) -> bool:
+        """Return False and log an actionable warning if the embedding model is not available."""
+        result = _embed_texts(["test"], self._model, self._base_url)
+        if result is None:
+            _log.error(
+                "chroma: embedding model %r not available — run: ollama pull %s",
+                self._model, self._model,
+            )
+            return False
+        return True
+
     def _full_index(self) -> None:
         try:
             self._ensure_client()
         except Exception as exc:
             _log.error("chroma init failed: %s", exc)
             return
+        if not self._probe_model():
+            return
+        all_files = list(self._vault._all_md_files())
+        stale = [
+            p for p in all_files
+            if not (lambda rel, mtime: self._manifest.get(rel) == mtime)(
+                str(p.relative_to(self._vault.root)),
+                p.stat().st_mtime if p.exists() else 0,
+            )
+        ]
+        _log.info("chroma full index start: %d files total, %d stale", len(all_files), len(stale))
         dirty = False
-        for path in self._vault._all_md_files():
+        for path in all_files:
             try:
                 mtime = path.stat().st_mtime
             except OSError:
@@ -199,7 +226,7 @@ class ChromaIndexer:
             dirty |= self._upsert_file(path)
         if dirty:
             self._save_manifest()
-            _log.info("chroma full index complete: %d files", len(self._manifest))
+        _log.info("chroma full index done: %d files indexed, %d chunks", len(self._manifest), self._collection.count())
 
     def _upsert_file(self, path: Path) -> bool:
         try:
@@ -218,6 +245,7 @@ class ChromaIndexer:
         self._collection.upsert(ids=ids, embeddings=embeddings, metadatas=metadatas, documents=chunks)
         with self._lock:
             self._manifest[rel] = mtime
+        _log.info("chroma upserted: %s (%d chunks)", rel, len(chunks))
         return True
 
     def _delete_file(self, path: Path) -> bool:

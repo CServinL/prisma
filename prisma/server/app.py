@@ -360,7 +360,7 @@ def status():
 
 @app.get("/logs")
 def get_logs(
-    concern: str = Query("server", description="server|access|maintenance|ollama|activity|stream"),
+    concern: str = Query("server", description="server|access|maintenance|ollama|activity|chroma|stream"),
     slug: Optional[str] = Query(None, description="stream slug (required when concern=stream)"),
     n: int = Query(200, ge=1, le=5000),
 ):
@@ -371,6 +371,7 @@ def get_logs(
         "maintenance": lp.maintenance,
         "ollama": lp.ollama,
         "activity": lp.activity,
+        "chroma": lp.chroma,
     }
     if concern == "stream":
         if not slug:
@@ -773,38 +774,69 @@ class SearchResult(BaseModel):
     score: float = 1.0
 
 
+# ── In-memory search index ────────────────────────────────────────────────────
+# Keyed by absolute path str → (mtime, slug, title, lower_text, first_lines)
+# Rebuilt lazily: only re-reads files whose mtime changed.
+_search_index: dict[str, tuple[float, str, str, str, list[str]]] = {}
+_search_index_lock = threading.Lock()
+
+
+def _refresh_search_index() -> None:
+    with _search_index_lock:
+        seen: set[str] = set()
+        for path in _vault._all_md_files():
+            key = str(path)
+            seen.add(key)
+            try:
+                mtime = path.stat().st_mtime
+            except OSError:
+                continue
+            cached = _search_index.get(key)
+            if cached and cached[0] == mtime:
+                continue
+            try:
+                text = path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            slug = path.stem
+            title = slug
+            try:
+                node = _vault.get_any(slug)
+                title = node.title
+            except Exception:
+                pass
+            _search_index[key] = (mtime, slug, title, text.lower(), text.splitlines())
+        # Drop deleted files
+        for key in list(_search_index):
+            if key not in seen:
+                del _search_index[key]
+
+
 def _text_search(q: str, top_k: int = 30) -> list[SearchResult]:
-    """Fast grep-style search over vault markdown files. All terms must appear (AND)."""
     terms = [t.lower().strip('"') for t in q.split() if t.strip('"')]
     if not terms:
         return []
 
-    results: list[tuple[float, str, str, str]] = []  # (score, slug, title, excerpt)
-    for path in _vault._all_md_files():
-        try:
-            text = path.read_text(encoding="utf-8", errors="replace")
-        except OSError:
+    _refresh_search_index()
+
+    results: list[tuple[float, str, str, str]] = []
+    with _search_index_lock:
+        entries = list(_search_index.values())
+
+    for _mtime, slug, title, lower, lines in entries:
+        hits = sum(1 for t in terms if t in lower)
+        if hits == 0:
             continue
-        lower = text.lower()
-        # Require every term to appear somewhere in the document
-        if not all(t in lower for t in terms):
-            continue
-        slug = path.stem
-        title = slug
-        try:
-            node = _vault.get_any(slug)
-            title = node.title
-        except Exception:
-            pass
         title_lower = title.lower()
-        score = 0.0
+        score = hits * 1.0
         for t in terms:
             if t in title_lower:
                 score += 4.0
-            score += 1.0
-        # Find a representative excerpt: first line containing any term
+        # All-terms bonus: full AND match scores higher than partial
+        if hits == len(terms):
+            score += 3.0
         excerpt = ""
-        for line in text.splitlines():
+        for line in lines:
             ll = line.lower().strip()
             if ll and any(t in ll for t in terms):
                 excerpt = line.strip()[:200]

@@ -57,6 +57,10 @@ _t("importing graphify_service")
 from prisma.services.graphify_service import GraphifyIndexer
 _t("graphify_service ok")
 
+_t("importing chroma_service")
+from prisma.services.chroma_service import ChromaIndexer
+_t("chroma_service ok")
+
 _t("importing zotero")
 from prisma.services.zotero import ZoteroMode, ZoteroService
 _t("zotero ok")
@@ -117,6 +121,15 @@ def _index_extensions() -> tuple[str, ...]:
     return DEFAULT_INDEX_EXTENSIONS
 
 
+def _build_chroma(vault: "VaultService") -> ChromaIndexer:
+    from prisma.utils.config import ConfigLoader
+    try:
+        rcfg = ConfigLoader().get_retrieval_config()
+        return ChromaIndexer(vault, embedding_model=rcfg.embedding_model, ollama_base_url=rcfg.ollama_base_url)
+    except Exception:
+        return ChromaIndexer(vault)
+
+
 from prisma.utils.text import significant_words as _significant_words
 
 
@@ -126,6 +139,8 @@ _t(f"vault root: {_vault.root}")
 _t("building indexer")
 _indexer = GraphifyIndexer(_vault, ollama_model=_ollama_model(),
                            index_extensions=_index_extensions())
+_t("building chroma")
+_chroma = _build_chroma(_vault)
 _t("building zotero")
 _zotero = _build_zotero()
 _t("module-level init done")
@@ -185,12 +200,14 @@ _scheduler = _StreamScheduler()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    _log.info("startup  lifespan: starting indexer")
+    _log.info("startup  lifespan: starting indexer + chroma")
     _indexer.start()
+    _chroma.start()
     _scheduler.start()
-    _log.info("startup  lifespan: indexer + stream scheduler started — server ready")
+    _log.info("startup  lifespan: indexer + chroma + stream scheduler started — server ready")
     yield
     _scheduler.stop()
+    _chroma.stop()
     _indexer.stop()
 
 
@@ -283,12 +300,15 @@ def _run_review(job_id: str, req: ReviewRequest) -> None:
 
 @app.post("/reload")
 def reload_server():
-    global _vault, _indexer, _zotero
+    global _vault, _indexer, _chroma, _zotero
     _indexer.stop()
+    _chroma.stop()
     _vault = VaultService(vault_root=_resolve_vault_root())
     _zotero = _build_zotero()
     _indexer = GraphifyIndexer(_vault, ollama_model=_ollama_model(), index_extensions=_index_extensions())
+    _chroma = _build_chroma(_vault)
     _indexer.start()
+    _chroma.start()
     return {"status": "reloaded", "vault_root": str(_vault.root), "zotero_mode": _zotero.mode}
 
 
@@ -332,6 +352,7 @@ def status():
         "config": {"ok": config_ok, "error": config_error},
         "pending_jobs": sum(1 for j in _jobs.values() if j["status"] in ("pending", "running")),
         "graphify": _indexer.status(),
+        "chroma": _chroma.status(),
         "vault": vault_stats,
         "zotero": zotero_info,
     }
@@ -840,7 +861,7 @@ def _resolve_source_files(items: list[dict]) -> list[DeepSearchResult]:
 @app.get("/search/deep")
 def deep_search(q: str = Query(..., min_length=1)) -> list[DeepSearchResult]:
     """Semantic search: Ollama reasons over the knowledge graph, falls back to graph scoring."""
-    ollama_results = _indexer.ollama_deep_search(q, top_k=15)
+    ollama_results = _indexer.ollama_deep_search(q, top_k=15, chroma=_chroma)
     if ollama_results:
         return _resolve_source_files(ollama_results)
 

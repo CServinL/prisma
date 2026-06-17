@@ -164,24 +164,34 @@ class GraphifyIndexer:
         except Exception:
             return []
 
-    def ollama_deep_search(self, question: str, top_k: int = 10) -> list[dict]:
-        if not self._graph_json.exists():
+    def ollama_deep_search(self, question: str, top_k: int = 10, chroma=None) -> list[dict]:
+        if not self._graph_json.exists() and chroma is None:
             return []
-        context_results = self.query(question, budget=4000)
-        if not context_results or not context_results[0].get("text"):
+        context_results = self.query(question, budget=4000) if self._graph_json.exists() else []
+        graph_text = context_results[0].get("text", "") if context_results else ""
+
+        relevant_nodes = self.ranked_nodes(question, top_k=30) if self._graph_json.exists() else []
+
+        # Normalize graphify scores to [0, 1]
+        max_g = max((n["score"] for n in relevant_nodes), default=1.0) or 1.0
+        file_scores: dict[str, float] = {
+            n["source_file"]: n["score"] / max_g
+            for n in relevant_nodes if n.get("source_file")
+        }
+
+        # Merge with ChromaDB scores (take max per file)
+        if chroma is not None:
+            for item in chroma.query(question, top_k=top_k * 3):
+                sf = item["source_file"]
+                file_scores[sf] = max(file_scores.get(sf, 0.0), item["score"])
+
+        if not file_scores:
             return []
-        graph_text = context_results[0]["text"]
 
-        relevant_nodes = self.ranked_nodes(question, top_k=30)
-        source_files: list[str] = []
-        seen_sf: set[str] = set()
-        for node in relevant_nodes:
-            sf = node.get("source_file", "")
-            if sf and sf not in seen_sf:
-                seen_sf.add(sf)
-                source_files.append(sf)
+        source_files = sorted(file_scores.keys(), key=lambda sf: -file_scores[sf])[:20]
+        seen_sf: set[str] = set(source_files)
 
-        sources_list = "\n".join(f"- {sf}" for sf in source_files[:20])
+        sources_list = "\n".join(f"- {sf}" for sf in source_files)
         prompt = (
             f'Query: "{question}"\n\n'
             f"Knowledge graph context (most relevant nodes and relationships):\n{graph_text}\n\n"

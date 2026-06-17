@@ -18,8 +18,11 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s %(message)s")
-_log = logging.getLogger("prisma.startup")
+from prisma.server import log_setup as _log_setup
+_LOG_PATHS = _log_setup.configure()
+_log = logging.getLogger("prisma.server")
+_maint_log = logging.getLogger("prisma.maintenance")
+_activity = logging.getLogger("prisma.activity")
 
 def _t(label: str, _t0=[0.0]):
     now = time.monotonic()
@@ -31,6 +34,7 @@ _t("importing fastapi")
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from prisma.server.access_log import AccessLogMiddleware
 _t("fastapi ok")
 
 _t("importing coordinator")
@@ -155,25 +159,25 @@ class _StreamScheduler:
         try:
             streams = _vault.list_streams()
         except Exception as exc:
-            _log.warning("stream-scheduler: list_streams failed: %s", exc)
+            _maint_log.warning("stream-scheduler: list_streams failed: %s", exc)
             return
         now = datetime.now()
-        for stream in streams:
-            if stream.status != StreamStatus.active:
-                continue
-            if stream.next_update is not None and stream.next_update > now:
-                continue
-            if stream.refresh_frequency.value == "manual":
-                continue
-            _log.info("stream-scheduler: running %r", stream.slug)
+        due = [s for s in streams if s.status == StreamStatus.active
+               and s.refresh_frequency.value != "manual"
+               and (s.next_update is None or s.next_update <= now)]
+        _maint_log.info("stream-scheduler: tick — %d streams checked, %d due", len(streams), len(due))
+        for stream in due:
+            _maint_log.info("stream-scheduler: running %r", stream.slug)
             try:
+                t0 = time.monotonic()
                 result = _run_stream(stream.slug, force=False)
-                _log.info(
-                    "stream-scheduler: %r done — found=%d saved=%d",
-                    stream.slug, result.papers_found, result.papers_saved,
+                elapsed_ms = (time.monotonic() - t0) * 1000
+                _maint_log.info(
+                    "stream-scheduler: %r done — found=%d saved=%d elapsed_ms=%.0f",
+                    stream.slug, result.papers_found, result.papers_saved, elapsed_ms,
                 )
             except Exception as exc:
-                _log.warning("stream-scheduler: %r failed: %s", stream.slug, exc)
+                _maint_log.warning("stream-scheduler: %r failed: %s", stream.slug, exc)
 
 
 _scheduler = _StreamScheduler()
@@ -198,6 +202,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(AccessLogMiddleware)
 
 _executor = ThreadPoolExecutor(max_workers=2)
 _jobs: dict[str, dict] = {}
@@ -332,6 +337,35 @@ def status():
     }
 
 
+@app.get("/logs")
+def get_logs(
+    concern: str = Query("server", description="server|access|maintenance|ollama|activity|stream"),
+    slug: Optional[str] = Query(None, description="stream slug (required when concern=stream)"),
+    n: int = Query(200, ge=1, le=5000),
+):
+    lp = _LOG_PATHS
+    path_map = {
+        "server": lp.server,
+        "access": lp.access,
+        "maintenance": lp.maintenance,
+        "ollama": lp.ollama,
+        "activity": lp.activity,
+    }
+    if concern == "stream":
+        if not slug:
+            raise HTTPException(status_code=400, detail="slug required when concern=stream")
+        log_path = lp.streams_dir / f"{slug}.log"
+    else:
+        log_path = path_map.get(concern)
+        if log_path is None:
+            raise HTTPException(status_code=400, detail=f"unknown concern: {concern!r}")
+    try:
+        all_lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+        return {"path": str(log_path), "lines": all_lines[-n:], "total": len(all_lines)}
+    except FileNotFoundError:
+        return {"path": str(log_path), "lines": [], "total": 0}
+
+
 @app.post("/graphify/taint")
 def graphify_taint():
     """Mark the index stale so the next cycle re-indexes changed files."""
@@ -432,6 +466,7 @@ def delete_node(slug: str):
     try:
         _vault.delete_node(slug)
         _indexer.mark_stale()
+        _activity.info("action=delete_node slug=%s", slug)
         return {"ok": True}
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -688,6 +723,7 @@ class NoteCreateRequest(BaseModel):
 def create_note(req: NoteCreateRequest):
     note = _vault.create_note(req.title, req.body, req.tags)
     _indexer.mark_stale()
+    _activity.info("action=create_note slug=%s title=%r", note.slug, note.title)
     html, broken_links, broken_citations = vault_render(note.body, _vault)
     return RenderedNode(slug=note.slug, title=note.title, node_type=note.node_type,
                         html=html, broken_links=broken_links, broken_citations=broken_citations)
@@ -887,6 +923,7 @@ def create_stream(req: StreamCreateRequest):
         tags=req.tags,
     )
     _indexer.mark_stale()
+    _activity.info("action=create_stream slug=%s query=%r freq=%s", s.slug, req.query, req.refresh_frequency)
     return _stream_meta(s)
 
 
@@ -916,6 +953,7 @@ def delete_stream(slug: str):
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail=f"stream not found: {slug!r}")
     _indexer.mark_stale()
+    _activity.info("action=delete_stream slug=%s", slug)
 
 
 class StreamRunResult(BaseModel):
@@ -933,16 +971,19 @@ def _run_stream(slug: str, force: bool = False) -> StreamRunResult:
     from prisma.agents.search_agent import SearchAgent
     from prisma.utils.config import ConfigLoader
 
+    _slog = _log_setup.get_stream_logger(slug)
+    _run_t0 = time.monotonic()
     _log.info("stream run start: slug=%r force=%s", slug, force)
+    _slog.info("--- run start --- force=%s", force)
     try:
         stream = _vault.get_stream(slug)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail=f"stream not found: {slug!r}")
 
-    _log.info("stream %r: query=%r next_update=%s", slug, stream.query, stream.next_update)
+    _slog.info("query=%r next_update=%s", stream.query, stream.next_update)
 
     if not force and stream.next_update and stream.next_update > datetime.now():
-        _log.info("stream %r: not due, skipping (use ?force=true to override)", slug)
+        _slog.info("not due, skipping (use ?force=true to override)")
         return StreamRunResult(
             slug=slug,
             papers_found=0,
@@ -955,13 +996,13 @@ def _run_stream(slug: str, force: bool = False) -> StreamRunResult:
     cfg = ConfigLoader().get_search_config()
     agent = SearchAgent()
     requested = list(cfg.sources)
-    _log.info("stream %r: preflight check for sources: %s", slug, requested)
+    _slog.info("preflight check for sources: %s", requested)
     available = agent.preflight(requested)
     skipped = [s for s in requested if s not in available]
-    _log.info("stream %r: sources available=%s skipped=%s", slug, available, skipped)
+    _slog.info("sources available=%s skipped=%s", available, skipped)
 
     if not available:
-        _log.warning("stream %r: all sources failed preflight — aborting", slug)
+        _slog.warning("all sources failed preflight — aborting")
         return StreamRunResult(
             slug=slug,
             papers_found=0,
@@ -971,13 +1012,13 @@ def _run_stream(slug: str, force: bool = False) -> StreamRunResult:
             errors=["all sources failed preflight"],
         )
 
-    _log.info("stream %r: searching internet sources (limit=%s)", slug, cfg.default_limit)
+    _slog.info("searching internet sources (limit=%s)", cfg.default_limit)
     result = agent.search(
         stream.query,
         sources=available,
         limit=cfg.default_limit,
     )
-    _log.info("stream %r: internet search returned %d papers", slug, len(result.papers))
+    _slog.info("internet search returned %d papers", len(result.papers))
     papers_saved = 0
     papers_skipped_llm = 0
     errors: list[str] = []
@@ -985,27 +1026,27 @@ def _run_stream(slug: str, force: bool = False) -> StreamRunResult:
     # Ensure the stream's ZoteroCollection exists
     collection_key = stream.collection_key
     if _zotero.mode != ZoteroMode.offline:
-        _log.info("stream %r: ensuring Zotero collection exists", slug)
+        _slog.info("ensuring Zotero collection exists")
         try:
             collection = _zotero.ensure_collection(stream.title)
             collection_key = collection.key
-            _log.info("stream %r: collection key=%r", slug, collection_key)
+            _slog.info("collection key=%r", collection_key)
             if collection_key != stream.collection_key:
                 _vault.save_stream(slug, collection_key=collection_key)
         except Exception as exc:
-            _log.error("stream %r: zotero collection error: %s", slug, exc)
+            _slog.error("zotero collection error: %s", exc)
             errors.append(f"zotero collection: {exc}")
     else:
-        _log.warning("stream %r: Zotero offline — papers will not be saved", slug)
+        _slog.warning("Zotero offline — papers will not be saved")
         errors.append("Zotero not configured for writes (offline mode) — papers found but not saved")
 
     # Load collection state once — indexes for fast O(1) dedup before any LLM call
     collection_items: list = []
     collection_item_keys: set[str] = set()
-    collection_by_doi: dict[str, object] = {}    # normalized DOI → ZoteroItem
-    collection_by_title: dict[str, object] = {}  # normalized title → ZoteroItem
+    collection_by_doi: dict[str, object] = {}
+    collection_by_title: dict[str, object] = {}
     if collection_key and _zotero.mode != ZoteroMode.offline:
-        _log.info("stream %r: loading existing collection items for dedup", slug)
+        _slog.info("loading existing collection items for dedup")
         try:
             for item in _zotero.list_items(collection_key=collection_key):
                 collection_items.append(item)
@@ -1013,11 +1054,10 @@ def _run_stream(slug: str, force: bool = False) -> StreamRunResult:
                 if item.doi:
                     collection_by_doi[item.doi.lower().strip()] = item
                 collection_by_title[item.title.lower().strip()] = item
-            _log.info("stream %r: collection has %d existing items", slug, len(collection_items))
+            _slog.info("collection has %d existing items", len(collection_items))
         except Exception as exc:
-            _log.warning("stream %r: failed to load collection items: %s", slug, exc)
+            _slog.warning("failed to load collection items: %s", exc)
 
-    # Lazy-initialise the analysis agent only when needed
     _analysis: object = None
 
     def _get_analysis():
@@ -1027,31 +1067,21 @@ def _run_stream(slug: str, force: bool = False) -> StreamRunResult:
             _analysis = AnalysisAgent()
         return _analysis
 
-    # Pre-compute stems for existing collection items once (paid on collection load, not per paper)
     _item_stems: list[tuple[frozenset[str], object]] = [
         (_significant_words(item.title), item)
         for item in collection_items
     ]
 
-    # Stem-overlap thresholds for identity decisions:
-    #   >= CERTAIN  → NLTK alone is confident enough; skip LLM
-    #   [AMBIGUOUS, CERTAIN) → NLTK suggests possible identity; confirm with LLM
-    #   < AMBIGUOUS → clearly different texts; skip LLM
-    _STEM_CERTAIN   = 5  # ≥5 shared stems → same paper, no LLM needed
-    _STEM_AMBIGUOUS = 2  # 2-4 shared stems → ask LLM
+    _STEM_CERTAIN   = 5
+    _STEM_AMBIGUOUS = 2
 
     def _already_in_collection(paper) -> bool:
-        # Gate 1a — local DOI index (free, O(1))
         if paper.doi and paper.doi.lower().strip() in collection_by_doi:
-            _log.info("dedup gate 1a (DOI): %r already in collection", paper.title)
+            _slog.info("dedup DOI: %r already in collection", paper.title)
             return True
-        # Gate 1b — local exact normalized title (free, O(1))
         if paper.title.lower().strip() in collection_by_title:
-            _log.info("dedup gate 1b (title): %r already in collection", paper.title)
+            _slog.info("dedup title: %r already in collection", paper.title)
             return True
-
-        # Gate 1c — Zotero's own search index (handles fuzzy title matching,
-        # DOI fields, and any other metadata Zotero indexed internally)
         try:
             hit = _zotero.find_by_identifier(
                 doi=paper.doi,
@@ -1059,22 +1089,18 @@ def _run_stream(slug: str, force: bool = False) -> StreamRunResult:
                 collection_key=collection_key,
             )
             if hit is not None:
-                _log.info("zotero search dedup: %r matched %r", paper.title, hit.title)
+                _slog.info("dedup zotero-search: %r matched %r", paper.title, hit.title)
                 return True
         except Exception as exc:
-            _log.warning("zotero search dedup failed: %s — continuing to NLTK", exc)
+            _slog.warning("dedup zotero-search failed: %s — continuing to NLTK", exc)
 
-        # Gate 1d — NLTK stem overlap (catches preprint→journal renames and similar)
         incoming_stems = _significant_words(paper.title)
         certain_match = False
         llm_candidates: list[tuple[str, str, object]] = []
         for item_stems, item in _item_stems:
             overlap = len(incoming_stems & item_stems)
             if overlap >= _STEM_CERTAIN:
-                _log.info(
-                    "stem dedup (certain): %r matched %r (overlap=%d)",
-                    paper.title, item.title, overlap,
-                )
+                _slog.info("dedup stem-certain: %r matched %r (overlap=%d)", paper.title, item.title, overlap)
                 certain_match = True
                 break
             if overlap >= _STEM_AMBIGUOUS:
@@ -1083,11 +1109,10 @@ def _run_stream(slug: str, force: bool = False) -> StreamRunResult:
         if certain_match:
             return True
         if not llm_candidates:
-            _log.info("dedup: %r is new (no stem overlap ≥%d)", paper.title, _STEM_AMBIGUOUS)
+            _slog.info("dedup: %r is new (no stem overlap ≥%d)", paper.title, _STEM_AMBIGUOUS)
             return False
 
-        # Gate 1e — LLM batch (only for the ambiguous middle zone that NLTK couldn't decide)
-        _log.info("dedup gate 1e (LLM): checking %r against %d ambiguous candidate(s)", paper.title, len(llm_candidates))
+        _slog.info("dedup LLM: checking %r against %d ambiguous candidate(s)", paper.title, len(llm_candidates))
         try:
             results = _get_analysis().check_identity_batch(
                 paper.title,
@@ -1096,51 +1121,45 @@ def _run_stream(slug: str, force: bool = False) -> StreamRunResult:
             )
             for identity_result, (_, _, item) in zip(results, llm_candidates):
                 if identity_result.are_same:
-                    _log.info(
-                        "LLM dedup: %r matched %r (confidence=%.2f)",
-                        paper.title, item.title, identity_result.confidence,
-                    )
+                    _slog.info("dedup LLM: %r matched %r (confidence=%.2f)", paper.title, item.title, identity_result.confidence)
                     return True
         except Exception as exc:
-            _log.warning("identity batch check failed: %s — treating as new paper", exc)
+            _slog.warning("dedup LLM failed: %s — treating as new paper", exc)
         return False
 
-
-    # Source 1: Zotero library — papers already saved that may be relevant to this stream
+    # Source 1: Zotero library
     library_papers_found = 0
     if collection_key and _zotero.mode != ZoteroMode.offline:
-        _log.info("stream %r: source 1 — searching Zotero library (query=%r, limit=%d)", slug, stream.query, cfg.default_limit)
+        _slog.info("source=library query=%r limit=%d", stream.query, cfg.default_limit)
         try:
             library_candidates = _zotero.list_items(q=stream.query, limit=cfg.default_limit)
             library_papers_found = len(library_candidates)
-            _log.info("stream %r: library search returned %d candidates", slug, library_papers_found)
+            _slog.info("library search returned %d candidates", library_papers_found)
         except Exception as exc:
-            _log.error("stream %r: library search failed: %s", slug, exc)
+            _slog.error("library search failed: %s", exc)
             errors.append(f"zotero library search: {exc}")
             library_candidates = []
 
-        # Filter out items already in the collection before the LLM call
         new_library_candidates = [
             item for item in library_candidates
             if item.key not in collection_item_keys
         ]
-        _log.info(
-            "stream %r: %d library candidates after collection filter (%d already in collection)",
-            slug, len(new_library_candidates), len(library_candidates) - len(new_library_candidates),
+        _slog.info(
+            "%d library candidates after collection filter (%d already in collection)",
+            len(new_library_candidates), len(library_candidates) - len(new_library_candidates),
         )
 
         if new_library_candidates:
-            _log.info("stream %r: batch relevance check for %d library items (single LLM call)", slug, len(new_library_candidates))
+            _slog.info("batch relevance check for %d library items", len(new_library_candidates))
             relevance_flags = _get_analysis().batch_relevance_check(
                 stream.query,
                 [(item.key, item.title, item.abstract) for item in new_library_candidates],
             )
             for lib_item, is_relevant in zip(new_library_candidates, relevance_flags):
-                _log.info("stream %r: library item %r → relevant=%s", slug, lib_item.title, is_relevant)
+                _slog.info("library %r → relevant=%s", lib_item.title, is_relevant)
                 if not is_relevant:
                     papers_skipped_llm += 1
                     continue
-                _log.info("stream %r: accepting library item %r — adding to collection", slug, lib_item.key)
                 try:
                     _zotero.add_to_collection(
                         lib_item.key, lib_item.version, collection_key,
@@ -1151,55 +1170,51 @@ def _run_stream(slug: str, force: bool = False) -> StreamRunResult:
                     if lib_item.doi:
                         collection_by_doi[lib_item.doi.lower().strip()] = lib_item
                     papers_saved += 1
-                    _log.info("stream %r: saved library item %r (total saved=%d)", slug, lib_item.key, papers_saved)
+                    _slog.info("saved library item key=%r (total saved=%d)", lib_item.key, papers_saved)
                 except Exception as exc:
-                    _log.error("stream %r: add_to_collection failed for %r: %s", slug, lib_item.key, exc)
+                    _slog.error("add_to_collection failed for key=%r: %s", lib_item.key, exc)
                     errors.append(str(exc))
 
-    # Source 2: Internet search results — batch pipeline
-    # Phase 2a: dedup + bookmark for all papers before any LLM call
-    _log.info("stream %r: source 2 — processing %d internet papers", slug, len(result.papers))
-    bookmarked: list[tuple[object, object]] = []  # (paper, library_item)
+    # Source 2: Internet — Phase 2a: dedup + bookmark
+    _slog.info("source=internet papers=%d", len(result.papers))
+    bookmarked: list[tuple[object, object]] = []
     for paper in result.papers:
-        _log.info("stream %r: internet paper %r (doi=%s)", slug, paper.title, paper.doi or "none")
+        _slog.info("internet paper %r doi=%s", paper.title, paper.doi or "none")
         if _zotero.mode == ZoteroMode.offline or not collection_key:
-            _log.info("stream %r: skipping — Zotero offline or no collection", slug)
+            _slog.info("skipping — Zotero offline or no collection")
             break
 
         if _already_in_collection(paper):
             continue
 
-        _log.info("stream %r: bookmark-first check for %r", slug, paper.title)
         try:
             existing_in_library = _zotero.find_by_identifier(doi=paper.doi, title=paper.title)
             if existing_in_library is not None:
                 if collection_key and collection_key in (existing_in_library.collection_keys or []):
-                    _log.info("stream %r: %r already in collection (item.collections) — skipping", slug, paper.title)
+                    _slog.info("%r already in collection (item.collections) — skipping", paper.title)
                     continue
-                _log.info("stream %r: %r already in library (key=%r) — reusing", slug, paper.title, existing_in_library.key)
+                _slog.info("%r already in library key=%r — reusing", paper.title, existing_in_library.key)
                 library_item = existing_in_library
             else:
-                _log.info("stream %r: bookmarking new paper %r", slug, paper.title)
                 library_item = _zotero.add_item(paper)
-                _log.info("stream %r: bookmarked %r → key=%r", slug, paper.title, library_item.key)
+                _slog.info("bookmarked %r → key=%r", paper.title, library_item.key)
             bookmarked.append((paper, library_item))
         except Exception as exc:
-            _log.error("stream %r: bookmark failed for %r: %s", slug, paper.title, exc)
+            _slog.error("bookmark failed for %r: %s", paper.title, exc)
             errors.append(f"bookmark: {exc}")
 
-    # Phase 2b: batch relevance check on all bookmarked survivors
+    # Phase 2b: batch relevance check
     if bookmarked:
-        _log.info("stream %r: batch relevance check for %d internet papers (single LLM call)", slug, len(bookmarked))
+        _slog.info("batch relevance check for %d internet papers", len(bookmarked))
         relevance_flags = _get_analysis().batch_relevance_check(
             stream.query,
             [(lib.key, paper.title, paper.abstract) for paper, lib in bookmarked],
         )
         for (paper, library_item), is_relevant in zip(bookmarked, relevance_flags):
-            _log.info("stream %r: internet paper %r → relevant=%s", slug, paper.title, is_relevant)
+            _slog.info("internet %r → relevant=%s", paper.title, is_relevant)
             if not is_relevant:
                 papers_skipped_llm += 1
                 continue
-            _log.info("stream %r: accepting %r — adding to collection", slug, paper.title)
             try:
                 _zotero.add_to_collection(
                     library_item.key,
@@ -1212,9 +1227,9 @@ def _run_stream(slug: str, force: bool = False) -> StreamRunResult:
                 if paper.doi:
                     collection_by_doi[paper.doi.lower().strip()] = library_item
                 papers_saved += 1
-                _log.info("stream %r: saved %r (total saved=%d)", slug, paper.title, papers_saved)
+                _slog.info("saved %r (total saved=%d)", paper.title, papers_saved)
             except Exception as exc:
-                _log.error("stream %r: add_to_collection failed for %r: %s", slug, paper.title, exc)
+                _slog.error("add_to_collection failed for %r: %s", paper.title, exc)
                 errors.append(str(exc))
 
     freq_map = {"daily": 1, "weekly": 7, "monthly": 30, "manual": 0}
@@ -1228,14 +1243,24 @@ def _run_stream(slug: str, force: bool = False) -> StreamRunResult:
         total_papers=stream.total_papers + papers_saved,
     )
 
-    _log.info(
-        "stream %r: run complete — found=%d saved=%d skipped_llm=%d errors=%d next_update=%s",
+    elapsed_ms = (time.monotonic() - _run_t0) * 1000
+    _slog.info(
+        "--- run end --- found=%d saved=%d skipped_llm=%d errors=%d elapsed_ms=%.0f next_update=%s",
+        len(result.papers) + library_papers_found,
+        papers_saved,
+        papers_skipped_llm,
+        len(errors),
+        elapsed_ms,
+        next_update,
+    )
+    _activity.info(
+        "action=run_stream slug=%s found=%d saved=%d skipped_llm=%d errors=%d elapsed_ms=%.0f",
         slug,
         len(result.papers) + library_papers_found,
         papers_saved,
         papers_skipped_llm,
         len(errors),
-        next_update,
+        elapsed_ms,
     )
 
     return StreamRunResult(
@@ -1251,7 +1276,9 @@ def _run_stream(slug: str, force: bool = False) -> StreamRunResult:
 
 @app.post("/streams/{slug}/run", response_model=StreamRunResult)
 def run_stream(slug: str, force: bool = Query(False)):
-    return _run_stream(slug, force=force)
+    t0 = time.monotonic()
+    result = _run_stream(slug, force=force)
+    return result
 
 
 # ── Zotero routes ─────────────────────────────────────────────────────────────
@@ -1381,6 +1408,7 @@ def zotero_import(key: str):
     path.write_text(_render_frontmatter(fm) + body, encoding="utf-8")
     _indexer.mark_stale()
     source = _vault.get_source(slug)
+    _activity.info("action=import_zotero key=%s slug=%s title=%r", key, source.slug, source.title)
     html, broken_links, broken_citations = vault_render(source.body, _vault)
     return RenderedNode(
         slug=source.slug, title=source.title, node_type=source.node_type,

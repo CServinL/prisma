@@ -2,6 +2,7 @@
 Analysis Agent - Analyzes and summarizes academic papers using LLM.
 """
 
+import logging
 import requests
 import json
 import threading
@@ -13,6 +14,8 @@ import time
 from ..utils.config import config
 from ..storage.models.agent_models import PaperMetadata, PaperSummary, AnalysisResult, ReportMetadata, LiteratureReviewReport
 from ..storage.models.api_response_models import OllamaGenerateResponse, LLMRelevanceResult, LLMIdentityResult
+
+_ollama_log = logging.getLogger("prisma.ollama")
 
 
 class AnalysisAgent:
@@ -105,10 +108,21 @@ class AnalysisAgent:
             processing_time=processing_time
         )
     
+    def _log_ollama(self, op: str, elapsed_ms: float, data: dict | None, error: str | None = None, **kw) -> None:
+        if error:
+            _ollama_log.warning("op=%s model=%s elapsed_ms=%.0f error=%s", op, self.model, elapsed_ms, error)
+            return
+        prompt_tokens = data.get("prompt_eval_count", "?") if data else "?"
+        gen_tokens = data.get("eval_count", "?") if data else "?"
+        extra = " ".join(f"{k}={v}" for k, v in kw.items())
+        _ollama_log.info(
+            "op=%s model=%s elapsed_ms=%.0f prompt_tokens=%s gen_tokens=%s%s",
+            op, self.model, elapsed_ms, prompt_tokens, gen_tokens,
+            f" {extra}" if extra else "",
+        )
+
     def _get_ollama_summary(self, title: str, abstract: str) -> str:
-        """Get enhanced summary from Ollama LLM."""
-        try:
-            prompt = f"""Analyze this research paper and provide a concise summary in 2-3 sentences:
+        prompt = f"""Analyze this research paper and provide a concise summary in 2-3 sentences:
 
 Title: {title}
 
@@ -116,30 +130,30 @@ Abstract: {abstract}
 
 Provide a clear, academic summary focusing on the main contribution and significance."""
 
+        t0 = time.monotonic()
+        try:
             response = requests.post(
                 f"{self.base_url}/api/generate",
                 json={
                     "model": self.model,
                     "prompt": prompt,
                     "stream": False,
-                    "options": {
-                        "temperature": 0.3,
-                        "num_predict": 200
-                    }
+                    "options": {"temperature": 0.3, "num_predict": 200},
                 },
-                timeout=30
+                timeout=30,
             )
-            
+            elapsed_ms = (time.monotonic() - t0) * 1000
             if response.status_code == 200:
-                # Use Pydantic model for response validation
-                ollama_response = OllamaGenerateResponse.model_validate(response.json())
+                data = response.json()
+                self._log_ollama("summarize", elapsed_ms, data)
+                ollama_response = OllamaGenerateResponse.model_validate(data)
                 return ollama_response.response.strip()
             else:
-                print(f"[WARNING] Ollama request failed: {response.status_code}")
+                self._log_ollama("summarize", elapsed_ms, None, error=f"status={response.status_code}")
                 return ""
-                
         except Exception as e:
-            print(f"[WARNING] Ollama analysis failed: {e}")
+            elapsed_ms = (time.monotonic() - t0) * 1000
+            self._log_ollama("summarize", elapsed_ms, None, error=str(e))
             return ""
     
     def _extract_key_findings(self, text: str) -> List[str]:
@@ -327,6 +341,7 @@ REASONING: [2-3 sentences explaining the semantic connection or lack thereof]"""
             f"{items_block}"
         )
 
+        t0 = time.monotonic()
         try:
             with self._inference_sem:
                 response = requests.post(
@@ -339,15 +354,21 @@ REASONING: [2-3 sentences explaining the semantic connection or lack thereof]"""
                     },
                     timeout=30,
                 )
+            elapsed_ms = (time.monotonic() - t0) * 1000
             if response.status_code != 200:
+                self._log_ollama("batch_relevance", elapsed_ms, None, error=f"status={response.status_code}", n=len(candidates))
                 return [True] * len(candidates)
-            text = response.json().get("response", "").strip().lower()
+            data = response.json()
+            self._log_ollama("batch_relevance", elapsed_ms, data, n=len(candidates))
+            text = data.get("response", "").strip().lower()
             if "none" in text and not any(ch.isdigit() for ch in text):
                 return [False] * len(candidates)
             import re
             selected = {int(n) for n in re.findall(r"\d+", text) if 1 <= int(n) <= len(candidates)}
             return [i + 1 in selected for i in range(len(candidates))]
-        except Exception:
+        except Exception as exc:
+            elapsed_ms = (time.monotonic() - t0) * 1000
+            self._log_ollama("batch_relevance", elapsed_ms, None, error=str(exc), n=len(candidates))
             return [True] * len(candidates)
 
     _IDENTITY_THRESHOLD = 8  # candidates per incoming paper; above this, switch to parallel
@@ -404,6 +425,7 @@ CANDIDATES
 Respond with exactly one line per candidate:
 {expected_lines}"""
 
+        t0 = time.monotonic()
         try:
             with self._inference_sem:
                 response = requests.post(
@@ -416,11 +438,16 @@ Respond with exactly one line per candidate:
                     },
                     timeout=10 + 15 * len(candidates),
                 )
+            elapsed_ms = (time.monotonic() - t0) * 1000
             if response.status_code != 200:
+                self._log_ollama("check_identity_batch", elapsed_ms, None, error=f"status={response.status_code}", n=len(candidates))
                 return [LLMIdentityResult(are_same=False, confidence=0.0, reason="LLM unavailable")] * len(candidates)
-            text = response.json().get("response", "").strip()
-            return self._parse_batch_response(text, len(candidates))
+            data = response.json()
+            self._log_ollama("check_identity_batch", elapsed_ms, data, n=len(candidates))
+            return self._parse_batch_response(data.get("response", "").strip(), len(candidates))
         except Exception as exc:
+            elapsed_ms = (time.monotonic() - t0) * 1000
+            self._log_ollama("check_identity_batch", elapsed_ms, None, error=str(exc), n=len(candidates))
             return [LLMIdentityResult(are_same=False, confidence=0.0, reason=f"error: {exc}")] * len(candidates)
 
     def _parse_batch_response(self, text: str, n: int) -> list[LLMIdentityResult]:
@@ -504,6 +531,7 @@ Abstract: {abstract_b or "(no abstract)"}
 SAME: [YES/NO]
 CONFIDENCE: [HIGH/MEDIUM/LOW]
 REASON: [one sentence]"""
+        t0 = time.monotonic()
         try:
             with self._inference_sem:
                 response = requests.post(
@@ -516,9 +544,13 @@ REASON: [one sentence]"""
                     },
                     timeout=20,
                 )
+            elapsed_ms = (time.monotonic() - t0) * 1000
             if response.status_code != 200:
+                self._log_ollama("check_identity_single", elapsed_ms, None, error=f"status={response.status_code}")
                 return LLMIdentityResult(are_same=False, confidence=0.0, reason="LLM unavailable")
-            text = response.json().get("response", "").strip()
+            data = response.json()
+            self._log_ollama("check_identity_single", elapsed_ms, data)
+            text = data.get("response", "").strip()
             are_same = False
             confidence = 0.5
             reason = ""
@@ -533,6 +565,8 @@ REASON: [one sentence]"""
                     reason = line.split(":", 1)[1].strip()
             return LLMIdentityResult(are_same=are_same, confidence=confidence, reason=reason)
         except Exception as exc:
+            elapsed_ms = (time.monotonic() - t0) * 1000
+            self._log_ollama("check_identity_single", elapsed_ms, None, error=str(exc))
             return LLMIdentityResult(are_same=False, confidence=0.0, reason=f"error: {exc}")
 
     def _simple_relevance_check(self, title: str, abstract: str, topic: str) -> Dict[str, Any]:

@@ -208,3 +208,13 @@ class RenderedNode(BaseModel):
     last_updated: datetime | None = None
     next_update: datetime | None = None
     query: str | None = None
+
+
+class StreamRunResult(BaseModel):
+    slug: str
+    papers_found: int
+    papers_saved: int
+    papers_skipped_llm: int = 0
+    sources_used: list[str]
+    sources_skipped: list[str]
+    errors: list[str] = []

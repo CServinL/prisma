@@ -98,7 +98,7 @@ ResearchStreamManager.update_stream()
 
 ## Server (REST API)
 
-`prisma serve` starts a FastAPI server on `localhost:7799`. The desktop app and any client use this API exclusively — there is no direct Python import path from the frontend.
+`prisma serve` starts a FastAPI server on `localhost:8765`. The desktop app and any client use this API exclusively — there is no direct Python import path from the frontend.
 
 Key endpoints:
 
@@ -157,4 +157,4 @@ The desktop app (`prisma-desktop/`) wraps Prisma + Graphify in a Tauri shell.
 | Settings persistence | Ollama/LLM calls |
 | Native OS integration | Graphify + ChromaDB indexing |
 
-The SvelteKit frontend calls the Python REST API directly over `localhost:7799`. Tauri Rust backend handles window lifecycle and OS-level concerns only.
+The SvelteKit frontend calls the Python REST API directly over `localhost:8765`. Tauri Rust backend handles window lifecycle and OS-level concerns only.

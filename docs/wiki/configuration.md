@@ -82,6 +82,11 @@ output:
 # ── Analysis ─────────────────────────────────────────────────────────────────
 analysis:
   summary_length: "medium"             # "short" | "medium" | "long"
+  nltk_dedup_sensitivity: "medium"     # "low" | "medium" | "high"
+                                       # Controls NLTK stem-overlap thresholds at dedup levels 4-5.
+                                       # low: certain=13 ambiguous=10
+                                       # medium: certain=10 ambiguous=7  (default)
+                                       # high:   certain=7  ambiguous=5
 
 # ── Retrieval (ChromaDB semantic search) ─────────────────────────────────────
 retrieval:

@@ -35,9 +35,31 @@ After search, each paper is passed to the local LLM (Ollama) for relevance asses
 
 ### 4. Duplicate Detection
 
-Before analysis, Prisma checks whether each paper already exists in your Zotero library by searching by title. Existing papers are skipped (counted as `papers_existing` in output metadata).
+Deduplication runs at two points:
 
-Within a single search run, duplicates across sources are removed by normalized title comparison.
+**During stream ingestion** (`prisma.services.dedup.find_duplicate`) — each incoming paper is checked against the existing Zotero collection using a multi-level cascade:
+
+| Level | Method | Speed |
+|-------|--------|-------|
+| 1 | DOI exact match | instant |
+| 2 | Title exact match (normalized) | instant |
+| 3 | Zotero `find_by_identifier` (network) | fast |
+| 4 | NLTK stem overlap ≥ certain threshold | fast |
+| 5 | NLTK stem overlap ≥ ambiguous threshold → LLM identity check | slow |
+
+Before reaching the LLM (levels 4-5), a **stem pre-filter** discards papers with fewer than 2 stem roots in common with the stream query, reducing unnecessary LLM calls.
+
+**Library maintenance** (`POST /maintenance/deduplicate`) — finds duplicate groups across the entire Zotero library. Defaults to `max_level=3` (DOI + title + year/author) for speed. Levels 4-5 are opt-in:
+
+```bash
+# Default: fast, no LLM
+curl -X POST "http://localhost:8765/maintenance/deduplicate?dry_run=true"
+
+# Thorough: includes NLTK + LLM
+curl -X POST "http://localhost:8765/maintenance/deduplicate?dry_run=true&max_level=5"
+```
+
+The `sensitivity` query param (or `analysis.nltk_dedup_sensitivity` in config) controls NLTK thresholds for levels 4-5: `low | medium | high`.
 
 ### 5. Deep Analysis
 
@@ -94,6 +116,7 @@ All vault operations go through the REST API (`GET /notes`, `PUT /notes/{slug}`,
 - Each matching term: +1.0
 - Term found in title: +4.0 bonus
 - All terms present (AND match): +3.0 bonus
+- NLTK stem overlap with query: +0.5 per shared stem root (e.g. "learning" matches "learned", "learns")
 
 Returns up to 30 results ordered by score, with an excerpt from the first matching line.
 
@@ -103,6 +126,7 @@ Returns up to 30 results ordered by score, with an excerpt from the first matchi
 
 1. **ChromaDB** embeds the query via `nomic-embed-text` and retrieves the top 60 matching chunks across all indexed files. Chunk-level distances are aggregated to file-level scores (best chunk wins).
 2. **Graphify re-ranking** applies a title-match boost using knowledge graph node titles, then returns the top 20 results with matched concepts.
+3. **NLTK re-rank boost**: after semantic scoring, each result receives a +0.05 bonus per shared stem root between its title/body and the query. This adjusts ordering without overriding semantic scores.
 
 Deep search is slower than regular search but finds semantically related content even without exact keyword overlap.
 

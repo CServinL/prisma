@@ -367,6 +367,21 @@ class ZoteroService:
         updated = list(current_collection_keys or []) + [collection_key]
         self._webapi_patch_item(item_key, version, {"collections": updated})
 
+    def delete_item(self, item_key: str, version: int) -> None:
+        """Permanently delete a library item. Web API only."""
+        if self.mode != ZoteroMode.web_api:
+            raise NotImplementedError("delete_item requires web_api mode")
+        import urllib.request
+        url = f"https://api.zotero.org/users/{self._user_id}/items/{item_key}"
+        headers = {
+            "Zotero-API-Key": self._api_key or "",
+            "Zotero-API-Version": "3",
+            "If-Unmodified-Since-Version": str(version),
+        }
+        req = urllib.request.Request(url, headers=headers, method="DELETE")
+        with urllib.request.urlopen(req, timeout=10):
+            pass
+
     def delete_collection(self, collection_key: str) -> None:
         """Delete a Zotero collection by key. Web API only."""
         if self.mode != ZoteroMode.web_api:
@@ -425,9 +440,12 @@ class ZoteroService:
         out: list[ZoteroCollection] = []
         for r in rows:
             d = r.get("data", {})
+            if d.get("deleted"):
+                continue
+            key = d["key"]
             parent = d.get("parentCollection")
             out.append(ZoteroCollection(
-                key=d["key"],
+                key=key,
                 name=d.get("name", "(no name)"),
                 parent_key=parent if isinstance(parent, str) else None,
             ))
@@ -446,6 +464,8 @@ class ZoteroService:
         out: list[ZoteroItem] = []
         for r in rows:
             d = r.get("data", {})
+            if d.get("deleted"):
+                continue
             if d.get("itemType") in _EXCLUDED:
                 continue
             authors = [

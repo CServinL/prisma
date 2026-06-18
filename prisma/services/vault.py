@@ -300,6 +300,11 @@ class VaultService:
     def get_any(self, slug: str) -> Note | Source | Chat | Stream:
         path = self._find_file(slug)
         if path is None:
+            # streams are stored as .yaml, not .md — _find_file won't find them
+            try:
+                return self.get_stream(slug)
+            except FileNotFoundError:
+                pass
             raise FileNotFoundError(f"node not found in vault: {slug!r}")
         if path.suffix == ".html":
             stat = path.stat()
@@ -577,10 +582,13 @@ class VaultService:
         except PermissionError:
             return nodes
 
+        streams_dir_name = self.default_dirs[NodeType.stream].name
         for entry in entries:
             name = entry.name
             if name in _SKIP_DIRS or name.startswith("."):
                 continue
+            if entry.is_dir(follow_symlinks=True) and directory == self.root and name == streams_dir_name:
+                continue  # streams shown in the dedicated sidebar section, not the tree
             if entry.is_dir(follow_symlinks=True):
                 children = self._tree_children(Path(entry.path))
                 if children:  # omit empty dirs

@@ -100,13 +100,28 @@ class SearchConfig(BaseModel):
 class AnalysisConfig(BaseModel):
     """Analysis configuration"""
     summary_length: str = Field("medium", description="Summary length")
-    
+    nltk_dedup_sensitivity: str = Field(
+        "medium",
+        description=(
+            "Controls NLTK stem-overlap thresholds used at dedup levels 4-5. "
+            "low: certain=13 ambiguous=10 | medium: certain=10 ambiguous=7 | high: certain=7 ambiguous=5"
+        ),
+    )
+
     @field_validator('summary_length')
     @classmethod
     def validate_summary_length(cls, v):
         valid_lengths = ['short', 'medium', 'long', 'detailed']
         if v not in valid_lengths:
             raise ValueError(f'summary_length must be one of {valid_lengths}')
+        return v
+
+    @field_validator('nltk_dedup_sensitivity')
+    @classmethod
+    def validate_nltk_dedup_sensitivity(cls, v):
+        valid = ['low', 'medium', 'high']
+        if v not in valid:
+            raise ValueError(f'nltk_dedup_sensitivity must be one of {valid}')
         return v
 
 

@@ -66,7 +66,7 @@ from prisma.services.zotero import ZoteroMode, ZoteroService
 _t("zotero ok")
 
 _t("importing vault_models")
-from prisma.storage.models.vault_models import NodeType, RenderedNode, VaultListing, VaultTreeNode
+from prisma.storage.models.vault_models import NodeType, RenderedNode, StreamRunResult, VaultListing, VaultTreeNode
 _t("vault_models ok")
 
 
@@ -817,6 +817,9 @@ def _text_search(q: str, top_k: int = 30) -> list[SearchResult]:
     if not terms:
         return []
 
+    # Expand terms with stems so "learning" also matches "learned", "learns", etc.
+    query_stems = _significant_words(q)
+
     _refresh_search_index()
 
     results: list[tuple[float, str, str, str]] = []
@@ -825,16 +828,22 @@ def _text_search(q: str, top_k: int = 30) -> list[SearchResult]:
 
     for _mtime, slug, title, lower, lines in entries:
         hits = sum(1 for t in terms if t in lower)
-        if hits == 0:
-            continue
         title_lower = title.lower()
         score = hits * 1.0
         for t in terms:
             if t in title_lower:
                 score += 4.0
-        # All-terms bonus: full AND match scores higher than partial
         if hits == len(terms):
             score += 3.0
+
+        # Stem-overlap bonus — rewards documents that share many stem roots with the query
+        doc_stems = _significant_words(title + " " + lower[:500])
+        stem_overlap = len(query_stems & doc_stems)
+        score += stem_overlap * 0.5
+
+        if score == 0:
+            continue
+
         excerpt = ""
         for line in lines:
             ll = line.lower().strip()
@@ -863,7 +872,7 @@ class DeepSearchResult(BaseModel):
     reason: str = ""
 
 
-def _resolve_source_files(items: list[dict]) -> list[DeepSearchResult]:
+def _resolve_source_files(items: list[dict], query_stems: frozenset | None = None) -> list[DeepSearchResult]:
     """Map [{source_file, score, reason}] to DeepSearchResult, resolving slugs."""
     vault_root = str(_vault.root)
     seen: set[str] = set()
@@ -884,7 +893,11 @@ def _resolve_source_files(items: list[dict]) -> list[DeepSearchResult]:
             title = slug
             body = ""
         excerpt = body[:200].replace("\n", " ").strip() if body else ""
-        out.append((item.get("score", 0.5), slug, title, excerpt, item.get("reason", "")))
+        score = item.get("score", 0.5)
+        if query_stems:
+            doc_stems = _significant_words(title + " " + (body[:500] if body else ""))
+            score += len(query_stems & doc_stems) * 0.05
+        out.append((score, slug, title, excerpt, item.get("reason", "")))
     out.sort(key=lambda x: -x[0])
     return [DeepSearchResult(slug=sl, title=ti, excerpt=ex, score=sc, reason=re)
             for sc, sl, ti, ex, re in out]
@@ -893,16 +906,17 @@ def _resolve_source_files(items: list[dict]) -> list[DeepSearchResult]:
 @app.get("/search/deep")
 def deep_search(q: str = Query(..., min_length=1)) -> list[DeepSearchResult]:
     """Semantic search: Ollama reasons over the knowledge graph, falls back to graph scoring."""
+    query_stems = _significant_words(q)
     ollama_results = _indexer.ollama_deep_search(q, top_k=15, chroma=_chroma)
     if ollama_results:
-        return _resolve_source_files(ollama_results)
+        return _resolve_source_files(ollama_results, query_stems=query_stems)
 
     # Fallback: graph scoring aggregated by file
     graph_nodes = _indexer.ranked_nodes(q, top_k=30)
     if graph_nodes:
         items = [{"source_file": n["source_file"], "score": n["score"], "reason": n.get("label", "")}
                  for n in graph_nodes if n.get("source_file")]
-        results = _resolve_source_files(items)
+        results = _resolve_source_files(items, query_stems=query_stems)
         # Pad with text search for coverage
         seen = {r.slug for r in results}
         for r in _text_search(q, top_k=10):
@@ -1009,329 +1023,23 @@ def delete_stream(slug: str):
     _activity.info("action=delete_stream slug=%s", slug)
 
 
-class StreamRunResult(BaseModel):
-    slug: str
-    papers_found: int
-    papers_saved: int
-    papers_skipped_llm: int = 0
-    sources_used: list[str]
-    sources_skipped: list[str]
-    errors: list[str] = []
-
-
 def _run_stream(slug: str, force: bool = False) -> StreamRunResult:
-    from datetime import datetime, timedelta
-    from prisma.agents.search_agent import SearchAgent
-    from prisma.utils.config import ConfigLoader
-
-    _slog = _log_setup.get_stream_logger(slug)
-    _run_t0 = time.monotonic()
-    _log.info("stream run start: slug=%r force=%s", slug, force)
-    _slog.info("--- run start --- force=%s", force)
+    from prisma.services.stream_runner import run_stream as _runner
     try:
-        stream = _vault.get_stream(slug)
+        _vault.get_stream(slug)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail=f"stream not found: {slug!r}")
-
-    _slog.info("query=%r next_update=%s", stream.query, stream.next_update)
-
-    if not force and stream.next_update and stream.next_update > datetime.now():
-        _slog.info("not due, skipping (use ?force=true to override)")
-        return StreamRunResult(
-            slug=slug,
-            papers_found=0,
-            papers_saved=0,
-            sources_used=[],
-            sources_skipped=[],
-            errors=["not due — use ?force=true to override"],
-        )
-
-    cfg = ConfigLoader().get_search_config()
-    agent = SearchAgent()
-    requested = list(cfg.sources)
-    _slog.info("preflight check for sources: %s", requested)
-    available = agent.preflight(requested)
-    skipped = [s for s in requested if s not in available]
-    _slog.info("sources available=%s skipped=%s", available, skipped)
-
-    if not available:
-        _slog.warning("all sources failed preflight — aborting")
-        return StreamRunResult(
-            slug=slug,
-            papers_found=0,
-            papers_saved=0,
-            sources_used=[],
-            sources_skipped=skipped,
-            errors=["all sources failed preflight"],
-        )
-
-    _slog.info("searching internet sources (limit=%s)", cfg.default_limit)
-    result = agent.search(
-        stream.query,
-        sources=available,
-        limit=cfg.default_limit,
-    )
-    _slog.info("internet search returned %d papers", len(result.papers))
-    papers_saved = 0
-    papers_skipped_llm = 0
-    errors: list[str] = []
-
-    # Ensure the stream's ZoteroCollection exists
-    collection_key = stream.collection_key
-    if _zotero.mode != ZoteroMode.offline:
-        _slog.info("ensuring Zotero collection exists")
-        try:
-            collection = _zotero.ensure_collection(stream.title)
-            collection_key = collection.key
-            _slog.info("collection key=%r", collection_key)
-            if collection_key != stream.collection_key:
-                _vault.save_stream(slug, collection_key=collection_key)
-        except Exception as exc:
-            _slog.error("zotero collection error: %s", exc)
-            errors.append(f"zotero collection: {exc}")
-    else:
-        _slog.warning("Zotero offline — papers will not be saved")
-        errors.append("Zotero not configured for writes (offline mode) — papers found but not saved")
-
-    # Load collection state once — indexes for fast O(1) dedup before any LLM call
-    collection_items: list = []
-    collection_item_keys: set[str] = set()
-    collection_by_doi: dict[str, object] = {}
-    collection_by_title: dict[str, object] = {}
-    if collection_key and _zotero.mode != ZoteroMode.offline:
-        _slog.info("loading existing collection items for dedup")
-        try:
-            for item in _zotero.list_items(collection_key=collection_key):
-                collection_items.append(item)
-                collection_item_keys.add(item.key)
-                if item.doi:
-                    collection_by_doi[item.doi.lower().strip()] = item
-                collection_by_title[item.title.lower().strip()] = item
-            _slog.info("collection has %d existing items", len(collection_items))
-        except Exception as exc:
-            _slog.warning("failed to load collection items: %s", exc)
-
-    _analysis: object = None
-
-    def _get_analysis():
-        nonlocal _analysis
-        if _analysis is None:
-            from prisma.agents.analysis_agent import AnalysisAgent
-            _analysis = AnalysisAgent()
-        return _analysis
-
-    _item_stems: list[tuple[frozenset[str], object]] = [
-        (_significant_words(item.title), item)
-        for item in collection_items
-    ]
-
-    _STEM_CERTAIN   = 5
-    _STEM_AMBIGUOUS = 2
-
-    def _already_in_collection(paper) -> bool:
-        if paper.doi and paper.doi.lower().strip() in collection_by_doi:
-            _slog.info("dedup DOI: %r already in collection", paper.title)
-            return True
-        if paper.title.lower().strip() in collection_by_title:
-            _slog.info("dedup title: %r already in collection", paper.title)
-            return True
-        try:
-            hit = _zotero.find_by_identifier(
-                doi=paper.doi,
-                title=paper.title,
-                collection_key=collection_key,
-            )
-            if hit is not None:
-                _slog.info("dedup zotero-search: %r matched %r", paper.title, hit.title)
-                return True
-        except Exception as exc:
-            _slog.warning("dedup zotero-search failed: %s — continuing to NLTK", exc)
-
-        incoming_stems = _significant_words(paper.title)
-        certain_match = False
-        llm_candidates: list[tuple[str, str, object]] = []
-        for item_stems, item in _item_stems:
-            overlap = len(incoming_stems & item_stems)
-            if overlap >= _STEM_CERTAIN:
-                _slog.info("dedup stem-certain: %r matched %r (overlap=%d)", paper.title, item.title, overlap)
-                certain_match = True
-                break
-            if overlap >= _STEM_AMBIGUOUS:
-                llm_candidates.append((item.title, item.abstract or "", item))
-
-        if certain_match:
-            return True
-        if not llm_candidates:
-            _slog.info("dedup: %r is new (no stem overlap ≥%d)", paper.title, _STEM_AMBIGUOUS)
-            return False
-
-        _slog.info("dedup LLM: checking %r against %d ambiguous candidate(s)", paper.title, len(llm_candidates))
-        try:
-            results = _get_analysis().check_identity_batch(
-                paper.title,
-                paper.abstract or "",
-                [(t, a) for t, a, _ in llm_candidates],
-            )
-            for identity_result, (_, _, item) in zip(results, llm_candidates):
-                if identity_result.are_same:
-                    _slog.info("dedup LLM: %r matched %r (confidence=%.2f)", paper.title, item.title, identity_result.confidence)
-                    return True
-        except Exception as exc:
-            _slog.warning("dedup LLM failed: %s — treating as new paper", exc)
-        return False
-
-    # Source 1: Zotero library
-    library_papers_found = 0
-    if collection_key and _zotero.mode != ZoteroMode.offline:
-        _slog.info("source=library query=%r limit=%d", stream.query, cfg.default_limit)
-        try:
-            library_candidates = _zotero.list_items(q=stream.query, limit=cfg.default_limit)
-            library_papers_found = len(library_candidates)
-            _slog.info("library search returned %d candidates", library_papers_found)
-        except Exception as exc:
-            _slog.error("library search failed: %s", exc)
-            errors.append(f"zotero library search: {exc}")
-            library_candidates = []
-
-        new_library_candidates = [
-            item for item in library_candidates
-            if item.key not in collection_item_keys
-        ]
-        _slog.info(
-            "%d library candidates after collection filter (%d already in collection)",
-            len(new_library_candidates), len(library_candidates) - len(new_library_candidates),
-        )
-
-        if new_library_candidates:
-            _slog.info("batch relevance check for %d library items", len(new_library_candidates))
-            relevance_flags = _get_analysis().batch_relevance_check(
-                stream.query,
-                [(item.key, item.title, item.abstract) for item in new_library_candidates],
-            )
-            for lib_item, is_relevant in zip(new_library_candidates, relevance_flags):
-                _slog.info("library %r → relevant=%s", lib_item.title, is_relevant)
-                if not is_relevant:
-                    papers_skipped_llm += 1
-                    continue
-                try:
-                    _zotero.add_to_collection(
-                        lib_item.key, lib_item.version, collection_key,
-                        current_collection_keys=lib_item.collection_keys,
-                    )
-                    collection_item_keys.add(lib_item.key)
-                    collection_by_title[lib_item.title.lower().strip()] = lib_item
-                    if lib_item.doi:
-                        collection_by_doi[lib_item.doi.lower().strip()] = lib_item
-                    papers_saved += 1
-                    _slog.info("saved library item key=%r (total saved=%d)", lib_item.key, papers_saved)
-                except Exception as exc:
-                    _slog.error("add_to_collection failed for key=%r: %s", lib_item.key, exc)
-                    errors.append(str(exc))
-
-    # Source 2: Internet — Phase 2a: dedup + bookmark
-    _slog.info("source=internet papers=%d", len(result.papers))
-    bookmarked: list[tuple[object, object]] = []
-    for paper in result.papers:
-        _slog.info("internet paper %r doi=%s", paper.title, paper.doi or "none")
-        if _zotero.mode == ZoteroMode.offline or not collection_key:
-            _slog.info("skipping — Zotero offline or no collection")
-            break
-
-        if _already_in_collection(paper):
-            continue
-
-        try:
-            existing_in_library = _zotero.find_by_identifier(doi=paper.doi, title=paper.title)
-            if existing_in_library is not None:
-                if collection_key and collection_key in (existing_in_library.collection_keys or []):
-                    _slog.info("%r already in collection (item.collections) — skipping", paper.title)
-                    continue
-                _slog.info("%r already in library key=%r — reusing", paper.title, existing_in_library.key)
-                library_item = existing_in_library
-            else:
-                library_item = _zotero.add_item(paper)
-                _slog.info("bookmarked %r → key=%r", paper.title, library_item.key)
-            bookmarked.append((paper, library_item))
-        except Exception as exc:
-            _slog.error("bookmark failed for %r: %s", paper.title, exc)
-            errors.append(f"bookmark: {exc}")
-
-    # Phase 2b: batch relevance check
-    if bookmarked:
-        _slog.info("batch relevance check for %d internet papers", len(bookmarked))
-        relevance_flags = _get_analysis().batch_relevance_check(
-            stream.query,
-            [(lib.key, paper.title, paper.abstract) for paper, lib in bookmarked],
-        )
-        for (paper, library_item), is_relevant in zip(bookmarked, relevance_flags):
-            _slog.info("internet %r → relevant=%s", paper.title, is_relevant)
-            if not is_relevant:
-                papers_skipped_llm += 1
-                continue
-            try:
-                _zotero.add_to_collection(
-                    library_item.key,
-                    library_item.version,
-                    collection_key,
-                    current_collection_keys=library_item.collection_keys,
-                )
-                collection_item_keys.add(library_item.key)
-                collection_by_title[paper.title.lower().strip()] = library_item
-                if paper.doi:
-                    collection_by_doi[paper.doi.lower().strip()] = library_item
-                papers_saved += 1
-                _slog.info("saved %r (total saved=%d)", paper.title, papers_saved)
-            except Exception as exc:
-                _slog.error("add_to_collection failed for %r: %s", paper.title, exc)
-                errors.append(str(exc))
-
-    freq_map = {"daily": 1, "weekly": 7, "monthly": 30, "manual": 0}
-    days = freq_map.get(stream.refresh_frequency.value, 7)
-    next_update = (datetime.now() + timedelta(days=days)) if days else None
-
-    _vault.save_stream(
-        slug,
-        last_updated=datetime.now(),
-        next_update=next_update,
-        total_papers=stream.total_papers + papers_saved,
-    )
-
-    elapsed_ms = (time.monotonic() - _run_t0) * 1000
-    _slog.info(
-        "--- run end --- found=%d saved=%d skipped_llm=%d errors=%d elapsed_ms=%.0f next_update=%s",
-        len(result.papers) + library_papers_found,
-        papers_saved,
-        papers_skipped_llm,
-        len(errors),
-        elapsed_ms,
-        next_update,
-    )
+    result = _runner(slug, _vault, _zotero, force=force, get_stream_logger=_log_setup.get_stream_logger)
     _activity.info(
-        "action=run_stream slug=%s found=%d saved=%d skipped_llm=%d errors=%d elapsed_ms=%.0f",
-        slug,
-        len(result.papers) + library_papers_found,
-        papers_saved,
-        papers_skipped_llm,
-        len(errors),
-        elapsed_ms,
+        "action=run_stream slug=%s found=%d saved=%d skipped_llm=%d errors=%d",
+        slug, result.papers_found, result.papers_saved, result.papers_skipped_llm, len(result.errors),
     )
-
-    return StreamRunResult(
-        slug=slug,
-        papers_found=len(result.papers) + library_papers_found,
-        papers_saved=papers_saved,
-        papers_skipped_llm=papers_skipped_llm,
-        sources_used=available,
-        sources_skipped=skipped,
-        errors=errors,
-    )
+    return result
 
 
 @app.post("/streams/{slug}/run", response_model=StreamRunResult)
 def run_stream(slug: str, force: bool = Query(False)):
-    t0 = time.monotonic()
-    result = _run_stream(slug, force=force)
-    return result
+    return _run_stream(slug, force=force)
 
 
 # ── Zotero routes ─────────────────────────────────────────────────────────────
@@ -1467,6 +1175,107 @@ def zotero_import(key: str):
         slug=source.slug, title=source.title, node_type=source.node_type,
         html=html, broken_links=broken_links, broken_citations=broken_citations,
     )
+
+
+class DeduplicateResult(BaseModel):
+    job_id: str
+    status: str
+
+
+def _run_deduplicate(job_id: str, dry_run: bool = False, max_level: int = 3, sensitivity: str = "medium") -> None:
+    from prisma.services.dedup import find_all_duplicates
+    _jobs[job_id] = {"status": "running", "dry_run": dry_run, "max_level": max_level, "sensitivity": sensitivity, "duplicates_found": 0, "items_deleted": 0, "would_delete": [], "errors": []}
+    _log.info("deduplicate[%s]: start — zotero mode=%s dry_run=%s max_level=%d sensitivity=%s", job_id, _zotero.mode, dry_run, max_level, sensitivity)
+    try:
+        items = _zotero.list_items()
+        _log.info("deduplicate[%s]: fetched %d items", job_id, len(items))
+    except Exception as exc:
+        _log.error("deduplicate[%s]: failed to fetch items: %s", job_id, exc)
+        _jobs[job_id] = {"status": "error", "dry_run": dry_run, "max_level": max_level, "duplicates_found": 0, "items_deleted": 0, "would_delete": [], "errors": [str(exc)]}
+        return
+
+    def _keep(group: list):
+        def score(i):
+            return (bool(i.abstract), bool(i.doi), len(i.authors), i.version)
+        return max(group, key=score)
+
+    _log.info("deduplicate[%s]: running find_all_duplicates", job_id)
+    try:
+        groups = find_all_duplicates(items, zotero=_zotero, log=_log, max_level=max_level, sensitivity=sensitivity)
+    except Exception as exc:
+        _log.error("deduplicate[%s]: find_all_duplicates failed: %s", job_id, exc, exc_info=True)
+        _jobs[job_id] = {"status": "error", "dry_run": dry_run, "max_level": max_level, "duplicates_found": 0, "items_deleted": 0, "would_delete": [], "errors": [str(exc)]}
+        return
+
+    _log.info("deduplicate[%s]: found %d duplicate group(s)", job_id, len(groups))
+    duplicates_found = 0
+    items_deleted = 0
+    would_delete: list[dict] = []
+    errors: list[str] = []
+
+    for group in groups:
+        duplicates_found += len(group) - 1
+        keep = _keep(group)
+        _log.info("deduplicate[%s]: group size=%d keeping key=%s title=%r", job_id, len(group), keep.key, keep.title)
+        for item in group:
+            if item.key == keep.key:
+                continue
+            entry = {"key": item.key, "title": item.title, "doi": item.doi, "keep_key": keep.key, "keep_title": keep.title}
+            if dry_run:
+                would_delete.append(entry)
+                _log.info("deduplicate[%s]: dry_run would delete key=%s title=%r (keep=%s)", job_id, item.key, item.title, keep.key)
+            else:
+                try:
+                    _zotero.delete_item(item.key, item.version)
+                    items_deleted += 1
+                    _log.info("deduplicate[%s]: deleted key=%s title=%r", job_id, item.key, item.title)
+                except Exception as exc:
+                    errors.append(f"{item.key}: {exc}")
+                    _log.warning("deduplicate[%s]: failed to delete key=%s: %s", job_id, item.key, exc)
+
+    if not dry_run:
+        _activity.info("action=deduplicate found=%d deleted=%d errors=%d", duplicates_found, items_deleted, len(errors))
+    _log.info("deduplicate[%s]: done — found=%d deleted=%d would_delete=%d errors=%d", job_id, duplicates_found, items_deleted, len(would_delete), len(errors))
+    _jobs[job_id] = {"status": "done", "dry_run": dry_run, "max_level": max_level, "duplicates_found": duplicates_found, "items_deleted": items_deleted, "would_delete": would_delete, "errors": errors}
+
+
+@app.post("/maintenance/deduplicate", response_model=DeduplicateResult, status_code=202)
+def deduplicate_library(
+    dry_run: bool = Query(default=False),
+    max_level: int = Query(default=3, ge=1, le=5),
+    sensitivity: str = Query(default=None),
+):
+    """
+    Deduplicate the Zotero library.
+
+    Levels (cumulative, stops at max_level):
+      1 — DOI exact match
+      2 — Title exact match (normalized)
+      3 — Year ±1 + author last name + first initial  [default stop]
+      4 — NLTK stem overlap (certain threshold) → certain match
+      5 — NLTK stem overlap (ambiguous threshold) → LLM identity check
+
+    sensitivity (levels 4-5 only): low | medium | high — defaults to analysis.nltk_dedup_sensitivity in config.
+      low: certain=13 ambiguous=10 | medium: certain=10 ambiguous=7 | high: certain=7 ambiguous=5
+    """
+    if _zotero.mode == ZoteroMode.offline:
+        raise HTTPException(status_code=503, detail="Zotero not available in offline mode")
+    if sensitivity is None:
+        from prisma.utils.config import ConfigLoader
+        sensitivity = ConfigLoader().load().analysis.nltk_dedup_sensitivity
+    if sensitivity not in ("low", "medium", "high"):
+        raise HTTPException(status_code=422, detail="sensitivity must be low, medium, or high")
+    job_id = str(uuid.uuid4())
+    _executor.submit(_run_deduplicate, job_id, dry_run, max_level, sensitivity)
+    return DeduplicateResult(job_id=job_id, status="running")
+
+
+@app.get("/maintenance/deduplicate/{job_id}")
+def deduplicate_status(job_id: str):
+    job = _jobs.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="job not found")
+    return {"job_id": job_id, **job}
 
 
 @app.post("/review", response_model=JobStatus, status_code=202)

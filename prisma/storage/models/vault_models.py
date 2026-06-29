@@ -208,6 +208,7 @@ class RenderedNode(BaseModel):
     last_updated: datetime | None = None
     next_update: datetime | None = None
     query: str | None = None
+    collection_key: str | None = None
 
 
 class StreamRunResult(BaseModel):

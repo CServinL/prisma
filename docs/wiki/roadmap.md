@@ -27,6 +27,7 @@ Core pipeline is working:
 - Multiple output formats: HTML, PDF, LaTeX, Word
 - Performance: concurrent source search, LLM batching
 - Better CLI error messages and progress output
+- **Ollama resilience** — graceful degradation when Ollama is unavailable at startup or drops mid-session: ChromaDB full index currently silently skips if Ollama is offline during the 20s startup window and never retries; Graphify retries every 60s (already handles it). Both services should expose clear status to the server health endpoint, and ChromaDB should schedule a retry when Ollama becomes reachable again rather than waiting for the next file-change event.
 
 ---
 

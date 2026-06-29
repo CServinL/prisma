@@ -587,6 +587,7 @@ def get_note(slug: str, format: str = "html"):
         rn.last_updated = node.last_updated
         rn.next_update = node.next_update
         rn.query = node.query
+        rn.collection_key = node.collection_key
     return rn
 
 
@@ -970,6 +971,11 @@ def get_stream(slug: str):
         return _stream_meta(_vault.get_stream(slug))
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail=f"stream not found: {slug!r}")
+
+
+@app.get("/streams/{slug}/view", response_model=RenderedNode)
+def get_stream_view(slug: str, format: str = "html"):
+    return get_note(slug, format)
 
 
 class StreamCreateRequest(BaseModel):

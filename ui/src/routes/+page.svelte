@@ -95,8 +95,17 @@
     tags: string[];
   }
 
+  const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+  if (isTauri) document.documentElement.classList.add("tauri");
+
   const DEFAULT_API = "http://127.0.0.1:8765";
-  let apiBase = $state(localStorage.getItem("prisma.server") ?? DEFAULT_API);
+  // In browser/PWA the UI is served from the same origin as the API — no config needed.
+  // In Tauri the server can be at any address, so respect the stored/configured value.
+  let apiBase = $state(
+    isTauri
+      ? (localStorage.getItem("prisma.server") ?? DEFAULT_API)
+      : window.location.origin
+  );
 
   let viewFormat = $state<"html" | "md">("html");
   let tree = $state<VaultTreeNode[]>([]);
@@ -533,8 +542,6 @@
   // ── Settings ─────────────────────────────────────────────────────────────────
 
   import { invoke } from "@tauri-apps/api/core";
-  const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
-  if (isTauri) document.documentElement.classList.add("tauri");
 
   let isMaximized = $state(false);
 
@@ -1293,21 +1300,23 @@
     </div>
 
     <div class="settings-body">
-      <label class="setting-row">
-        <span class="setting-label">Display scale</span>
-        <select bind:value={cfg.scale}>
-          {#each SCALE_OPTIONS as s}
-            <option value={s}>{s === 1.0 ? "1× (default)" : `${s}×`}</option>
-          {/each}
-        </select>
-        <span class="setting-hint">Applied immediately — persisted across restarts.</span>
-      </label>
+      {#if isTauri}
+        <label class="setting-row">
+          <span class="setting-label">Display scale</span>
+          <select bind:value={cfg.scale}>
+            {#each SCALE_OPTIONS as s}
+              <option value={s}>{s === 1.0 ? "1× (default)" : `${s}×`}</option>
+            {/each}
+          </select>
+          <span class="setting-hint">Applied immediately — persisted across restarts.</span>
+        </label>
 
-      <label class="setting-row">
-        <span class="setting-label">Server URL</span>
-        <input bind:value={apiBase} placeholder="http://127.0.0.1:8765" />
-        <span class="setting-hint">URL of the running <code>prisma serve</code> process.</span>
-      </label>
+        <label class="setting-row">
+          <span class="setting-label">Server URL</span>
+          <input bind:value={apiBase} placeholder="http://127.0.0.1:8765" />
+          <span class="setting-hint">URL of the running <code>prisma serve</code> process.</span>
+        </label>
+      {/if}
 
     </div>
 

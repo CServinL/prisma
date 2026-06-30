@@ -132,6 +132,12 @@ Key API endpoints:
 | POST | `/render` | Render arbitrary markdown to HTML |
 | POST | `/graphify/taint` | Force full re-index of knowledge graph |
 | GET | `/vault/assets/{path}` | Serve vault static assets |
+| POST | `/reload` | Reinitialize all backend services + remount UI |
+| POST | `/reload/ui` | Remount `ui/build/` at `/app` (after a UI rebuild) |
+| POST | `/reload/vault` | Reinitialize VaultService from config |
+| POST | `/reload/zotero` | Reinitialize Zotero client |
+| POST | `/reload/indexer` | Restart Graphify indexer |
+| POST | `/reload/chroma` | Restart ChromaDB indexer |
 
 ## Background Services
 

@@ -10,6 +10,7 @@ def _ep_safe(**kw):
 _imeta.entry_points = _ep_safe
 
 import logging
+import os
 import threading
 import time
 import uuid

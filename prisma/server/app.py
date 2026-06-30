@@ -225,9 +225,15 @@ _ui_dist = Path(__file__).parent.parent.parent / "ui" / "build"
 _ui_src  = Path(__file__).parent.parent.parent / "ui" / "src"
 _ui_dir  = Path(__file__).parent.parent.parent / "ui"
 
-if _ui_dist.exists():
+def _mount_ui() -> None:
     from fastapi.staticfiles import StaticFiles
+    if not _ui_dist.exists():
+        return
+    # Remove stale mount if present before remounting
+    app.routes[:] = [r for r in app.routes if getattr(r, "name", None) != "ui"]
     app.mount("/app", StaticFiles(directory=_ui_dist, html=True), name="ui")
+
+_mount_ui()
 app.add_middleware(AccessLogMiddleware)
 
 # ── UI dev watcher ────────────────────────────────────────────────────────────
@@ -349,6 +355,45 @@ def _run_review(job_id: str, req: ReviewRequest) -> None:
 
 # ── Routes ────────────────────────────────────────────────────────────────────
 
+@app.post("/reload/ui")
+def reload_ui():
+    _mount_ui()
+    app.middleware_stack = app.build_middleware_stack()
+    return {"status": "reloaded", "ui_dist": str(_ui_dist), "mounted": _ui_dist.exists()}
+
+
+@app.post("/reload/vault")
+def reload_vault():
+    global _vault
+    _vault = VaultService(vault_root=_resolve_vault_root())
+    return {"status": "reloaded", "vault_root": str(_vault.root)}
+
+
+@app.post("/reload/zotero")
+def reload_zotero():
+    global _zotero
+    _zotero = _build_zotero()
+    return {"status": "reloaded", "zotero_mode": _zotero.mode}
+
+
+@app.post("/reload/indexer")
+def reload_indexer():
+    global _indexer
+    _indexer.stop()
+    _indexer = GraphifyIndexer(_vault, ollama_model=_ollama_model(), index_extensions=_index_extensions())
+    _indexer.start()
+    return {"status": "reloaded"}
+
+
+@app.post("/reload/chroma")
+def reload_chroma():
+    global _chroma
+    _chroma.stop()
+    _chroma = _build_chroma(_vault)
+    _chroma.start()
+    return {"status": "reloaded"}
+
+
 @app.post("/reload")
 def reload_server():
     global _vault, _indexer, _chroma, _zotero
@@ -360,6 +405,8 @@ def reload_server():
     _chroma = _build_chroma(_vault)
     _indexer.start()
     _chroma.start()
+    _mount_ui()
+    app.middleware_stack = app.build_middleware_stack()
     return {"status": "reloaded", "vault_root": str(_vault.root), "zotero_mode": _zotero.mode}
 
 

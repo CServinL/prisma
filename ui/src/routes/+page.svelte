@@ -424,13 +424,26 @@
 
   // ── Reload ──────────────────────────────────────────────────────────────────
 
+  type ReloadScope = "all" | "ui" | "config" | "indexers";
   let reloading = $state(false);
+  let reloadScope = $state<ReloadScope>("all");
+
+  const RELOAD_ENDPOINTS: Record<ReloadScope, string> = {
+    all:      "/reload",
+    ui:       "/reload/ui",
+    config:   "/reload/vault",
+    indexers: "/reload/indexer",
+  };
 
   async function reloadServer() {
     reloading = true;
     try {
-      await fetch(`${apiBase}/reload`, { method: "POST" });
-      await Promise.all([loadTree(), loadStreams(), loadChats(), loadZoteroStatus()]);
+      await fetch(`${apiBase}${RELOAD_ENDPOINTS[reloadScope]}`, { method: "POST" });
+      if (reloadScope === "ui") {
+        window.location.reload();
+      } else {
+        await Promise.all([loadTree(), loadStreams(), loadChats(), loadZoteroStatus()]);
+      }
     } catch {} finally { reloading = false; }
   }
 
@@ -1342,10 +1355,22 @@
       <button class="btn-secondary" onclick={() => showSettings = false}>Cancel</button>
     </div>
     <div class="settings-danger-zone">
+      <div class="reload-scope">
+        {#each [
+          { value: "all",      label: "All" },
+          { value: "ui",       label: "UI only" },
+          { value: "config",   label: "Config" },
+          { value: "indexers", label: "Indexers" },
+        ] as opt (opt.value)}
+          <label class="reload-option">
+            <input type="radio" name="reload-scope" value={opt.value} bind:group={reloadScope} />
+            {opt.label}
+          </label>
+        {/each}
+      </div>
       <button class="btn-danger" onclick={reloadServer} disabled={reloading}>
-        {reloading ? "Reloading…" : "Reload server"}
+        {reloading ? "Reloading…" : "Reload"}
       </button>
-      <span class="setting-hint">Re-reads config.yaml and restarts the indexer.</span>
     </div>
   </div>
   {/if}
@@ -2458,6 +2483,21 @@
   }
   .btn-danger:hover:not(:disabled) { border-color: #aa3030; color: #cc4444; }
   .btn-danger:disabled { opacity: 0.4; cursor: default; }
+  .reload-scope {
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+  .reload-option {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 12px;
+    color: #8a9bb0;
+    cursor: pointer;
+    user-select: none;
+  }
+  .reload-option input[type="radio"] { accent-color: #4a90d9; cursor: pointer; }
 
   /* ── Deep search ─────────────────────────────────────────────────────────── */
   .deep-btn {

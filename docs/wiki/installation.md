@@ -176,13 +176,13 @@ prisma serve         # also watches ui/src/ and rebuilds on change
 
 # terminal 2
 cd /path/to/prisma-desktop
-PKG_CONFIG_PATH=/usr/lib/x86_64-linux-gnu/pkgconfig ~/.cargo/bin/tauri dev
+PKG_CONFIG_PATH=/usr/lib/x86_64-linux-gnu/pkgconfig ~/.cargo/bin/cargo-tauri dev
 ```
 
 Aliases (add to `~/.bashrc`):
 ```bash
 alias prisma-serve='cd ~/Repos/CServinL/prisma && .venv/bin/prisma serve'
-alias prisma-desktop='cd ~/Repos/CServinL/prisma-desktop && PKG_CONFIG_PATH=/usr/lib/x86_64-linux-gnu/pkgconfig ~/.cargo/bin/tauri dev'
+alias prisma-desktop='cd ~/Repos/CServinL/prisma-desktop && PKG_CONFIG_PATH=/usr/lib/x86_64-linux-gnu/pkgconfig ~/.cargo/bin/cargo-tauri dev'
 alias prisma-ui-build='cd ~/Repos/CServinL/prisma/ui && npm run build'
 ```
 

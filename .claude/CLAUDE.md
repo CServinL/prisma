@@ -29,7 +29,7 @@ cd ui && npm install && npm run build
 Regenerate all diagrams before opening a PR:
 
 ```bash
-for f in docs/diagrams/*.py; do .venv/bin/python "$f"; done
+bash docs/diagrams/gen.sh
 ```
 
 Diagrams live in `docs/diagrams/`. Include updated HTML files in the PR — reviewing them is part of the PR checklist:

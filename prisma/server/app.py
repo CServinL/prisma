@@ -355,6 +355,7 @@ def status():
         "chroma": _chroma.status(),
         "vault": vault_stats,
         "zotero": zotero_info,
+        "ollama": {"reachable": _indexer._ollama_ready()},
     }
 
 

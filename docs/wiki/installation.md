@@ -150,6 +150,16 @@ Full reference: [Configuration](configuration.md)
 
 The Tauri shell opens a native window pointed at `http://127.0.0.1:8765/app`. It requires `prisma serve` to be running first.
 
+### Install Tauri CLI (once)
+
+Install via cargo — do **not** use `npm install @tauri-apps/cli`:
+
+```bash
+cargo install tauri-cli --locked
+```
+
+This places `tauri` at `~/.cargo/bin/tauri`. Verify: `tauri --version`.
+
 ### Build the UI (once, after cloning or after UI changes)
 
 ```bash
@@ -166,13 +176,13 @@ prisma serve         # also watches ui/src/ and rebuilds on change
 
 # terminal 2
 cd /path/to/prisma-desktop
-PATH="$HOME/.cargo/bin:$PATH" PKG_CONFIG_PATH=/usr/lib/x86_64-linux-gnu/pkgconfig npm run tauri dev
+PKG_CONFIG_PATH=/usr/lib/x86_64-linux-gnu/pkgconfig ~/.cargo/bin/tauri dev
 ```
 
 Aliases (add to `~/.bashrc`):
 ```bash
 alias prisma-serve='cd ~/Repos/CServinL/prisma && .venv/bin/prisma serve'
-alias prisma-desktop='cd ~/Repos/CServinL/prisma-desktop && PATH="$HOME/.cargo/bin:$PATH" PKG_CONFIG_PATH=/usr/lib/x86_64-linux-gnu/pkgconfig npm run tauri dev'
+alias prisma-desktop='cd ~/Repos/CServinL/prisma-desktop && PKG_CONFIG_PATH=/usr/lib/x86_64-linux-gnu/pkgconfig ~/.cargo/bin/tauri dev'
 alias prisma-ui-build='cd ~/Repos/CServinL/prisma/ui && npm run build'
 ```
 

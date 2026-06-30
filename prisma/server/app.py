@@ -221,10 +221,55 @@ app.add_middleware(
 )
 
 _ui_dist = Path(__file__).parent.parent.parent / "ui" / "build"
+_ui_src  = Path(__file__).parent.parent.parent / "ui" / "src"
+_ui_dir  = Path(__file__).parent.parent.parent / "ui"
+
 if _ui_dist.exists():
     from fastapi.staticfiles import StaticFiles
     app.mount("/app", StaticFiles(directory=_ui_dist, html=True), name="ui")
 app.add_middleware(AccessLogMiddleware)
+
+# ── UI dev watcher ────────────────────────────────────────────────────────────
+
+import hashlib as _hashlib
+import subprocess as _subprocess
+
+_ui_dev_state: dict = {"version": 0, "building": False}
+_ui_dev_lock = threading.Lock()
+
+def _src_hash() -> str:
+    h = _hashlib.md5()
+    for root, _, files in os.walk(_ui_src):
+        for f in sorted(files):
+            try:
+                h.update(str(Path(root, f).stat().st_mtime_ns).encode())
+            except OSError:
+                pass
+    return h.hexdigest()
+
+def _ui_watcher() -> None:
+    last = _src_hash()
+    while True:
+        time.sleep(1)
+        try:
+            cur = _src_hash()
+            if cur == last:
+                continue
+            last = cur
+            time.sleep(0.5)  # debounce — let the editor finish writing
+            with _ui_dev_lock:
+                _ui_dev_state["building"] = True
+            _log.info("ui/src changed — rebuilding")
+            _subprocess.run(["npm", "run", "build"], cwd=_ui_dir, capture_output=True)
+            with _ui_dev_lock:
+                _ui_dev_state["version"] += 1
+                _ui_dev_state["building"] = False
+            _log.info("ui rebuild done (version %d)", _ui_dev_state["version"])
+        except Exception:
+            pass
+
+if _ui_src.exists():
+    threading.Thread(target=_ui_watcher, daemon=True, name="ui-watcher").start()
 
 _executor = ThreadPoolExecutor(max_workers=2)
 _jobs: dict[str, dict] = {}
@@ -320,6 +365,12 @@ def reload_server():
 @app.get("/health")
 def health():
     return {"status": "ok", "online": connectivity.is_online}
+
+
+@app.get("/ui/dev/version")
+def ui_dev_version():
+    with _ui_dev_lock:
+        return {"version": _ui_dev_state["version"], "building": _ui_dev_state["building"]}
 
 
 @app.get("/status")

@@ -146,6 +146,42 @@ Full reference: [Configuration](configuration.md)
 
 ---
 
+## Desktop App (Tauri shell — Linux / WSL2)
+
+The Tauri shell opens a native window pointed at `http://127.0.0.1:8765/app`. It requires `prisma serve` to be running first.
+
+### Build the UI (once, after cloning or after UI changes)
+
+```bash
+cd /path/to/prisma/ui
+npm install
+npm run build        # output → ui/build/ — served by prisma serve at /app
+```
+
+### Run the shell
+
+```bash
+# terminal 1
+prisma serve         # also watches ui/src/ and rebuilds on change
+
+# terminal 2
+cd /path/to/prisma-desktop
+PATH="$HOME/.cargo/bin:$PATH" PKG_CONFIG_PATH=/usr/lib/x86_64-linux-gnu/pkgconfig npm run tauri dev
+```
+
+Aliases (add to `~/.bashrc`):
+```bash
+alias prisma-serve='cd ~/Repos/CServinL/prisma && .venv/bin/prisma serve'
+alias prisma-desktop='cd ~/Repos/CServinL/prisma-desktop && PATH="$HOME/.cargo/bin:$PATH" PKG_CONFIG_PATH=/usr/lib/x86_64-linux-gnu/pkgconfig npm run tauri dev'
+alias prisma-ui-build='cd ~/Repos/CServinL/prisma/ui && npm run build'
+```
+
+### Browser / PWA (macOS, iOS, Android)
+
+Open `http://<server-host>:8765/app` in a browser. On Android and iOS, use "Add to home screen" to install as a PWA.
+
+---
+
 ## Verify Everything
 
 ```bash

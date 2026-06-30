@@ -107,6 +107,18 @@
       : window.location.origin
   );
 
+  // ── UI dev hot-reload ─────────────────────────────────────────────────────────
+  let _devBuildVersion: number | null = null;
+  setInterval(async () => {
+    try {
+      const r = await fetch(`${apiBase}/ui/dev/version`);
+      if (!r.ok) return;
+      const { version } = await r.json();
+      if (_devBuildVersion === null) { _devBuildVersion = version; return; }
+      if (version !== _devBuildVersion) window.location.reload();
+    } catch {}
+  }, 2000);
+
   let viewFormat = $state<"html" | "md">("html");
   let tree = $state<VaultTreeNode[]>([]);
   let collapsedDirs = $state<Set<string>>(new Set());

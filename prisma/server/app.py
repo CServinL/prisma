@@ -215,10 +215,15 @@ app = FastAPI(title="Prisma", version="0.1.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["tauri://localhost", "http://localhost", "http://localhost:1420"],
+    allow_origins=["tauri://localhost", "http://localhost", "http://127.0.0.1:8765"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+_ui_dist = Path(__file__).parent.parent.parent / "ui" / "build"
+if _ui_dist.exists():
+    from fastapi.staticfiles import StaticFiles
+    app.mount("/app", StaticFiles(directory=_ui_dist, html=True), name="ui")
 app.add_middleware(AccessLogMiddleware)
 
 _executor = ThreadPoolExecutor(max_workers=2)

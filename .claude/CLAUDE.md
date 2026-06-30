@@ -26,10 +26,18 @@ cd ui && npm install && npm run build
 
 ## Before opening a PR
 
-Regenerate the architecture diagram whenever Python modules are added, removed, or renamed:
+Regenerate all diagrams before opening a PR:
 
 ```bash
-.venv/bin/python docs/reflection/module-map.py
+for f in docs/diagrams/*.py; do .venv/bin/python "$f"; done
 ```
 
-Include the updated `docs/reflection/module-map.html` in the PR so reviewers can inspect the diagram.
+Diagrams live in `docs/diagrams/`. Include updated HTML files in the PR — reviewing them is part of the PR checklist:
+
+| File | Type | What it shows |
+|------|------|---------------|
+| `01_system_overview.html` | SystemMap | Clients → API → services → storage → external |
+| `02a_zotero_classes.html` | ClassMap | Zotero client hierarchy and interfaces |
+| `02b_zotero_state.html` | StateMap | Online / degraded / offline connection states |
+| `03_stream_update_flow.html` | SequenceMap | Stream refresh: API → agents → Zotero |
+| `04_vault_data_model.html` | ERMap | Vault logical data model |

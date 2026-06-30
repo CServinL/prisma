@@ -10,6 +10,7 @@ def _ep_safe(**kw):
 _imeta.entry_points = _ep_safe
 
 import logging
+import os
 import threading
 import time
 import uuid
@@ -221,10 +222,61 @@ app.add_middleware(
 )
 
 _ui_dist = Path(__file__).parent.parent.parent / "ui" / "build"
-if _ui_dist.exists():
+_ui_src  = Path(__file__).parent.parent.parent / "ui" / "src"
+_ui_dir  = Path(__file__).parent.parent.parent / "ui"
+
+def _mount_ui() -> None:
     from fastapi.staticfiles import StaticFiles
+    if not _ui_dist.exists():
+        return
+    # Remove stale mount if present before remounting
+    app.routes[:] = [r for r in app.routes if getattr(r, "name", None) != "ui"]
     app.mount("/app", StaticFiles(directory=_ui_dist, html=True), name="ui")
+
+_mount_ui()
 app.add_middleware(AccessLogMiddleware)
+
+# ── UI dev watcher ────────────────────────────────────────────────────────────
+
+import hashlib as _hashlib
+import subprocess as _subprocess
+
+_ui_dev_state: dict = {"version": 0, "building": False}
+_ui_dev_lock = threading.Lock()
+
+def _src_hash() -> str:
+    h = _hashlib.md5()
+    for root, _, files in os.walk(_ui_src):
+        for f in sorted(files):
+            try:
+                h.update(str(Path(root, f).stat().st_mtime_ns).encode())
+            except OSError:
+                pass
+    return h.hexdigest()
+
+def _ui_watcher() -> None:
+    last = _src_hash()
+    while True:
+        time.sleep(1)
+        try:
+            cur = _src_hash()
+            if cur == last:
+                continue
+            last = cur
+            time.sleep(0.5)  # debounce — let the editor finish writing
+            with _ui_dev_lock:
+                _ui_dev_state["building"] = True
+            _log.info("ui/src changed — rebuilding")
+            _subprocess.run(["npm", "run", "build"], cwd=_ui_dir, capture_output=True)
+            with _ui_dev_lock:
+                _ui_dev_state["version"] += 1
+                _ui_dev_state["building"] = False
+            _log.info("ui rebuild done (version %d)", _ui_dev_state["version"])
+        except Exception:
+            pass
+
+if _ui_src.exists():
+    threading.Thread(target=_ui_watcher, daemon=True, name="ui-watcher").start()
 
 _executor = ThreadPoolExecutor(max_workers=2)
 _jobs: dict[str, dict] = {}
@@ -303,6 +355,45 @@ def _run_review(job_id: str, req: ReviewRequest) -> None:
 
 # ── Routes ────────────────────────────────────────────────────────────────────
 
+@app.post("/reload/ui")
+def reload_ui():
+    _mount_ui()
+    app.middleware_stack = app.build_middleware_stack()
+    return {"status": "reloaded", "ui_dist": str(_ui_dist), "mounted": _ui_dist.exists()}
+
+
+@app.post("/reload/vault")
+def reload_vault():
+    global _vault
+    _vault = VaultService(vault_root=_resolve_vault_root())
+    return {"status": "reloaded", "vault_root": str(_vault.root)}
+
+
+@app.post("/reload/zotero")
+def reload_zotero():
+    global _zotero
+    _zotero = _build_zotero()
+    return {"status": "reloaded", "zotero_mode": _zotero.mode}
+
+
+@app.post("/reload/indexer")
+def reload_indexer():
+    global _indexer
+    _indexer.stop()
+    _indexer = GraphifyIndexer(_vault, ollama_model=_ollama_model(), index_extensions=_index_extensions())
+    _indexer.start()
+    return {"status": "reloaded"}
+
+
+@app.post("/reload/chroma")
+def reload_chroma():
+    global _chroma
+    _chroma.stop()
+    _chroma = _build_chroma(_vault)
+    _chroma.start()
+    return {"status": "reloaded"}
+
+
 @app.post("/reload")
 def reload_server():
     global _vault, _indexer, _chroma, _zotero
@@ -314,12 +405,20 @@ def reload_server():
     _chroma = _build_chroma(_vault)
     _indexer.start()
     _chroma.start()
+    _mount_ui()
+    app.middleware_stack = app.build_middleware_stack()
     return {"status": "reloaded", "vault_root": str(_vault.root), "zotero_mode": _zotero.mode}
 
 
 @app.get("/health")
 def health():
     return {"status": "ok", "online": connectivity.is_online}
+
+
+@app.get("/ui/dev/version")
+def ui_dev_version():
+    with _ui_dev_lock:
+        return {"version": _ui_dev_state["version"], "building": _ui_dev_state["building"]}
 
 
 @app.get("/status")

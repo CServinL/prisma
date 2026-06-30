@@ -107,6 +107,18 @@
       : window.location.origin
   );
 
+  // ── UI dev hot-reload ─────────────────────────────────────────────────────────
+  let _devBuildVersion: number | null = null;
+  setInterval(async () => {
+    try {
+      const r = await fetch(`${apiBase}/ui/dev/version`);
+      if (!r.ok) return;
+      const { version } = await r.json();
+      if (_devBuildVersion === null) { _devBuildVersion = version; return; }
+      if (version !== _devBuildVersion) window.location.reload();
+    } catch {}
+  }, 2000);
+
   let viewFormat = $state<"html" | "md">("html");
   let tree = $state<VaultTreeNode[]>([]);
   let collapsedDirs = $state<Set<string>>(new Set());
@@ -133,6 +145,10 @@
 
   let showDeepSearch = $state(false);
   let deepQuery = $state("");
+  let deepInputEl = $state<HTMLInputElement | undefined>(undefined);
+  let renameInputEl = $state<HTMLInputElement | undefined>(undefined);
+  $effect(() => { if (showDeepSearch) deepInputEl?.focus(); });
+  $effect(() => { if (renameTarget) renameInputEl?.focus(); });
   let deepResults = $state<DeepSearchResult[]>([]);
   let deepSearching = $state(false);
   let deepTimer: ReturnType<typeof setTimeout> | null = null;
@@ -408,13 +424,26 @@
 
   // ── Reload ──────────────────────────────────────────────────────────────────
 
+  type ReloadScope = "all" | "ui" | "config" | "indexers";
   let reloading = $state(false);
+  let reloadScope = $state<ReloadScope>("all");
+
+  const RELOAD_ENDPOINTS: Record<ReloadScope, string> = {
+    all:      "/reload",
+    ui:       "/reload/ui",
+    config:   "/reload/vault",
+    indexers: "/reload/indexer",
+  };
 
   async function reloadServer() {
     reloading = true;
     try {
-      await fetch(`${apiBase}/reload`, { method: "POST" });
-      await Promise.all([loadTree(), loadStreams(), loadChats(), loadZoteroStatus()]);
+      await fetch(`${apiBase}${RELOAD_ENDPOINTS[reloadScope]}`, { method: "POST" });
+      if (reloadScope === "ui") {
+        window.location.reload();
+      } else {
+        await Promise.all([loadTree(), loadStreams(), loadChats(), loadZoteroStatus()]);
+      }
     } catch {} finally { reloading = false; }
   }
 
@@ -542,6 +571,7 @@
   // ── Settings ─────────────────────────────────────────────────────────────────
 
   import { invoke } from "@tauri-apps/api/core";
+  import { untrack } from "svelte";
 
   let isMaximized = $state(false);
 
@@ -593,7 +623,7 @@
   const SCALE_OPTIONS = [1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0];
 
   let showSettings = $state(false);
-  let cfg = $state<AppSettings>({ scale: 1.0, server_url: apiBase });
+  let cfg = $state<AppSettings>({ scale: 1.0, server_url: untrack(() => apiBase) });
 
   async function loadSettings() {
     try {
@@ -934,7 +964,7 @@
           </button>
         </div>
         {#if sectionOpen.vault}
-          <div class="section-body section-body-scroll" bind:this={sidebarEl} ondragover={onSidebarDragOver}>
+          <div class="section-body section-body-scroll" role="list" bind:this={sidebarEl} ondragover={onSidebarDragOver}>
             {#if tree.length > 0}
               {#each tree as node}
                 {@render treeNode(node, "")}
@@ -1241,7 +1271,7 @@
         bind:value={deepQuery}
         placeholder="Search with graph index…"
         oninput={onDeepSearchInput}
-        autofocus
+        bind:this={deepInputEl}
       />
       {#if deepSearching}
         <span class="spinner-sm deep-spinner"></span>
@@ -1325,17 +1355,32 @@
       <button class="btn-secondary" onclick={() => showSettings = false}>Cancel</button>
     </div>
     <div class="settings-danger-zone">
+      <div class="reload-scope">
+        {#each [
+          { value: "all",      label: "All" },
+          { value: "ui",       label: "UI only" },
+          { value: "config",   label: "Config" },
+          { value: "indexers", label: "Indexers" },
+        ] as opt (opt.value)}
+          <label class="reload-option">
+            <input type="radio" name="reload-scope" value={opt.value} bind:group={reloadScope} />
+            {opt.label}
+          </label>
+        {/each}
+      </div>
       <button class="btn-danger" onclick={reloadServer} disabled={reloading}>
-        {reloading ? "Reloading…" : "Reload server"}
+        {reloading ? "Reloading…" : "Reload"}
       </button>
-      <span class="setting-hint">Re-reads config.yaml and restarts the indexer.</span>
     </div>
   </div>
   {/if}
 
   <!-- Context menu -->
   {#if ctxMenu}
-    <div class="ctx-overlay" onclick={() => { ctxMenu = null; ctxMovePicker = false; }}></div>
+    <div class="ctx-overlay" role="button" tabindex="-1"
+      onclick={() => { ctxMenu = null; ctxMovePicker = false; }}
+      onkeydown={(e) => { if (e.key === "Escape") { ctxMenu = null; ctxMovePicker = false; } }}
+    ></div>
     <div class="ctx-menu" style="left:{ctxMenu.x}px; top:{ctxMenu.y}px">
       {#if !ctxMovePicker}
         {#if ctxMenu.slug}
@@ -1360,10 +1405,13 @@
 
   <!-- Rename dialog -->
   {#if renameTarget}
-    <div class="ctx-overlay" onclick={() => renameTarget = null}></div>
+    <div class="ctx-overlay" role="button" tabindex="-1"
+      onclick={() => renameTarget = null}
+      onkeydown={(e) => { if (e.key === "Escape") renameTarget = null; }}
+    ></div>
     <div class="rename-dialog">
       <div class="rename-label">Rename</div>
-      <input class="rename-input" autofocus bind:value={renameTarget.value}
+      <input class="rename-input" bind:this={renameInputEl} bind:value={renameTarget.value}
         onkeydown={(e) => { if (e.key === "Enter") doRename(); if (e.key === "Escape") renameTarget = null; }} />
       <div class="rename-actions">
         <button class="rename-cancel" onclick={() => renameTarget = null}>Cancel</button>
@@ -2435,6 +2483,21 @@
   }
   .btn-danger:hover:not(:disabled) { border-color: #aa3030; color: #cc4444; }
   .btn-danger:disabled { opacity: 0.4; cursor: default; }
+  .reload-scope {
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+  .reload-option {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 12px;
+    color: #8a9bb0;
+    cursor: pointer;
+    user-select: none;
+  }
+  .reload-option input[type="radio"] { accent-color: #4a90d9; cursor: pointer; }
 
   /* ── Deep search ─────────────────────────────────────────────────────────── */
   .deep-btn {

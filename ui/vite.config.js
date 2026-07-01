@@ -65,6 +65,22 @@ export default defineConfig({
           { src: "/app/pwa-512x512.png", sizes: "512x512", type: "image/png" },
           { src: "/app/pwa-maskable-512x512.png", sizes: "512x512", type: "image/png", purpose: "maskable" },
         ],
+        screenshots: [
+          {
+            src: "/app/screenshots/desktop-wide.png",
+            sizes: "1280x800",
+            type: "image/png",
+            form_factor: "wide",
+            label: "Prisma vault dashboard on desktop",
+          },
+          {
+            src: "/app/screenshots/mobile-narrow.png",
+            sizes: "390x844",
+            type: "image/png",
+            form_factor: "narrow",
+            label: "Prisma vault dashboard on mobile",
+          },
+        ],
       },
     }),
   ],

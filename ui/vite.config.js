@@ -1,5 +1,6 @@
 import { defineConfig } from "vite";
 import { sveltekit } from "@sveltejs/kit/vite";
+import { VitePWA } from "vite-plugin-pwa";
 import fs from "fs";
 import path from "path";
 
@@ -34,5 +35,34 @@ const svelteCssCacheMissGuard = {
 };
 
 export default defineConfig({
-  plugins: [sveltekit(), svelteCssCacheMissGuard],
+  plugins: [
+    sveltekit(),
+    svelteCssCacheMissGuard,
+    VitePWA({
+      registerType: "autoUpdate",
+      scope: "/app/",
+      base: "/app/",
+      injectRegister: "auto",
+      workbox: {
+        globPatterns: ["**/*.{js,css,html,ico,png,svg,woff,woff2}"],
+        navigateFallback: "/app/index.html",
+        navigateFallbackAllowlist: [/^\/app/],
+      },
+      manifest: {
+        name: "Prisma",
+        short_name: "Prisma",
+        description: "Local-first academic research workspace",
+        theme_color: "#1a1a2e",
+        background_color: "#1a1a2e",
+        display: "standalone",
+        scope: "/app/",
+        start_url: "/app/",
+        icons: [
+          { src: "/app/pwa-192x192.png", sizes: "192x192", type: "image/png" },
+          { src: "/app/pwa-512x512.png", sizes: "512x512", type: "image/png" },
+          { src: "/app/pwa-maskable-512x512.png", sizes: "512x512", type: "image/png", purpose: "maskable" },
+        ],
+      },
+    }),
+  ],
 });

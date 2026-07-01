@@ -9,6 +9,8 @@ def _ep_safe(**kw):
         return []
 _imeta.entry_points = _ep_safe
 
+import asyncio
+import json
 import logging
 import os
 import threading
@@ -32,7 +34,7 @@ def _t(label: str, _t0=[0.0]):
     _log.info("startup  %+6.2fs  %s", now - _t0[0], label)
 
 _t("importing fastapi")
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from prisma.server.access_log import AccessLogMiddleware
@@ -70,6 +72,36 @@ _t("importing vault_models")
 from prisma.storage.models.vault_models import NodeType, RenderedNode, StreamRunResult, VaultListing, VaultTreeNode
 _t("vault_models ok")
 
+
+# ── WebSocket connection manager ──────────────────────────────────────────────
+
+_ws_clients: set[WebSocket] = set()
+_ws_clients_lock = threading.Lock()
+_ws_loop: asyncio.AbstractEventLoop | None = None
+
+
+async def _ws_broadcast(event: dict) -> None:
+    msg = json.dumps(event)
+    dead: set[WebSocket] = set()
+    with _ws_clients_lock:
+        clients = set(_ws_clients)
+    for ws in clients:
+        try:
+            await ws.send_text(msg)
+        except Exception:
+            dead.add(ws)
+    if dead:
+        with _ws_clients_lock:
+            _ws_clients.difference_update(dead)
+
+
+def broadcast(event: dict) -> None:
+    """Thread-safe fire-and-forget broadcast to all connected WS clients."""
+    if _ws_loop is not None and _ws_loop.is_running():
+        asyncio.run_coroutine_threadsafe(_ws_broadcast(event), _ws_loop)
+
+
+# ── Vault root / config helpers ───────────────────────────────────────────────
 
 def _resolve_vault_root() -> Path:
     try:
@@ -201,6 +233,8 @@ _scheduler = _StreamScheduler()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global _ws_loop
+    _ws_loop = asyncio.get_event_loop()
     _log.info("startup  lifespan: starting indexer + chroma")
     _indexer.start()
     _chroma.start()
@@ -272,6 +306,7 @@ def _ui_watcher() -> None:
                 _ui_dev_state["version"] += 1
                 _ui_dev_state["building"] = False
             _log.info("ui rebuild done (version %d)", _ui_dev_state["version"])
+            broadcast({"type": "hot_reload", "version": _ui_dev_state["version"]})
         except Exception:
             pass
 
@@ -413,6 +448,21 @@ def reload_server():
 @app.get("/health")
 def health():
     return {"status": "ok", "online": connectivity.is_online}
+
+
+@app.websocket("/ws")
+async def websocket_endpoint(ws: WebSocket):
+    await ws.accept()
+    with _ws_clients_lock:
+        _ws_clients.add(ws)
+    try:
+        while True:
+            await ws.receive_text()  # keeps connection alive; client sends nothing
+    except WebSocketDisconnect:
+        pass
+    finally:
+        with _ws_clients_lock:
+            _ws_clients.discard(ws)
 
 
 @app.get("/ui/dev/version")
@@ -594,6 +644,7 @@ def delete_node(slug: str):
         _vault.delete_node(slug)
         _indexer.mark_stale()
         _activity.info("action=delete_node slug=%s", slug)
+        broadcast({"type": "vault_change", "action": "delete", "slug": slug})
         return {"ok": True}
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -852,6 +903,7 @@ def create_note(req: NoteCreateRequest):
     note = _vault.create_note(req.title, req.body, req.tags)
     _indexer.mark_stale()
     _activity.info("action=create_note slug=%s title=%r", note.slug, note.title)
+    broadcast({"type": "vault_change", "action": "create", "slug": note.slug})
     html, broken_links, broken_citations = vault_render(note.body, _vault)
     return RenderedNode(slug=note.slug, title=note.title, node_type=note.node_type,
                         html=html, broken_links=broken_links, broken_citations=broken_citations)
@@ -868,6 +920,7 @@ def save_note(slug: str, req: NoteSaveRequest):
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail=f"note not found: {slug!r}")
     _indexer.mark_stale()
+    broadcast({"type": "vault_change", "action": "save", "slug": slug})
     html, broken_links, broken_citations = vault_render(note.body, _vault)
     return RenderedNode(slug=note.slug, title=note.title, node_type=note.node_type,
                         html=html, broken_links=broken_links, broken_citations=broken_citations)
@@ -1140,11 +1193,14 @@ def _run_stream(slug: str, force: bool = False) -> StreamRunResult:
         _vault.get_stream(slug)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail=f"stream not found: {slug!r}")
+    broadcast({"type": "stream_progress", "slug": slug, "status": "running"})
     result = _runner(slug, _vault, _zotero, force=force, get_stream_logger=_log_setup.get_stream_logger)
     _activity.info(
         "action=run_stream slug=%s found=%d saved=%d skipped_llm=%d errors=%d",
         slug, result.papers_found, result.papers_saved, result.papers_skipped_llm, len(result.errors),
     )
+    broadcast({"type": "stream_progress", "slug": slug, "status": "done",
+               "found": result.papers_found, "saved": result.papers_saved})
     return result
 
 

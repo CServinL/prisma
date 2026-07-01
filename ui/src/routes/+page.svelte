@@ -107,9 +107,46 @@
       : window.location.origin
   );
 
-  // ── UI dev hot-reload ─────────────────────────────────────────────────────────
+  // ── WebSocket — push events + hot-reload ─────────────────────────────────────
+  let _wsConnected = false;
+
+  function connectWS() {
+    const wsBase = apiBase.replace(/^http/, "ws");
+    const ws = new WebSocket(`${wsBase}/ws`);
+
+    ws.onopen = () => { _wsConnected = true; };
+
+    ws.onmessage = (e) => {
+      try {
+        const ev = JSON.parse(e.data);
+        if (ev.type === "hot_reload") {
+          window.location.reload();
+        } else if (ev.type === "vault_change") {
+          loadTree();
+        } else if (ev.type === "stream_progress") {
+          if (ev.status === "done") loadStreams();
+        }
+      } catch {}
+    };
+
+    ws.onclose = () => {
+      _wsConnected = false;
+      // Reconnect with backoff — cap at 30 s
+      const delay = Math.min(1000 * 2 ** Math.min(_wsRetry, 4), 30000);
+      _wsRetry++;
+      setTimeout(connectWS, delay);
+    };
+
+    ws.onerror = () => ws.close();
+  }
+
+  let _wsRetry = 0;
+  connectWS();
+
+  // ── UI dev hot-reload fallback (polling when WS unavailable) ─────────────────
   let _devBuildVersion: number | null = null;
   setInterval(async () => {
+    if (_wsConnected) return;  // WS handles this when connected
     try {
       const r = await fetch(`${apiBase}/ui/dev/version`);
       if (!r.ok) return;

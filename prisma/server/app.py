@@ -251,9 +251,12 @@ app = FastAPI(title="Prisma", version="0.1.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    # http://127.0.0.1:8766 is the Web process (see ADR-012, prisma.server.web_app) —
-    # the browser page loads from there but calls this API's REST/WS endpoints directly.
-    allow_origins=["tauri://localhost", "http://localhost", "http://127.0.0.1:8765", "http://127.0.0.1:8766"],
+    allow_origins=["tauri://localhost"],
+    # Any port on localhost/127.0.0.1 — covers the API's own port, the Web
+    # process's port (ADR-012), and whichever hostname variant the browser
+    # resolved (CORS origin matching is exact-string, so both "localhost"
+    # and "127.0.0.1" must be covered, not just one).
+    allow_origin_regex=r"^http://(localhost|127\.0\.0\.1)(:\d+)?$",
     allow_methods=["*"],
     allow_headers=["*"],
 )

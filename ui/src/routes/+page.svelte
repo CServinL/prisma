@@ -554,6 +554,19 @@
     }
   }
 
+  // Delegates clicks on links inside {@html}-rendered content. Attached imperatively
+  // (rather than an onclick attribute) because the container is not itself an
+  // interactive widget — only the <a> elements it hosts are, and those already carry
+  // native link semantics and keyboard support.
+  function contentClickDelegate(node: HTMLElement) {
+    node.addEventListener("click", handleContentClick);
+    return {
+      destroy() {
+        node.removeEventListener("click", handleContentClick);
+      },
+    };
+  }
+
   // ── Search ──────────────────────────────────────────────────────────────────
 
   let searchTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1235,8 +1248,7 @@
           ></iframe>
           {/key}
         {:else}
-        <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-        <div class="rendered" onclick={handleContentClick}>
+        <div class="rendered" use:contentClickDelegate>
           {@html activeNode.html}
         </div>
         {/if}
@@ -1251,8 +1263,7 @@
 
   <!-- New stream form -->
   {#if showStreamForm}
-  <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-  <div class="settings-backdrop" onclick={() => showStreamForm = false}></div>
+  <button class="settings-backdrop" aria-label="Close" onclick={() => showStreamForm = false}></button>
   <div class="settings-panel">
     <div class="settings-header">
       <span>New stream</span>
@@ -1295,8 +1306,7 @@
 
   <!-- Deep search panel -->
   {#if showDeepSearch}
-  <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-  <div class="settings-backdrop" onclick={() => showDeepSearch = false}></div>
+  <button class="settings-backdrop" aria-label="Close" onclick={() => showDeepSearch = false}></button>
   <div class="deep-panel">
     <div class="settings-header">
       <span>Deep search</span>
@@ -1358,8 +1368,7 @@
 
   <!-- Settings panel -->
   {#if showSettings}
-  <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-  <div class="settings-backdrop" onclick={() => showSettings = false}></div>
+  <button class="settings-backdrop" aria-label="Close" onclick={() => showSettings = false}></button>
   <div class="settings-panel">
     <div class="settings-header">
       <span>Settings</span>
@@ -2361,6 +2370,9 @@
     inset: 0;
     background: rgba(0,0,0,0.4);
     z-index: 10;
+    border: none;
+    padding: 0;
+    cursor: default;
   }
 
   :global(.tauri) .settings-backdrop {

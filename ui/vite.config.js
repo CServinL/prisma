@@ -1,6 +1,6 @@
 import { defineConfig } from "vite";
 import { sveltekit } from "@sveltejs/kit/vite";
-import { VitePWA } from "vite-plugin-pwa";
+import { SvelteKitPWA } from "@vite-pwa/sveltekit";
 import fs from "fs";
 import path from "path";
 
@@ -38,11 +38,14 @@ export default defineConfig({
   plugins: [
     sveltekit(),
     svelteCssCacheMissGuard,
-    VitePWA({
+    SvelteKitPWA({
       registerType: "autoUpdate",
       scope: "/app/",
       base: "/app/",
-      injectRegister: "auto",
+      injectRegister: false,  // registered manually in +layout.svelte via virtual:pwa-register
+      kit: {
+        spa: true,  // adapter-static SPA mode (fallback: index.html)
+      },
       workbox: {
         globPatterns: ["**/*.{js,css,html,ico,png,svg,woff,woff2}"],
         navigateFallback: "/app/index.html",

@@ -213,23 +213,9 @@ class ChromaIndexer:
         if not self._probe_model():
             return
         all_files = list(self._vault._all_md_files())
-        stale = [
-            p for p in all_files
-            if not (lambda rel, mtime: self._manifest.get(rel) == mtime)(
-                str(p.relative_to(self._vault.root)),
-                p.stat().st_mtime if p.exists() else 0,
-            )
-        ]
-        _log.info("chroma full index start: %d files total, %d stale", len(all_files), len(stale))
+        _log.info("chroma full index start: %d files total", len(all_files))
         dirty = False
         for path in all_files:
-            try:
-                mtime = path.stat().st_mtime
-            except OSError:
-                continue
-            rel = str(path.relative_to(self._vault.root))
-            if self._manifest.get(rel) == mtime:
-                continue
             dirty |= self._upsert_file(path)
         if dirty:
             self._save_manifest()
@@ -238,9 +224,18 @@ class ChromaIndexer:
     def _upsert_file(self, path: Path) -> bool:
         try:
             mtime = path.stat().st_mtime
-            text = path.read_text(encoding="utf-8", errors="replace")
             rel = str(path.relative_to(self._vault.root))
         except (OSError, ValueError):
+            return False
+        # Skip files whose content hasn't changed since the last upsert. Without this,
+        # any filesystem event that isn't an actual content change (e.g. a metadata-only
+        # touch, common on WSL2's watch layer) would re-embed the file on every
+        # incremental cycle forever, since the watchdog handler re-queues on any event.
+        if self._manifest.get(rel) == mtime:
+            return False
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
             return False
         chunks = _chunk_markdown(text)
         embeddings = _embed_texts(chunks, self._model, self._base_url)

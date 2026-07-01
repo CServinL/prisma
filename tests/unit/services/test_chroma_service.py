@@ -94,8 +94,10 @@ def _mock_chroma_client(collection):
 
 
 def test_status_returns_zero_on_empty_collection(indexer):
-    # Real chromadb in tmp — empty collection returns 0 chunks and 0 files
-    status = indexer.status()
+    col = _mock_chroma_collection()
+    client = _mock_chroma_client(col)
+    with patch("chromadb.HttpClient", return_value=client):
+        status = indexer.status()
     assert status["chunks"] == 0
     assert status["files_indexed"] == 0
     assert status["model"] == "nomic-embed-text"
@@ -105,7 +107,7 @@ def test_query_empty_collection_returns_empty(indexer):
     col = _mock_chroma_collection()
     col.count.return_value = 0
     client = _mock_chroma_client(col)
-    with patch("chromadb.PersistentClient", return_value=client):
+    with patch("chromadb.HttpClient", return_value=client):
         result = indexer.query("test question", top_k=5)
     assert result == []
 
@@ -123,7 +125,7 @@ def test_query_returns_ranked_file_scores(indexer, vault):
     }
     client = _mock_chroma_client(col)
     embed = [[0.1] * 768]
-    with patch("chromadb.PersistentClient", return_value=client):
+    with patch("chromadb.HttpClient", return_value=client):
         with patch("prisma.services.chroma_service._embed_texts", return_value=embed):
             result = indexer.query("neural networks", top_k=5)
 
@@ -145,7 +147,7 @@ def test_upsert_file_updates_manifest(indexer, vault, tmp_path):
     # "# Title\nSome content here." → 1 chunk after heading split
     embed = [[0.1] * 768]
 
-    with patch("chromadb.PersistentClient", return_value=client):
+    with patch("chromadb.HttpClient", return_value=client):
         indexer._ensure_client()
         with patch("prisma.services.chroma_service._embed_texts", return_value=embed):
             result = indexer._upsert_file(md_file)
@@ -164,7 +166,7 @@ def test_upsert_file_skips_on_embedding_failure(indexer, vault):
     col = _mock_chroma_collection()
     client = _mock_chroma_client(col)
 
-    with patch("chromadb.PersistentClient", return_value=client):
+    with patch("chromadb.HttpClient", return_value=client):
         indexer._ensure_client()
         with patch("prisma.services.chroma_service._embed_texts", return_value=None):
             result = indexer._upsert_file(md_file)
@@ -182,7 +184,7 @@ def test_upsert_file_skips_when_mtime_unchanged(indexer, vault):
     client = _mock_chroma_client(col)
     embed = [[0.1] * 768]
 
-    with patch("chromadb.PersistentClient", return_value=client):
+    with patch("chromadb.HttpClient", return_value=client):
         indexer._ensure_client()
         with patch("prisma.services.chroma_service._embed_texts", return_value=embed) as mock_embed:
             first = indexer._upsert_file(md_file)
@@ -204,7 +206,7 @@ def test_delete_file_removes_from_manifest(indexer, vault):
     col = _mock_chroma_collection()
     client = _mock_chroma_client(col)
 
-    with patch("chromadb.PersistentClient", return_value=client):
+    with patch("chromadb.HttpClient", return_value=client):
         indexer._ensure_client()
         result = indexer._delete_file(md_file)
 
@@ -217,7 +219,7 @@ def test_save_and_load_manifest(indexer, vault):
     col = _mock_chroma_collection()
     client = _mock_chroma_client(col)
 
-    with patch("chromadb.PersistentClient", return_value=client):
+    with patch("chromadb.HttpClient", return_value=client):
         indexer._ensure_client()
 
     indexer._manifest["notes/x.md"] = 999.0

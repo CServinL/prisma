@@ -158,7 +158,8 @@ def _build_chroma(vault: "VaultService") -> ChromaIndexer:
     from prisma.utils.config import ConfigLoader
     try:
         rcfg = ConfigLoader().get_retrieval_config()
-        return ChromaIndexer(vault, embedding_model=rcfg.embedding_model, ollama_base_url=rcfg.ollama_base_url)
+        return ChromaIndexer(vault, embedding_model=rcfg.embedding_model,
+                              ollama_base_url=rcfg.ollama_base_url, chroma_port=rcfg.chroma_port)
     except Exception:
         return ChromaIndexer(vault)
 
@@ -250,87 +251,14 @@ app = FastAPI(title="Prisma", version="0.1.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["tauri://localhost", "http://localhost", "http://127.0.0.1:8765"],
+    # http://127.0.0.1:8766 is the Web process (see ADR-012, prisma.server.web_app) —
+    # the browser page loads from there but calls this API's REST/WS endpoints directly.
+    allow_origins=["tauri://localhost", "http://localhost", "http://127.0.0.1:8765", "http://127.0.0.1:8766"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-_ui_dist = Path(__file__).parent.parent.parent / "ui" / "build"
-_ui_src  = Path(__file__).parent.parent.parent / "ui" / "src"
-_ui_dir  = Path(__file__).parent.parent.parent / "ui"
-
-
-class _CleanUrlStaticFiles:
-    """StaticFiles that resolves extension-less clean URLs (SvelteKit prerendered
-    routes, e.g. /foo) to their built file (foo.html), like a real static host does.
-    Without this, prerendered pages 404 since adapter-static writes them as flat
-    .html files but the browser/service worker requests the clean path."""
-
-    def __new__(cls, *args, **kwargs):
-        from fastapi.staticfiles import StaticFiles
-
-        class _Impl(StaticFiles):
-            def lookup_path(self, path: str):
-                full_path, stat_result = super().lookup_path(path)
-                if stat_result is None and path and "." not in path.rsplit("/", 1)[-1]:
-                    full_path, stat_result = super().lookup_path(f"{path}.html")
-                return full_path, stat_result
-
-        return _Impl(*args, **kwargs)
-
-
-def _mount_ui() -> None:
-    if not _ui_dist.exists():
-        return
-    # Remove stale mount if present before remounting
-    app.routes[:] = [r for r in app.routes if getattr(r, "name", None) != "ui"]
-    app.mount("/app", _CleanUrlStaticFiles(directory=_ui_dist, html=True), name="ui")
-
-_mount_ui()
 app.add_middleware(AccessLogMiddleware)
-
-# ── UI dev watcher ────────────────────────────────────────────────────────────
-
-import hashlib as _hashlib
-import subprocess as _subprocess
-
-_ui_dev_state: dict = {"version": 0, "building": False}
-_ui_dev_lock = threading.Lock()
-
-def _src_hash() -> str:
-    h = _hashlib.md5()
-    for root, _, files in os.walk(_ui_src):
-        for f in sorted(files):
-            try:
-                h.update(str(Path(root, f).stat().st_mtime_ns).encode())
-            except OSError:
-                pass
-    return h.hexdigest()
-
-def _ui_watcher() -> None:
-    last = _src_hash()
-    while True:
-        time.sleep(1)
-        try:
-            cur = _src_hash()
-            if cur == last:
-                continue
-            last = cur
-            time.sleep(0.5)  # debounce — let the editor finish writing
-            with _ui_dev_lock:
-                _ui_dev_state["building"] = True
-            _log.info("ui/src changed — rebuilding")
-            _subprocess.run(["npm", "run", "build"], cwd=_ui_dir, capture_output=True)
-            with _ui_dev_lock:
-                _ui_dev_state["version"] += 1
-                _ui_dev_state["building"] = False
-            _log.info("ui rebuild done (version %d)", _ui_dev_state["version"])
-            broadcast({"type": "hot_reload", "version": _ui_dev_state["version"]})
-        except Exception:
-            pass
-
-if _ui_src.exists():
-    threading.Thread(target=_ui_watcher, daemon=True, name="ui-watcher").start()
 
 _executor = ThreadPoolExecutor(max_workers=2)
 _jobs: dict[str, dict] = {}
@@ -409,13 +337,6 @@ def _run_review(job_id: str, req: ReviewRequest) -> None:
 
 # ── Routes ────────────────────────────────────────────────────────────────────
 
-@app.post("/reload/ui")
-def reload_ui():
-    _mount_ui()
-    app.middleware_stack = app.build_middleware_stack()
-    return {"status": "reloaded", "ui_dist": str(_ui_dist), "mounted": _ui_dist.exists()}
-
-
 @app.post("/reload/vault")
 def reload_vault():
     global _vault
@@ -459,8 +380,6 @@ def reload_server():
     _chroma = _build_chroma(_vault)
     _indexer.start()
     _chroma.start()
-    _mount_ui()
-    app.middleware_stack = app.build_middleware_stack()
     return {"status": "reloaded", "vault_root": str(_vault.root), "zotero_mode": _zotero.mode}
 
 
@@ -482,12 +401,6 @@ async def websocket_endpoint(ws: WebSocket):
     finally:
         with _ws_clients_lock:
             _ws_clients.discard(ws)
-
-
-@app.get("/ui/dev/version")
-def ui_dev_version():
-    with _ui_dev_lock:
-        return {"version": _ui_dev_state["version"], "building": _ui_dev_state["building"]}
 
 
 @app.get("/status")

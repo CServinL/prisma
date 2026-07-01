@@ -20,7 +20,10 @@ prisma/                        # repo root
 │   │       ├── desktop_client.py  # Desktop-specific operations
 │   │       └── unified_client.py  # Common interface all clients implement
 │   ├── server/
-│   │   ├── app.py                 # FastAPI application — all HTTP endpoints + UI serving
+│   │   ├── supervisor.py          # Process supervisor — spawns/monitors api, web, chroma (ADR-012)
+│   │   ├── app.py                 # API process — REST + WebSocket, no UI mount
+│   │   ├── web_app.py             # Web process — serves ui/build/ at /app, dev watcher
+│   │   ├── static.py              # CleanUrlStaticFiles — shared by app.py and web_app.py
 │   │   └── log_setup.py           # Rotating log files per concern (server, chroma, ollama…)
 │   ├── services/
 │   │   ├── vault.py               # Vault CRUD: notes, sources, chats, streams
@@ -102,16 +105,37 @@ ResearchStreamManager.update_stream()
        └─ Smart tag application + stream state saved to data/research_streams.json
 ```
 
-## Server (HTTP API + UI)
+## Server (Supervisor + API + Web + ChromaDB)
 
-`prisma serve` starts a FastAPI server on `localhost:8765`. It serves both the API and the SvelteKit UI.
+`prisma serve` starts a **supervisor** process (`prisma.server.supervisor`), which
+spawns and monitors three independent worker processes — see ADR-012 for the
+full rationale. A crash in any one of them no longer takes down the others,
+and the supervisor auto-restarts a worker that dies unexpectedly (with
+backoff), or on request via its control API.
+
+| Process | Default port | Purpose |
+|---------|--------------|---------|
+| Supervisor | `8760` (loopback only) | Spawns/monitors workers; control API |
+| API | `8765` | REST + WebSocket (`prisma.server.app`) |
+| Web | `8766` | Serves the built UI at `/app` (`prisma.server.web_app`) |
+| ChromaDB | `8767` (loopback only) | Standalone `chroma run` server — not embedded |
+
+### Supervisor control API
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| GET | `/supervisor/status` | PID, liveness, restart count per worker |
+| POST | `/supervisor/restart/{name}` | Deliberately restart one worker (`api`, `web`, or `chroma`) — this is what actually reloads new code, since `/reload/*` below only resets in-process object state |
+
+### Web process
 
 | Path | Purpose |
 |------|---------|
 | `/app` | SvelteKit SPA (static files from `ui/build/`) |
-| `/ui/dev/version` | Dev hot-reload signal — version counter incremented after each UI rebuild |
+| `/ui/dev/version` | Dev hot-reload signal (polled) — version counter incremented after each UI rebuild |
+| `POST /reload/ui` | Remount `ui/build/` at `/app` (after a UI rebuild) |
 
-Key API endpoints:
+### API process
 
 | Method | Path | Purpose |
 |--------|------|---------|
@@ -132,26 +156,30 @@ Key API endpoints:
 | POST | `/render` | Render arbitrary markdown to HTML |
 | POST | `/graphify/taint` | Force full re-index of knowledge graph |
 | GET | `/vault/assets/{path}` | Serve vault static assets |
-| POST | `/reload` | Reinitialize all backend services + remount UI |
-| POST | `/reload/ui` | Remount `ui/build/` at `/app` (after a UI rebuild) |
+| POST | `/reload` | Reinitialize vault, Zotero, Graphify, ChromaDB client (in-process state, not a restart) |
 | POST | `/reload/vault` | Reinitialize VaultService from config |
 | POST | `/reload/zotero` | Reinitialize Zotero client |
 | POST | `/reload/indexer` | Restart Graphify indexer |
-| POST | `/reload/chroma` | Restart ChromaDB indexer |
-| GET | `/ws` | WebSocket — server push events (`hot_reload`, `vault_change`, `stream_progress`) |
+| POST | `/reload/chroma` | Rebuild the ChromaDB client (reconnects to the Chroma server process) |
+| GET | `/ws` | WebSocket — server push events (`vault_change`, `stream_progress`) |
 
 ## Background Services
 
-Four daemon threads start at server startup:
+Three daemon threads start in the **API process**:
 
 | Service | What it does |
 |---------|--------------|
-| Graphify indexer | Watchdog on vault root; on change, extracts knowledge-graph nodes via Ollama and persists to `graphify-out/`. Retries every 60 s if Ollama is unreachable. |
-| ChromaDB indexer | Watchdog on vault root; on change, embeds changed `.md` files via `nomic-embed-text` and upserts into a persistent ChromaDB collection at `{vault_root}/chromadb/`. |
+| Graphify indexer | Watchdog on vault root; on change, spawns a subprocess that extracts knowledge-graph nodes via Ollama and persists to `graphify-out/`. Retries every 60 s if Ollama is unreachable. The subprocess runs in its own session so it isn't killed by a signal sent to the API process — the indexer's `stop()` terminates it deliberately (SIGTERM, escalating to SIGKILL) instead. |
+| ChromaDB indexer | Watchdog on vault root; on change, embeds changed `.md` files via `nomic-embed-text` and upserts into the ChromaDB **server process** (`chromadb.HttpClient`, not embedded — see ADR-012) at `{vault_root}/chromadb/`. Skips files whose mtime hasn't changed since the last upsert, even if a spurious filesystem event re-queues them. |
 | Stream scheduler | Polls every 5 min; runs active streams whose `next_update` is past. |
+
+One daemon thread starts in the **Web process**:
+
+| Service | What it does |
+|---------|--------------|
 | UI watcher | Polls `ui/src/` mtime hash every 1 s. When source changes, debounces 500 ms, runs `npm run build` in `ui/`, then increments the dev version counter (exposed via `GET /ui/dev/version`). Only active when `ui/src/` exists (dev environment). |
 
-Both indexers wait 20 s after startup before the initial full scan, so the server is responsive immediately.
+Both indexers wait 20 s after startup before the initial full scan, so the API process is responsive immediately.
 
 ## Search Strategy
 
@@ -165,17 +193,26 @@ Both indexers wait 20 s after startup before the initial full scan, so the serve
 - **Vault stored as flat Markdown files** — no database; `VaultService` reads/writes `.md` files in a structured folder layout
 - **Pydantic models throughout** — all API responses and internal data validated with Pydantic v2
 - **Offline-first for reads** — Zotero writes queued, reads degrade gracefully to local Zotero HTTP
-- **Entry points** — `prisma.cli.prisma_cli:cli` (CLI) and `prisma.server.app:app` (ASGI server) in `pyproject.toml`
+- **Entry points** — `prisma.cli.prisma_cli:cli` (CLI, `prisma serve` launches the supervisor); `prisma.server.app:app` and `prisma.server.web_app:app` are the two ASGI apps the supervisor runs under `uvicorn`
 
 ## Client Architecture
 
-The SvelteKit UI (`ui/`) is the single source for all clients. `prisma serve` builds and serves it; clients differ only in how they wrap it.
+The SvelteKit UI (`ui/`) is the single source for all clients. The Web
+process (`prisma.server.web_app`, port `8766`) builds and serves it; the API
+process (port `8765`) is a separate origin the client calls for REST/WS —
+see ADR-012. Clients differ only in how they wrap the page.
 
 | Platform | Client | How UI is delivered |
 |----------|--------|---------------------|
-| Linux | Tauri shell (`prisma-desktop`) | Native window → `http://127.0.0.1:8765/app` |
-| Windows / WSL2 | Tauri shell (`prisma-desktop`) | Native window → `http://127.0.0.1:8765/app` |
-| macOS / iOS / Android | Browser PWA | `http://<host>:8765/app` → install via browser |
+| Linux | Tauri shell (`prisma-desktop`) | Native window → `http://127.0.0.1:8766/app` |
+| Windows / WSL2 | Tauri shell (`prisma-desktop`) | Native window → `http://127.0.0.1:8766/app` |
+| macOS / iOS / Android | Browser PWA | `http://<host>:8766/app` → install via browser |
+
+> **Follow-up needed:** `prisma-desktop`'s window URL is currently configured
+> against the old single-port assumption (`:8765/app`). It needs updating to
+> point at the Web process's port (`8766`) now that UI serving and the API
+> are separate processes. Out of scope for this (Python-side) change —
+> tracked as a `prisma-desktop` repo follow-up.
 
 **Tauri shell** (`prisma-desktop/src-tauri/`) is thin — Rust handles only:
 - Window lifecycle (create, resize, minimize, maximize, close, drag)
@@ -183,7 +220,7 @@ The SvelteKit UI (`ui/`) is the single source for all clients. `prisma serve` bu
 - WSL2-aware URL opener (`open_url` command)
 
 The SvelteKit app detects its runtime via `"__TAURI_INTERNALS__" in window`:
-- **Tauri**: uses `@tauri-apps/api` for window commands and settings; `apiBase` from `localStorage`
-- **Browser/PWA**: uses `window.open`, `localStorage` for settings; `apiBase = window.location.origin`
+- **Tauri**: uses `@tauri-apps/api` for window commands and settings; `apiBase` from `localStorage` (defaults to the API port, `8765`)
+- **Browser/PWA**: `apiBase` defaults to the page's own host on the API's port (`8765`) rather than the page's own origin, since the Web process serving the page and the API are different origins now; overridable via `localStorage` for reverse-proxied deployments
 
-**Dev hot-reload**: `ui/src/` changes trigger an auto-rebuild on the server. The client polls `GET /ui/dev/version` every 2 s and calls `window.location.reload()` when the version bumps — works in both Tauri and browser without a Vite dev server.
+**Dev hot-reload**: `ui/src/` changes trigger an auto-rebuild in the Web process. The client polls `GET /ui/dev/version` on the Web process's own origin every 2 s and calls `window.location.reload()` when the version bumps — a dev-only, self-contained mechanism that doesn't involve the API process or WebSocket at all.

@@ -1260,7 +1260,7 @@
           {#key activeNode.slug}
           <iframe
             class="html-frame"
-            src="/notes/{activeNode.slug}/view"
+            src="{apiBase}/notes/{activeNode.slug}/view"
             title={activeNode.title}
           ></iframe>
           {/key}

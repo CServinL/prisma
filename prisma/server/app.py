@@ -597,7 +597,7 @@ def list_notes(node_type: Optional[str] = Query(None)):
 
 
 @app.get("/notes/{slug}", response_model=RenderedNode)
-def get_note(slug: str, format: str = "html"):
+def get_note(slug: str, request: Request, format: str = "html"):
     from prisma.storage.models.vault_models import Stream
     try:
         node = _vault.get_any(slug)
@@ -625,7 +625,7 @@ def get_note(slug: str, format: str = "html"):
             try:
                 html_dir = html_path.parent.relative_to(_vault.root)
                 base = str(html_dir).replace("\\", "/").rstrip("/")
-                prefix = f"/vault/assets/{base}/" if base else "/vault/assets/"
+                prefix = f"{request.base_url}vault/assets/{base}/" if base else f"{request.base_url}vault/assets/"
                 _ASSET_EXT = r'\.(?:png|jpg|jpeg|gif|webp|svg|ico|woff2?|ttf|eot|css|js|map)'
                 html = _re.sub(
                     rf'(?<![:\w])(src)="(?!\s*(?:https?|data|javascript):|//|#|/)([^"]+{_ASSET_EXT})"',
@@ -646,7 +646,7 @@ def get_note(slug: str, format: str = "html"):
                 try:
                     html_dir = html_path.parent.relative_to(_vault.root)
                     base = str(html_dir).replace("\\", "/").rstrip("/")
-                    prefix = f"/vault/assets/{base}/" if base else "/vault/assets/"
+                    prefix = f"{request.base_url}vault/assets/{base}/" if base else f"{request.base_url}vault/assets/"
                     html = _re.sub(
                         r'(?<![:\w])(src|href)="(?!\s*(?:https?|data|javascript|mailto|tel):|//|#|/)([^"]+)"',
                         lambda mo: f'{mo.group(1)}="{prefix}{mo.group(2)}"',
@@ -1064,8 +1064,8 @@ def get_stream(slug: str):
 
 
 @app.get("/streams/{slug}/view", response_model=RenderedNode)
-def get_stream_view(slug: str, format: str = "html"):
-    return get_note(slug, format)
+def get_stream_view(slug: str, request: Request, format: str = "html"):
+    return get_note(slug, request, format)
 
 
 class StreamCreateRequest(BaseModel):

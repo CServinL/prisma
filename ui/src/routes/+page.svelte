@@ -828,8 +828,7 @@
         title="System status"
       ></button>
       {#if statusPopoverOpen}
-        <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-        <div class="status-backdrop" onclick={() => statusPopoverOpen = false}></div>
+        <button class="status-backdrop" aria-label="Close" onclick={() => statusPopoverOpen = false}></button>
         <div class="status-popover">
           <div class="sp-header">System status</div>
 
@@ -1664,6 +1663,10 @@
     position: fixed;
     inset: 0;
     z-index: 19;
+    border: none;
+    padding: 0;
+    background: transparent;
+    cursor: default;
   }
 
   .status-popover {

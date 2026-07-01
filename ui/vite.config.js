@@ -1,5 +1,6 @@
 import { defineConfig } from "vite";
 import { sveltekit } from "@sveltejs/kit/vite";
+import { SvelteKitPWA } from "@vite-pwa/sveltekit";
 import fs from "fs";
 import path from "path";
 
@@ -34,5 +35,53 @@ const svelteCssCacheMissGuard = {
 };
 
 export default defineConfig({
-  plugins: [sveltekit(), svelteCssCacheMissGuard],
+  plugins: [
+    sveltekit(),
+    svelteCssCacheMissGuard,
+    SvelteKitPWA({
+      registerType: "autoUpdate",
+      scope: "/app/",
+      base: "/app/",
+      injectRegister: false,  // registered manually in +layout.svelte via virtual:pwa-register
+      kit: {
+        spa: true,  // adapter-static SPA mode (fallback: index.html)
+      },
+      workbox: {
+        globPatterns: ["**/*.{js,css,html,ico,png,svg,woff,woff2}"],
+        navigateFallback: "/app/index.html",
+        navigateFallbackAllowlist: [/^\/app/],
+      },
+      manifest: {
+        name: "Prisma",
+        short_name: "Prisma",
+        description: "Research workspace with semantic search over your papers and notes",
+        theme_color: "#1a1a2e",
+        background_color: "#1a1a2e",
+        display: "standalone",
+        scope: "/app/",
+        start_url: "/app/",
+        icons: [
+          { src: "/app/pwa-192x192.png", sizes: "192x192", type: "image/png" },
+          { src: "/app/pwa-512x512.png", sizes: "512x512", type: "image/png" },
+          { src: "/app/pwa-maskable-512x512.png", sizes: "512x512", type: "image/png", purpose: "maskable" },
+        ],
+        screenshots: [
+          {
+            src: "/app/screenshots/desktop-wide.png",
+            sizes: "1280x800",
+            type: "image/png",
+            form_factor: "wide",
+            label: "Prisma vault dashboard on desktop",
+          },
+          {
+            src: "/app/screenshots/mobile-narrow.png",
+            sizes: "390x844",
+            type: "image/png",
+            form_factor: "narrow",
+            label: "Prisma vault dashboard on mobile",
+          },
+        ],
+      },
+    }),
+  ],
 });

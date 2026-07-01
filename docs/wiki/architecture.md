@@ -138,6 +138,7 @@ Key API endpoints:
 | POST | `/reload/zotero` | Reinitialize Zotero client |
 | POST | `/reload/indexer` | Restart Graphify indexer |
 | POST | `/reload/chroma` | Restart ChromaDB indexer |
+| GET | `/ws` | WebSocket — server push events (`hot_reload`, `vault_change`, `stream_progress`) |
 
 ## Background Services
 

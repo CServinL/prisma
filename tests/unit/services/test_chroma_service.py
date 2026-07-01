@@ -173,6 +173,29 @@ def test_upsert_file_skips_on_embedding_failure(indexer, vault):
     assert not col.upsert.called
 
 
+def test_upsert_file_skips_when_mtime_unchanged(indexer, vault):
+    md_file = vault.root / "notes" / "test.md"
+    md_file.parent.mkdir(parents=True, exist_ok=True)
+    md_file.write_text("# Title\nSome content here.", encoding="utf-8")
+
+    col = _mock_chroma_collection()
+    client = _mock_chroma_client(col)
+    embed = [[0.1] * 768]
+
+    with patch("chromadb.PersistentClient", return_value=client):
+        indexer._ensure_client()
+        with patch("prisma.services.chroma_service._embed_texts", return_value=embed) as mock_embed:
+            first = indexer._upsert_file(md_file)
+            # Simulates a spurious watchdog re-fire (e.g. a metadata-only touch on
+            # WSL2) with no actual content change — mtime is identical.
+            second = indexer._upsert_file(md_file)
+
+    assert first is True
+    assert second is False
+    assert mock_embed.call_count == 1
+    assert col.upsert.call_count == 1
+
+
 def test_delete_file_removes_from_manifest(indexer, vault):
     md_file = vault.root / "notes" / "gone.md"
     rel = str(md_file.relative_to(vault.root))

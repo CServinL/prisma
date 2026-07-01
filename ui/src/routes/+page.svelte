@@ -107,9 +107,46 @@
       : window.location.origin
   );
 
-  // ── UI dev hot-reload ─────────────────────────────────────────────────────────
+  // ── WebSocket — push events + hot-reload ─────────────────────────────────────
+  let _wsConnected = false;
+
+  function connectWS() {
+    const wsBase = apiBase.replace(/^http/, "ws");
+    const ws = new WebSocket(`${wsBase}/ws`);
+
+    ws.onopen = () => { _wsConnected = true; };
+
+    ws.onmessage = (e) => {
+      try {
+        const ev = JSON.parse(e.data);
+        if (ev.type === "hot_reload") {
+          window.location.reload();
+        } else if (ev.type === "vault_change") {
+          loadTree();
+        } else if (ev.type === "stream_progress") {
+          if (ev.status === "done") loadStreams();
+        }
+      } catch {}
+    };
+
+    ws.onclose = () => {
+      _wsConnected = false;
+      // Reconnect with backoff — cap at 30 s
+      const delay = Math.min(1000 * 2 ** Math.min(_wsRetry, 4), 30000);
+      _wsRetry++;
+      setTimeout(connectWS, delay);
+    };
+
+    ws.onerror = () => ws.close();
+  }
+
+  let _wsRetry = 0;
+  connectWS();
+
+  // ── UI dev hot-reload fallback (polling when WS unavailable) ─────────────────
   let _devBuildVersion: number | null = null;
   setInterval(async () => {
+    if (_wsConnected) return;  // WS handles this when connected
     try {
       const r = await fetch(`${apiBase}/ui/dev/version`);
       if (!r.ok) return;
@@ -517,6 +554,19 @@
     }
   }
 
+  // Delegates clicks on links inside {@html}-rendered content. Attached imperatively
+  // (rather than an onclick attribute) because the container is not itself an
+  // interactive widget — only the <a> elements it hosts are, and those already carry
+  // native link semantics and keyboard support.
+  function contentClickDelegate(node: HTMLElement) {
+    node.addEventListener("click", handleContentClick);
+    return {
+      destroy() {
+        node.removeEventListener("click", handleContentClick);
+      },
+    };
+  }
+
   // ── Search ──────────────────────────────────────────────────────────────────
 
   let searchTimer: ReturnType<typeof setTimeout> | null = null;
@@ -778,8 +828,7 @@
         title="System status"
       ></button>
       {#if statusPopoverOpen}
-        <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-        <div class="status-backdrop" onclick={() => statusPopoverOpen = false}></div>
+        <button class="status-backdrop" aria-label="Close" onclick={() => statusPopoverOpen = false}></button>
         <div class="status-popover">
           <div class="sp-header">System status</div>
 
@@ -1198,8 +1247,7 @@
           ></iframe>
           {/key}
         {:else}
-        <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-        <div class="rendered" onclick={handleContentClick}>
+        <div class="rendered" use:contentClickDelegate>
           {@html activeNode.html}
         </div>
         {/if}
@@ -1214,8 +1262,7 @@
 
   <!-- New stream form -->
   {#if showStreamForm}
-  <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-  <div class="settings-backdrop" onclick={() => showStreamForm = false}></div>
+  <button class="settings-backdrop" aria-label="Close" onclick={() => showStreamForm = false}></button>
   <div class="settings-panel">
     <div class="settings-header">
       <span>New stream</span>
@@ -1258,8 +1305,7 @@
 
   <!-- Deep search panel -->
   {#if showDeepSearch}
-  <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-  <div class="settings-backdrop" onclick={() => showDeepSearch = false}></div>
+  <button class="settings-backdrop" aria-label="Close" onclick={() => showDeepSearch = false}></button>
   <div class="deep-panel">
     <div class="settings-header">
       <span>Deep search</span>
@@ -1321,8 +1367,7 @@
 
   <!-- Settings panel -->
   {#if showSettings}
-  <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-  <div class="settings-backdrop" onclick={() => showSettings = false}></div>
+  <button class="settings-backdrop" aria-label="Close" onclick={() => showSettings = false}></button>
   <div class="settings-panel">
     <div class="settings-header">
       <span>Settings</span>
@@ -1618,6 +1663,10 @@
     position: fixed;
     inset: 0;
     z-index: 19;
+    border: none;
+    padding: 0;
+    background: transparent;
+    cursor: default;
   }
 
   .status-popover {
@@ -2324,6 +2373,9 @@
     inset: 0;
     background: rgba(0,0,0,0.4);
     z-index: 10;
+    border: none;
+    padding: 0;
+    cursor: default;
   }
 
   :global(.tauri) .settings-backdrop {

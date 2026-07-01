@@ -41,3 +41,4 @@ Diagrams live in `docs/diagrams/`. Include updated HTML files in the PR — revi
 | `02b_zotero_state.html` | StateMap | Online / degraded / offline connection states |
 | `03_stream_update_flow.html` | SequenceMap | Stream refresh: API → agents → Zotero |
 | `04_vault_data_model.html` | ERMap | Vault logical data model |
+| `05_transport_auth.html` | SystemMap | REST vs WebSocket transport + auth zones (local/LAN/WAN) |

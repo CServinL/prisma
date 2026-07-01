@@ -28,11 +28,26 @@ Core pipeline is working:
 - Performance: concurrent source search, LLM batching
 - Better CLI error messages and progress output
 - **Ollama resilience** — graceful degradation when Ollama is unavailable at startup or drops mid-session: ChromaDB full index currently silently skips if Ollama is offline during the 20s startup window and never retries; Graphify retries every 60s (already handles it). Both services should expose clear status to the server health endpoint, and ChromaDB should schedule a retry when Ollama becomes reachable again rather than waiting for the next file-change event.
-- **WebSocket migration** — replace the HTTP REST + polling model with a single WebSocket connection. The server already runs a filesystem watcher; it should push events (vault tree changed, stream updated, index progress, Ollama state change) directly to the client instead of waiting for the 30 s poll. The desktop is the only consumer — no 3rd-party integrations to support — so there is no reason to maintain a dual REST + WS surface. All commands (open note, run stream, import from Zotero, etc.) go over the socket as typed messages; all state updates arrive as server-initiated events. Replaces `fetchStatus`, `loadTree`, and every `fetch()` call in the desktop. FastAPI supports WebSocket natively (`@app.websocket`).
+- **WebSocket push events** — ✅ Done (see ADR-010). Rather than replacing REST, the server keeps REST for all CRUD/search/asset endpoints and adds one `/ws` channel purely for server-initiated push: `hot_reload`, `vault_change`, `stream_progress`. This replaces the old 2 s `/ui/dev/version` poll (kept only as a fallback when WS is unavailable — e.g. a restrictive proxy). Full REST→WS replacement was considered and rejected: it would cost `curl`-ability of the API for a use case (single client, localhost/LAN) where REST's caching/CDN advantages don't matter anyway. Remaining work: extend push coverage to note-content live-updates across multiple open clients, and stream the future chat feature's LLM tokens over the same channel.
 
 ---
 
-## Phase 2 — Sources
+## Phase 2 — Conversational Chat & On-Demand Knowledge Graphs
+
+- **Chat** — ask Prisma questions about your vault (papers, notes, sources). Answers
+  are grounded via ChromaDB semantic retrieval + Graphify context, synthesized by the
+  local LLM (Ollama), with citations back to source notes. Chat sessions are saved to
+  the vault (`chats/` — already modeled in `VaultService`, currently always empty
+  since no chat UI exists yet).
+- **Knowledge graphs from chat context** — ask Prisma to generate a knowledge graph
+  for a chat's subject. Graphify already builds a knowledge graph internally to
+  re-rank search results (`GraphifyService`, `graphify-out/`); this exposes that
+  capability as a user-facing artifact scoped to a specific topic/conversation,
+  rather than only an internal search index.
+
+---
+
+## Phase 3 — Sources
 
 - **PubMed** — biomedical literature
 - **IEEE Xplore** — engineering and CS
@@ -43,7 +58,7 @@ Core pipeline is working:
 
 ---
 
-## Phase 3 — Zotero & Library
+## Phase 4 — Zotero & Library
 
 - Scheduled stream updates (cron-based, not just on-demand)
 - "What's new" delta reports between stream update runs
@@ -52,7 +67,7 @@ Core pipeline is working:
 
 ---
 
-## Phase 4 — Analytics & Visualization
+## Phase 5 — Analytics & Visualization
 
 - **ConnectedPapers integration** — auto-generate links using DOI/arXiv ID/Semantic Scholar URL for citation network visualization. ConnectedPapers has no public API, but direct URL construction works
 - Citation network analysis
@@ -62,7 +77,7 @@ Core pipeline is working:
 
 ---
 
-## Phase 5 — Multi-platform (Long-term)
+## Phase 6 — Multi-platform (Long-term)
 
 Platform matrix:
 
@@ -74,7 +89,7 @@ Platform matrix:
 
 - **Server** (`prisma serve`) — Linux only, including WSL2. No macOS or Windows native server planned.
 - **Tauri desktop** — Linux and Windows only. No native Mac/iOS build planned.
-- **Web client (PWA)** — SvelteKit static build with `vite-plugin-pwa`. Served alongside `prisma serve`. Once the WebSocket migration is done, any browser is a first-class client. On Android, iOS, and macOS, users install it from the browser ("Add to home screen") and it runs as a standalone app — own icon, no browser chrome, appears in the app launcher. No store, no fee, no review. Add: `manifest.json` (name, icons, `display: standalone`) + service worker via `vite-plugin-pwa`. Access remotely via Tailscale or a reverse proxy.
+- **Web client (PWA)** — ✅ Done. SvelteKit static build with `@vite-pwa/sveltekit` (manifest + Workbox service worker), served alongside `prisma serve` at `/app`. On Android, iOS, and macOS, users install it from the browser ("Add to home screen") and it runs as a standalone app — own icon, no browser chrome, appears in the app launcher. No store, no fee, no review. Remote access (outside the home LAN) is covered by the zone-based deployment model — see [deployment-models.md](deployment-models.md) and ADR-011 — rather than Tailscale specifically.
 - Shared research projects and multi-user Zotero group support
 - Distributed processing for large-scale reviews
 

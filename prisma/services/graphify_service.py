@@ -56,6 +56,7 @@ class GraphifyIndexer:
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._observer: Observer | None = None
+        self._current_proc: subprocess.Popen | None = None
 
     def start(self) -> None:
         self._vault.ensure_dirs()
@@ -70,6 +71,18 @@ class GraphifyIndexer:
         if self._observer is not None:
             self._observer.stop()
             self._observer.join(timeout=2)
+        # The subprocess runs in its own session (see _run_graphify), so it doesn't
+        # receive the terminal's Ctrl+C directly — terminate it here instead, so an
+        # in-flight LLM call gets a clean SIGTERM rather than being killed mid-request
+        # by an inherited signal.
+        with self._lock:
+            proc = self._current_proc
+        if proc is not None and proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
 
     def mark_stale(self) -> None:
         with self._lock:
@@ -242,6 +255,7 @@ class GraphifyIndexer:
         if not env.get("OLLAMA_API_KEY"):
             env["OLLAMA_API_KEY"] = "ollama"
         stderr_lines: list[str] = []
+        proc: subprocess.Popen | None = None
         try:
             proc = subprocess.Popen(
                 [sys.executable, "-m", "graphify", str(input_path),
@@ -254,7 +268,13 @@ class GraphifyIndexer:
                 text=True,
                 encoding="utf-8",
                 errors="replace",
+                # Own session so a terminal Ctrl+C (SIGINT to the foreground process
+                # group) doesn't kill this mid-request — the server's own shutdown
+                # path (stop()) terminates it deliberately instead.
+                start_new_session=True,
             )
+            with self._lock:
+                self._current_proc = proc
             assert proc.stdout is not None
             for line in proc.stdout:
                 line = line.rstrip()
@@ -285,6 +305,10 @@ class GraphifyIndexer:
             with self._lock:
                 self._last_error = str(exc)
             return False
+        finally:
+            with self._lock:
+                if self._current_proc is proc:
+                    self._current_proc = None
 
     # ── Index loop ────────────────────────────────────────────────────────────
 

@@ -47,6 +47,11 @@ def run_stream(
     _STEM_PREFILTER = 2
 
     def _stem_relevant(title: str) -> bool:
+        # A query with fewer significant stems than the threshold can never pass
+        # the overlap check — don't let a terse query (e.g. a single short word)
+        # silently block every candidate from ever being saved.
+        if len(_query_stems) < _STEM_PREFILTER:
+            return True
         return len(_query_stems & significant_words(title)) >= _STEM_PREFILTER
 
     _slog.info("query=%r next_update=%s", stream.query, stream.next_update)

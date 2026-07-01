@@ -54,7 +54,7 @@ export default defineConfig({
       manifest: {
         name: "Prisma",
         short_name: "Prisma",
-        description: "Local-first academic research workspace",
+        description: "Research workspace with semantic search over your papers and notes",
         theme_color: "#1a1a2e",
         background_color: "#1a1a2e",
         display: "standalone",

@@ -36,7 +36,6 @@
 - **🌐 Multi-Source Search**: Combines premium APIs with structured data sources
 - **📖 Full-Text Analysis**: Processes PDFs, abstracts, and metadata across all document types
 - **🤖 AI-Powered Curation**: Uses local LLMs for intelligent research assessment and organization
-- **👥 Author Analysis**: Identifies key researchers and creates academic contact directory
 - **📊 Library Organization**: Generates structured research organization and enhanced library management
 - **🗂️ Vault Workspace**: A local, flat-Markdown second brain for notes, sources, and chats — `prisma serve` opens it as a web app, installable PWA, or native desktop shell
 - **🔍 Semantic Search**: ChromaDB embeddings + a Graphify knowledge graph re-rank results beyond keyword matching

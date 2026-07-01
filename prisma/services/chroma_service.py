@@ -153,14 +153,21 @@ class ChromaIndexer:
     # ── Internal ──────────────────────────────────────────────────────────────
 
     def _ensure_client(self) -> None:
-        if self._client is not None:
+        if self._collection is not None:
             return
         import chromadb
         self._chroma_dir.mkdir(parents=True, exist_ok=True)
-        self._client = chromadb.PersistentClient(path=str(self._chroma_dir))
-        self._collection = self._client.get_or_create_collection(
-            "vault", metadata={"hnsw:space": "cosine"}
-        )
+        try:
+            client = chromadb.PersistentClient(path=str(self._chroma_dir))
+            collection = client.get_or_create_collection(
+                "vault", metadata={"hnsw:space": "cosine"}
+            )
+        except Exception:
+            self._client = None
+            self._collection = None
+            raise
+        self._client = client
+        self._collection = collection
         if self._manifest_path.exists():
             try:
                 self._manifest = json.loads(self._manifest_path.read_text(encoding="utf-8"))

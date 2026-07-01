@@ -982,20 +982,21 @@ class TestZoteroLibraryCleanupVerification:
         for item in all_items:
             item_tags = item.get('data', {}).get('tags', [])
             item_title = item.get('data', {}).get('title', '')
-            
-            # Check if this item has any test tags
+
+            # Check if this item has any test tags — this is the only reliable
+            # signal, since every test item this suite creates is tagged with
+            # one of these exact values. A title-substring check (previously
+            # also used here) is not reliable: real academic papers routinely
+            # contain generic words like "test" or "testbed" (e.g. a paper
+            # about statistical hypothesis testing), and a paper literally
+            # named "Prisma" is a real, legitimate reference — not an artifact
+            # of this test suite sharing the same project name.
             has_test_tags = any(
                 any(tag.get('tag', '').lower() in test_tag for test_tag in test_tags)
                 for tag in item_tags
             )
-            
-            # Check if title contains test indicators
-            has_test_title = any(
-                indicator in item_title.lower()
-                for indicator in ['test', 'integration testing', 'prisma']
-            )
-            
-            if has_test_tags or has_test_title:
+
+            if has_test_tags:
                 test_items_found.append({
                     'key': item['key'],
                     'title': item_title,

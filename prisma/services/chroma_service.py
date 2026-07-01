@@ -53,10 +53,16 @@ class ChromaIndexer:
         vault: VaultService,
         embedding_model: str = "nomic-embed-text",
         ollama_base_url: str = "http://localhost:11434",
+        chroma_host: str = "127.0.0.1",
+        chroma_port: int = 8767,
     ) -> None:
         self._vault = vault
         self._model = embedding_model
         self._base_url = ollama_base_url
+        # ChromaDB runs as its own supervised server process (ADR-012), not
+        # embedded — a crash there no longer takes down this process's threads.
+        self._chroma_host = chroma_host
+        self._chroma_port = chroma_port
         self._chroma_dir = vault.root / "chromadb"
         self._manifest_path = self._chroma_dir / "manifest.json"
         self._client = None
@@ -158,7 +164,7 @@ class ChromaIndexer:
         import chromadb
         self._chroma_dir.mkdir(parents=True, exist_ok=True)
         try:
-            client = chromadb.PersistentClient(path=str(self._chroma_dir))
+            client = chromadb.HttpClient(host=self._chroma_host, port=self._chroma_port)
             collection = client.get_or_create_collection(
                 "vault", metadata={"hnsw:space": "cosine"}
             )

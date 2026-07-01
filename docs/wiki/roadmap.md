@@ -61,7 +61,13 @@ Core pipeline is working:
 ## Phase 4 — Zotero & Library
 
 - Scheduled stream updates (cron-based, not just on-demand)
-- "What's new" delta reports between stream update runs
+- **"What's new" stream newsletter** — when `prisma streams update` finds new
+  papers for a stream, generate a digest ("newsletter") of what's new: the
+  papers found, why they're relevant to the stream's query, and (once Phase 5's
+  author analysis exists) who wrote them and why that might matter. This is
+  the actual delivery mechanism the author-analysis work in Phase 5 is for —
+  author analysis isn't meant to be a standalone report, it's an enrichment
+  step feeding this newsletter.
 - Better collection hierarchy management
 - Mendeley, EndNote, RefWorks integration
 
@@ -69,9 +75,22 @@ Core pipeline is working:
 
 ## Phase 5 — Analytics & Visualization
 
+- **⚠️ Author Analysis / Research Directory — advertised, not implemented.** The
+  README lists this under Key Features ("Identifies key researchers and
+  creates academic contact directory"), but `ReportAgent.analyze_authors()`,
+  `.create_research_directory()`, and `.map_collaboration_networks()` in
+  `prisma/agents/report_agent.py` are all literal `pass` stubs — nothing has
+  ever been implemented. This has been silently dropped across multiple past
+  sessions; calling it out explicitly here so it isn't missed again. Scope:
+  extract unique authors from a corpus of paper summaries, build per-author
+  profiles (institutional affiliation, specializations, key publications),
+  and render a Markdown "research directory" — the co-authorship/network
+  and trajectory analysis below can come later as a separate increment. Not
+  meant to be a standalone report — it's an enrichment step feeding the
+  stream newsletter in Phase 4.
 - **ConnectedPapers integration** — auto-generate links using DOI/arXiv ID/Semantic Scholar URL for citation network visualization. ConnectedPapers has no public API, but direct URL construction works
 - Citation network analysis
-- Author intelligence: profiles, collaboration networks, research trajectories, institution mapping
+- Author intelligence (extended): collaboration networks, research trajectories, institution mapping — builds on the author-analysis MVP above
 - Trend monitoring: emerging topics, topic drift detection across updates
 - Geographic distribution of research activity
 

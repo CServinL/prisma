@@ -147,6 +147,7 @@ class SourcesConfig(BaseModel):
 class RetrievalConfig(BaseModel):
     embedding_model: str = Field("nomic-embed-text", description="Ollama embedding model for ChromaDB semantic search")
     ollama_base_url: str = Field("http://localhost:11434", description="Ollama base URL for embeddings")
+    chroma_port: int = Field(8767, description="Port of the supervised ChromaDB server process (see ADR-012)")
 
 
 class PrismaConfig(BaseModel):

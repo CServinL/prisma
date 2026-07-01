@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-30
 **Author:** CServinL
-**Status:** Proposed
+**Status:** Accepted
 
 ## Context
 

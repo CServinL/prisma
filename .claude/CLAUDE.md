@@ -16,7 +16,7 @@ Read before writing code:
 ## Running locally
 
 ```bash
-.venv/bin/prisma serve        # API on :8765, UI at :8765/app
+.venv/bin/prisma serve        # supervisor: API :8765, Web/UI :8766, ChromaDB :8767 (see ADR-012)
 ```
 
 Build the UI first if not already built:
@@ -42,3 +42,4 @@ Diagrams live in `docs/diagrams/`. Include updated HTML files in the PR — revi
 | `03_stream_update_flow.html` | SequenceMap | Stream refresh: API → agents → Zotero |
 | `04_vault_data_model.html` | ERMap | Vault logical data model |
 | `05_transport_auth.html` | SystemMap | REST vs WebSocket transport + auth zones (local/LAN/WAN) |
+| `06_process_supervision.html` | SystemMap | Supervisor topology + crash/restart recovery paths |

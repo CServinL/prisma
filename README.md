@@ -1,5 +1,9 @@
+<p align="center">
+  <img src="ui/static/prisma-icon.svg" alt="Prisma" width="120">
+</p>
+
 # Prisma
-*Research Library Assistant with Zotero Integration*
+*Research workspace with semantic search over your papers and notes — Zotero-integrated, local-first, and reachable from a browser or desktop app.*
 
 [![Sponsor](https://img.shields.io/badge/Sponsor-CServinL-ea4aaa?logo=github)](https://github.com/sponsors/CServinL)
 
@@ -32,8 +36,9 @@
 - **🌐 Multi-Source Search**: Combines premium APIs with structured data sources
 - **📖 Full-Text Analysis**: Processes PDFs, abstracts, and metadata across all document types
 - **🤖 AI-Powered Curation**: Uses local LLMs for intelligent research assessment and organization
-- **👥 Author Analysis**: Identifies key researchers and creates academic contact directory
 - **📊 Library Organization**: Generates structured research organization and enhanced library management
+- **🗂️ Vault Workspace**: A local, flat-Markdown second brain for notes, sources, and chats — `prisma serve` opens it as a web app, installable PWA, or native desktop shell
+- **🔍 Semantic Search**: ChromaDB embeddings + a Graphify knowledge graph re-rank results beyond keyword matching
 
 ## Research Library Management Process
 
@@ -55,7 +60,7 @@
 
 ## CLI Commands
 
-> 📖 **Complete CLI Reference**: See [CLI Documentation](docs/cli.md) for detailed command options, examples, and advanced usage.
+> 📖 **Complete CLI Reference**: See [CLI Documentation](docs/wiki/cli.md) for detailed command options, examples, and advanced usage.
 
 ### Research Streams
 ```bash
@@ -106,6 +111,14 @@ prisma streams list
 prisma streams update --all
 ```
 
+### Run the workspace UI
+
+```bash
+prisma serve
+```
+
+Opens the vault workspace at `http://127.0.0.1:8766/app` — installable as a PWA, or wrapped in the [Tauri desktop shell](https://github.com/CServinL/prisma-desktop). See [Installation](docs/wiki/installation.md) for the full setup.
+
 ### Developers (install from source, editable)
 
 ```bash
@@ -135,13 +148,16 @@ Changes to source files are immediately active — no reinstall needed.
 
 ## Technology Stack
 
-- **🐍 Python 3.12+** with Poetry for dependency management
-- **🤖 Ollama** for local LLM backend (Llama 3.1:8b)
-- **🔗 Zotero** for reference management and organization
-- **⌨️ Click** for command-line interface
-- **🗃️ SQLite** for local database and job state
+- **🐍 Python 3.12+** — pip/setuptools, no Poetry
+- **🤖 Ollama** for local LLM backend (analysis, chat, and Graphify's knowledge-graph extraction)
+- **🔗 Zotero** for reference management — the bookmark layer; the vault is the second brain
+- **⌨️ Click** for the command-line interface
+- **🗂️ Flat Markdown vault** — no database; notes, sources, chats, and streams are plain `.md`/`.yaml` files
+- **🔍 ChromaDB** for semantic search, running as its own supervised server process
+- **🌐 FastAPI + SvelteKit** — REST + WebSocket API, installable as a PWA on any platform, or wrapped in a native [Tauri desktop shell](https://github.com/CServinL/prisma-desktop)
+- **🛡️ Supervised processes** — `prisma serve` runs a small supervisor that isolates the API, UI, and ChromaDB into independent, crash-recoverable processes
 
-See [Architecture Overview](docs/architecture.md) for complete technical details.
+See [Architecture Overview](docs/wiki/architecture.md) for complete technical details.
 
 ## Contributing
 

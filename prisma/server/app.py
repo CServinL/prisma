@@ -259,13 +259,32 @@ _ui_dist = Path(__file__).parent.parent.parent / "ui" / "build"
 _ui_src  = Path(__file__).parent.parent.parent / "ui" / "src"
 _ui_dir  = Path(__file__).parent.parent.parent / "ui"
 
+
+class _CleanUrlStaticFiles:
+    """StaticFiles that resolves extension-less clean URLs (SvelteKit prerendered
+    routes, e.g. /foo) to their built file (foo.html), like a real static host does.
+    Without this, prerendered pages 404 since adapter-static writes them as flat
+    .html files but the browser/service worker requests the clean path."""
+
+    def __new__(cls, *args, **kwargs):
+        from fastapi.staticfiles import StaticFiles
+
+        class _Impl(StaticFiles):
+            def lookup_path(self, path: str):
+                full_path, stat_result = super().lookup_path(path)
+                if stat_result is None and path and "." not in path.rsplit("/", 1)[-1]:
+                    full_path, stat_result = super().lookup_path(f"{path}.html")
+                return full_path, stat_result
+
+        return _Impl(*args, **kwargs)
+
+
 def _mount_ui() -> None:
-    from fastapi.staticfiles import StaticFiles
     if not _ui_dist.exists():
         return
     # Remove stale mount if present before remounting
     app.routes[:] = [r for r in app.routes if getattr(r, "name", None) != "ui"]
-    app.mount("/app", StaticFiles(directory=_ui_dist, html=True), name="ui")
+    app.mount("/app", _CleanUrlStaticFiles(directory=_ui_dist, html=True), name="ui")
 
 _mount_ui()
 app.add_middleware(AccessLogMiddleware)

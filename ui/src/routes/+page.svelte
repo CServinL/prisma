@@ -99,15 +99,33 @@
   if (isTauri) document.documentElement.classList.add("tauri");
 
   const DEFAULT_API = "http://127.0.0.1:8765";
-  // In browser/PWA the UI is served from the same origin as the API — no config needed.
-  // In Tauri the server can be at any address, so respect the stored/configured value.
+  const DEFAULT_API_PORT = 8765;
+
+  // The Web process (serving this page at /app) and the API process are
+  // independent processes/ports (see ADR-012) — the page's own origin is no
+  // longer the same as the API's origin, even in browser/PWA mode.
+  const webBase = typeof window !== "undefined" ? window.location.origin : "";
+
+  function _defaultApiBase(): string {
+    if (typeof window === "undefined") return DEFAULT_API;
+    const url = new URL(window.location.origin);
+    url.port = String(DEFAULT_API_PORT);
+    return url.origin;
+  }
+
+  // In Tauri the server can be at any address, so respect the stored/configured
+  // value. In browser/PWA mode, default to the same host on the API's port,
+  // but still allow an explicit override for reverse-proxied deployments.
   let apiBase = $state(
     isTauri
       ? (localStorage.getItem("prisma.server") ?? DEFAULT_API)
-      : window.location.origin
+      : (localStorage.getItem("prisma.server") ?? _defaultApiBase())
   );
 
-  // ── WebSocket — push events + hot-reload ─────────────────────────────────────
+  // ── WebSocket — API-process push events (vault_change, stream_progress) ──────
+  // Hot-reload is handled separately below, by polling the Web process directly —
+  // it's a dev-only, self-contained concern local to that process (see ADR-012),
+  // not a production event this channel needs to carry.
   let _wsConnected = false;
 
   function connectWS() {
@@ -119,9 +137,7 @@
     ws.onmessage = (e) => {
       try {
         const ev = JSON.parse(e.data);
-        if (ev.type === "hot_reload") {
-          window.location.reload();
-        } else if (ev.type === "vault_change") {
+        if (ev.type === "vault_change") {
           loadTree();
         } else if (ev.type === "stream_progress") {
           if (ev.status === "done") loadStreams();
@@ -143,12 +159,11 @@
   let _wsRetry = 0;
   connectWS();
 
-  // ── UI dev hot-reload fallback (polling when WS unavailable) ─────────────────
+  // ── UI dev hot-reload (polling the Web process — dev-only, self-contained) ───
   let _devBuildVersion: number | null = null;
   setInterval(async () => {
-    if (_wsConnected) return;  // WS handles this when connected
     try {
-      const r = await fetch(`${apiBase}/ui/dev/version`);
+      const r = await fetch(`${webBase}/ui/dev/version`);
       if (!r.ok) return;
       const { version } = await r.json();
       if (_devBuildVersion === null) { _devBuildVersion = version; return; }
@@ -475,7 +490,10 @@
   async function reloadServer() {
     reloading = true;
     try {
-      await fetch(`${apiBase}${RELOAD_ENDPOINTS[reloadScope]}`, { method: "POST" });
+      // /reload/ui lives on the Web process (it owns UI serving — see ADR-012);
+      // every other scope is an API-process concern.
+      const base = reloadScope === "ui" ? webBase : apiBase;
+      await fetch(`${base}${RELOAD_ENDPOINTS[reloadScope]}`, { method: "POST" });
       if (reloadScope === "ui") {
         window.location.reload();
       } else {
@@ -1242,7 +1260,7 @@
           {#key activeNode.slug}
           <iframe
             class="html-frame"
-            src="/notes/{activeNode.slug}/view"
+            src="{apiBase}/notes/{activeNode.slug}/view"
             title={activeNode.title}
           ></iframe>
           {/key}

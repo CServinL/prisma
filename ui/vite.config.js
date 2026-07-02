@@ -48,8 +48,19 @@ export default defineConfig({
       },
       workbox: {
         globPatterns: ["**/*.{js,css,html,ico,png,svg,woff,woff2}"],
-        navigateFallback: "/app/index.html",
-        navigateFallbackAllowlist: [/^\/app/],
+        // Explicitly undefined (not omitted): @vite-pwa/sveltekit auto-injects
+        // a default navigateFallback whenever the key is absent from this
+        // object, regardless of its value — the key merely needs to be
+        // *present* to suppress that. With ssr:false + adapter-static, the
+        // SPA fallback page is synthesized in a build phase that runs after
+        // this plugin's precache scan, so there's never a real artifact to
+        // bind an offline-navigation route to (produces a runtime
+        // "non-precached-url" error regardless of the URL configured). Also
+        // of no real value here: Prisma requires a live local/LAN server to
+        // do anything, so a cached shell with no backend isn't a capability
+        // worth having. Online navigation is unaffected — the browser just
+        // fetches fresh HTML normally.
+        navigateFallback: undefined,
       },
       manifest: {
         name: "Prisma",

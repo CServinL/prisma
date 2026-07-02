@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>prisma — compute-pool topology</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; background: #f1f5f9; font-family: sans-serif; }
+
+  body { display: flex; align-items: center; justify-content: center; }
+  #diagram {
+    border: 1px solid #cbd5e1;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.12);
+    background: #ffffff;
+    overflow: hidden;
+    position: relative;
+  }
+
+</style>
+</head>
+<body>
+<div id="diagram"></div>
+<script src="https://viewer.diagrams.net/js/viewer-static.min.js"></script>
+<script>
+function fitGraph(viewer, container) {
+  if (!viewer || !viewer.graph) return;
+  var graph = viewer.graph;
+  graph.view.setScale(1);
+  graph.view.setTranslate(0, 0);
+  var bounds = graph.getGraphBounds();
+  if (!bounds || bounds.width <= 0 || bounds.height <= 0) return;
+  var pad = 30;
+  var availW = container.clientWidth - pad * 2;
+  var availH = container.clientHeight - pad * 2;
+  var scale = Math.min(availW / bounds.width, availH / bounds.height);
+  if (scale > 4) scale = 4;
+  if (scale < 0.1) scale = 0.1;
+  graph.view.setScale(scale);
+  var b2 = graph.getGraphBounds();
+  var tx = (container.clientWidth - b2.width) / 2 - b2.x;
+  var ty = (container.clientHeight - b2.height) / 2 - b2.y;
+  graph.view.setTranslate(tx / scale, ty / scale);
+}
+
+var xmlStr = "<mxGraphModel dx=\"1422\" dy=\"762\" grid=\"1\" gridSize=\"10\" guides=\"1\" tooltips=\"1\" connect=\"1\" arrows=\"1\" fold=\"1\" page=\"1\" pageScale=\"1\" pageWidth=\"1169\" pageHeight=\"827\" math=\"0\" shadow=\"0\"><root><mxCell id=\"0\" /><mxCell id=\"1\" parent=\"0\" /><mxCell id=\"trace-layer\" parent=\"0\" value=\"Traces\" visible=\"0\" /><mxCell id=\"legend-layer\" parent=\"0\" value=\"Legend\" visible=\"0\" /><mxCell id=\"2\" value=\"Three independent Ollama callers\" style=\"swimlane;startSize=24;fillColor=#0ea5e9;strokeColor=#94a3b8;fontStyle=2;fontSize=11;opacity=20;\" vertex=\"1\" parent=\"1\"><mxGeometry x=\"1172\" y=\"47\" width=\"688\" height=\"132\" as=\"geometry\" /></mxCell><mxCell id=\"3\" value=\"Supervisor\" style=\"swimlane;startSize=24;fillColor=#f43f5e;strokeColor=#94a3b8;fontStyle=2;fontSize=11;opacity=20;\" vertex=\"1\" parent=\"1\"><mxGeometry x=\"1412\" y=\"363\" width=\"208\" height=\"132\" as=\"geometry\" /></mxCell><mxCell id=\"4\" value=\"Request-scoped (not supervised)\" style=\"swimlane;startSize=24;fillColor=#f59e0b;strokeColor=#94a3b8;fontStyle=2;fontSize=11;opacity=20;\" vertex=\"1\" parent=\"1\"><mxGeometry x=\"1412\" y=\"233\" width=\"208\" height=\"132\" as=\"geometry\" /></mxCell><mxCell id=\"5\" value=\"Shared LLM/embedding backend\" style=\"swimlane;startSize=24;fillColor=#10b981;strokeColor=#94a3b8;fontStyle=2;fontSize=11;opacity=20;\" vertex=\"1\" parent=\"1\"><mxGeometry x=\"1412\" y=\"523\" width=\"208\" height=\"132\" as=\"geometry\" /></mxCell><mxCell id=\"6\" value=\"ChromaIndexer embed calls\" style=\"rounded=1;whiteSpace=wrap;html=1;arcSize=8;fillColor=#0ea5e9;strokeColor=#374151;fontFamily=monospace;fontSize=11;\" vertex=\"1\" parent=\"2\"><mxGeometry x=\"24\" y=\"48\" width=\"160\" height=\"60\" as=\"geometry\" /></mxCell><mxCell id=\"7\" value=\"AnalysisAgent LLM calls\" style=\"rounded=1;whiteSpace=wrap;html=1;arcSize=8;fillColor=#0ea5e9;strokeColor=#374151;fontFamily=monospace;fontSize=11;\" vertex=\"1\" parent=\"2\"><mxGeometry x=\"504\" y=\"48\" width=\"160\" height=\"60\" as=\"geometry\" /></mxCell><mxCell id=\"8\" value=\"GraphifyIndexer._run_graphify\" style=\"rounded=1;whiteSpace=wrap;html=1;arcSize=8;fillColor=#0ea5e9;strokeColor=#374151;fontFamily=monospace;fontSize=11;\" vertex=\"1\" parent=\"2\"><mxGeometry x=\"264\" y=\"48\" width=\"160\" height=\"60\" as=\"geometry\" /></mxCell><mxCell id=\"9\" value=\"Graphify subprocess\" style=\"rounded=1;whiteSpace=wrap;html=1;arcSize=8;fillColor=#f59e0b;strokeColor=#374151;fontFamily=monospace;fontSize=11;\" vertex=\"1\" parent=\"4\"><mxGeometry x=\"24\" y=\"48\" width=\"160\" height=\"60\" as=\"geometry\" /></mxCell><mxCell id=\"10\" value=\"ResourceManager\" style=\"rounded=1;whiteSpace=wrap;html=1;arcSize=8;fillColor=#f43f5e;strokeColor=#374151;fontFamily=monospace;fontSize=11;\" vertex=\"1\" parent=\"3\"><mxGeometry x=\"24\" y=\"48\" width=\"160\" height=\"60\" as=\"geometry\" /></mxCell><mxCell id=\"11\" value=\"Ollama\" style=\"rounded=1;whiteSpace=wrap;html=1;arcSize=8;fillColor=#10b981;strokeColor=#374151;fontFamily=monospace;fontSize=11;\" vertex=\"1\" parent=\"5\"><mxGeometry x=\"24\" y=\"48\" width=\"160\" height=\"60\" as=\"geometry\" /></mxCell><mxCell id=\"12\" value=\"\" style=\"rounded=1;exitX=0.5;exitY=1.0;exitDx=0;exitDy=0;entryX=0.25;entryY=0.0;entryDx=0;entryDy=0;strokeColor=#6b7280;strokeWidth=1.5;fontSize=10;\" edge=\"1\" source=\"6\" target=\"10\" parent=\"1\"><mxGeometry relative=\"1\" as=\"geometry\"><Array as=\"points\"><mxPoint x=\"1276\" y=\"170\" /><mxPoint x=\"1371\" y=\"170\" /><mxPoint x=\"1371\" y=\"400\" /><mxPoint x=\"1476\" y=\"400\" /></Array></mxGeometry></mxCell><mxCell id=\"10012\" value=\"resource_lock.lease()\" style=\"edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];fontSize=10;\" vertex=\"1\" connectable=\"0\" parent=\"12\"><mxGeometry x=\"-0.83\" y=\"0\" relative=\"1\" as=\"geometry\"><mxPoint x=\"0\" y=\"10\" as=\"offset\" /></mxGeometry></mxCell><mxCell id=\"13\" value=\"\" style=\"rounded=1;exitX=0.5;exitY=1.0;exitDx=0;exitDy=0;entryX=0.75;entryY=0.0;entryDx=0;entryDy=0;strokeColor=#6b7280;strokeWidth=1.5;fontSize=10;\" edge=\"1\" source=\"7\" target=\"10\" parent=\"1\"><mxGeometry relative=\"1\" as=\"geometry\"><Array as=\"points\"><mxPoint x=\"1756\" y=\"170\" /><mxPoint x=\"1631\" y=\"170\" /><mxPoint x=\"1631\" y=\"400\" /><mxPoint x=\"1556\" y=\"400\" /></Array></mxGeometry></mxCell><mxCell id=\"10013\" value=\"resource_lock.lease()\" style=\"edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];fontSize=10;\" vertex=\"1\" connectable=\"0\" parent=\"13\"><mxGeometry x=\"-0.7971\" y=\"0\" relative=\"1\" as=\"geometry\"><mxPoint x=\"0\" y=\"10\" as=\"offset\" /></mxGeometry></mxCell><mxCell id=\"14\" value=\"\" style=\"rounded=1;exitX=0.3333;exitY=1.0;exitDx=0;exitDy=0;entryX=0.5;entryY=0.0;entryDx=0;entryDy=0;strokeColor=#6b7280;strokeWidth=1.5;fontSize=10;\" edge=\"1\" source=\"8\" target=\"10\" parent=\"1\"><mxGeometry relative=\"1\" as=\"geometry\"><Array as=\"points\"><mxPoint x=\"1489\" y=\"170\" /><mxPoint x=\"1491\" y=\"170\" /><mxPoint x=\"1491\" y=\"220\" /><mxPoint x=\"1641\" y=\"220\" /><mxPoint x=\"1641\" y=\"400\" /><mxPoint x=\"1516\" y=\"400\" /></Array></mxGeometry></mxCell><mxCell id=\"10014\" value=\"resource_lock.lease()\" style=\"edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];fontSize=10;\" vertex=\"1\" connectable=\"0\" parent=\"14\"><mxGeometry x=\"-0.8893\" y=\"0\" relative=\"1\" as=\"geometry\"><mxPoint x=\"10\" y=\"0\" as=\"offset\" /></mxGeometry></mxCell><mxCell id=\"15\" value=\"\" style=\"rounded=1;dashed=1;exitX=0.6667;exitY=1.0;exitDx=0;exitDy=0;entryX=0.5;entryY=0.0;entryDx=0;entryDy=0;strokeColor=#6b7280;strokeWidth=1.5;fontSize=10;\" edge=\"1\" source=\"8\" target=\"9\" parent=\"1\"><mxGeometry relative=\"1\" as=\"geometry\"><Array as=\"points\"><mxPoint x=\"1542\" y=\"170\" /><mxPoint x=\"1541\" y=\"170\" /><mxPoint x=\"1541\" y=\"270\" /><mxPoint x=\"1516\" y=\"270\" /></Array></mxGeometry></mxCell><mxCell id=\"10015\" value=\"spawn (holds lease)\" style=\"edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];fontSize=10;\" vertex=\"1\" connectable=\"0\" parent=\"15\"><mxGeometry x=\"-0.4605\" y=\"0\" relative=\"1\" as=\"geometry\"><mxPoint x=\"10\" y=\"0\" as=\"offset\" /></mxGeometry></mxCell><mxCell id=\"16\" value=\"\u2937 ollama\" style=\"ellipse;whiteSpace=wrap;html=1;fillColor=#fef3c7;strokeColor=#92400e;fontFamily=monospace;fontSize=8;fontStyle=1;\" vertex=\"1\" parent=\"1\"><mxGeometry x=\"1216\" y=\"161\" width=\"120\" height=\"22\" as=\"geometry\" /></mxCell><mxCell id=\"17\" value=\"\u2936 chroma_embeds\" style=\"ellipse;whiteSpace=wrap;html=1;fillColor=#fef3c7;strokeColor=#92400e;fontFamily=monospace;fontSize=8;fontStyle=1;\" vertex=\"1\" parent=\"1\"><mxGeometry x=\"1456\" y=\"543\" width=\"120\" height=\"22\" as=\"geometry\" /></mxCell><mxCell id=\"18\" value=\"\" style=\"rounded=1;exitX=0.5;exitY=1.0;exitDx=0;exitDy=0;entryX=0.5;entryY=0.0;entryDx=0;entryDy=0;strokeColor=#6b7280;strokeWidth=1.5;fontSize=10;\" edge=\"1\" source=\"6\" target=\"16\" parent=\"1\"><mxGeometry relative=\"1\" as=\"geometry\" /></mxCell><mxCell id=\"19\" value=\"\" style=\"rounded=1;exitX=0.5;exitY=1.0;exitDx=0;exitDy=0;entryX=0.5;entryY=0.0;entryDx=0;entryDy=0;strokeColor=#6b7280;strokeWidth=1.5;fontSize=10;\" edge=\"1\" source=\"17\" target=\"11\" parent=\"1\"><mxGeometry relative=\"1\" as=\"geometry\" /></mxCell><mxCell id=\"20\" value=\"\u2937 ollama\" style=\"ellipse;whiteSpace=wrap;html=1;fillColor=#fef3c7;strokeColor=#92400e;fontFamily=monospace;fontSize=8;fontStyle=1;\" vertex=\"1\" parent=\"1\"><mxGeometry x=\"1696\" y=\"161\" width=\"120\" height=\"22\" as=\"geometry\" /></mxCell><mxCell id=\"21\" value=\"\u2936 analysis_agent\" style=\"ellipse;whiteSpace=wrap;html=1;fillColor=#fef3c7;strokeColor=#92400e;fontFamily=monospace;fontSize=8;fontStyle=1;\" vertex=\"1\" parent=\"1\"><mxGeometry x=\"1580\" y=\"543\" width=\"120\" height=\"22\" as=\"geometry\" /></mxCell><mxCell id=\"22\" value=\"\" style=\"rounded=1;exitX=0.5;exitY=1.0;exitDx=0;exitDy=0;entryX=0.5;entryY=0.0;entryDx=0;entryDy=0;strokeColor=#6b7280;strokeWidth=1.5;fontSize=10;\" edge=\"1\" source=\"7\" target=\"20\" parent=\"1\"><mxGeometry relative=\"1\" as=\"geometry\" /></mxCell><mxCell id=\"23\" value=\"\" style=\"rounded=1;exitX=0.5;exitY=1.0;exitDx=0;exitDy=0;entryX=0.5;entryY=0.0;entryDx=0;entryDy=0;strokeColor=#6b7280;strokeWidth=1.5;fontSize=10;\" edge=\"1\" source=\"21\" target=\"11\" parent=\"1\"><mxGeometry relative=\"1\" as=\"geometry\" /></mxCell><mxCell id=\"24\" value=\"\" style=\"rounded=1;exitX=0.5;exitY=1.0;exitDx=0;exitDy=0;entryX=0.5;entryY=0.0;entryDx=0;entryDy=0;strokeColor=#6b7280;strokeWidth=1.5;fontSize=10;\" edge=\"1\" source=\"9\" target=\"11\" parent=\"1\"><mxGeometry relative=\"1\" as=\"geometry\"><Array as=\"points\"><mxPoint x=\"1516\" y=\"350\" /><mxPoint x=\"1401\" y=\"350\" /><mxPoint x=\"1401\" y=\"560\" /><mxPoint x=\"1516\" y=\"560\" /></Array></mxGeometry></mxCell><mxCell id=\"10024\" value=\"generate calls\" style=\"edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];fontSize=10;\" vertex=\"1\" connectable=\"0\" parent=\"24\"><mxGeometry x=\"-0.0043\" y=\"0\" relative=\"1\" as=\"geometry\"><mxPoint x=\"10\" y=\"0\" as=\"offset\" /></mxGeometry></mxCell></root></mxGraphModel>";
+var config = {"nav": true, "resize": false, "toolbar": "zoom layers lightbox", "fit": true, "page": false};
+var container = document.getElementById('diagram');
+var viewerMode = "cdn";
+
+function setSize() {
+  container.style.width  = Math.round(window.innerWidth  * 0.8) + 'px';
+  container.style.height = Math.round(window.innerHeight * 0.8) + 'px';
+}
+
+setSize();
+
+if (typeof GraphViewer === 'undefined' || typeof mxUtils === 'undefined') {
+  
+  var msg = '';
+  if (viewerMode === 'cdn') {
+    msg = '<strong>draw.io viewer not loaded.</strong><br>' +
+          'Could not fetch <code>viewer-static.min.js</code> from the CDN.<br>' +
+          'Check your internet connection, or regenerate with ' +
+          "<code>viewer='local'</code> or <code>viewer='embed'</code>.";
+  } else if (viewerMode === 'local') {
+    msg = '<strong>draw.io viewer not loaded.</strong><br>' +
+          'Expected <code>viewer-static.min.js</code> next to this HTML file but did not find it.<br>' +
+          'Re-run save with the same path so the file is copied alongside.';
+  } else {
+    msg = '<strong>draw.io viewer not loaded.</strong><br>' +
+          'The embedded viewer JS appears to be corrupted.';
+  }
+  container.innerHTML =
+    '<div style="padding:32px;font-family:sans-serif;color:#7f1d1d;' +
+    'background:#fef2f2;border:1px solid #fecaca;border-radius:6px;' +
+    'max-width:560px;margin:auto;line-height:1.5;">' + msg + '</div>';
+
+} else {
+  var xmlDoc = mxUtils.parseXml(xmlStr);
+  var viewer = new GraphViewer(container, xmlDoc.documentElement, config);
+  setTimeout(function() { fitGraph(viewer, container); }, 50);
+  window.addEventListener('resize', function() {
+    setSize();
+    fitGraph(viewer, container);
+  });
+}
+</script>
+</body>
+</html>

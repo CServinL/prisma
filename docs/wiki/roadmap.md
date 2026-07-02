@@ -35,14 +35,28 @@ Core pipeline is working:
 ## Phase 2 — Conversational Chat & On-Demand Knowledge Graphs
 
 - **Chat** — ask Prisma questions about your vault (papers, notes, sources). Answers
-  are grounded via ChromaDB semantic retrieval + Graphify context, synthesized by the
-  local LLM (Ollama), with citations back to source notes. Chat sessions are saved to
-  the vault (`chats/` — already modeled in `VaultService`, currently always empty
+  are grounded via ChromaDB semantic retrieval + knowledge-graph context (see
+  Graphify replacement below), synthesized by the local LLM (Ollama), with
+  citations back to source notes. Chat sessions are saved to the vault
+  (`chats/` — already modeled in `VaultService`, currently always empty
   since no chat UI exists yet).
+- **Replace Graphify with a native, Kùzu-backed knowledge graph module** —
+  Graphify (the third-party pip package currently doing entity/relationship
+  extraction) is being dropped: its `graph.json` flat-file store has no
+  incremental upsert (whole-file reparse per query, hand-rolled JSON-list
+  merges), and its per-file chunking has a hard ceiling — a single large
+  document (e.g. a dense paper) that alone exceeds the model's token budget
+  has no further recovery path and silently returns a truncated extraction
+  forever (see `docs/ollama-concurrency.md` and the investigation that led
+  to this decision). Prisma only ever exercised a narrow slice of Graphify's
+  surface anyway (no code-AST extraction — the vault has no code files);
+  replacing that slice with a purpose-built module is more tractable than
+  continuing to patch around the third-party package's limitations. See
+  `TODO.md` for the full feature-parity checklist and migration plan.
 - **Knowledge graphs from chat context** — ask Prisma to generate a knowledge graph
-  for a chat's subject. Graphify already builds a knowledge graph internally to
-  re-rank search results (`GraphifyService`, `graphify-out/`); this exposes that
-  capability as a user-facing artifact scoped to a specific topic/conversation,
+  for a chat's subject. The replacement module (above) builds this internally to
+  re-rank search results; this exposes that capability as a user-facing artifact
+  scoped to a specific topic/conversation,
   rather than only an internal search index.
 
 ---
@@ -61,7 +75,13 @@ Core pipeline is working:
 ## Phase 4 — Zotero & Library
 
 - Scheduled stream updates (cron-based, not just on-demand)
-- "What's new" delta reports between stream update runs
+- **"What's new" stream newsletter** — when `prisma streams update` finds new
+  papers for a stream, generate a digest ("newsletter") of what's new: the
+  papers found, why they're relevant to the stream's query, and (once Phase 5's
+  author analysis exists) who wrote them and why that might matter. This is
+  the actual delivery mechanism the author-analysis work in Phase 5 is for —
+  author analysis isn't meant to be a standalone report, it's an enrichment
+  step feeding this newsletter.
 - Better collection hierarchy management
 - Mendeley, EndNote, RefWorks integration
 
@@ -69,9 +89,22 @@ Core pipeline is working:
 
 ## Phase 5 — Analytics & Visualization
 
+- **⚠️ Author Analysis / Research Directory — advertised, not implemented.** The
+  README lists this under Key Features ("Identifies key researchers and
+  creates academic contact directory"), but `ReportAgent.analyze_authors()`,
+  `.create_research_directory()`, and `.map_collaboration_networks()` in
+  `prisma/agents/report_agent.py` are all literal `pass` stubs — nothing has
+  ever been implemented. This has been silently dropped across multiple past
+  sessions; calling it out explicitly here so it isn't missed again. Scope:
+  extract unique authors from a corpus of paper summaries, build per-author
+  profiles (institutional affiliation, specializations, key publications),
+  and render a Markdown "research directory" — the co-authorship/network
+  and trajectory analysis below can come later as a separate increment. Not
+  meant to be a standalone report — it's an enrichment step feeding the
+  stream newsletter in Phase 4.
 - **ConnectedPapers integration** — auto-generate links using DOI/arXiv ID/Semantic Scholar URL for citation network visualization. ConnectedPapers has no public API, but direct URL construction works
 - Citation network analysis
-- Author intelligence: profiles, collaboration networks, research trajectories, institution mapping
+- Author intelligence (extended): collaboration networks, research trajectories, institution mapping — builds on the author-analysis MVP above
 - Trend monitoring: emerging topics, topic drift detection across updates
 - Geographic distribution of research activity
 

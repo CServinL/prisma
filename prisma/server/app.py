@@ -58,6 +58,7 @@ _t("renderer ok")
 
 _t("importing graphify_service")
 from prisma.services.graphify_service import GraphifyIndexer
+from prisma.services import resource_lock
 _t("graphify_service ok")
 
 _t("importing chroma_service")
@@ -158,7 +159,8 @@ def _build_chroma(vault: "VaultService") -> ChromaIndexer:
     from prisma.utils.config import ConfigLoader
     try:
         rcfg = ConfigLoader().get_retrieval_config()
-        return ChromaIndexer(vault, embedding_model=rcfg.embedding_model, ollama_base_url=rcfg.ollama_base_url)
+        return ChromaIndexer(vault, embedding_model=rcfg.embedding_model,
+                              ollama_base_url=rcfg.ollama_base_url, chroma_port=rcfg.chroma_port)
     except Exception:
         return ChromaIndexer(vault)
 
@@ -171,7 +173,8 @@ _vault = VaultService(vault_root=_resolve_vault_root())
 _t(f"vault root: {_vault.root}")
 _t("building indexer")
 _indexer = GraphifyIndexer(_vault, ollama_model=_ollama_model(),
-                           index_extensions=_index_extensions())
+                           index_extensions=_index_extensions(),
+                           supervisor_port=resource_lock.default_port())
 _t("building chroma")
 _chroma = _build_chroma(_vault)
 _t("building zotero")
@@ -250,87 +253,17 @@ app = FastAPI(title="Prisma", version="0.1.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["tauri://localhost", "http://localhost", "http://127.0.0.1:8765"],
+    allow_origins=["tauri://localhost"],
+    # Any port on localhost/127.0.0.1 — covers the API's own port, the Web
+    # process's port (ADR-012), and whichever hostname variant the browser
+    # resolved (CORS origin matching is exact-string, so both "localhost"
+    # and "127.0.0.1" must be covered, not just one).
+    allow_origin_regex=r"^http://(localhost|127\.0\.0\.1)(:\d+)?$",
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-_ui_dist = Path(__file__).parent.parent.parent / "ui" / "build"
-_ui_src  = Path(__file__).parent.parent.parent / "ui" / "src"
-_ui_dir  = Path(__file__).parent.parent.parent / "ui"
-
-
-class _CleanUrlStaticFiles:
-    """StaticFiles that resolves extension-less clean URLs (SvelteKit prerendered
-    routes, e.g. /foo) to their built file (foo.html), like a real static host does.
-    Without this, prerendered pages 404 since adapter-static writes them as flat
-    .html files but the browser/service worker requests the clean path."""
-
-    def __new__(cls, *args, **kwargs):
-        from fastapi.staticfiles import StaticFiles
-
-        class _Impl(StaticFiles):
-            def lookup_path(self, path: str):
-                full_path, stat_result = super().lookup_path(path)
-                if stat_result is None and path and "." not in path.rsplit("/", 1)[-1]:
-                    full_path, stat_result = super().lookup_path(f"{path}.html")
-                return full_path, stat_result
-
-        return _Impl(*args, **kwargs)
-
-
-def _mount_ui() -> None:
-    if not _ui_dist.exists():
-        return
-    # Remove stale mount if present before remounting
-    app.routes[:] = [r for r in app.routes if getattr(r, "name", None) != "ui"]
-    app.mount("/app", _CleanUrlStaticFiles(directory=_ui_dist, html=True), name="ui")
-
-_mount_ui()
 app.add_middleware(AccessLogMiddleware)
-
-# ── UI dev watcher ────────────────────────────────────────────────────────────
-
-import hashlib as _hashlib
-import subprocess as _subprocess
-
-_ui_dev_state: dict = {"version": 0, "building": False}
-_ui_dev_lock = threading.Lock()
-
-def _src_hash() -> str:
-    h = _hashlib.md5()
-    for root, _, files in os.walk(_ui_src):
-        for f in sorted(files):
-            try:
-                h.update(str(Path(root, f).stat().st_mtime_ns).encode())
-            except OSError:
-                pass
-    return h.hexdigest()
-
-def _ui_watcher() -> None:
-    last = _src_hash()
-    while True:
-        time.sleep(1)
-        try:
-            cur = _src_hash()
-            if cur == last:
-                continue
-            last = cur
-            time.sleep(0.5)  # debounce — let the editor finish writing
-            with _ui_dev_lock:
-                _ui_dev_state["building"] = True
-            _log.info("ui/src changed — rebuilding")
-            _subprocess.run(["npm", "run", "build"], cwd=_ui_dir, capture_output=True)
-            with _ui_dev_lock:
-                _ui_dev_state["version"] += 1
-                _ui_dev_state["building"] = False
-            _log.info("ui rebuild done (version %d)", _ui_dev_state["version"])
-            broadcast({"type": "hot_reload", "version": _ui_dev_state["version"]})
-        except Exception:
-            pass
-
-if _ui_src.exists():
-    threading.Thread(target=_ui_watcher, daemon=True, name="ui-watcher").start()
 
 _executor = ThreadPoolExecutor(max_workers=2)
 _jobs: dict[str, dict] = {}
@@ -409,13 +342,6 @@ def _run_review(job_id: str, req: ReviewRequest) -> None:
 
 # ── Routes ────────────────────────────────────────────────────────────────────
 
-@app.post("/reload/ui")
-def reload_ui():
-    _mount_ui()
-    app.middleware_stack = app.build_middleware_stack()
-    return {"status": "reloaded", "ui_dist": str(_ui_dist), "mounted": _ui_dist.exists()}
-
-
 @app.post("/reload/vault")
 def reload_vault():
     global _vault
@@ -434,7 +360,7 @@ def reload_zotero():
 def reload_indexer():
     global _indexer
     _indexer.stop()
-    _indexer = GraphifyIndexer(_vault, ollama_model=_ollama_model(), index_extensions=_index_extensions())
+    _indexer = GraphifyIndexer(_vault, ollama_model=_ollama_model(), index_extensions=_index_extensions(), supervisor_port=resource_lock.default_port())
     _indexer.start()
     return {"status": "reloaded"}
 
@@ -455,12 +381,10 @@ def reload_server():
     _chroma.stop()
     _vault = VaultService(vault_root=_resolve_vault_root())
     _zotero = _build_zotero()
-    _indexer = GraphifyIndexer(_vault, ollama_model=_ollama_model(), index_extensions=_index_extensions())
+    _indexer = GraphifyIndexer(_vault, ollama_model=_ollama_model(), index_extensions=_index_extensions(), supervisor_port=resource_lock.default_port())
     _chroma = _build_chroma(_vault)
     _indexer.start()
     _chroma.start()
-    _mount_ui()
-    app.middleware_stack = app.build_middleware_stack()
     return {"status": "reloaded", "vault_root": str(_vault.root), "zotero_mode": _zotero.mode}
 
 
@@ -482,12 +406,6 @@ async def websocket_endpoint(ws: WebSocket):
     finally:
         with _ws_clients_lock:
             _ws_clients.discard(ws)
-
-
-@app.get("/ui/dev/version")
-def ui_dev_version():
-    with _ui_dev_lock:
-        return {"version": _ui_dev_state["version"], "building": _ui_dev_state["building"]}
 
 
 @app.get("/status")
@@ -529,12 +447,13 @@ def status():
         "vault": vault_stats,
         "zotero": zotero_info,
         "ollama": {"reachable": _indexer._ollama_ready()},
+        "resources": resource_lock.status("127.0.0.1", resource_lock.default_port()),
     }
 
 
 @app.get("/logs")
 def get_logs(
-    concern: str = Query("server", description="server|access|maintenance|ollama|activity|chroma|stream"),
+    concern: str = Query("server", description="server|access|maintenance|ollama|activity|chroma|supervisor|stream"),
     slug: Optional[str] = Query(None, description="stream slug (required when concern=stream)"),
     n: int = Query(200, ge=1, le=5000),
 ):
@@ -546,6 +465,7 @@ def get_logs(
         "ollama": lp.ollama,
         "activity": lp.activity,
         "chroma": lp.chroma,
+        "supervisor": lp.supervisor,
     }
     if concern == "stream":
         if not slug:
@@ -684,7 +604,7 @@ def list_notes(node_type: Optional[str] = Query(None)):
 
 
 @app.get("/notes/{slug}", response_model=RenderedNode)
-def get_note(slug: str, format: str = "html"):
+def get_note(slug: str, request: Request, format: str = "html"):
     from prisma.storage.models.vault_models import Stream
     try:
         node = _vault.get_any(slug)
@@ -712,7 +632,7 @@ def get_note(slug: str, format: str = "html"):
             try:
                 html_dir = html_path.parent.relative_to(_vault.root)
                 base = str(html_dir).replace("\\", "/").rstrip("/")
-                prefix = f"/vault/assets/{base}/" if base else "/vault/assets/"
+                prefix = f"{request.base_url}vault/assets/{base}/" if base else f"{request.base_url}vault/assets/"
                 _ASSET_EXT = r'\.(?:png|jpg|jpeg|gif|webp|svg|ico|woff2?|ttf|eot|css|js|map)'
                 html = _re.sub(
                     rf'(?<![:\w])(src)="(?!\s*(?:https?|data|javascript):|//|#|/)([^"]+{_ASSET_EXT})"',
@@ -733,7 +653,7 @@ def get_note(slug: str, format: str = "html"):
                 try:
                     html_dir = html_path.parent.relative_to(_vault.root)
                     base = str(html_dir).replace("\\", "/").rstrip("/")
-                    prefix = f"/vault/assets/{base}/" if base else "/vault/assets/"
+                    prefix = f"{request.base_url}vault/assets/{base}/" if base else f"{request.base_url}vault/assets/"
                     html = _re.sub(
                         r'(?<![:\w])(src|href)="(?!\s*(?:https?|data|javascript|mailto|tel):|//|#|/)([^"]+)"',
                         lambda mo: f'{mo.group(1)}="{prefix}{mo.group(2)}"',
@@ -1151,8 +1071,8 @@ def get_stream(slug: str):
 
 
 @app.get("/streams/{slug}/view", response_model=RenderedNode)
-def get_stream_view(slug: str, format: str = "html"):
-    return get_note(slug, format)
+def get_stream_view(slug: str, request: Request, format: str = "html"):
+    return get_note(slug, request, format)
 
 
 class StreamCreateRequest(BaseModel):

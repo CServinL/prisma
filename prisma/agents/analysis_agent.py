@@ -14,18 +14,44 @@ import time
 from ..utils.config import config
 from ..storage.models.agent_models import PaperMetadata, PaperSummary, AnalysisResult, ReportMetadata, LiteratureReviewReport
 from ..storage.models.api_response_models import OllamaGenerateResponse, LLMRelevanceResult, LLMIdentityResult
+from ..services import resource_lock
 
 _ollama_log = logging.getLogger("prisma.ollama")
+
+_RESOURCE_HOLDER = "api"  # must match the worker name supervisor.py restarts, so a crash releases our leases
 
 
 class AnalysisAgent:
     """Analyze papers and generate summaries using Ollama."""
-    
-    def __init__(self):
+
+    def __init__(self, supervisor_host: str = "127.0.0.1", supervisor_port: int | None = None):
         self.llm_config = config.get_llm_config()
         self.base_url = self.llm_config.base_url
         self.model = self.llm_config.model
         self._inference_sem = threading.Semaphore(self.llm_config.max_concurrent_inferences)
+        self._supervisor_host = supervisor_host
+        self._supervisor_port = supervisor_port if supervisor_port is not None else resource_lock.default_port()
+
+    def _call_ollama_generate(self, prompt: str, options: dict, timeout: float) -> requests.Response | None:
+        """Single choke point for every Ollama /api/generate call in this agent.
+
+        Wraps the supervisor's compute-pool lease (ADR-012) around the existing
+        process-local concurrency semaphore, so this agent can't run concurrently
+        against the same GPU/LLM backend as Graphify or ChromaDB indexing.
+        Returns None if no compute pool is free right now — callers should
+        treat that the same as any other LLM failure.
+        """
+        with resource_lock.lease(
+            self._supervisor_host, self._supervisor_port, holder=_RESOURCE_HOLDER, model=self.model,
+        ) as granted:
+            if not granted:
+                return None
+            with self._inference_sem:
+                return requests.post(
+                    f"{self.base_url}/api/generate",
+                    json={"model": self.model, "prompt": prompt, "stream": False, "options": options},
+                    timeout=timeout,
+                )
     
     def analyze(self, papers: List[PaperMetadata]) -> AnalysisResult:
         """
@@ -132,24 +158,18 @@ Provide a clear, academic summary focusing on the main contribution and signific
 
         t0 = time.monotonic()
         try:
-            response = requests.post(
-                f"{self.base_url}/api/generate",
-                json={
-                    "model": self.model,
-                    "prompt": prompt,
-                    "stream": False,
-                    "options": {"temperature": 0.3, "num_predict": 200},
-                },
-                timeout=30,
+            response = self._call_ollama_generate(
+                prompt, options={"temperature": 0.3, "num_predict": 200}, timeout=30,
             )
             elapsed_ms = (time.monotonic() - t0) * 1000
-            if response.status_code == 200:
+            if response is not None and response.status_code == 200:
                 data = response.json()
                 self._log_ollama("summarize", elapsed_ms, data)
                 ollama_response = OllamaGenerateResponse.model_validate(data)
                 return ollama_response.response.strip()
             else:
-                self._log_ollama("summarize", elapsed_ms, None, error=f"status={response.status_code}")
+                error = f"status={response.status_code}" if response is not None else "no compute lease available"
+                self._log_ollama("summarize", elapsed_ms, None, error=error)
                 return ""
         except Exception as e:
             elapsed_ms = (time.monotonic() - t0) * 1000
@@ -203,31 +223,21 @@ RELEVANCE: [HIGHLY_RELEVANT/RELEVANT/SOMEWHAT_RELEVANT/NOT_RELEVANT]
 CONFIDENCE: [HIGH/MEDIUM/LOW]
 REASONING: [2-3 sentences explaining the semantic connection or lack thereof]"""
 
-            with self._inference_sem:
-                response = requests.post(
-                    f"{self.base_url}/api/generate",
-                    json={
-                        "model": self.model,
-                        "prompt": prompt,
-                        "stream": False,
-                        "options": {
-                            "temperature": 0.3,
-                            "num_predict": 250
-                        }
-                    },
-                    timeout=45
-                )
-            
-            if response.status_code == 200:
+            response = self._call_ollama_generate(
+                prompt, options={"temperature": 0.3, "num_predict": 250}, timeout=45,
+            )
+
+            if response is not None and response.status_code == 200:
                 result = response.json().get('response', '').strip()
                 return self._parse_semantic_relevance(result)
             else:
-                print(f"[WARNING] Semantic relevance assessment failed: {response.status_code}")
+                status = response.status_code if response is not None else "no compute lease available"
+                print(f"[WARNING] Semantic relevance assessment failed: {status}")
                 return LLMRelevanceResult(
                     is_relevant=False,
                     relevance_level="UNKNOWN",
                     confidence=0.0,
-                    reasoning=f"LLM request failed with status {response.status_code}",
+                    reasoning=f"LLM request failed with status {status}",
                     semantic_score=0.0
                 )
                 
@@ -343,20 +353,13 @@ REASONING: [2-3 sentences explaining the semantic connection or lack thereof]"""
 
         t0 = time.monotonic()
         try:
-            with self._inference_sem:
-                response = requests.post(
-                    f"{self.base_url}/api/generate",
-                    json={
-                        "model": self.model,
-                        "prompt": prompt,
-                        "stream": False,
-                        "options": {"temperature": 0.1, "num_predict": 60},
-                    },
-                    timeout=30,
-                )
+            response = self._call_ollama_generate(
+                prompt, options={"temperature": 0.1, "num_predict": 60}, timeout=30,
+            )
             elapsed_ms = (time.monotonic() - t0) * 1000
-            if response.status_code != 200:
-                self._log_ollama("batch_relevance", elapsed_ms, None, error=f"status={response.status_code}", n=len(candidates))
+            if response is None or response.status_code != 200:
+                error = f"status={response.status_code}" if response is not None else "no compute lease available"
+                self._log_ollama("batch_relevance", elapsed_ms, None, error=error, n=len(candidates))
                 return [True] * len(candidates)
             data = response.json()
             self._log_ollama("batch_relevance", elapsed_ms, data, n=len(candidates))
@@ -427,20 +430,13 @@ Respond with exactly one line per candidate:
 
         t0 = time.monotonic()
         try:
-            with self._inference_sem:
-                response = requests.post(
-                    f"{self.base_url}/api/generate",
-                    json={
-                        "model": self.model,
-                        "prompt": prompt,
-                        "stream": False,
-                        "options": {"temperature": 0.1, "num_predict": 30 * len(candidates)},
-                    },
-                    timeout=10 + 15 * len(candidates),
-                )
+            response = self._call_ollama_generate(
+                prompt, options={"temperature": 0.1, "num_predict": 30 * len(candidates)}, timeout=10 + 15 * len(candidates),
+            )
             elapsed_ms = (time.monotonic() - t0) * 1000
-            if response.status_code != 200:
-                self._log_ollama("check_identity_batch", elapsed_ms, None, error=f"status={response.status_code}", n=len(candidates))
+            if response is None or response.status_code != 200:
+                error = f"status={response.status_code}" if response is not None else "no compute lease available"
+                self._log_ollama("check_identity_batch", elapsed_ms, None, error=error, n=len(candidates))
                 return [LLMIdentityResult(are_same=False, confidence=0.0, reason="LLM unavailable")] * len(candidates)
             data = response.json()
             self._log_ollama("check_identity_batch", elapsed_ms, data, n=len(candidates))
@@ -533,20 +529,13 @@ CONFIDENCE: [HIGH/MEDIUM/LOW]
 REASON: [one sentence]"""
         t0 = time.monotonic()
         try:
-            with self._inference_sem:
-                response = requests.post(
-                    f"{self.base_url}/api/generate",
-                    json={
-                        "model": self.model,
-                        "prompt": prompt,
-                        "stream": False,
-                        "options": {"temperature": 0.1, "num_predict": 60},
-                    },
-                    timeout=20,
-                )
+            response = self._call_ollama_generate(
+                prompt, options={"temperature": 0.1, "num_predict": 60}, timeout=20,
+            )
             elapsed_ms = (time.monotonic() - t0) * 1000
-            if response.status_code != 200:
-                self._log_ollama("check_identity_single", elapsed_ms, None, error=f"status={response.status_code}")
+            if response is None or response.status_code != 200:
+                error = f"status={response.status_code}" if response is not None else "no compute lease available"
+                self._log_ollama("check_identity_single", elapsed_ms, None, error=error)
                 return LLMIdentityResult(are_same=False, confidence=0.0, reason="LLM unavailable")
             data = response.json()
             self._log_ollama("check_identity_single", elapsed_ms, data)

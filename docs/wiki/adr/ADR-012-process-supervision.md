@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-30
 **Author:** CServinL
-**Status:** Proposed
+**Status:** Accepted
 
 ## Context
 
@@ -138,6 +138,162 @@ Graphify's subprocess is spawned on demand by the API process's
 worker like the other three — it only exists for the duration of an indexing
 run. No change from its current design beyond what's already shipped in this
 PR.
+
+### Addendum — GPU/LLM compute-pool leasing
+
+Live testing surfaced a real incident this design didn't originally cover:
+three `graphify` subprocesses ended up running **simultaneously**, all
+hammering the same local Ollama instance, driving GPU utilization to ~100%
+for over half an hour with no single component able to see or explain why.
+
+Root cause was a race in `GraphifyIndexer._run_graphify`: `subprocess.Popen()`
+returned before `self._current_proc` was assigned, so a concurrent `stop()`
+(e.g. from a reload triggered while a run was already in flight) could read a
+stale/`None` value, terminate nothing, and silently orphan the subprocess it
+should have stopped. That race is fixed at the `GraphifyIndexer` level (the
+lock now spans the whole check-spawn-register step), but the deeper issue is
+architectural: **the supervisor had no visibility into this at all.** Graphify
+is a grandchild — spawned by the API process, not the supervisor — so even
+a perfectly correct `GraphifyIndexer` still can't, by itself, guarantee that
+some *other* GPU/LLM-using component (ChromaDB's embeddings today, chat
+later) doesn't run concurrently against the same constrained backend.
+
+**Decision:** the supervisor gains a second responsibility beyond crash
+isolation — arbitrating a small set of **named, capacity-limited compute
+pools** (`ResourceManager` in `supervisor.py`). A pool models whatever "the
+LLM" actually is for a given deployment — a single local GPU, a beefier
+remote multi-GPU box, a rate-limited cloud API — each with its own
+concurrency ceiling, configured via `compute_pools` in `config.yaml`
+(defaults to one pool, `"default"`, concurrency 1, if unconfigured). Any
+code about to do LLM/embedding/AI work follows the same protocol: **look for
+a free pool, acquire a lease, do the work, release it.** The supervisor
+doesn't know or care what a pool is actually backed by — only whether it's
+currently full.
+
+Each lease is tied to the requester's actual OS PID and carries an optional
+timeout, not just a worker name. Two independent mechanisms prevent an
+abandoned lease from wedging a pool forever:
+- `release_all_held_by(name)` — the fast path: fires the instant a
+  *supervised* worker (api/web/chroma) dies or is restarted.
+- `ResourceManager.reap()` — the general path: runs every monitor-loop tick,
+  checks every held lease's PID (`os.kill(pid, 0)`) and configured timeout
+  independent of which worker (if any) is still alive. This is what actually
+  catches the graphify incident's failure mode: a single task dying or
+  wedging without its parent worker process crashing at all.
+
+Graphify is the first integrated caller (`prisma.services.resource_lock`,
+holder `"api"`, lease timeout matched to its own `7200`s hard ceiling).
+ChromaDB's embeddings and the analysis agent's Ollama calls are wired the
+same way as a later follow-up (both go through the same `resource_lock.lease`
+choke point, so this only needed one place to change).
+
+#### Follow-up — retry/backoff, model affinity, and contention stats
+
+Three refinements landed after the initial addendum above, driven by real
+usage rather than being designed up front:
+
+- **Retry with backoff** (`prisma.services.backoff`): a denied `acquire()` is
+  retried with exponential backoff + jitter for up to `max_wait` (default
+  10s) before `lease()` gives up — a pool clearing up a fraction of a second
+  later is the common case, not the exception, so a bare first-try failure
+  was rejecting work a moment's patience would have let through.
+- **`model_affinity`** (default: **true**): a compute pool models one
+  hardware unit that can hold exactly one resident model's weights at a time
+  (one GPU, or one Ollama instance bound to one GPU) — confirmed by
+  benchmark in `docs/ollama-concurrency.md`: 3 concurrent calls to the
+  *same* model batch for a real ~2x speedup, but alternating between two
+  models costs ~4-9s of reload per switch regardless of concurrency. A
+  `model_affinity` pool tracks which model is currently resident and only
+  grants concurrent leases for that same model; a request for a different
+  model is denied (same as "pool full") until the pool drains. Only pools
+  with no such constraint at all — an auto-scaled/auto-routed cloud API —
+  should set `model_affinity: false`. Multiple GPUs are modeled as multiple
+  pools (one per GPU), not one pool with a bigger capacity; `acquire()`
+  already tries every pool when the caller doesn't pin one, so same-model
+  demand naturally spills across GPUs and different models can sit pinned to
+  different GPUs at once.
+- **Contention stats** (`ResourceManager._stats`, surfaced in `status()` as
+  `resources.<pool>.stats`): cumulative `granted` / `denied_capacity` /
+  `denied_model_busy` counts per pool since the supervisor started. Motivated
+  by exactly the scenario this ADR describes — three components silently
+  fighting over one GPU with no way to see it — but this time for the
+  *within-design-limits* case: a long Graphify run legitimately holding the
+  pool for its whole extraction pass (which can take a long time on a slow
+  chunk) silently starves ChromaDB's embeddings and the analysis agent's
+  relevance/identity checks for that entire window, each falling back to its
+  own "LLM unavailable" default. That's the correct trade-off for one shared
+  GPU, but previously the only way to see it happening was grepping
+  `supervisor.log` for 409s. The stats counter answers "why is the server
+  busy" directly from `/status` instead.
+
+#### Future consideration: transport for the lease protocol
+
+Acquire/release currently go over plain HTTP to the supervisor's control
+port (`requests.post`, localhost). For graphify's usage pattern — one
+acquire and one release per run, each run lasting minutes — this overhead is
+immaterial; it's not on any hot path.
+
+That stops being true if the same protocol is extended to ChromaDB's
+embedding calls, which are frequent and individually fast (triggered on
+every vault file change). Per-embed HTTP round-trips would add real,
+avoidable latency to a hot path. Two mitigations, in order of preference
+when that integration happens:
+1. **Batch the lease, not the call** — acquire once per indexing pass
+   (however many chunks it embeds), not once per chunk. Keeps HTTP, keeps
+   the pattern consistent with graphify, and the per-pass overhead stays
+   negligible regardless of chunk count.
+2. **If per-call granularity turns out to be unavoidable**, reconsider the
+   transport itself. A Unix domain socket removes the TCP/IP stack overhead
+   but keeps HTTP/JSON parsing cost and loses ad-hoc `curl` debuggability.
+   A more structural alternative: model each pool slot as a lock file and use
+   `fcntl.flock()` — the kernel releases the lock automatically the instant
+   the holding process dies, for *any* reason including `SIGKILL`, which
+   would replace PID-tracking and `reap()` for the crash case entirely (a
+   hung-but-alive process would still need the timeout mechanism on top).
+   Trade-off: loses the single `GET /supervisor/status` view of who holds
+   what without extra scanning code, and loses centralized arbitration (it
+   becomes a race between processes for lock files rather than an explicit
+   grant/deny). Not adopted now — HTTP is not costing us anything at
+   graphify's usage frequency — but the right thing to revisit if/when a
+   high-frequency caller is added.
+
+### Ensuring nothing survives the supervisor itself
+
+Every worker (and Graphify's own subprocess) runs in its own session
+(`start_new_session=True`) specifically so a signal sent to the supervisor's
+terminal doesn't propagate to them directly — `stop_all()` is meant to be
+the only thing that stops them, deliberately and gracefully. That design
+has a sharp edge: if the supervisor itself is killed abruptly and
+`stop_all()` never runs, nothing else does either. This wasn't hypothetical —
+it happened during testing, when a `timeout N prisma serve &` wrapper used
+for smoke-testing killed the supervisor process after its timeout without
+ever giving it a chance to clean up, leaving nine worker processes (and
+three more graphify subprocesses from a separate incident) running
+untouched, hours later, still consuming GPU.
+
+Two fixes, addressing different failure modes:
+- **`SIGTERM` handling.** Python does not turn `SIGTERM` into a catchable
+  `KeyboardInterrupt` by default — only Ctrl+C (`SIGINT`) went through
+  `stop_all()` before this fix. A plain `kill <supervisor-pid>` bypassed
+  cleanup entirely. `main()` now installs a `SIGTERM` handler that raises
+  `KeyboardInterrupt`, routing both signals through the same graceful path.
+- **`PR_SET_PDEATHSIG` (Linux, best-effort) as the backstop for everything a
+  signal handler can't catch** — `SIGKILL`, an unhandled crash, or a wrapper
+  that force-kills the supervisor outright. Every worker (and Graphify's
+  subprocess) is spawned with a `preexec_fn` that asks the kernel to send it
+  `SIGTERM` the moment its direct parent dies, for any reason. This doesn't
+  depend on any Python cleanup code running at all — even if `stop_all()`
+  never executes, the OS still tears down the tree.
+- The `api` worker's own `stop_timeout` was also bumped from 5s to 10s: its
+  internal graceful shutdown cascades through several steps (stream
+  scheduler, ChromaDB indexer, Graphify indexer — which itself waits up to
+  5s to terminate a subprocess) before uvicorn actually exits. The previous
+  5s outer timeout could have `SIGKILL`'d the api process mid-cascade,
+  orphaning whatever it was still in the middle of cleaning up.
+
+Verified live: `SIGTERM` to the supervisor now cleanly stops all three
+workers (each logging its own graceful shutdown) with zero processes left
+behind, confirmed via `ps aux` immediately after.
 
 ### Relationship to existing `/reload/*` endpoints
 

@@ -323,7 +323,10 @@ class TestRunStream:
     def test_saves_new_papers_to_zotero(self, vault, mock_indexer, mock_cfg):
         vault.create_stream(title="AI", query="artificial intelligence")
 
-        paper = _make_paper(title="Attention Is All You Need", authors=["Vaswani A"])
+        # Title shares stems with the query so it clears the stem pre-filter —
+        # a title unrelated to the query (e.g. "Attention Is All You Need") is
+        # exactly what that filter is meant to screen out before the LLM call.
+        paper = _make_paper(title="Artificial Intelligence and Attention Mechanisms", authors=["Vaswani A"])
         agent = MagicMock()
         agent.preflight.return_value = ["arxiv"]
         agent.search.return_value = _make_search_result(papers=[paper])

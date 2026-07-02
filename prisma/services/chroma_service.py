@@ -7,9 +7,12 @@ from pathlib import Path
 
 import requests
 
+from prisma.services import resource_lock
 from prisma.services.vault import VaultService
 
 _log = logging.getLogger("prisma.chroma")
+
+_RESOURCE_HOLDER = "api"  # must match the worker name supervisor.py restarts, so a crash releases our leases
 
 
 def _embed_texts(texts: list[str], model: str, base_url: str = "http://localhost:11434") -> list[list[float]] | None:
@@ -53,10 +56,20 @@ class ChromaIndexer:
         vault: VaultService,
         embedding_model: str = "nomic-embed-text",
         ollama_base_url: str = "http://localhost:11434",
+        chroma_host: str = "127.0.0.1",
+        chroma_port: int = 8767,
+        supervisor_host: str = "127.0.0.1",
+        supervisor_port: int | None = None,
     ) -> None:
         self._vault = vault
         self._model = embedding_model
         self._base_url = ollama_base_url
+        # ChromaDB runs as its own supervised server process (ADR-012), not
+        # embedded — a crash there no longer takes down this process's threads.
+        self._chroma_host = chroma_host
+        self._chroma_port = chroma_port
+        self._supervisor_host = supervisor_host
+        self._supervisor_port = supervisor_port if supervisor_port is not None else resource_lock.default_port()
         self._chroma_dir = vault.root / "chromadb"
         self._manifest_path = self._chroma_dir / "manifest.json"
         self._client = None
@@ -124,7 +137,8 @@ class ChromaIndexer:
                 return []
         except Exception:
             return []
-        embeddings = _embed_texts([question], self._model, self._base_url)
+        with resource_lock.lease(self._supervisor_host, self._supervisor_port, holder=_RESOURCE_HOLDER, model=self._model) as granted:
+            embeddings = _embed_texts([question], self._model, self._base_url) if granted else None
         if not embeddings:
             _log.warning("chroma query: embedding failed for question, skipping")
             return []
@@ -158,7 +172,7 @@ class ChromaIndexer:
         import chromadb
         self._chroma_dir.mkdir(parents=True, exist_ok=True)
         try:
-            client = chromadb.PersistentClient(path=str(self._chroma_dir))
+            client = chromadb.HttpClient(host=self._chroma_host, port=self._chroma_port)
             collection = client.get_or_create_collection(
                 "vault", metadata={"hnsw:space": "cosine"}
             )
@@ -182,13 +196,28 @@ class ChromaIndexer:
                 pending = self._pending.copy()
                 self._pending.clear()
             if pending:
-                _log.info("chroma incremental update: %d files changed", len(pending))
+                _log.info("chroma incremental update: %d files flagged by watcher", len(pending))
                 dirty = False
-                for path in pending:
-                    if path.exists():
-                        dirty |= self._upsert_file(path)
-                    else:
-                        dirty |= self._delete_file(path)
+                upserted = 0
+                # One lease covers the whole batch rather than one per file — HTTP
+                # round-trips to the supervisor are cheap per-batch, not per-embed.
+                with resource_lock.lease(self._supervisor_host, self._supervisor_port, holder=_RESOURCE_HOLDER, model=self._model) as granted:
+                    for path in pending:
+                        if path.exists():
+                            changed = self._upsert_file(path) if granted else False
+                            dirty |= changed
+                            upserted += changed
+                        else:
+                            dirty |= self._delete_file(path)
+                if not granted:
+                    _log.warning("chroma incremental update skipped: no compute lease available")
+                elif upserted == 0:
+                    # Watchdog fires on any filesystem event, not just real content
+                    # changes (e.g. a metadata-only touch, common on WSL2) — the
+                    # mtime-equality guard in _upsert_file correctly no-ops these,
+                    # but that's silent by default, which looks like a stuck/never-
+                    # finishing reindex if you're only watching this log.
+                    _log.info("chroma incremental update: no real content change — watcher false-positive, nothing re-embedded")
                 if dirty:
                     self._save_manifest()
             self._stop_event.wait(timeout=60)
@@ -210,16 +239,22 @@ class ChromaIndexer:
         except Exception as exc:
             _log.error("chroma init failed: %s", exc)
             return
-        if not self._probe_model():
-            return
-        all_files = list(self._vault._all_md_files())
-        _log.info("chroma full index start: %d files total", len(all_files))
-        dirty = False
-        for path in all_files:
-            dirty |= self._upsert_file(path)
-        if dirty:
-            self._save_manifest()
-        _log.info("chroma full index done: %d files indexed, %d chunks", len(self._manifest), self._collection.count())
+        # One lease for the entire pass, not one per file — a full index can touch
+        # thousands of files and we don't want thousands of acquire/release round-trips.
+        with resource_lock.lease(self._supervisor_host, self._supervisor_port, holder=_RESOURCE_HOLDER, model=self._model) as granted:
+            if not granted:
+                _log.warning("chroma full index skipped: no compute lease available")
+                return
+            if not self._probe_model():
+                return
+            all_files = list(self._vault._all_md_files())
+            _log.info("chroma full index start: %d files total", len(all_files))
+            dirty = False
+            for path in all_files:
+                dirty |= self._upsert_file(path)
+            if dirty:
+                self._save_manifest()
+            _log.info("chroma full index done: %d files indexed, %d chunks", len(self._manifest), self._collection.count())
 
     def _upsert_file(self, path: Path) -> bool:
         try:

@@ -14,6 +14,7 @@ class LogPaths(BaseModel):
     ollama: Path
     activity: Path
     chroma: Path
+    supervisor: Path
     streams_dir: Path
 
     model_config = {"arbitrary_types_allowed": True}
@@ -78,6 +79,12 @@ def configure(level: int = logging.INFO) -> LogPaths:
         ollama=base / "ollama.log",
         activity=base / "activity.log",
         chroma=base / "chroma.log",
+        # Written by the supervisor process itself (prisma.server.supervisor),
+        # not by this configure() — that process deliberately doesn't import
+        # this module (which pulls in pydantic) to stay stdlib + yaml only.
+        # Same base dir and filename convention, so this is just the path the
+        # api process's /logs viewer reads from, not a handler this owns.
+        supervisor=base / "supervisor.log",
         streams_dir=streams_dir,
     )
     return _paths

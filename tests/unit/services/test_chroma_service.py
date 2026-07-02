@@ -126,7 +126,13 @@ def test_query_returns_ranked_file_scores(indexer, vault):
     client = _mock_chroma_client(col)
     embed = [[0.1] * 768]
     with patch("chromadb.HttpClient", return_value=client):
-        with patch("prisma.services.chroma_service._embed_texts", return_value=embed):
+        # Must mock resource_lock — otherwise this hits whatever supervisor
+        # happens to be reachable on the default port on the machine running
+        # the tests (e.g. a real `prisma serve` the developer has up), which
+        # is both flaky and an unintended side effect on production state.
+        with patch("prisma.services.chroma_service.resource_lock.acquire", return_value=(True, "local-ollama", "req-1")), \
+             patch("prisma.services.chroma_service.resource_lock.release"), \
+             patch("prisma.services.chroma_service._embed_texts", return_value=embed):
             result = indexer.query("neural networks", top_k=5)
 
     assert len(result) == 2
@@ -213,6 +219,36 @@ def test_delete_file_removes_from_manifest(indexer, vault):
     assert result is True
     assert rel not in indexer._manifest
     col.delete.assert_called_once_with(where={"path": rel})
+
+
+def test_query_skips_embed_when_lease_denied(indexer, vault):
+    col = _mock_chroma_collection()
+    col.count.return_value = 6
+    client = _mock_chroma_client(col)
+
+    with patch("chromadb.HttpClient", return_value=client):
+        with patch("prisma.services.chroma_service.resource_lock.acquire", return_value=(False, None, None)):
+            with patch("prisma.services.resource_lock.backoff.retry_with_backoff",
+                       side_effect=lambda attempt, is_success, **kw: attempt()):
+                with patch("prisma.services.chroma_service._embed_texts") as mock_embed:
+                    result = indexer.query("neural networks", top_k=5)
+
+    assert result == []
+    assert not mock_embed.called
+
+
+def test_full_index_skips_when_lease_denied(indexer, vault):
+    col = _mock_chroma_collection()
+    client = _mock_chroma_client(col)
+
+    with patch("chromadb.HttpClient", return_value=client):
+        with patch("prisma.services.chroma_service.resource_lock.acquire", return_value=(False, None, None)):
+            with patch("prisma.services.resource_lock.backoff.retry_with_backoff",
+                       side_effect=lambda attempt, is_success, **kw: attempt()):
+                with patch.object(indexer, "_upsert_file") as mock_upsert:
+                    indexer._full_index()
+
+    assert not mock_upsert.called
 
 
 def test_save_and_load_manifest(indexer, vault):

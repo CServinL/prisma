@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import signal
 import subprocess
 import threading
 from datetime import datetime
@@ -12,6 +13,7 @@ from typing import Literal
 from watchdog.events import FileSystemEventHandler, FileSystemEvent
 from watchdog.observers import Observer
 
+from prisma.services import resource_lock
 from prisma.services.vault import VaultService
 
 _log = logging.getLogger("prisma.graphify")
@@ -23,6 +25,22 @@ DEFAULT_INDEX_EXTENSIONS: tuple[str, ...] = (
     ".md",
     ".png", ".jpg", ".jpeg", ".webp", ".gif",
 )
+
+
+def _die_with_parent() -> None:
+    """Linux-only, best-effort: ask the kernel to SIGTERM this subprocess the
+    moment its parent (the API process) dies, for any reason — crash, SIGKILL,
+    or anything else that skips GraphifyIndexer.stop()'s own cleanup. See the
+    identical helper in prisma.server.supervisor for the full rationale;
+    duplicated rather than shared so this module doesn't depend on the server
+    package, and vice versa."""
+    try:
+        import ctypes
+        PR_SET_PDEATHSIG = 1
+        libc = ctypes.CDLL("libc.so.6", use_errno=True)
+        libc.prctl(PR_SET_PDEATHSIG, signal.SIGTERM)
+    except Exception:
+        pass  # non-Linux, or prctl unavailable — best effort only
 
 
 class _VaultChangeHandler(FileSystemEventHandler):
@@ -42,11 +60,14 @@ class _VaultChangeHandler(FileSystemEventHandler):
 class GraphifyIndexer:
     def __init__(self, vault: VaultService, interval_minutes: int = 10,
                  ollama_model: str = "qwen2.5-graphify:7b",
-                 index_extensions: tuple[str, ...] = DEFAULT_INDEX_EXTENSIONS) -> None:
+                 index_extensions: tuple[str, ...] = DEFAULT_INDEX_EXTENSIONS,
+                 supervisor_host: str = "127.0.0.1", supervisor_port: int = 8760) -> None:
         self._vault = vault
         self._interval = interval_minutes * 60
         self._ollama_model = ollama_model
         self.index_extensions = index_extensions
+        self._supervisor_host = supervisor_host
+        self._supervisor_port = supervisor_port
         self._out_dir = vault.root / "graphify-out"
         self._graph_json = self._out_dir / "graph.json"
         self._state: IndexState = "stale" if not self._graph_json.exists() else "idle"
@@ -247,7 +268,34 @@ class GraphifyIndexer:
     # 2-hour hard ceiling; normal runs finish in minutes.
     _PROC_TIMEOUT = 7200
 
+    # Holder is the worker name ("api"), not a task label — release_all_held_by
+    # (the fast path, triggered the instant that worker dies/restarts) matches
+    # on this. The finer-grained safety net (a single hung/dead task, worker
+    # otherwise fine) is PID- and lease-timeout-based instead — see
+    # resource_lock.acquire() and Supervisor.ResourceManager.reap().
+    _RESOURCE_HOLDER = "api"
+
     def _run_graphify(self, input_path: Path) -> bool:
+        # Ask the supervisor for permission before spawning — graphify makes
+        # sustained, concurrent-hostile calls to Ollama, and it's not the only
+        # thing that might (chroma's embeddings, chat, later). See ADR-012 and
+        # prisma.services.resource_lock. Fails open if the supervisor isn't
+        # running at all (e.g. direct `uvicorn` for local dev).
+        with resource_lock.lease(
+            self._supervisor_host, self._supervisor_port,
+            holder=self._RESOURCE_HOLDER,
+            # Matches the hard ceiling _run_graphify_locked itself enforces
+            # (plus margin), so the reaper never races a legitimately still-
+            # running extraction — it only catches one that's truly wedged.
+            lease_timeout=self._PROC_TIMEOUT + 60,
+            model=self._ollama_model,
+        ) as granted:
+            if not granted:
+                _log.info("graphify: no free GPU/LLM compute pool right now — skipping this cycle")
+                return False
+            return self._run_graphify_locked(input_path)
+
+    def _run_graphify_locked(self, input_path: Path) -> bool:
         import sys
         # token_budget matches num_ctx minus headroom for output + system prompt.
         token_budget = 8000
@@ -257,23 +305,34 @@ class GraphifyIndexer:
         stderr_lines: list[str] = []
         proc: subprocess.Popen | None = None
         try:
-            proc = subprocess.Popen(
-                [sys.executable, "-m", "graphify", str(input_path),
-                 "--backend", "ollama", "--model", self._ollama_model,
-                 "--token-budget", str(token_budget),
-                 "--api-timeout", str(self._CHUNK_TIMEOUT)],
-                env=env,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                # Own session so a terminal Ctrl+C (SIGINT to the foreground process
-                # group) doesn't kill this mid-request — the server's own shutdown
-                # path (stop()) terminates it deliberately instead.
-                start_new_session=True,
-            )
+            # Holding the lock across spawn-and-register closes a race with stop():
+            # without it, stop() could read self._current_proc in the gap between
+            # Popen() returning and the assignment below, see a stale/None value,
+            # and terminate nothing — silently orphaning this subprocess to keep
+            # running (and hammering Ollama) even after the indexer was told to stop.
             with self._lock:
+                if self._stop_event.is_set():
+                    return False
+                proc = subprocess.Popen(
+                    [sys.executable, "-m", "graphify", str(input_path),
+                     "--backend", "ollama", "--model", self._ollama_model,
+                     "--token-budget", str(token_budget),
+                     "--api-timeout", str(self._CHUNK_TIMEOUT)],
+                    env=env,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    # Own session so a terminal Ctrl+C (SIGINT to the foreground process
+                    # group) doesn't kill this mid-request — the server's own shutdown
+                    # path (stop()) terminates it deliberately instead.
+                    start_new_session=True,
+                    # Last-resort backstop: if the API process itself dies without
+                    # running that shutdown path (crash, SIGKILL), the kernel still
+                    # tells this subprocess to exit rather than leaving it orphaned.
+                    preexec_fn=_die_with_parent,
+                )
                 self._current_proc = proc
             assert proc.stdout is not None
             for line in proc.stdout:

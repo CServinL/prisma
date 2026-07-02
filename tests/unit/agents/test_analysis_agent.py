@@ -44,8 +44,14 @@ class TestAnalysisAgent(unittest.TestCase):
         self.assertIsNotNone(self.analysis_agent.base_url)
         self.assertIsNotNone(self.analysis_agent.model)
     
+    # Every test below that reaches _call_ollama_generate must mock
+    # resource_lock.acquire — otherwise it hits whatever supervisor happens
+    # to be reachable on the default port on the machine running the tests
+    # (e.g. a real `prisma serve` the developer has up), which is both flaky
+    # and an unintended side effect on production state.
+    @patch('prisma.agents.analysis_agent.resource_lock.acquire', return_value=(True, "local-ollama", "req-1"))
     @patch('prisma.agents.analysis_agent.requests.post')
-    def test_analyze_papers(self, mock_post):
+    def test_analyze_papers(self, mock_post, mock_acquire):
         """Test paper analysis functionality."""
         mock_response = MagicMock()
         mock_response.status_code = 200
@@ -60,8 +66,9 @@ class TestAnalysisAgent(unittest.TestCase):
         self.assertEqual(result.author_count, 2)
         self.assertIsInstance(result.summaries[0], PaperSummary)
 
+    @patch('prisma.agents.analysis_agent.resource_lock.acquire', return_value=(True, "local-ollama", "req-1"))
     @patch('prisma.agents.analysis_agent.requests.post')
-    def test_summarize_paper_structure(self, mock_post):
+    def test_summarize_paper_structure(self, mock_post, mock_acquire):
         """Test paper summary structure."""
         mock_response = MagicMock()
         mock_response.status_code = 200
@@ -78,9 +85,10 @@ class TestAnalysisAgent(unittest.TestCase):
         self.assertIsInstance(summary.key_findings, list)
         self.assertIsInstance(summary.methodology, str)
         self.assertIsInstance(summary.connected_papers_url, str)
-    
+
+    @patch('prisma.agents.analysis_agent.resource_lock.acquire', return_value=(True, "local-ollama", "req-1"))
     @patch('prisma.agents.analysis_agent.requests.post')
-    def test_ollama_integration_success(self, mock_post):
+    def test_ollama_integration_success(self, mock_post, mock_acquire):
         """Test successful Ollama integration."""
         # Mock successful Ollama response
         mock_response = MagicMock()
@@ -92,29 +100,46 @@ class TestAnalysisAgent(unittest.TestCase):
             'done': True
         }
         mock_post.return_value = mock_response
-        
+
         summary = self.analysis_agent._get_ollama_summary(
             self.sample_paper.title,
             self.sample_paper.abstract
         )
-        
+
         self.assertIsNotNone(summary)
         self.assertIn('machine learning', summary)
-    
+
+    @patch('prisma.agents.analysis_agent.resource_lock.acquire', return_value=(True, "local-ollama", "req-1"))
     @patch('prisma.agents.analysis_agent.requests.post')
-    def test_ollama_integration_failure(self, mock_post):
+    def test_ollama_integration_failure(self, mock_post, mock_acquire):
         """Test Ollama integration failure handling."""
         # Mock failed Ollama response
         mock_post.side_effect = Exception("Connection failed")
-        
+
         summary = self.analysis_agent._get_ollama_summary(
             self.sample_paper.title,
             self.sample_paper.abstract
         )
-        
+
         # Should handle failure gracefully and return empty string
         self.assertEqual(summary, "")
     
+    @patch(
+        'prisma.services.resource_lock.backoff.retry_with_backoff',
+        side_effect=lambda attempt, is_success, **kw: attempt(),
+    )
+    @patch('prisma.agents.analysis_agent.resource_lock.acquire', return_value=(False, None, None))
+    @patch('prisma.agents.analysis_agent.requests.post')
+    def test_ollama_summary_skips_call_when_lease_denied(self, mock_post, mock_acquire, mock_retry):
+        """No compute lease available should be handled like any other LLM failure, not crash."""
+        summary = self.analysis_agent._get_ollama_summary(
+            self.sample_paper.title,
+            self.sample_paper.abstract
+        )
+
+        self.assertEqual(summary, "")
+        self.assertFalse(mock_post.called)
+
     def test_extract_key_findings(self):
         """Test key findings extraction."""
         text_with_findings = "The results show significant improvements. Key findings indicate better performance."

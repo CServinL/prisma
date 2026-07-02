@@ -58,6 +58,7 @@ _t("renderer ok")
 
 _t("importing graphify_service")
 from prisma.services.graphify_service import GraphifyIndexer
+from prisma.services import resource_lock
 _t("graphify_service ok")
 
 _t("importing chroma_service")
@@ -172,7 +173,8 @@ _vault = VaultService(vault_root=_resolve_vault_root())
 _t(f"vault root: {_vault.root}")
 _t("building indexer")
 _indexer = GraphifyIndexer(_vault, ollama_model=_ollama_model(),
-                           index_extensions=_index_extensions())
+                           index_extensions=_index_extensions(),
+                           supervisor_port=resource_lock.default_port())
 _t("building chroma")
 _chroma = _build_chroma(_vault)
 _t("building zotero")
@@ -358,7 +360,7 @@ def reload_zotero():
 def reload_indexer():
     global _indexer
     _indexer.stop()
-    _indexer = GraphifyIndexer(_vault, ollama_model=_ollama_model(), index_extensions=_index_extensions())
+    _indexer = GraphifyIndexer(_vault, ollama_model=_ollama_model(), index_extensions=_index_extensions(), supervisor_port=resource_lock.default_port())
     _indexer.start()
     return {"status": "reloaded"}
 
@@ -379,7 +381,7 @@ def reload_server():
     _chroma.stop()
     _vault = VaultService(vault_root=_resolve_vault_root())
     _zotero = _build_zotero()
-    _indexer = GraphifyIndexer(_vault, ollama_model=_ollama_model(), index_extensions=_index_extensions())
+    _indexer = GraphifyIndexer(_vault, ollama_model=_ollama_model(), index_extensions=_index_extensions(), supervisor_port=resource_lock.default_port())
     _chroma = _build_chroma(_vault)
     _indexer.start()
     _chroma.start()
@@ -445,12 +447,13 @@ def status():
         "vault": vault_stats,
         "zotero": zotero_info,
         "ollama": {"reachable": _indexer._ollama_ready()},
+        "resources": resource_lock.status("127.0.0.1", resource_lock.default_port()),
     }
 
 
 @app.get("/logs")
 def get_logs(
-    concern: str = Query("server", description="server|access|maintenance|ollama|activity|chroma|stream"),
+    concern: str = Query("server", description="server|access|maintenance|ollama|activity|chroma|supervisor|stream"),
     slug: Optional[str] = Query(None, description="stream slug (required when concern=stream)"),
     n: int = Query(200, ge=1, le=5000),
 ):
@@ -462,6 +465,7 @@ def get_logs(
         "ollama": lp.ollama,
         "activity": lp.activity,
         "chroma": lp.chroma,
+        "supervisor": lp.supervisor,
     }
     if concern == "stream":
         if not slug:

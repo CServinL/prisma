@@ -122,3 +122,45 @@ analysis:
 # Optional: Semantic Scholar API Key for Higher Rate Limits
 # semantic_scholar:
 #   api_key: "YOUR_SEMANTIC_SCHOLAR_API_KEY"  # Optional for > 1000 req/sec
+# ── Compute pools (supervisor GPU/LLM concurrency arbitration — ADR-012) ──────
+# Named pools with a concurrency limit each. Any code doing LLM/embedding work
+# (Graphify's extraction, ChromaDB's embeddings, future chat) requests a lease
+# from one of these before running, so at most `max_concurrent` such calls run
+# against a given backend at once — protecting whatever "the LLM" actually is:
+# a single local GPU, a beefier remote box, or a rate-limited cloud API.
+#
+# Defaults to a single pool named "default" with max_concurrent: 1 if this
+# section is omitted entirely — matching the common case (one machine, one
+# local GPU, one Ollama instance) with zero config required.
+#
+# One pool = one hardware unit that can hold exactly one resident model at a
+# time (one GPU, or one Ollama instance bound to one GPU). model_affinity
+# defaults to true for exactly this reason: real hardware works this way.
+# When true, concurrent leases are only granted for whichever model is
+# currently resident, up to max_concurrent — a request for a different model
+# is held back (via the caller's normal retry/backoff) until the pool drains.
+# Without this, two tasks using different models would "concurrently" thrash
+# the GPU reloading each other's weights instead of actually running in
+# parallel. See docs/ollama-concurrency.md for a benchmark backing this up.
+#
+# Set model_affinity: false only for pools with no such constraint at all —
+# an auto-scaled/auto-routed cloud API that switches models with no reload
+# penalty. It is the exception, not the default.
+#
+# If a machine has several GPUs, model them as several pools (one per GPU)
+# rather than one lump pool with a big max_concurrent — that lets some GPUs
+# stay pinned to one model while others serve a different one, or lets the
+# same model spread across more GPUs for extra concurrency when one isn't
+# enough. acquire() already tries every pool when the caller doesn't request
+# one specifically, so it naturally lands a request on whichever pool
+# already has that model loaded (or an idle one), and turns away a different
+# model from a busy pool until it drains.
+#
+# compute_pools:
+#   - name: local_gpu0            # single GPU — 3 concurrent calls to the SAME model
+#     max_concurrent: 3           # model_affinity omitted — defaults to true
+#   - name: local_gpu1            # a second GPU — can hold a different model at once
+#     max_concurrent: 2
+#   - name: cloud_api
+#     max_concurrent: 4           # rate-limited cloud inference endpoint
+#     model_affinity: false       # auto-scaled/auto-routed — no reload penalty to model

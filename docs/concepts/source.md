@@ -14,7 +14,7 @@ the source itself.
 
 ## Files on disk
 
-Every `Source` has exactly one `.md` file in `vault/sources/`. This is what Graphify indexes
+Every `Source` has exactly one `.md` file in `vault/sources/`. This is what the knowledge graph indexer indexes
 and what DSL links (`[[@citekey]]`) point to.
 
 Optionally, a companion file lives alongside it (`<slug>.pdf`, `<slug>.html`, `<slug>.svg`, …).
@@ -45,14 +45,14 @@ The companion is the original rich format, served to the UI via `GET /notes/{slu
 3. PDF is fetched (from Zotero attachment or URL).
 4. docu-craft converts PDF → `.md` body.
 5. `Source` is written to `vault/sources/<slug>.md` with frontmatter.
-6. Graphify is marked stale; next cycle indexes the new source.
+6. The knowledge graph is marked stale; next cycle indexes the new source.
 
 ## Relations
 
 - Originates from a [ZoteroItem](zotero-item.md) (via import).
 - Optionally associated with a [Stream](stream.md) via `stream_id`.
 - Referenced by [Note](note.md)s and [Chat](chat.md)s via `[[@citekey]]` [Citations](citation.md).
-- Indexed by Graphify as a [GraphNode](graph-node.md).
+- Indexed by the knowledge graph indexer as a [GraphNode](graph-node.md).
 
 ## Relevant axioms
 

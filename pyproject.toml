@@ -17,11 +17,11 @@ dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",
     "docu-craft>=0.3.1",
-    "graphifyy>=0.8",
     "watchdog>=6.0",
-    "openai>=1.0",
     "nltk>=3.9",
     "chromadb>=0.6",
+    "kuzu>=0.11",
+    "semchunk>=4.1",
 ]
 
 [project.optional-dependencies]

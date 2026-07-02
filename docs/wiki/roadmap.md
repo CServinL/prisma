@@ -27,7 +27,7 @@ Core pipeline is working:
 - Multiple output formats: HTML, PDF, LaTeX, Word
 - Performance: concurrent source search, LLM batching
 - Better CLI error messages and progress output
-- **Ollama resilience** — graceful degradation when Ollama is unavailable at startup or drops mid-session: ChromaDB full index currently silently skips if Ollama is offline during the 20s startup window and never retries; Graphify retries every 60s (already handles it). Both services should expose clear status to the server health endpoint, and ChromaDB should schedule a retry when Ollama becomes reachable again rather than waiting for the next file-change event.
+- **Ollama resilience** — graceful degradation when Ollama is unavailable at startup or drops mid-session. ✅ Both indexers now handle the manifest side correctly: ChromaDB's `_upsert_file` and the knowledge graph's `_extract_file` only advance their manifest on genuine success (a section that legitimately found nothing still counts; a denied lease/connection error/bad status doesn't) — a file that changed while Ollama was unreachable is retried next cycle instead of silently skipped forever. Remaining: expose clear Ollama-reachability status on the server health endpoint (not just the indexers' own retry behavior) at startup and mid-session.
 - **WebSocket push events** — ✅ Done (see ADR-010). Rather than replacing REST, the server keeps REST for all CRUD/search/asset endpoints and adds one `/ws` channel purely for server-initiated push: `hot_reload`, `vault_change`, `stream_progress`. This replaces the old 2 s `/ui/dev/version` poll (kept only as a fallback when WS is unavailable — e.g. a restrictive proxy). Full REST→WS replacement was considered and rejected: it would cost `curl`-ability of the API for a use case (single client, localhost/LAN) where REST's caching/CDN advantages don't matter anyway. Remaining work: extend push coverage to note-content live-updates across multiple open clients, and stream the future chat feature's LLM tokens over the same channel.
 
 ---
@@ -35,29 +35,20 @@ Core pipeline is working:
 ## Phase 2 — Conversational Chat & On-Demand Knowledge Graphs
 
 - **Chat** — ask Prisma questions about your vault (papers, notes, sources). Answers
-  are grounded via ChromaDB semantic retrieval + knowledge-graph context (see
-  Graphify replacement below), synthesized by the local LLM (Ollama), with
-  citations back to source notes. Chat sessions are saved to the vault
-  (`chats/` — already modeled in `VaultService`, currently always empty
-  since no chat UI exists yet).
-- **Replace Graphify with a native, Kùzu-backed knowledge graph module** —
-  Graphify (the third-party pip package currently doing entity/relationship
-  extraction) is being dropped: its `graph.json` flat-file store has no
-  incremental upsert (whole-file reparse per query, hand-rolled JSON-list
-  merges), and its per-file chunking has a hard ceiling — a single large
-  document (e.g. a dense paper) that alone exceeds the model's token budget
-  has no further recovery path and silently returns a truncated extraction
-  forever (see `docs/ollama-concurrency.md` and the investigation that led
-  to this decision). Prisma only ever exercised a narrow slice of Graphify's
-  surface anyway (no code-AST extraction — the vault has no code files);
-  replacing that slice with a purpose-built module is more tractable than
-  continuing to patch around the third-party package's limitations. See
-  `TODO.md` for the full feature-parity checklist and migration plan.
+  are grounded via ChromaDB semantic retrieval + native knowledge-graph context,
+  synthesized by the local LLM (Ollama), with citations back to source notes.
+  Chat sessions are saved to the vault (`chats/` — already modeled in
+  `VaultService`, currently always empty since no chat UI exists yet). Full
+  architecture (tool-calling loop, trust tiers, injection sanitization) in
+  `TODO.md`.
+- **Native knowledge graph module** — ✅ Done. Entity/relationship extraction
+  and storage are no longer a third-party dependency — see ADR-009's
+  follow-up section for why and `TODO.md` for what's still deferred
+  (`ranked_nodes`/`surprising_connections` sophistication, image extraction).
 - **Knowledge graphs from chat context** — ask Prisma to generate a knowledge graph
-  for a chat's subject. The replacement module (above) builds this internally to
+  for a chat's subject. The knowledge graph module builds this internally to
   re-rank search results; this exposes that capability as a user-facing artifact
-  scoped to a specific topic/conversation,
-  rather than only an internal search index.
+  scoped to a specific topic/conversation, rather than only an internal search index.
 
 ---
 

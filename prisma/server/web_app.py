@@ -3,7 +3,7 @@
 Runs independently of the API process (see ADR-012): a crash here doesn't
 touch REST/WebSocket traffic, and vice versa. Deliberately does not import
 prisma.server.app — pulling that in would drag every API dependency
-(chromadb, graphify, zotero, coordinator/agents) into a process whose only
+(chromadb, kuzu, zotero, coordinator/agents) into a process whose only
 job is serving static files.
 
 Dev-only hot reload: when running from source (ui/src/ exists), a background

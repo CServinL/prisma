@@ -39,4 +39,4 @@ produced by docu-craft (e.g. a sysatlas diagram, a Plotly report). In that case 
 ## Relevant axioms
 
 > Every LiteratureReviewReport becomes a Note. See [Axiom 3](../ontologia.md).
-> Graphify re-indexes on save. See [Axiom 8](../ontologia.md).
+> The knowledge graph indexer re-indexes on save. See [Axiom 8](../ontologia.md).

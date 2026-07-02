@@ -38,7 +38,7 @@
 - **🤖 AI-Powered Curation**: Uses local LLMs for intelligent research assessment and organization
 - **📊 Library Organization**: Generates structured research organization and enhanced library management
 - **🗂️ Vault Workspace**: A local, flat-Markdown second brain for notes, sources, and chats — `prisma serve` opens it as a web app, installable PWA, or native desktop shell
-- **🔍 Semantic Search**: ChromaDB embeddings + a Graphify knowledge graph re-rank results beyond keyword matching
+- **🔍 Semantic Search**: ChromaDB embeddings + a native knowledge graph re-rank results beyond keyword matching
 
 ## Research Library Management Process
 
@@ -149,7 +149,7 @@ Changes to source files are immediately active — no reinstall needed.
 ## Technology Stack
 
 - **🐍 Python 3.12+** — pip/setuptools, no Poetry
-- **🤖 Ollama** for local LLM backend (analysis, chat, and Graphify's knowledge-graph extraction)
+- **🤖 Ollama** for local LLM backend (analysis, chat, and knowledge-graph extraction)
 - **🔗 Zotero** for reference management — the bookmark layer; the vault is the second brain
 - **⌨️ Click** for the command-line interface
 - **🗂️ Flat Markdown vault** — no database; notes, sources, chats, and streams are plain `.md`/`.yaml` files

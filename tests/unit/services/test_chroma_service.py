@@ -101,6 +101,30 @@ def test_status_returns_zero_on_empty_collection(indexer):
     assert status["chunks"] == 0
     assert status["files_indexed"] == 0
     assert status["model"] == "nomic-embed-text"
+    assert status["current_activity"] is None
+
+
+def test_full_index_sets_activity_per_file_then_clears(indexer, vault):
+    md_file = vault.root / "notes" / "test.md"
+    md_file.parent.mkdir(parents=True, exist_ok=True)
+    md_file.write_text("# Title\nSome content here.", encoding="utf-8")
+
+    col = _mock_chroma_collection()
+    client = _mock_chroma_client(col)
+    embed = [[0.1] * 768]
+
+    with patch("chromadb.HttpClient", return_value=client):
+        indexer._ensure_client()
+        with patch("prisma.services.chroma_service.resource_lock.acquire", return_value=(True, "local-ollama", "req-1")), \
+             patch("prisma.services.chroma_service.resource_lock.release"), \
+             patch("prisma.services.chroma_service._embed_texts", return_value=embed), \
+             patch.object(indexer, "_set_activity", wraps=indexer._set_activity) as mock_set_activity:
+            indexer._full_index()
+
+    activities = [c.args[0] for c in mock_set_activity.call_args_list]
+    assert any(a and "scanning file" in a and "test.md" in a for a in activities)
+    assert activities[-1] is None  # cleared when done
+    assert indexer.status()["current_activity"] is None
 
 
 def test_query_empty_collection_returns_empty(indexer):

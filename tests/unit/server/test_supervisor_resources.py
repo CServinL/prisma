@@ -8,7 +8,7 @@ import os
 import time
 from pathlib import Path
 
-from prisma.server.supervisor import ResourceManager, _load_compute_pools
+from prisma.server.supervisor import ResourceManager, _load_compute_pools, _process_memory_mb, _system_info
 
 
 def test_acquire_respects_pool_capacity():
@@ -126,7 +126,7 @@ def test_model_affinity_denies_a_different_model_while_busy():
     pid = os.getpid()
 
     rm.acquire("api", pid, model="qwen2.5:7b")
-    r2, rid2 = rm.acquire("api", pid, model="qwen2.5-graphify:7b")
+    r2, rid2 = rm.acquire("api", pid, model="prisma-kg:7b")
 
     assert r2 is None and rid2 is None
 
@@ -138,9 +138,9 @@ def test_model_affinity_allows_switch_once_pool_drains():
     resource, request_id = rm.acquire("api", pid, model="qwen2.5:7b")
     rm.release(resource, request_id)
 
-    r2, rid2 = rm.acquire("api", pid, model="qwen2.5-graphify:7b")
+    r2, rid2 = rm.acquire("api", pid, model="prisma-kg:7b")
     assert r2 == "local-ollama" and rid2 is not None
-    assert rm.status()["local-ollama"]["active_model"] == "qwen2.5-graphify:7b"
+    assert rm.status()["local-ollama"]["active_model"] == "prisma-kg:7b"
 
 
 def test_model_affinity_reaper_clears_active_model_when_lease_dies():
@@ -151,7 +151,7 @@ def test_model_affinity_reaper_clears_active_model_when_lease_dies():
     rm.reap()
 
     assert rm.status()["local-ollama"]["active_model"] is None
-    r2, rid2 = rm.acquire("api", os.getpid(), model="qwen2.5-graphify:7b")
+    r2, rid2 = rm.acquire("api", os.getpid(), model="prisma-kg:7b")
     assert r2 == "local-ollama" and rid2 is not None
 
 
@@ -220,7 +220,7 @@ def test_stats_count_model_busy_denials_separately_from_capacity():
     pid = os.getpid()
 
     rm.acquire("api", pid, model="qwen2.5:7b")               # granted
-    rm.acquire("api", pid, model="qwen2.5-graphify:7b")      # denied — different model, pool has room
+    rm.acquire("api", pid, model="prisma-kg:7b")      # denied — different model, pool has room
 
     stats = rm.status()["local-ollama"]["stats"]
     assert stats["granted"] == 1
@@ -244,7 +244,27 @@ def test_pools_without_model_affinity_ignore_model_identity():
     pid = os.getpid()
 
     r1, _ = rm.acquire("api", pid, model="qwen2.5:7b")
-    r2, _ = rm.acquire("api", pid, model="qwen2.5-graphify:7b")
+    r2, _ = rm.acquire("api", pid, model="prisma-kg:7b")
 
     assert r1 == "remote-ollama" and r2 == "remote-ollama"
     assert rm.status()["remote-ollama"]["active_model"] is None
+
+
+# ── Memory/capacity reporting ─────────────────────────────────────────────────
+
+def test_process_memory_mb_returns_positive_value_for_self():
+    mb = _process_memory_mb(os.getpid())
+    assert mb is not None
+    assert mb > 0
+
+
+def test_process_memory_mb_returns_none_for_nonexistent_pid():
+    assert _process_memory_mb(2**30) is None
+
+
+def test_system_info_reports_cpu_count_and_memory():
+    info = _system_info()
+    assert info["cpu_count"] and info["cpu_count"] > 0
+    # memory fields may be None on non-Linux, but must be present as keys
+    assert "memory_total_mb" in info
+    assert "memory_available_mb" in info

@@ -226,6 +226,44 @@ usage rather than being designed up front:
   `supervisor.log` for 409s. The stats counter answers "why is the server
   busy" directly from `/status` instead.
 
+#### Follow-up — Graphify replaced with a native module, running as a 4th worker
+
+The `graphify` pip dependency mentioned throughout this ADR ("Graphify is
+the first integrated caller," "the graphify incident's failure mode," etc.)
+has been removed as of 2026-07-01. `prisma/services/knowledge_graph_service.py`
+(`KnowledgeGraphService`) replaces it, with native storage (embedded Kùzu
+graph DB, not a flat `graph.json`) and per-*section* extraction chunking
+(not per-file), which closes the token-budget cliff a single oversized
+document used to hit with no recovery path. Full rationale, alternatives
+considered, and consequences are in their own ADR: **ADR-013**. (Also see
+ADR-009's follow-up section and `TODO.md`.)
+
+Kùzu's concurrency model was verified empirically before adopting it: only
+one process may hold the database open at all (a `READ_WRITE` connection
+locks out every other Database object, even `READ_ONLY` ones, in any other
+process). Not a blocker — only one process needs graph access, ever — but
+worth remembering: no external tool/script can open the graph DB file
+directly (even read-only) while that process is running.
+
+That single-process-only constraint, plus the same crash-isolation
+reasoning that made ChromaDB its own server in this ADR's original
+decision, is why **`KnowledgeGraphService` runs as a 4th supervised worker
+process** (`kg_app.py`, a small FastAPI app, `:8768` by default) rather than
+embedded inside `api` — a native-extension crash or a wedged extraction
+call no longer takes REST/WebSocket traffic down with it, it can be
+restarted independently, and its CPU work (semchunk splitting, Cypher
+upserts) runs on its own core instead of competing with api's event loop.
+Unlike ChromaDB, there's no ready-made server binary for Kùzu (`chroma run`
+already existed; `kuzu serve` doesn't) — `kg_app.py` *is* that server, built
+for this purpose. `app.py` talks to it through `KnowledgeGraphClient`
+(`prisma/services/knowledge_graph_client.py`), a thin HTTP client matching
+`KnowledgeGraphService`'s exact method names, so no call-site changes were
+needed beyond construction. Resource-lock holder is `"kg"`, matching the
+worker name — same `local-ollama` pool, same `model_affinity` behavior as
+before, just attributed to the correct worker for `release_all_held_by()`
+to fire on crash/restart. Gets its own log file (`kg.log`, `/logs?concern=kg`),
+same pattern as `chroma`/`ollama`/`activity`/`maintenance`.
+
 #### Future consideration: transport for the lease protocol
 
 Acquire/release currently go over plain HTTP to the supervisor's control
@@ -364,3 +402,6 @@ maintain.
 - ADR-011: Authentication Strategy (zone-based auth; supervisor and Chroma
   server should bind loopback-only regardless of zone, only API/Web cross
   network boundaries)
+- ADR-013: Native Knowledge Graph (the `kg` worker's own crash-isolation
+  and storage-backend rationale, extending this ADR's supervised-worker
+  pattern to a 4th process)

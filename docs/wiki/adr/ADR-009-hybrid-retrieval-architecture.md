@@ -90,8 +90,49 @@ Neo4j becomes relevant if Prisma evolves into a multi-user server or the graph e
 - Index storage grows: ChromaDB adds a persistent directory alongside `graphify-out/`
 - Query latency increases slightly from running two retrievers, though both are local
 
+## Follow-up (2026-07-01): Graphify replaced with a native module
+
+The "Graphify" layer described above is now `KnowledgeGraphService`
+(`prisma/services/knowledge_graph_service.py`) — the third-party `graphify`
+pip dependency was dropped. Two real problems drove this, not a preference
+for owning more code:
+
+- `graphify-out/graph.json` was a flat JSON blob: every query reparsed the
+  whole file into networkx in memory, with no incremental upsert.
+- Graphify's chunking was per-*file*: a single document too large for the
+  model's token budget had no further recovery path and silently returned a
+  truncated, incomplete extraction on every run — confirmed live with a
+  real paper in the vault (see `docs/ollama-concurrency.md` and
+  `TODO.md`).
+
+The retrieval flow and hybrid-scoring design in this ADR are unchanged —
+`KnowledgeGraphService.ranked_nodes()`/`.query()` are drop-in replacements
+with the same method names/shapes, still merged with ChromaDB's scores the
+same way. What changed: storage is now an embedded Kùzu graph DB (not
+JSON), and extraction is chunked **per section** (heading/token-budget-aware
+via `semchunk`), not per-file — so no single document can ever be too big.
+
+This also resolves the "Neo4j instead of Graphify's in-memory graph"
+alternative considered above: **Kùzu**, not Neo4j, was chosen — embedded (no
+server process, no JVM), with real Cypher-like traversal. Neo4j was rejected
+as too heavy for this vault's scale (hundreds of documents, not millions)
+and for adding a server process ADR-012 was specifically working to avoid.
+Kùzu's own concurrency model (only one process may hold the database open
+at all) was verified empirically before committing to it — not a blocker,
+since only one process (`kg_app.py`, not `api`) ever needs graph access.
+Full rationale, alternatives, and consequences now live in their own ADR:
+**ADR-013**. See `TODO.md` for the remaining checklist and ADR-012's
+follow-up section for the compute-pool-leasing side of this work.
+
+`ranked_nodes`/`query`'s full neighbor-expansion-with-proximity-weighting
+sophistication is deliberately deferred in the new module (a simpler
+term-match-only `search()` for now) — a conscious scope decision, not an
+oversight, tracked in `TODO.md`.
+
 ## Related ADRs
 
 - ADR-001: Pipeline Architecture (retrieval feeds context into the analysis pipeline)
 - ADR-007: Research Streams (streams trigger re-indexing when new papers are added)
 - ADR-008: Enhanced Zotero Integration (Zotero papers land in the vault, triggering indexing)
+- ADR-012: Process Supervision (compute-pool leasing that `KnowledgeGraphService`'s
+  extraction calls go through, same as the old Graphify integration did)

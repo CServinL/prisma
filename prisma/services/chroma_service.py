@@ -76,6 +76,10 @@ class ChromaIndexer:
         self._collection = None
         self._manifest: dict[str, float] = {}
         self._pending: set[Path] = set()
+        # What the background thread is doing *right now* — e.g.
+        # "embedding notes/foo.md" — so /status answers "what is the server
+        # working on" without grepping chroma.log.
+        self._current_activity: str | None = None
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
@@ -94,7 +98,7 @@ class ChromaIndexer:
                 if event.is_directory:
                     return
                 path = Path(str(event.src_path))
-                if any(p in path.parts for p in ("chromadb", "graphify-out", "streams")):
+                if any(p in path.parts for p in ("chromadb", "kg-out", "graphify-out", "streams")):
                     return
                 if path.name.startswith("."):
                     return
@@ -115,6 +119,17 @@ class ChromaIndexer:
         if self._observer is not None:
             self._observer.stop()
             self._observer.join(timeout=2)
+        # Without joining this too, /reload/chroma could start a replacement
+        # ChromaIndexer (and its own _loop thread) before this one actually
+        # exits — Event.wait() wakes immediately once _stop_event is set, so
+        # the common case (thread idle between cycles) joins fast; a thread
+        # mid-extraction won't notice until it returns to the loop, so this
+        # can still time out — that's surfaced as a warning, not silently
+        # ignored, since a thread can't be force-killed from outside.
+        if self._thread is not None:
+            self._thread.join(timeout=5)
+            if self._thread.is_alive():
+                _log.warning("chroma indexer thread did not exit within 5s — likely mid-extraction")
         _log.info("chroma stopped")
 
     def status(self) -> dict:
@@ -125,7 +140,12 @@ class ChromaIndexer:
             chunks = -1
         with self._lock:
             files = len(self._manifest)
-        return {"chunks": chunks, "files_indexed": files, "model": self._model}
+            activity = self._current_activity
+        return {"chunks": chunks, "files_indexed": files, "model": self._model, "current_activity": activity}
+
+    def _set_activity(self, activity: str | None) -> None:
+        with self._lock:
+            self._current_activity = activity
 
     # ── Query ─────────────────────────────────────────────────────────────────
 
@@ -204,6 +224,7 @@ class ChromaIndexer:
                 with resource_lock.lease(self._supervisor_host, self._supervisor_port, holder=_RESOURCE_HOLDER, model=self._model) as granted:
                     for path in pending:
                         if path.exists():
+                            self._set_activity(f"embedding {path.name}")
                             changed = self._upsert_file(path) if granted else False
                             dirty |= changed
                             upserted += changed
@@ -220,6 +241,7 @@ class ChromaIndexer:
                     _log.info("chroma incremental update: no real content change — watcher false-positive, nothing re-embedded")
                 if dirty:
                     self._save_manifest()
+                self._set_activity(None)
             self._stop_event.wait(timeout=60)
 
     def _probe_model(self) -> bool:
@@ -250,10 +272,12 @@ class ChromaIndexer:
             all_files = list(self._vault._all_md_files())
             _log.info("chroma full index start: %d files total", len(all_files))
             dirty = False
-            for path in all_files:
+            for i, path in enumerate(all_files):
+                self._set_activity(f"scanning file {i + 1}/{len(all_files)}: {path.name}")
                 dirty |= self._upsert_file(path)
             if dirty:
                 self._save_manifest()
+            self._set_activity(None)
             _log.info("chroma full index done: %d files indexed, %d chunks", len(self._manifest), self._collection.count())
 
     def _upsert_file(self, path: Path) -> bool:

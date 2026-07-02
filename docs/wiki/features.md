@@ -125,18 +125,18 @@ Returns up to 30 results ordered by score, with an excerpt from the first matchi
 `GET /search/deep?q=...` — two-stage semantic search:
 
 1. **ChromaDB** embeds the query via `nomic-embed-text` and retrieves the top 60 matching chunks across all indexed files. Chunk-level distances are aggregated to file-level scores (best chunk wins).
-2. **Graphify re-ranking** applies a title-match boost using knowledge graph node titles, then returns the top 20 results with matched concepts.
+2. **Knowledge graph re-ranking** applies a title-match boost using knowledge graph node titles, then returns the top 20 results with matched concepts.
 3. **NLTK re-rank boost**: after semantic scoring, each result receives a +0.05 bonus per shared stem root between its title/body and the query. This adjusts ordering without overriding semantic scores.
 
 Deep search is slower than regular search but finds semantically related content even without exact keyword overlap.
 
 ---
 
-## Knowledge Graph (Graphify)
+## Knowledge Graph
 
-A background indexer watches the vault root and extracts a knowledge graph via a local Ollama model. The graph is persisted to `{vault_root}/graphify-out/`. On query, Graphify returns related concepts and connections relevant to the search query.
+A background indexer (`KnowledgeGraphService`, native — replaced the third-party `graphify` pip dependency, see ADR-012's follow-up section and `TODO.md`) watches the vault root and extracts a knowledge graph via a local Ollama model, chunked **per section** (not per-file) so no single oversized document can exceed the model's token budget. The graph is persisted to an embedded Kùzu database at `{vault_root}/kg-out/`. On query, it returns related concepts and connections relevant to the search query.
 
-Status is exposed at `GET /status` under `graphify` and shown in the desktop app status popover.
+Status is exposed at `GET /status` under `knowledge_graph` and shown in the desktop app status popover.
 
 ---
 

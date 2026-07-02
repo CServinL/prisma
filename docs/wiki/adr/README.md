@@ -12,4 +12,5 @@ Each ADR documents a significant design decision: what was decided, why, and wha
 | [ADR-006](ADR-006-simple-folder-structure.md) | Simple Folder Structure | Active |
 | [ADR-007](ADR-007-research-streams-architecture.md) | Research Streams Architecture | Active |
 | [ADR-008](ADR-008-enhanced-zotero-integration.md) | Enhanced Zotero Integration | Active |
-| [ADR-009](ADR-009-hybrid-retrieval-architecture.md) | Hybrid Retrieval — Graphify + ChromaDB | Accepted |
+| [ADR-009](ADR-009-hybrid-retrieval-architecture.md) | Hybrid Retrieval — Graphify + ChromaDB (Graphify since replaced, see follow-up) | Evolved |
+| [ADR-013](ADR-013-native-knowledge-graph.md) | Native Knowledge Graph — Replacing Graphify with Kùzu | Accepted |

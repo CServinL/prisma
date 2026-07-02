@@ -221,6 +221,43 @@ def _pid_alive(pid: int) -> bool:
         return True  # unknown — fail safe, don't release something we're unsure about
 
 
+def _process_memory_mb(pid: int) -> float | None:
+    """Resident set size for a worker, in MB. Reads /proc directly (Linux
+    only, stdlib-only) rather than adding psutil as a dependency — matches
+    this module's "stdlib + yaml only" constraint (see module docstring).
+    Returns None if unreadable (process gone, no /proc, permission denied)."""
+    try:
+        with open(f"/proc/{pid}/status", "r", encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    kb = int(line.split()[1])
+                    return round(kb / 1024, 1)
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
+def _system_info() -> dict:
+    """CPU core count and total/available system memory, for capacity
+    planning alongside per-worker memory_mb — e.g. deciding compute_pools
+    sizing or whether OLLAMA_NUM_PARALLEL has real headroom. /proc/meminfo
+    only (Linux), same stdlib-only reasoning as _process_memory_mb."""
+    info: dict = {"cpu_count": os.cpu_count()}
+    try:
+        with open("/proc/meminfo", "r", encoding="utf-8") as f:
+            fields = {}
+            for line in f:
+                if line.startswith(("MemTotal:", "MemAvailable:")):
+                    key, val = line.split(":", 1)
+                    fields[key] = round(int(val.split()[0]) / 1024, 1)
+            info["memory_total_mb"] = fields.get("MemTotal")
+            info["memory_available_mb"] = fields.get("MemAvailable")
+    except (OSError, ValueError, IndexError):
+        info["memory_total_mb"] = None
+        info["memory_available_mb"] = None
+    return info
+
+
 class ResourceManager:
     """Tracks named compute pools — one pool per hardware unit that can hold
     exactly one resident model at a time ("local GPU, 3 concurrent calls",
@@ -377,9 +414,9 @@ class Supervisor:
 
     def stop_all(self) -> None:
         # Ensures a full `kill <supervisor-pid>` (not just Ctrl+C) still tears
-        # down every worker (and, transitively, anything they spawned, like a
-        # graphify run) instead of leaving them orphaned — see main()'s signal
-        # handling, which routes both SIGINT and SIGTERM through this method.
+        # down every worker (and, transitively, anything they spawned) instead
+        # of leaving them orphaned — see main()'s signal handling, which
+        # routes both SIGINT and SIGTERM through this method.
         self._stop_event.set()
         for w in self.workers.values():
             w.stop()
@@ -437,10 +474,12 @@ def _make_handler(supervisor: Supervisor):
                         "pid": w.proc.pid if w.proc else None,
                         "alive": w.is_alive(),
                         "restart_count": w.restart_count,
+                        "memory_mb": _process_memory_mb(w.proc.pid) if w.proc and w.is_alive() else None,
                     }
                     for name, w in supervisor.workers.items()
                 }
                 status["resources"] = supervisor.resources.status()
+                status["system"] = _system_info()
                 self._json(200, status)
             else:
                 self._json(404, {"error": "not found"})
@@ -486,6 +525,7 @@ def main(
     api_port: int = 8765,
     web_port: int = 8766,
     chroma_port: int = 8767,
+    kg_port: int = 8768,
     supervisor_port: int = 8760,
     reload: bool = False,
 ) -> None:
@@ -501,12 +541,11 @@ def main(
 
     workers = {
         # Longer stop_timeout: the api process's own graceful shutdown cascades
-        # through several steps (stream scheduler, chroma indexer, graphify
-        # indexer — which itself waits up to 5s to terminate a subprocess) before
+        # through several steps (stream scheduler, chroma indexer) before
         # uvicorn actually exits. A short outer timeout here would SIGKILL it
         # before that finishes, orphaning whatever it was still cleaning up.
         "api": Worker("api", api_cmd, stop_timeout=10.0,
-                      env={"PRISMA_SUPERVISOR_PORT": str(supervisor_port)}),
+                      env={"PRISMA_SUPERVISOR_PORT": str(supervisor_port), "PRISMA_KG_PORT": str(kg_port)}),
         "web": Worker("web", [_venv_bin("uvicorn"), "prisma.server.web_app:app", "--host", host, "--port", str(web_port)]),
         "chroma": Worker("chroma", [
             _venv_bin("chroma"), "run",
@@ -514,6 +553,16 @@ def main(
             "--host", "127.0.0.1",  # loopback only, regardless of the API/Web bind host
             "--port", str(chroma_port),
         ]),
+        # Owns the sole Kùzu connection (see knowledge_graph_service.py's
+        # module docstring — only one process may ever hold that database
+        # open) and does all LLM extraction itself, isolated from the api
+        # process: a native-extension crash here doesn't take REST/WebSocket
+        # down with it, it can be restarted independently, and its CPU work
+        # (semchunk splitting, JSON parsing, Cypher upserts) runs on its own
+        # core instead of competing with api's event loop. Longer stop_timeout
+        # since a single extraction call can run up to 120s.
+        "kg": Worker("kg", [_venv_bin("uvicorn"), "prisma.server.kg_app:app", "--host", host, "--port", str(kg_port)],
+                     stop_timeout=15.0, env={"PRISMA_SUPERVISOR_PORT": str(supervisor_port)}),
     }
     resources = ResourceManager(*_load_compute_pools())
 
@@ -524,14 +573,14 @@ def main(
     http_thread = threading.Thread(target=http_server.serve_forever, daemon=True, name="supervisor-http")
     http_thread.start()
     log.info("control API on http://127.0.0.1:%d", supervisor_port)
-    log.info("API on http://%s:%d  Web on http://%s:%d", host, api_port, host, web_port)
+    log.info("API on http://%s:%d  Web on http://%s:%d  KG on http://%s:%d", host, api_port, host, web_port, host, kg_port)
 
     # A plain `kill <pid>` sends SIGTERM, which Python does not turn into a
     # catchable KeyboardInterrupt by default — without this handler, only
     # Ctrl+C would trigger stop_all(), and SIGTERM would skip cleanup entirely,
-    # orphaning every worker (and transitively their own children, like a
-    # graphify run). preexec_fn's PR_SET_PDEATHSIG is the last-resort backstop
-    # for the even-more-abrupt SIGKILL case, which no signal handler can catch.
+    # orphaning every worker (and transitively their own children). preexec_fn's
+    # PR_SET_PDEATHSIG is the last-resort backstop for the even-more-abrupt
+    # SIGKILL case, which no signal handler can catch.
     def _handle_sigterm(signum, frame):
         raise KeyboardInterrupt
 

@@ -10,7 +10,7 @@ what was found in prior runs. The stream is the only entity in Prisma that drive
 discovery.
 
 Streams are stored as `.yaml` files in `vault/streams/`. They are vault nodes (`NodeType.stream`)
-but are deliberately not `.md` files — Graphify indexes only markdown, and stream metadata
+but are deliberately not `.md` files — the knowledge graph indexer indexes only markdown, and stream metadata
 should not pollute the knowledge graph.
 
 ## Fields

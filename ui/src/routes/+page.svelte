@@ -6,11 +6,16 @@
     online: boolean;
     config: { ok: boolean; error: string | null };
     pending_jobs: number;
-    graphify: { state: GState; last_indexed: string | null; last_error?: string | null };
-    chroma?: { chunks: number; files_indexed: number; model: string } | null;
+    knowledge_graph: { state: GState; last_indexed: string | null; last_error?: string | null; current_activity?: string | null };
+    chroma?: { chunks: number; files_indexed: number; model: string; current_activity?: string | null } | null;
     vault?: { root: string; notes: number; sources: number; chats: number; streams: number };
     zotero?: { mode: string; available: boolean } | null;
     ollama?: { reachable: boolean } | null;
+    processes?: {
+      [worker: string]: { pid: number | null; alive: boolean; restart_count: number; memory_mb: number | null };
+    } & {
+      system?: { cpu_count: number | null; memory_total_mb: number | null; memory_available_mb: number | null };
+    };
   }
 
   interface NodeMeta {
@@ -186,8 +191,8 @@
   let hoverExpandTimer: ReturnType<typeof setTimeout> | null = null;
   let activeNode = $state<RenderedNode | null>(null);
   let serverOnline = $state(false);
-  let graphifyState = $state<GState | null>(null);
-  let graphifyLastIndexed = $state<string | null>(null);
+  let kgState = $state<GState | null>(null);
+  let kgLastIndexed = $state<string | null>(null);
   let serverStatus = $state<ServerStatus | null>(null);
   let statusPopoverOpen = $state(false);
   let searchQuery = $state("");
@@ -464,8 +469,8 @@
       const s: ServerStatus = await r.json();
       serverOnline = true;
       serverStatus = s;
-      graphifyState = s.graphify?.state ?? null;
-      graphifyLastIndexed = s.graphify?.last_indexed ?? null;
+      kgState = s.knowledge_graph?.state ?? null;
+      kgLastIndexed = s.knowledge_graph?.last_indexed ?? null;
       if (!wasOnline) {
         await Promise.all([loadTree(), loadHome(), loadStreams(), loadChats(), loadZoteroStatus()]);
       } else {
@@ -839,9 +844,9 @@
         class="gdot-btn"
         class:offline={!serverOnline}
         class:error={serverOnline && !serverStatus?.config?.ok}
-        class:indexing={serverOnline && serverStatus?.config?.ok && graphifyState === "indexing"}
-        class:stale={serverOnline && serverStatus?.config?.ok && graphifyState === "stale"}
-        class:idle={serverOnline && serverStatus?.config?.ok && graphifyState === "idle"}
+        class:indexing={serverOnline && serverStatus?.config?.ok && kgState === "indexing"}
+        class:stale={serverOnline && serverStatus?.config?.ok && kgState === "stale"}
+        class:idle={serverOnline && serverStatus?.config?.ok && kgState === "idle"}
         onclick={() => statusPopoverOpen = !statusPopoverOpen}
         title="System status"
       ></button>
@@ -892,20 +897,23 @@
             {/if}
 
             <div class="sp-section">
-              <span class="sp-label">Graphify</span>
+              <span class="sp-label">Knowledge graph</span>
               <span class="sp-val"
-                class:ok={graphifyState === "idle"}
-                class:warn={graphifyState === "stale"}
-                class:info={graphifyState === "indexing"}
+                class:ok={kgState === "idle"}
+                class:warn={kgState === "stale"}
+                class:info={kgState === "indexing"}
               >
-                {graphifyState ?? "—"}
-                {#if graphifyLastIndexed && graphifyState === "idle"}
-                  · {new Date(graphifyLastIndexed).toLocaleTimeString()}
+                {kgState ?? "—"}
+                {#if kgLastIndexed && kgState === "idle"}
+                  · {new Date(kgLastIndexed).toLocaleTimeString()}
                 {/if}
               </span>
             </div>
-            {#if serverStatus.graphify?.last_error}
-              <div class="sp-error">{serverStatus.graphify.last_error}</div>
+            {#if serverStatus.knowledge_graph?.last_error}
+              <div class="sp-error">{serverStatus.knowledge_graph.last_error}</div>
+            {/if}
+            {#if serverStatus.knowledge_graph?.current_activity}
+              <div class="sp-vault-root">{serverStatus.knowledge_graph.current_activity}</div>
             {/if}
 
             {#if serverStatus.chroma}
@@ -916,6 +924,9 @@
                 </span>
               </div>
               <div class="sp-vault-root">{serverStatus.chroma.model}</div>
+              {#if serverStatus.chroma.current_activity}
+                <div class="sp-vault-root">{serverStatus.chroma.current_activity}</div>
+              {/if}
             {/if}
 
             {#if serverStatus.zotero}
@@ -935,6 +946,29 @@
                 <span class="sp-label">Jobs</span>
                 <span class="sp-val warn">{serverStatus.pending_jobs} pending</span>
               </div>
+            {/if}
+
+            {#if serverStatus.processes}
+              <div class="sp-section">
+                <span class="sp-label">Processes</span>
+                <span class="sp-val">
+                  {#if serverStatus.processes.system}
+                    {serverStatus.processes.system.cpu_count} cores
+                    {#if serverStatus.processes.system.memory_available_mb != null}
+                      · {Math.round(serverStatus.processes.system.memory_available_mb / 1024 * 10) / 10}GB free
+                      / {Math.round((serverStatus.processes.system.memory_total_mb ?? 0) / 1024 * 10) / 10}GB
+                    {/if}
+                  {/if}
+                </span>
+              </div>
+              {#each Object.entries(serverStatus.processes).filter(([k]) => k !== "system") as [name, proc]}
+                {#if proc && typeof proc === "object" && "pid" in proc}
+                  <div class="sp-proc-row">
+                    <span class="sp-proc-name" class:bad={!proc.alive}>{name}</span>
+                    <span class="sp-proc-mem">{proc.memory_mb != null ? `${proc.memory_mb}MB` : "—"}</span>
+                  </div>
+                {/if}
+              {/each}
             {/if}
           {/if}
         </div>
@@ -1367,10 +1401,10 @@
         {/each}
       {/if}
     </div>
-    {#if serverStatus?.graphify && serverStatus.graphify.state !== "idle"}
+    {#if serverStatus?.knowledge_graph && serverStatus.knowledge_graph.state !== "idle"}
       <div class="deep-notice">
-        {#if serverStatus.graphify.state === "indexing"}
-          {#if serverStatus.graphify.last_indexed}
+        {#if serverStatus.knowledge_graph.state === "indexing"}
+          {#if serverStatus.knowledge_graph.last_indexed}
             Re-indexing — results based on previous graph.
           {:else}
             Building graph index for the first time — showing text matches only.
@@ -1748,6 +1782,25 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  .sp-proc-row {
+    display: flex;
+    justify-content: space-between;
+    padding: 2px 12px 2px 88px;
+    font-size: 10px;
+    font-family: "JetBrains Mono", monospace;
+  }
+
+  .sp-proc-name {
+    color: #4a6a8a;
+  }
+  .sp-proc-name.bad {
+    color: #f87171;
+  }
+
+  .sp-proc-mem {
+    color: #1a3050;
   }
 
   .format-toggle {

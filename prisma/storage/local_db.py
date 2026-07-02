@@ -5,9 +5,9 @@ past state without coupling to other components.
 
 Usage:
     db = LocalDB()
-    db.set("graphify:mtimes:/vault", "sources/paper.md", 1234567890.1)
-    db.get("graphify:mtimes:/vault", "sources/paper.md")  # → 1234567890.1
-    db.get_namespace("graphify:mtimes:/vault")             # → {key: value, ...}
+    db.set("knowledge_graph:mtimes:/vault", "sources/paper.md", 1234567890.1)
+    db.get("knowledge_graph:mtimes:/vault", "sources/paper.md")  # → 1234567890.1
+    db.get_namespace("knowledge_graph:mtimes:/vault")             # → {key: value, ...}
 """
 from __future__ import annotations
 

@@ -343,12 +343,13 @@ def sync():
 @click.option("--port", default=8765, show_default=True, help="API port")
 @click.option("--web-port", default=8766, show_default=True, help="Web (UI) port")
 @click.option("--chroma-port", default=8767, show_default=True, help="ChromaDB server port")
+@click.option("--kg-port", default=8768, show_default=True, help="Knowledge graph server port")
 @click.option("--supervisor-port", default=8760, show_default=True, help="Supervisor control port (loopback only)")
 @click.option("--reload", is_flag=True, help="Auto-reload the API on code changes (dev only)")
-def serve(host: str, port: int, web_port: int, chroma_port: int, supervisor_port: int, reload: bool):
-    """Start Prisma: a supervisor process managing the API, Web, and ChromaDB
-    server processes independently (see ADR-012). A crash in any one of them
-    no longer takes down the others."""
+def serve(host: str, port: int, web_port: int, chroma_port: int, kg_port: int, supervisor_port: int, reload: bool):
+    """Start Prisma: a supervisor process managing the API, Web, ChromaDB, and
+    knowledge graph server processes independently (see ADR-012). A crash in
+    any one of them no longer takes down the others."""
     try:
         import uvicorn  # noqa: F401 — validated here for a clearer error message
     except ImportError:
@@ -357,7 +358,7 @@ def serve(host: str, port: int, web_port: int, chroma_port: int, supervisor_port
     click.echo(f"Starting Prisma — API http://{host}:{port}  Web http://{host}:{web_port}")
     supervisor_main(
         host=host, api_port=port, web_port=web_port,
-        chroma_port=chroma_port, supervisor_port=supervisor_port, reload=reload,
+        chroma_port=chroma_port, kg_port=kg_port, supervisor_port=supervisor_port, reload=reload,
     )
 
 

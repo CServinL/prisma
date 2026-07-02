@@ -93,8 +93,8 @@ retrieval:
   embedding_model: "nomic-embed-text"  # Ollama model used for vault embeddings
   ollama_base_url: "http://localhost:11434"  # WSL: use Windows host IP
 
-# ── Graphify (knowledge graph) ────────────────────────────────────────────────
-graphify:
+# ── Knowledge graph — native KnowledgeGraphService (Kùzu-backed) ─────────────
+kg:
   index_extensions: [".md", ".txt"]   # file types included in the graph index
 ```
 

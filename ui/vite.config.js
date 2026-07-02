@@ -4,6 +4,7 @@ import { SvelteKitPWA } from "@vite-pwa/sveltekit";
 import fs from "fs";
 import path from "path";
 
+/** @param {string} dir @returns {string[]} */
 function findSvelteFiles(dir) {
   const results = [];
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
@@ -18,6 +19,7 @@ function findSvelteFiles(dir) {
 // before the parent .svelte is compiled, it returns undefined and Vite serves the
 // raw .svelte file as CSS, breaking PostCSS. Pre-warming all .svelte files on
 // server start ensures the cache is populated before any CSS request arrives.
+/** @type {import('vite').Plugin} */
 const svelteCssCacheMissGuard = {
   name: "svelte-css-cache-miss-guard",
   enforce: "pre",

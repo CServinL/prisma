@@ -39,6 +39,31 @@ def test_status_returns_empty_dict_when_unreachable():
     assert result == {}
 
 
+def test_process_status_returns_worker_and_system_fields():
+    mock_resp = MagicMock()
+    mock_resp.raise_for_status.return_value = None
+    mock_resp.json.return_value = {
+        "api": {"pid": 1, "alive": True, "restart_count": 0, "memory_mb": 42.0},
+        "kg": {"pid": 2, "alive": True, "restart_count": 0, "memory_mb": 88.5},
+        "resources": {"default": {"capacity": 1, "in_use": 0, "leases": []}},
+        "system": {"cpu_count": 8, "memory_total_mb": 16000.0, "memory_available_mb": 8000.0},
+    }
+    with patch("prisma.services.resource_lock.requests.get", return_value=mock_resp):
+        result = resource_lock.process_status("127.0.0.1", 8760)
+
+    assert "resources" not in result
+    assert result["api"]["memory_mb"] == 42.0
+    assert result["kg"]["memory_mb"] == 88.5
+    assert result["system"]["cpu_count"] == 8
+
+
+def test_process_status_returns_empty_dict_when_unreachable():
+    with patch("prisma.services.resource_lock.requests.get", side_effect=requests.ConnectionError("down")):
+        result = resource_lock.process_status("127.0.0.1", 8760)
+
+    assert result == {}
+
+
 def test_lease_yields_true_and_releases_on_success():
     with patch("prisma.services.resource_lock.acquire", return_value=(True, "default", "req-1")) as mock_acquire, \
          patch("prisma.services.resource_lock.release") as mock_release:

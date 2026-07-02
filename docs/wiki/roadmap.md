@@ -35,14 +35,28 @@ Core pipeline is working:
 ## Phase 2 — Conversational Chat & On-Demand Knowledge Graphs
 
 - **Chat** — ask Prisma questions about your vault (papers, notes, sources). Answers
-  are grounded via ChromaDB semantic retrieval + Graphify context, synthesized by the
-  local LLM (Ollama), with citations back to source notes. Chat sessions are saved to
-  the vault (`chats/` — already modeled in `VaultService`, currently always empty
+  are grounded via ChromaDB semantic retrieval + knowledge-graph context (see
+  Graphify replacement below), synthesized by the local LLM (Ollama), with
+  citations back to source notes. Chat sessions are saved to the vault
+  (`chats/` — already modeled in `VaultService`, currently always empty
   since no chat UI exists yet).
+- **Replace Graphify with a native, Kùzu-backed knowledge graph module** —
+  Graphify (the third-party pip package currently doing entity/relationship
+  extraction) is being dropped: its `graph.json` flat-file store has no
+  incremental upsert (whole-file reparse per query, hand-rolled JSON-list
+  merges), and its per-file chunking has a hard ceiling — a single large
+  document (e.g. a dense paper) that alone exceeds the model's token budget
+  has no further recovery path and silently returns a truncated extraction
+  forever (see `docs/ollama-concurrency.md` and the investigation that led
+  to this decision). Prisma only ever exercised a narrow slice of Graphify's
+  surface anyway (no code-AST extraction — the vault has no code files);
+  replacing that slice with a purpose-built module is more tractable than
+  continuing to patch around the third-party package's limitations. See
+  `TODO.md` for the full feature-parity checklist and migration plan.
 - **Knowledge graphs from chat context** — ask Prisma to generate a knowledge graph
-  for a chat's subject. Graphify already builds a knowledge graph internally to
-  re-rank search results (`GraphifyService`, `graphify-out/`); this exposes that
-  capability as a user-facing artifact scoped to a specific topic/conversation,
+  for a chat's subject. The replacement module (above) builds this internally to
+  re-rank search results; this exposes that capability as a user-facing artifact
+  scoped to a specific topic/conversation,
   rather than only an internal search index.
 
 ---

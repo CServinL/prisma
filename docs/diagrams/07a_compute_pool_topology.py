@@ -18,14 +18,11 @@ tp = SystemMap(title="prisma — compute-pool topology")
 
 tp.group("Callers",  color="#0ea5e9", label="Three independent Ollama callers")
 tp.group("Arbiter",  color="#f43f5e", label="Supervisor")
-tp.group("OnDemand", color="#f59e0b", label="Request-scoped (not supervised)")
 tp.group("Backend",  color="#10b981", label="Shared LLM/embedding backend")
 
-tp.add_component("chroma_embeds",     label="ChromaIndexer embed calls",     layer="callers",  group="Callers",  tech="model=nomic-embed-text — inside API process")
-tp.add_component("analysis_agent",    label="AnalysisAgent LLM calls",       layer="callers",  group="Callers",  tech="model=llm_config.model — inside API process")
-tp.add_component("graphify_launcher", label="GraphifyIndexer._run_graphify",layer="callers",  group="Callers",  tech="holds lease for the whole run, ~2h ceiling")
-
-tp.add_component("graphify_proc",     label="Graphify subprocess",           layer="ondemand", group="OnDemand", tech="spawned only after lease is granted")
+tp.add_component("chroma_embeds",     label="ChromaIndexer embed calls",     layer="callers",  group="Callers",  tech='model=nomic-embed-text — inside API process, holder="api"')
+tp.add_component("analysis_agent",    label="AnalysisAgent LLM calls",       layer="callers",  group="Callers",  tech='model=llm_config.model — inside API process, holder="api"')
+tp.add_component("kg_proc",           label="Knowledge graph server",        layer="callers",  group="Callers",  tech='its own supervised process (kg_app.py), holder="kg" — per-section extraction')
 
 tp.add_component("resource_mgr",      label="ResourceManager",               layer="arbiter",  group="Arbiter",  tech="named pools, model_affinity, contention stats (granted/denied_capacity/denied_model_busy)")
 
@@ -33,12 +30,11 @@ tp.add_component("ollama",            label="Ollama",                        lay
 
 tp.connect("chroma_embeds",     "resource_mgr", label="resource_lock.lease()")
 tp.connect("analysis_agent",    "resource_mgr", label="resource_lock.lease()")
-tp.connect("graphify_launcher", "resource_mgr", label="resource_lock.lease()")
-tp.connect("graphify_launcher", "graphify_proc",label="spawn (holds lease)", style="dashed")
+tp.connect("kg_proc",           "resource_mgr", label="resource_lock.lease()")
 
 tp.connect("chroma_embeds",     "ollama",       label="embed calls")
 tp.connect("analysis_agent",    "ollama",       label="generate calls")
-tp.connect("graphify_proc",     "ollama",       label="generate calls")
+tp.connect("kg_proc",           "ollama",       label="extract calls (per section)")
 
 tp.save(str(OUT))
 print(f"[sysatlas] wrote {OUT}")

@@ -3,9 +3,9 @@
 ## What it is
 
 A **GraphNode** is a vault node ([Source](source.md), [Note](note.md), [Chat](chat.md))
-represented as a vertex in the knowledge graph maintained by Graphify.
+represented as a vertex in the knowledge graph maintained by the knowledge graph indexer (`KnowledgeGraphService`).
 
-Graphify indexes all `.md` files in the vault and extracts DSL links ([WikiLink](wiki-link.md),
+The knowledge graph indexer indexes all `.md` files in the vault and extracts DSL links ([WikiLink](wiki-link.md),
 [Transclusion](transclusion.md), [Citation](citation.md)) as directed edges between nodes.
 It also derives implicit edges from co-authorship, co-citation, and semantic similarity.
 
@@ -39,7 +39,7 @@ The graph is used for:
 
 ## Relevant axioms
 
-> Graphify re-indexes on save. See [Axiom 8](../ontologia.md).
+> The knowledge graph indexer re-indexes on save. See [Axiom 8](../ontologia.md).
 
 ## Not yet implemented
 

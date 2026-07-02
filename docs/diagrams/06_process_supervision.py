@@ -17,7 +17,6 @@ tp = SystemMap(title="prisma — process topology")
 tp.group("CLI",        color="#6366f1", label="prisma serve")
 tp.group("Supervisor", color="#f43f5e", label="Supervisor (:8760) — stdlib only")
 tp.group("Workers",    color="#0ea5e9", label="Supervised workers")
-tp.group("OnDemand",   color="#f59e0b", label="Request-scoped (not supervised)")
 
 tp.add_component("cli",          label="prisma serve",       layer="cli",     group="CLI",        tech="click command")
 tp.add_component("supervisor",   label="Supervisor",          layer="sup",     group="Supervisor", tech="subprocess.Popen + monitor loop + ResourceManager")
@@ -26,16 +25,16 @@ tp.add_component("control_api",  label="Control API",         layer="sup",     g
 tp.add_component("api_proc",     label="API process",         layer="workers", group="Workers",    tech=":8765 — prisma.server.app")
 tp.add_component("web_proc",     label="Web process",         layer="workers", group="Workers",    tech=":8766 — prisma.server.web_app")
 tp.add_component("chroma_proc",  label="ChromaDB server",     layer="workers", group="Workers",    tech=":8767 — chroma run")
-
-tp.add_component("graphify_proc",label="Graphify subprocess", layer="ondemand",group="OnDemand",   tech="spawned by API's GraphifyIndexer, per run, only after a compute-pool lease is granted")
+tp.add_component("kg_proc",      label="Knowledge graph server", layer="workers", group="Workers", tech=":8768 — prisma.server.kg_app (Kùzu, sole connection)")
 
 tp.connect("cli",        "supervisor",   label="launches")
 tp.connect("supervisor", "control_api",  label="exposes")
 tp.connect("supervisor", "api_proc",     label="spawn + monitor")
 tp.connect("supervisor", "web_proc",     label="spawn + monitor")
 tp.connect("supervisor", "chroma_proc",  label="spawn + monitor")
-tp.connect("api_proc",   "graphify_proc",label="spawns on demand (lease-gated)", style="dashed")
+tp.connect("supervisor", "kg_proc",      label="spawn + monitor")
 tp.connect("api_proc",   "chroma_proc",  label="HttpClient (vector storage/query)")
+tp.connect("api_proc",   "kg_proc",      label="HTTP (KnowledgeGraphClient)")
 
 # ── View 2: Failure handling ───────────────────────────────────────────────────
 fl = SystemMap(title="prisma — failure & recovery paths")

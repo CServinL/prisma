@@ -20,15 +20,17 @@ prisma/                        # repo root
 │   │       ├── desktop_client.py  # Desktop-specific operations
 │   │       └── unified_client.py  # Common interface all clients implement
 │   ├── server/
-│   │   ├── supervisor.py          # Process supervisor — spawns/monitors api, web, chroma (ADR-012)
+│   │   ├── supervisor.py          # Process supervisor — spawns/monitors api, web, chroma, kg (ADR-012)
 │   │   ├── app.py                 # API process — REST + WebSocket, no UI mount
 │   │   ├── web_app.py             # Web process — serves ui/build/ at /app, dev watcher
+│   │   ├── kg_app.py              # Knowledge graph process — owns the sole Kùzu connection
 │   │   ├── static.py              # CleanUrlStaticFiles — shared by app.py and web_app.py
-│   │   └── log_setup.py           # Rotating log files per concern (server, chroma, ollama…)
+│   │   └── log_setup.py           # Rotating log files per concern (server, chroma, kg, ollama…)
 │   ├── services/
 │   │   ├── vault.py               # Vault CRUD: notes, sources, chats, streams
 │   │   ├── zotero_service.py      # Zotero integration (offline/online)
-│   │   ├── graphify_service.py    # Graphify knowledge graph indexer (watchdog + Ollama)
+│   │   ├── knowledge_graph_service.py  # Native Kùzu-backed knowledge graph indexer (watchdog + Ollama, per-section) — runs inside kg_app.py
+│   │   ├── knowledge_graph_client.py   # Thin HTTP client app.py uses to reach kg_app.py
 │   │   ├── chroma_service.py      # ChromaDB semantic index (watchdog + nomic-embed-text)
 │   │   └── research_stream_manager.py  # Stream lifecycle management
 │   ├── storage/
@@ -119,6 +121,7 @@ backoff), or on request via its control API.
 | API | `8765` | REST + WebSocket (`prisma.server.app`) |
 | Web | `8766` | Serves the built UI at `/app` (`prisma.server.web_app`) |
 | ChromaDB | `8767` (loopback only) | Standalone `chroma run` server — not embedded |
+| Knowledge graph | `8768` (loopback only) | `prisma.server.kg_app` — owns the sole Kùzu connection, does all LLM extraction |
 
 ### Supervisor control API
 
@@ -140,7 +143,7 @@ backoff), or on request via its control API.
 | Method | Path | Purpose |
 |--------|------|---------|
 | GET | `/health` | Liveness check |
-| GET | `/status` | Config, vault stats, Graphify state, ChromaDB state, Zotero, Ollama reachability |
+| GET | `/status` | Config, vault stats, knowledge graph state, ChromaDB state, Zotero, Ollama reachability |
 | GET | `/logs` | Tail a log file (`?concern=server\|chroma\|ollama\|activity\|stream&slug=…`) |
 | GET | `/notes` | List vault notes (filterable by type) |
 | GET | `/notes/{slug}` | Fetch and render a note (HTML or raw) |
@@ -151,27 +154,33 @@ backoff), or on request via its control API.
 | GET | `/streams/{slug}/view` | Render a stream as HTML (stream YAML → RenderedNode) |
 | GET | `/tree` | Vault directory tree |
 | GET | `/search` | Fast text search (in-memory index, OR scoring with title boost) |
-| GET | `/search/deep` | Semantic search via ChromaDB + Graphify re-ranking |
+| GET | `/search/deep` | Semantic search via ChromaDB + knowledge graph re-ranking |
 | GET | `/home` | Render the vault home/dashboard note |
 | POST | `/render` | Render arbitrary markdown to HTML |
-| POST | `/graphify/taint` | Force full re-index of knowledge graph |
+| POST | `/knowledge-graph/taint` | Force full re-index of knowledge graph |
+| POST | `/knowledge-graph/drop` | Drop the entire knowledge graph, forcing a full reindex from scratch |
 | GET | `/vault/assets/{path}` | Serve vault static assets |
-| POST | `/reload` | Reinitialize vault, Zotero, Graphify, ChromaDB client (in-process state, not a restart) |
+| POST | `/reload` | Reinitialize vault, Zotero, knowledge graph, ChromaDB client (in-process state, not a restart) |
 | POST | `/reload/vault` | Reinitialize VaultService from config |
 | POST | `/reload/zotero` | Reinitialize Zotero client |
-| POST | `/reload/indexer` | Restart Graphify indexer |
+| POST | `/reload/indexer` | Restart knowledge graph indexer |
 | POST | `/reload/chroma` | Rebuild the ChromaDB client (reconnects to the Chroma server process) |
 | GET | `/ws` | WebSocket — server push events (`vault_change`, `stream_progress`) |
 
 ## Background Services
 
-Three daemon threads start in the **API process**:
+Two daemon threads start in the **API process**:
 
 | Service | What it does |
 |---------|--------------|
-| Graphify indexer | Watchdog on vault root; on change, spawns a subprocess that extracts knowledge-graph nodes via Ollama and persists to `graphify-out/`. Retries every 60 s if Ollama is unreachable. The subprocess runs in its own session so it isn't killed by a signal sent to the API process — the indexer's `stop()` terminates it deliberately (SIGTERM, escalating to SIGKILL) instead. |
 | ChromaDB indexer | Watchdog on vault root; on change, embeds changed `.md` files via `nomic-embed-text` and upserts into the ChromaDB **server process** (`chromadb.HttpClient`, not embedded — see ADR-012) at `{vault_root}/chromadb/`. Skips files whose mtime hasn't changed since the last upsert, even if a spurious filesystem event re-queues them. |
 | Stream scheduler | Polls every 5 min; runs active streams whose `next_update` is past. |
+
+One daemon thread starts in the **Knowledge graph process** (`kg_app.py`, its own supervised worker — see ADR-012's follow-up section):
+
+| Service | What it does |
+|---------|--------------|
+| Knowledge graph indexer | Watchdog on vault root; on change, extracts entities/relationships via Ollama **per section** (chunked with `semchunk`, token-budget-aware — not per-file, so no single oversized document can exceed the model's budget) and upserts into an embedded Kùzu graph DB at `{vault_root}/kg-out/`. Owns the sole Kùzu connection for the process's lifetime. `app.py` talks to it over HTTP via `KnowledgeGraphClient`. Replaces the third-party `graphify` dependency — see `TODO.md`. |
 
 One daemon thread starts in the **Web process**:
 
@@ -179,13 +188,13 @@ One daemon thread starts in the **Web process**:
 |---------|--------------|
 | UI watcher | Polls `ui/src/` mtime hash every 1 s. When source changes, debounces 500 ms, runs `npm run build` in `ui/`, then increments the dev version counter (exposed via `GET /ui/dev/version`). Only active when `ui/src/` exists (dev environment). |
 
-Both indexers wait 20 s after startup before the initial full scan, so the API process is responsive immediately.
+Both indexers wait 20 s after their process starts before the initial full scan, so that process is responsive immediately.
 
 ## Search Strategy
 
 **Regular search (`GET /search`):** keyword scoring against an in-memory mtime-keyed index. Files are stat'd on every request; only files whose mtime changed are re-read from disk. Scoring: each matching term +1.0, title match +4.0, all-terms match (AND bonus) +3.0. Returns up to 30 results sorted by score.
 
-**Deep search (`GET /search/deep`):** ChromaDB semantic query (top 60 chunks) → file-level best-chunk scoring → Graphify node titles used for title-boost re-ranking → top 20 results. Slower but semantics-aware.
+**Deep search (`GET /search/deep`):** ChromaDB semantic query (top 60 chunks) → file-level best-chunk scoring → knowledge graph node titles used for title-boost re-ranking → top 20 results. Slower but semantics-aware.
 
 ## Key Design Decisions
 

@@ -56,10 +56,10 @@ _t("importing renderer")
 from prisma.services.renderer import render as vault_render
 _t("renderer ok")
 
-_t("importing graphify_service")
-from prisma.services.graphify_service import GraphifyIndexer
+_t("importing knowledge_graph_client")
+from prisma.services.knowledge_graph_client import KnowledgeGraphClient
 from prisma.services import resource_lock
-_t("graphify_service ok")
+_t("knowledge_graph_client ok")
 
 _t("importing chroma_service")
 from prisma.services.chroma_service import ChromaIndexer
@@ -131,28 +131,15 @@ def _build_zotero() -> ZoteroService:
         return ZoteroService(mode=ZoteroMode.offline)
 
 
-def _ollama_model() -> str:
+def _kg_port() -> int:
+    """Knowledge graph worker's port — set by the supervisor when it spawns
+    the api process, so this client talks to the same kg instance even if
+    --kg-port was customized. ollama_model/index_extensions config resolution
+    now lives in kg_app.py itself (that process owns extraction), not here."""
     try:
-        import yaml
-        cfg_path = Path.home() / ".config" / "prisma" / "config.yaml"
-        cfg = yaml.safe_load(cfg_path.read_text()) or {}
-        return cfg.get("llm", {}).get("model", "qwen2.5-graphify:7b")
-    except Exception:
-        return "qwen2.5-graphify:7b"
-
-
-def _index_extensions() -> tuple[str, ...]:
-    from prisma.services.graphify_service import DEFAULT_INDEX_EXTENSIONS
-    try:
-        import yaml
-        cfg_path = Path.home() / ".config" / "prisma" / "config.yaml"
-        cfg = yaml.safe_load(cfg_path.read_text()) or {}
-        exts = cfg.get("graphify", {}).get("index_extensions")
-        if exts and isinstance(exts, list):
-            return tuple(e if e.startswith(".") else f".{e}" for e in exts)
-    except Exception:
-        pass
-    return DEFAULT_INDEX_EXTENSIONS
+        return int(os.environ.get("PRISMA_KG_PORT", "8768"))
+    except ValueError:
+        return 8768
 
 
 def _build_chroma(vault: "VaultService") -> ChromaIndexer:
@@ -172,9 +159,7 @@ _t("building vault")
 _vault = VaultService(vault_root=_resolve_vault_root())
 _t(f"vault root: {_vault.root}")
 _t("building indexer")
-_indexer = GraphifyIndexer(_vault, ollama_model=_ollama_model(),
-                           index_extensions=_index_extensions(),
-                           supervisor_port=resource_lock.default_port())
+_indexer = KnowledgeGraphClient(port=_kg_port())
 _t("building chroma")
 _chroma = _build_chroma(_vault)
 _t("building zotero")
@@ -360,7 +345,7 @@ def reload_zotero():
 def reload_indexer():
     global _indexer
     _indexer.stop()
-    _indexer = GraphifyIndexer(_vault, ollama_model=_ollama_model(), index_extensions=_index_extensions(), supervisor_port=resource_lock.default_port())
+    _indexer = KnowledgeGraphClient(port=_kg_port())
     _indexer.start()
     return {"status": "reloaded"}
 
@@ -381,7 +366,7 @@ def reload_server():
     _chroma.stop()
     _vault = VaultService(vault_root=_resolve_vault_root())
     _zotero = _build_zotero()
-    _indexer = GraphifyIndexer(_vault, ollama_model=_ollama_model(), index_extensions=_index_extensions(), supervisor_port=resource_lock.default_port())
+    _indexer = KnowledgeGraphClient(port=_kg_port())
     _chroma = _build_chroma(_vault)
     _indexer.start()
     _chroma.start()
@@ -442,18 +427,19 @@ def status():
         "online": connectivity.is_online,
         "config": {"ok": config_ok, "error": config_error},
         "pending_jobs": sum(1 for j in _jobs.values() if j["status"] in ("pending", "running")),
-        "graphify": _indexer.status(),
+        "knowledge_graph": _indexer.status(),
         "chroma": _chroma.status(),
         "vault": vault_stats,
         "zotero": zotero_info,
         "ollama": {"reachable": _indexer._ollama_ready()},
         "resources": resource_lock.status("127.0.0.1", resource_lock.default_port()),
+        "processes": resource_lock.process_status("127.0.0.1", resource_lock.default_port()),
     }
 
 
 @app.get("/logs")
 def get_logs(
-    concern: str = Query("server", description="server|access|maintenance|ollama|activity|chroma|supervisor|stream"),
+    concern: str = Query("server", description="server|access|maintenance|ollama|activity|chroma|kg|supervisor|stream"),
     slug: Optional[str] = Query(None, description="stream slug (required when concern=stream)"),
     n: int = Query(200, ge=1, le=5000),
 ):
@@ -465,6 +451,7 @@ def get_logs(
         "ollama": lp.ollama,
         "activity": lp.activity,
         "chroma": lp.chroma,
+        "kg": lp.kg,
         "supervisor": lp.supervisor,
     }
     if concern == "stream":
@@ -482,16 +469,16 @@ def get_logs(
         return {"path": str(log_path), "lines": [], "total": 0}
 
 
-@app.post("/graphify/taint")
-def graphify_taint():
+@app.post("/knowledge-graph/taint")
+def knowledge_graph_taint():
     """Mark the index stale so the next cycle re-indexes changed files."""
     _indexer.mark_stale()
     return {"status": "stale"}
 
 
-@app.post("/graphify/drop")
-def graphify_drop():
-    """Drop all tracked mtimes and graph.json, forcing a full reindex from scratch."""
+@app.post("/knowledge-graph/drop")
+def knowledge_graph_drop():
+    """Drop the entire Kùzu graph and tracked manifest, forcing a full reindex from scratch."""
     _indexer.drop_index()
     return {"status": "dropped"}
 

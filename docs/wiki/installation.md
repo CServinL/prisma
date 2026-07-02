@@ -101,7 +101,7 @@ Pull the required models (once, after install and after each Ollama upgrade):
 | Model | Purpose |
 |---|---|
 | `ollama pull llama3.1:8b` | Default LLM for analysis and chat |
-| `ollama pull qwen2.5-graphify:7b` | Knowledge graph extraction (Graphify) |
+| `ollama pull prisma-kg:7b` | Knowledge graph extraction |
 | `ollama pull nomic-embed-text` | Semantic embeddings (ChromaDB vector search) |
 
 > **Upgrade note:** after `pip install --upgrade prisma`, re-run `ollama pull nomic-embed-text` if the configured embedding model changes — check `retrieval.embedding_model` in `config.yaml`.

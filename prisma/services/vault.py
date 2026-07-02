@@ -15,8 +15,8 @@ from prisma.storage.models.vault_models import (
 # Recognised companion file extensions stored alongside a .md source node.
 COMPANION_EXTS = (".pdf", ".html", ".htm", ".svg", ".epub", ".docx")
 
-# Directories that are never part of the vault (graphify output, VCS, hidden).
-_SKIP_DIRS = {".graphify-out", ".git", ".svn", "__pycache__", "node_modules", ".venv", "venv", "dist", "build"}
+# Directories that are never part of the vault (graph indexer output, VCS, hidden).
+_SKIP_DIRS = {"graphify-out", "kg-out", ".git", ".svn", "__pycache__", "node_modules", ".venv", "venv", "dist", "build"}
 
 
 def _slugify(name: str) -> str:
@@ -459,7 +459,7 @@ class VaultService:
             n += 1
         return slug
 
-    # ── Streams (stored as .yaml — graphify skips non-.md files) ─────────────
+    # ── Streams (stored as .yaml — the knowledge graph indexer skips non-.md files) ─
 
     def _find_stream_path(self, slug: str) -> Path | None:
         slug_norm = _file_slug(slug).lower()

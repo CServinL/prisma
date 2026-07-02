@@ -1,9 +1,9 @@
 """Client helper for the supervisor's compute-pool leases (see
 prisma.server.supervisor.ResourceManager and ADR-012).
 
-Any code about to do LLM/embedding/AI work — Graphify's extraction subprocess,
-ChromaDB's embedding calls, and eventually chat — should acquire a lease
-before starting and release it when done. Pools are named and capacity-
+Any code about to do LLM/embedding/AI work — the knowledge graph indexer's
+extraction calls, ChromaDB's embedding calls, and eventually chat — should
+acquire a lease before starting and release it when done. Pools are named and capacity-
 limited (e.g. "local Ollama, 1 concurrent call" vs "remote Ollama, 12
 concurrent calls") — the caller doesn't pick a pool, the supervisor grants
 whichever has a free slot; the operator defines pools and their concurrency
@@ -89,6 +89,25 @@ def status(host: str, port: int, timeout: float = 3.0) -> dict:
         return resp.json().get("resources", {})
     except requests.RequestException:
         _log.warning("supervisor unreachable at %s:%d — resource status unavailable", host, port)
+        return {}
+
+
+def process_status(host: str, port: int, timeout: float = 3.0) -> dict:
+    """Per-worker pid/alive/restart_count/memory_mb plus system-wide
+    cpu_count/memory_total_mb/memory_available_mb, straight from the
+    supervisor — same fail-open spirit as status()/acquire(): returns {} if
+    the supervisor isn't reachable, for surfacing on the api process's
+    /status endpoint without hitting the supervisor's loopback-only control
+    port directly. Useful for capacity planning (compute_pools sizing,
+    whether OLLAMA_NUM_PARALLEL has real headroom) alongside the resource
+    contention stats status() already exposes."""
+    try:
+        resp = requests.get(f"http://{host}:{port}/supervisor/status", timeout=timeout)
+        resp.raise_for_status()
+        data = resp.json()
+        return {k: v for k, v in data.items() if k != "resources"}
+    except requests.RequestException:
+        _log.warning("supervisor unreachable at %s:%d — process status unavailable", host, port)
         return {}
 
 

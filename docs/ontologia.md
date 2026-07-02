@@ -49,7 +49,7 @@ The key separation:
 | Internet / library | raw academic papers | external APIs | SearchAgent |
 | Zotero library | bookmarks of discovered papers | streams (automatic) | user, streams |
 | Zotero collection | papers accepted by ONE stream | stream run | user |
-| Vault | things you actively work with | user (via import) | Graphify, Chat |
+| Vault | things you actively work with | user (via import) | Knowledge graph indexer, Chat |
 
 ---
 
@@ -86,10 +86,10 @@ The key separation:
 | **Vault import** | `POST /zotero/import/{key}` → `ZoteroItem` + optional PDF → `Source` (.md + companion) |
 | **Literature review** | topic → `SearchAgent` → `AnalysisAgent` → `ReportAgent` → `LiteratureReviewReport` → `Note` |
 | **DSL rendering** | markdown body → resolve `WikiLink` / `Transclusion` / `Citation` → HTML (server-side, before display) |
-| **Graphify indexing** | any vault write → `GraphifyIndexer.mark_stale()` → background re-index → `GraphNode` graph |
+| **Knowledge graph indexing** | any vault write → `KnowledgeGraphService.mark_stale()` → background re-index → `GraphNode` graph |
 | **Note promotion** | chat excerpt selected by user → new `Note` (back-linked via `promoted_from_chat`) |
 | **Stream scheduling** | `_StreamScheduler` daemon checks every 5 min; runs any `Stream` where `next_update ≤ now` and `status == active` and `refresh_frequency != manual` |
-| **docu-craft conversion** | companion file (PDF, HTML, …) → docu-craft → `.md` body for Graphify + HTML view for UI |
+| **docu-craft conversion** | companion file (PDF, HTML, …) → docu-craft → `.md` body for the knowledge graph indexer + HTML view for UI |
 
 ### Stream run — per-candidate pipeline (detailed)
 
@@ -146,11 +146,11 @@ Rules that are always true. Not preferences — invariants.
 
 7. **Transclusion depth ≤ 5.** Guards against circular embeds crashing the renderer.
 
-8. **Graphify re-indexes on save.** After any `Note` or `Source` write, `mark_stale()` is called — the graph is always fresh within one cycle.
+8. **The knowledge graph indexer re-indexes on save.** After any `Note` or `Source` write, `mark_stale()` is called — the graph is always fresh within one cycle.
 
 9. **`slug` is stable.** Once assigned, a node's slug never changes — all DSL links remain valid.
 
-10. **Every `Source` has a `.md`; the companion is optional.** The `.md` is always created (manually or via docu-craft). It is what Graphify indexes and what DSL links point to. The companion (`.pdf`, `.html`, `.svg`, …) is the original rich format for human reading.
+10. **Every `Source` has a `.md`; the companion is optional.** The `.md` is always created (manually or via docu-craft). It is what the knowledge graph indexer indexes and what DSL links point to. The companion (`.pdf`, `.html`, `.svg`, …) is the original rich format for human reading.
 
 11. **Every `Source` has a `zotero_key`.** Sources enter the vault only via Zotero import. The key is the permanent back-link to the `ZoteroItem`.
 

@@ -14,6 +14,7 @@ class LogPaths(BaseModel):
     ollama: Path
     activity: Path
     chroma: Path
+    kg: Path
     supervisor: Path
     streams_dir: Path
 
@@ -59,6 +60,7 @@ def configure(level: int = logging.INFO) -> LogPaths:
         ("prisma.ollama", "ollama.log"),
         ("prisma.activity", "activity.log"),
         ("prisma.chroma", "chroma.log"),
+        ("prisma.knowledge_graph", "kg.log"),
     ]:
         lgr = logging.getLogger(name)
         lgr.propagate = True
@@ -79,6 +81,7 @@ def configure(level: int = logging.INFO) -> LogPaths:
         ollama=base / "ollama.log",
         activity=base / "activity.log",
         chroma=base / "chroma.log",
+        kg=base / "kg.log",
         # Written by the supervisor process itself (prisma.server.supervisor),
         # not by this configure() — that process deliberately doesn't import
         # this module (which pulls in pydantic) to stay stdlib + yaml only.

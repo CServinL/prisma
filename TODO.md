@@ -20,23 +20,40 @@ This file is the working checklist.
 
 ## What prisma actually uses today (must keep working)
 
-- [ ] **Semantic extraction**: LLM-based entity/relationship extraction from
-      `.md` docs/papers and images → nodes, edges, hyperedges. (Code-AST
-      extraction is explicitly *not* in scope — unused, vault has no code.)
-- [ ] **`ranked_nodes(question, top_k)`** (`graphify_service.py`) — term-match
-      + one-hop neighbor-expansion, ranks source files by relevance. Used by
-      `/search`'s graph-backed path.
-- [ ] **`query(question, budget)`** — compact textual summary of the most
-      relevant graph neighborhood, fed as LLM context. Used by
-      `ollama_deep_search()`.
-- [ ] **`ollama_deep_search()`** — merges graph-based file ranking with
-      ChromaDB's embedding ranking (max score per file), asks the LLM for a
-      final relevance re-rank. Must keep working against the new backend
-      with no behavior change from the caller's perspective.
-- [ ] **Incremental re-extraction** — only changed files get re-processed
-      (Graphify's own semantic cache did this; the new module needs an
-      equivalent, ideally simpler given a real DB with per-note upsert).
-- [ ] **GPU/LLM resource-lock integration** — the new extraction module still
+Status 2026-07-01: `prisma/services/knowledge_graph_service.py` (new module,
+`KnowledgeGraphService`) implements all of the below at MVP/deliberately
+basic level — schema, per-section extraction, incremental re-extraction,
+resource_lock integration, and thin compatibility wrappers
+(`ranked_nodes`/`query`/`ollama_deep_search`/`drop_index`/`_ollama_ready`)
+matching `GraphifyIndexer`'s public shape so `app.py`'s call sites need no
+changes beyond construction. 268 tests passing
+(`tests/unit/services/test_knowledge_graph_service.py`).
+
+- [x] **Semantic extraction**: LLM-based entity/relationship extraction from
+      `.md` docs/papers → nodes, edges. **Gap not yet closed: images are not
+      handled** — the old `DEFAULT_INDEX_EXTENSIONS` included
+      `.png/.jpg/.jpeg/.webp/.gif` for vision-model extraction; the new
+      module's `_all_md_files()`-based scan only covers `.md`. Separate,
+      smaller follow-up, not blocking this cutover. (Code-AST extraction is
+      explicitly *not* in scope — unused, vault has no code.)
+- [x] **`ranked_nodes(question, top_k)`** — thin wrapper over the new
+      module's own basic `search()` (term-match only, no neighbor-expansion
+      proximity weighting yet — that refinement is explicitly deferred).
+      Used by `/search`'s graph-backed path, no call-site changes needed.
+- [x] **`query(question, budget)`** — compact textual summary, simpler than
+      Graphify's BFS-token-budgeted graph-context text (just a scored file
+      list for now). Used by `ollama_deep_search()`.
+- [x] **`ollama_deep_search()`** — merges graph-based file ranking with
+      ChromaDB's embedding ranking (max score per file). **Simplification
+      vs. the old version: the final LLM-based relevance re-rank step was
+      dropped for this MVP** — results are score-merged only, not
+      re-ranked by an LLM pass. Still returns ranked results, just with
+      less sophistication. Worth adding back once the deferred
+      ranked_nodes/surprising_connections work is picked up.
+- [x] **Incremental re-extraction** — content-hash-based manifest (simpler
+      than Graphify's own semantic cache, given real per-note upsert instead
+      of hand-rolled JSON-list merging).
+- [x] **GPU/LLM resource-lock integration** — the new extraction module still
       calls Ollama, so it still needs to go through `resource_lock.lease()`
       exactly like Graphify does today (same holder, same `local-ollama`
       pool, same `model_affinity` behavior — see ADR-012).
@@ -49,6 +66,25 @@ This file is the working checklist.
       single file can ever be "too big to extract." Each section's nodes/
       edges get upserted independently — no whole-document atomicity
       requirement, no bisection-recursion needed.
+- [x] **Extraction invocation model — resolved differently than first
+      planned, and better.** Originally sized as "subprocess spawned by api,
+      stateless, results piped back for api to upsert." Superseded 2026-07-01:
+      `KnowledgeGraphService` now runs in its own supervised **process**
+      (`kg_app.py`, a 4th worker alongside api/web/chroma), not a
+      request-scoped subprocess spawned by api. It owns the sole persistent
+      Kùzu connection for that process's entire lifetime and does extraction
+      itself — no IPC needed to get nodes/edges back to a separate writer,
+      since the process holding the connection *is* the one doing the
+      extracting. This gives the same crash isolation Graphify's subprocess
+      model had (a wedged/crashed Kùzu call no longer takes api's
+      REST/WebSocket traffic down with it) plus more: independent restart,
+      and its own CPU core for extraction work instead of competing with
+      api's event loop. `app.py` talks to it via `KnowledgeGraphClient`
+      (`prisma/services/knowledge_graph_client.py`), a thin HTTP client
+      matching `KnowledgeGraphService`'s exact method names — zero further
+      call-site changes. Resource-lock holder is `"kg"` now, not `"api"` —
+      critical for `release_all_held_by("kg")` to fire correctly if this
+      worker crashes/restarts.
 
 ## Unused Graphify capability we explicitly want to gain (chat module)
 
@@ -114,12 +150,34 @@ actually picked up, not now.
 
 ## Storage
 
-- [ ] Pick Kùzu as the embedded graph store (decided — no server process,
+- [x] Pick Kùzu as the embedded graph store (decided — no server process,
       real Cypher-like traversal, no JVM/ops tax; see the Neo4j vs. Kùzu vs.
       SQLite discussion this file's history was born from).
+- [x] **Kùzu concurrency model verified 2026-07-01** (was the top blocking
+      question): only one process may hold a database open at all — a
+      `READ_WRITE` connection locks out *every* other Database object in any
+      other process, including `READ_ONLY` ones (`RuntimeError: Could not
+      set lock on file`, confirmed empirically with two local processes, not
+      just from docs). Kùzu's own docs recommend an API-server pattern for
+      true multi-process access — same lesson ADR-012 already applied to
+      ChromaDB.
+      **Resolution**: this is not a blocker for prisma's actual architecture
+      — only the `api` worker process ever needs graph access (web/chroma
+      workers don't touch it). Design: **one persistent `READ_WRITE`
+      connection, opened once at `api` process startup, held for the process
+      lifetime, closed at shutdown** — no separate supervised Kùzu server
+      needed, unlike ChromaDB.
+      **Practical consequence worth remembering**: no external tool/script
+      can open the graph DB file directly (even read-only) while `prisma
+      serve`'s api process is running — it'll hit the same lock error. Any
+      inspection/debug tooling must go through the api process's own HTTP
+      endpoints, not open the Kùzu file path directly. Don't rediscover this
+      the hard way later.
 - [ ] Schema: nodes (id, label, file_type, source_file, source_location,
-      source_url, captured_at, author, contributor) and edges (source,
-      target, relation, confidence, confidence_score, weight) — same shape
+      source_url, captured_at, author, contributor, **trust_tier** —
+      source/note/chat, new field not in Graphify's old schema, see the
+      "Chat trust tiers" section below) and edges (source, target, relation,
+      confidence, confidence_score, weight) — same conceptual shape
       Graphify's JSON used, so migration of the *concept* is straightforward;
       only the storage/query mechanics change.
 - [ ] One-time migration path for any existing `graphify-out/graph.json` —

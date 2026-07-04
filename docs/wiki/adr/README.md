@@ -14,3 +14,5 @@ Each ADR documents a significant design decision: what was decided, why, and wha
 | [ADR-008](ADR-008-enhanced-zotero-integration.md) | Enhanced Zotero Integration | Active |
 | [ADR-009](ADR-009-hybrid-retrieval-architecture.md) | Hybrid Retrieval — Graphify + ChromaDB (Graphify since replaced, see follow-up) | Evolved |
 | [ADR-013](ADR-013-native-knowledge-graph.md) | Native Knowledge Graph — Replacing Graphify with Kùzu | Accepted |
+| [ADR-014](ADR-014-chat-llm-backend-interface.md) | Chat Module's LLM Backend Interface — `openai` SDK, multi-`base_url` | Accepted |
+| [ADR-015](ADR-015-chat-excerpt-context-model.md) | Chat Excerpt & Context Model — one Excerpt per chat, compressed vs. verbatim pinning by backend context budget | Accepted |

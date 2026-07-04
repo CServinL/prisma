@@ -70,7 +70,7 @@ def test_lease_yields_true_and_releases_on_success():
         with resource_lock.lease("127.0.0.1", 8760, holder="api") as granted:
             assert granted is True
 
-    mock_acquire.assert_called_once_with("127.0.0.1", 8760, "api", None, model=None)
+    mock_acquire.assert_called_once_with("127.0.0.1", 8760, "api", None, model=None, pool=None, priority="background")
     mock_release.assert_called_once_with("127.0.0.1", 8760, "default", "req-1")
 
 
@@ -114,7 +114,18 @@ def test_lease_passes_model_through_to_acquire():
         with resource_lock.lease("127.0.0.1", 8760, holder="api", model="qwen2.5:7b") as granted:
             assert granted is True
 
-    mock_acquire.assert_called_once_with("127.0.0.1", 8760, "api", None, model="qwen2.5:7b")
+    mock_acquire.assert_called_once_with("127.0.0.1", 8760, "api", None, model="qwen2.5:7b", pool=None, priority="background")
+
+
+def test_lease_passes_explicit_pool_through_to_acquire():
+    with patch("prisma.services.resource_lock.acquire", return_value=(True, "cloud_api", "req-1")) as mock_acquire, \
+         patch("prisma.services.resource_lock.release"):
+        with resource_lock.lease("127.0.0.1", 8760, holder="api", model="anthropic/claude-3.5-sonnet", pool="cloud_api") as granted:
+            assert granted is True
+
+    mock_acquire.assert_called_once_with(
+        "127.0.0.1", 8760, "api", None, model="anthropic/claude-3.5-sonnet", pool="cloud_api", priority="background",
+    )
 
 
 def test_lease_releases_even_if_body_raises():

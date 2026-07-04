@@ -100,9 +100,42 @@ Pull the required models (once, after install and after each Ollama upgrade):
 
 | Model | Purpose |
 |---|---|
-| `ollama pull llama3.1:8b` | Default LLM for analysis and chat |
-| `ollama pull prisma-kg:7b` | Knowledge graph extraction |
+| `ollama pull llama3.1:8b` | Default LLM for analysis (`analysis_agent.py`) |
+| `ollama pull qwen2.5:7b` | Base model `prisma-llm:7b` is built from below |
 | `ollama pull nomic-embed-text` | Semantic embeddings (ChromaDB vector search) |
+
+`prisma-llm:7b` — used for both knowledge graph extraction and chat — is
+**not** on the Ollama registry: it's `qwen2.5:7b` with `num_ctx` pinned to
+32768 via a custom Modelfile (no re-download, shares the same weights).
+32768 is not a tuning choice — it's Qwen2.5-7B's actual architectural
+maximum context length; Ollama silently clamps any higher `num_ctx` rather
+than erroring, so setting a bigger number doesn't get you more context, it
+just lies to you about what's really in effect. (Knowledge graph extraction
+and chat originally ran as two separate tags, `prisma-kg:7b` and
+`prisma-chat:7b`, on the mistaken belief they needed different `num_ctx`
+values — merged once it became clear both were silently clamped to the
+same 32768 ceiling anyway.)
+
+```bash
+ollama cp qwen2.5:7b prisma-llm:7b
+ollama show prisma-llm:7b --modelfile > /tmp/prisma-llm.modelfile
+echo 'PARAMETER num_ctx 32768' >> /tmp/prisma-llm.modelfile
+ollama create prisma-llm:7b -f /tmp/prisma-llm.modelfile
+```
+
+Verify the real, enforced context after creating it — don't trust
+`ollama show --modelfile` alone, it only echoes back what you configured,
+not what's actually loaded:
+
+```bash
+curl -s http://localhost:11434/api/generate -d '{"model":"prisma-llm:7b","prompt":"hi","options":{"num_predict":1}}' >/dev/null
+curl -s http://localhost:11434/api/ps | python3 -c "import json,sys; print(json.load(sys.stdin)['models'][0]['context_length'])"
+# should print 32768 — if it's lower, the model's own architecture caps below that
+```
+
+See ADR-013 and ADR-014's appendix for the full VRAM/concurrency
+measurements behind these numbers, and the correction once the 65536
+claim turned out to be wrong.
 
 > **Upgrade note:** after `pip install --upgrade prisma`, re-run `ollama pull nomic-embed-text` if the configured embedding model changes — check `retrieval.embedding_model` in `config.yaml`.
 

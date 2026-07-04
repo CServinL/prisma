@@ -47,9 +47,9 @@ def _ollama_model() -> str:
         import yaml
         cfg_path = Path.home() / ".config" / "prisma" / "config.yaml"
         cfg = yaml.safe_load(cfg_path.read_text()) or {}
-        return cfg.get("llm", {}).get("model", "prisma-kg:7b")
+        return cfg.get("llm", {}).get("model", "prisma-llm:7b")
     except Exception:
-        return "prisma-kg:7b"
+        return "prisma-llm:7b"
 
 
 def _index_extensions() -> tuple[str, ...]:
@@ -66,8 +66,38 @@ def _index_extensions() -> tuple[str, ...]:
     return DEFAULT_INDEX_EXTENSIONS
 
 
+def _extraction_concurrency() -> int:
+    try:
+        import yaml
+        cfg_path = Path.home() / ".config" / "prisma" / "config.yaml"
+        cfg = yaml.safe_load(cfg_path.read_text()) or {}
+        return int(cfg.get("kg", {}).get("extraction_concurrency", 3))
+    except Exception:
+        return 3
+
+
+def _token_budget() -> int:
+    # See docs/kg-extraction-context-length.md — a controlled test on real
+    # paper content found the previous default (8000) produced ~10x fewer
+    # unique entities and ~4x fewer relationships than chunking the same
+    # content at ~2000 tokens per section, not just marginally worse.
+    try:
+        import yaml
+        cfg_path = Path.home() / ".config" / "prisma" / "config.yaml"
+        cfg = yaml.safe_load(cfg_path.read_text()) or {}
+        return int(cfg.get("kg", {}).get("token_budget", 2000))
+    except Exception:
+        return 2000
+
+
 _vault = VaultService(vault_root=_resolve_vault_root())
-_kg = KnowledgeGraphService(_vault, ollama_model=_ollama_model(), index_extensions=_index_extensions())
+_kg = KnowledgeGraphService(
+    _vault,
+    ollama_model=_ollama_model(),
+    index_extensions=_index_extensions(),
+    extraction_concurrency=_extraction_concurrency(),
+    token_budget=_token_budget(),
+)
 
 
 @asynccontextmanager
@@ -102,6 +132,17 @@ def mark_stale():
 def drop_index():
     _kg.drop_index()
     return {"status": "dropped"}
+
+
+@app.post("/taint_file")
+def taint_file(rel: str = Query(...)):
+    tainted = _kg.taint_file(rel)
+    return {"tainted": tainted}
+
+
+@app.get("/entities_for_file")
+def entities_for_file(rel: str = Query(...)):
+    return _kg.entities_for_file(rel)
 
 
 @app.get("/search")

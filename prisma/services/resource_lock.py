@@ -47,7 +47,7 @@ def default_port() -> int:
 
 def acquire(
     host: str, port: int, holder: str, lease_timeout: float | None = None, timeout: float = 3.0,
-    model: str | None = None,
+    model: str | None = None, pool: str | None = None, priority: str = "background",
 ) -> tuple[bool, str | None, str | None]:
     """Returns (proceed, resource, request_id). `resource` + `request_id` are
     what release() needs later; both are None if there was nothing to
@@ -60,11 +60,21 @@ def acquire(
     than the one currently resident is denied rather than granted, since
     running it would evict the other and defeat the point of a "concurrent"
     lease; the caller's normal retry/backoff naturally waits for that pool to
-    drain instead."""
+    drain instead. `pool` requests a *specific* named pool (e.g. a cloud
+    backend that must never share a lease with a model_affinity'd local GPU
+    pool, even though the server would otherwise auto-select whichever pool
+    has free capacity) — omit to let the supervisor pick. `priority`:
+    "interactive" for a live user request (chat) that must never queue
+    behind bulk background work, or "background" (the default) for
+    automated/bulk work (kg extraction, chroma embedding) — see
+    ResourceManager.acquire for what this actually changes."""
     try:
         resp = requests.post(
             f"http://{host}:{port}/supervisor/resources/acquire",
-            json={"holder": holder, "pid": os.getpid(), "timeout": lease_timeout, "model": model},
+            json={
+                "holder": holder, "pid": os.getpid(), "timeout": lease_timeout,
+                "model": model, "resource": pool, "priority": priority,
+            },
             timeout=timeout,
         )
     except requests.RequestException:
@@ -127,7 +137,7 @@ def release(host: str, port: int, resource: str | None, request_id: str | None, 
 @contextmanager
 def lease(
     host: str, port: int, holder: str, lease_timeout: float | None = None, max_wait: float = 10.0,
-    model: str | None = None,
+    model: str | None = None, pool: str | None = None, priority: str = "background",
 ):
     """Context manager wrapping acquire -> yield granted -> release, so
     callers don't hand-roll the same try/finally. A denied acquire (pool at
@@ -148,10 +158,18 @@ def lease(
     Always pass `model` when the call is going to a specific model — it's
     what lets the supervisor tell "3 concurrent calls to the same model"
     (fine, batch them) apart from "2 tasks that need different models"
-    (must serialize, since only one model's weights fit at a time).
+    (must serialize, since only one model's weights fit at a time). Pass
+    `pool` when the caller must land on one *specific* named pool rather
+    than "whichever has free capacity" — e.g. a cloud backend that must
+    never be auto-routed into a model_affinity'd local-GPU pool, which
+    would otherwise misattribute the cloud model as that GPU's resident
+    model and start denying real local Ollama calls for no hardware reason.
+    Pass `priority="interactive"` for a live user request (chat) that must
+    never queue behind bulk background work — leave the "background"
+    default for automated/bulk callers (kg extraction, chroma embedding).
     """
     proceed, resource, request_id = backoff.retry_with_backoff(
-        lambda: acquire(host, port, holder, lease_timeout, model=model),
+        lambda: acquire(host, port, holder, lease_timeout, model=model, pool=pool, priority=priority),
         is_success=lambda result: result[0],
         max_wait=max_wait,
     )

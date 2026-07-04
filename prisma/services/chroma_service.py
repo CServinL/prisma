@@ -98,7 +98,7 @@ class ChromaIndexer:
                 if event.is_directory:
                     return
                 path = Path(str(event.src_path))
-                if any(p in path.parts for p in ("chromadb", "kg-out", "graphify-out", "streams")):
+                if any(p in path.parts for p in ("chromadb", "kg-out", "graphify-out", "streams", "chats")):
                     return
                 if path.name.startswith("."):
                     return
@@ -146,6 +146,21 @@ class ChromaIndexer:
     def _set_activity(self, activity: str | None) -> None:
         with self._lock:
             self._current_activity = activity
+
+    def taint_file(self, rel_path: str) -> bool:
+        """Force one specific file to be re-embedded on the next incremental
+        cycle, without touching the rest of the index. Removes its manifest
+        entry (an unchanged file's mtime would otherwise still match, and
+        _upsert_file skips it) and enqueues it directly rather than waiting
+        for a real filesystem event or the next full rescan. Returns False
+        if the file doesn't exist in the vault."""
+        path = self._vault.root / rel_path
+        if not path.exists():
+            return False
+        with self._lock:
+            self._manifest.pop(rel_path, None)
+            self._pending.add(path)
+        return True
 
     # ── Query ─────────────────────────────────────────────────────────────────
 
@@ -216,33 +231,54 @@ class ChromaIndexer:
                 pending = self._pending.copy()
                 self._pending.clear()
             if pending:
-                _log.info("chroma incremental update: %d files flagged by watcher", len(pending))
-                dirty = False
-                upserted = 0
-                # One lease covers the whole batch rather than one per file — HTTP
-                # round-trips to the supervisor are cheap per-batch, not per-embed.
-                with resource_lock.lease(self._supervisor_host, self._supervisor_port, holder=_RESOURCE_HOLDER, model=self._model) as granted:
-                    for path in pending:
-                        if path.exists():
-                            self._set_activity(f"embedding {path.name}")
-                            changed = self._upsert_file(path) if granted else False
-                            dirty |= changed
-                            upserted += changed
-                        else:
-                            dirty |= self._delete_file(path)
-                if not granted:
-                    _log.warning("chroma incremental update skipped: no compute lease available")
-                elif upserted == 0:
-                    # Watchdog fires on any filesystem event, not just real content
-                    # changes (e.g. a metadata-only touch, common on WSL2) — the
-                    # mtime-equality guard in _upsert_file correctly no-ops these,
-                    # but that's silent by default, which looks like a stuck/never-
-                    # finishing reindex if you're only watching this log.
-                    _log.info("chroma incremental update: no real content change — watcher false-positive, nothing re-embedded")
-                if dirty:
-                    self._save_manifest()
-                self._set_activity(None)
+                self._process_incremental(pending)
             self._stop_event.wait(timeout=60)
+
+    def _process_incremental(self, pending: set[Path]) -> None:
+        _log.info("chroma incremental update: %d files flagged by watcher", len(pending))
+        dirty = False
+        upserted = 0
+        # Deletions need no Ollama call at all, so they must not be gated
+        # behind the embed lease — a deleted file's tracking was previously
+        # lost whenever the lease happened to be busy, even though there was
+        # never any real contention for it.
+        to_embed = []
+        for path in pending:
+            if path.exists():
+                to_embed.append(path)
+            else:
+                dirty |= self._delete_file(path)
+        # One lease covers the whole batch rather than one per file — HTTP
+        # round-trips to the supervisor are cheap per-batch, not per-embed.
+        granted = True
+        if to_embed:
+            with resource_lock.lease(self._supervisor_host, self._supervisor_port, holder=_RESOURCE_HOLDER, model=self._model) as granted:
+                if granted:
+                    for path in to_embed:
+                        self._set_activity(f"embedding {path.name}")
+                        changed = self._upsert_file(path)
+                        dirty |= changed
+                        upserted += changed
+        if not granted:
+            # Re-queue rather than silently dropping — a real bug this
+            # closes: files that changed while the pool was busy would
+            # otherwise never be retried unless they changed again.
+            _log.warning(
+                "chroma incremental update: %d file(s) skipped — no compute lease "
+                "available, will retry next cycle", len(to_embed),
+            )
+            with self._lock:
+                self._pending.update(to_embed)
+        elif upserted == 0 and to_embed:
+            # Watchdog fires on any filesystem event, not just real content
+            # changes (e.g. a metadata-only touch, common on WSL2) — the
+            # mtime-equality guard in _upsert_file correctly no-ops these,
+            # but that's silent by default, which looks like a stuck/never-
+            # finishing reindex if you're only watching this log.
+            _log.info("chroma incremental update: no real content change — watcher false-positive, nothing re-embedded")
+        if dirty:
+            self._save_manifest()
+        self._set_activity(None)
 
     def _probe_model(self) -> bool:
         """Return False and log an actionable warning if the embedding model is not available."""
@@ -269,7 +305,14 @@ class ChromaIndexer:
                 return
             if not self._probe_model():
                 return
-            all_files = list(self._vault._all_md_files())
+            # Chats are excluded from the vault-wide semantic index — unlike the
+            # knowledge graph, ChromaDB's metadata has no trust_tier field to
+            # filter by at query time, so this is the only place that can keep
+            # chat transcripts out of search_vault's results.
+            all_files = [
+                p for p in self._vault._all_md_files()
+                if "chats" not in p.relative_to(self._vault.root).parts
+            ]
             _log.info("chroma full index start: %d files total", len(all_files))
             dirty = False
             for i, path in enumerate(all_files):

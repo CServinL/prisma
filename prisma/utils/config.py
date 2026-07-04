@@ -50,7 +50,7 @@ class ZoteroConfig(BaseModel):
 class LLMConfig(BaseModel):
     """LLM configuration"""
     provider: str = Field("ollama", description="LLM provider")
-    model: str = Field("llama3.1:8b", description="Model name")
+    model: str = Field("prisma-llm:7b", description="Model name")
     host: str = Field("localhost:11434", description="Host and port")
     max_concurrent_inferences: int = Field(1, ge=1, le=16, description="Max simultaneous Ollama requests")
 
@@ -58,6 +58,39 @@ class LLMConfig(BaseModel):
     def base_url(self) -> str:
         """Generate base URL for API calls"""
         return f"http://{self.host}"
+
+
+class ChatConfig(BaseModel):
+    """Chat module LLM backend configuration (ADR-014: openai SDK, multi-base_url)."""
+    provider: str = Field("ollama", description="ollama | openrouter | anthropic")
+    model: str = Field("prisma-llm:7b", description="Model name for the chosen provider")
+    base_url: Optional[str] = Field(
+        None, description="Override the provider's default base_url; None derives it from provider"
+    )
+    api_key_env: Optional[str] = Field(
+        None, description="Name of the environment variable holding the API key (None for local Ollama)"
+    )
+    pool: str = Field(
+        "local-ollama",
+        description="compute_pools entry this backend's calls lease from — must match a name in compute_pools",
+    )
+    context_window: int = Field(
+        32768,
+        description=(
+            "This backend's real usable context window (verified via /api/ps's context_length "
+            "for Ollama, not a claimed/configured value — see ADR-013's follow-up section on why "
+            "that distinction matters). Drives ADR-015's compressed-vs-verbatim Excerpt mode: a "
+            "small window (today's local prisma-llm:7b) needs pinned turns compressed into a "
+            "Summary; a large one (a future cloud backend) can afford to keep them verbatim."
+        ),
+    )
+
+    @field_validator('provider')
+    @classmethod
+    def validate_provider(cls, v):
+        if v not in ('ollama', 'openrouter', 'anthropic'):
+            raise ValueError('provider must be "ollama", "openrouter", or "anthropic"')
+        return v
 
 
 class OutputConfig(BaseModel):
@@ -156,6 +189,7 @@ class PrismaConfig(BaseModel):
 
     sources: SourcesConfig = Field(default_factory=lambda: SourcesConfig())
     llm: LLMConfig = Field(default_factory=lambda: LLMConfig())
+    chat: ChatConfig = Field(default_factory=lambda: ChatConfig())
     output: OutputConfig = Field(default_factory=lambda: OutputConfig())
     search: SearchConfig = Field(default_factory=lambda: SearchConfig())
     analysis: AnalysisConfig = Field(default_factory=lambda: AnalysisConfig())
@@ -255,6 +289,9 @@ class ConfigLoader:
     
     def get_retrieval_config(self) -> RetrievalConfig:
         return self.config.retrieval
+
+    def get_chat_config(self) -> ChatConfig:
+        return self.config.chat
 
     def has_zotero_credentials(self) -> bool:
         """Check if Zotero API credentials are configured."""

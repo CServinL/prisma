@@ -8,8 +8,8 @@ from typing import Iterator
 import yaml
 
 from prisma.storage.models.vault_models import (
-    Chat, Note, NodeType, Source, Stream, StreamStatus, RefreshFrequency,
-    VaultListing, VaultNodeMeta, VaultTreeNode,
+    Chat, ChatMessage, ChatRole, Note, NodeType, Source, Stream, StreamStatus,
+    RefreshFrequency, ToolCallRecord, VaultListing, VaultNodeMeta, VaultTreeNode,
 )
 
 # Recognised companion file extensions stored alongside a .md source node.
@@ -76,6 +76,57 @@ def _parse_frontmatter(body: str) -> tuple[dict, str]:
 
 def _render_frontmatter(fm: dict) -> str:
     return "---\n" + yaml.dump(fm, default_flow_style=False, allow_unicode=True) + "---\n\n"
+
+
+# Chat transcripts are stored as plain markdown (no database, no HTML) —
+# role is carried by a heading per turn so any plain markdown viewer still
+# renders a readable transcript; the app parses on these headings to style
+# turns differently (user vs. assistant) at render time.
+_CHAT_ROLE_HEADING = {ChatRole.user: "You", ChatRole.assistant: "Prisma"}
+_CHAT_HEADING_ROLE = {v: k for k, v in _CHAT_ROLE_HEADING.items()}
+_CHAT_TURN_RE = re.compile(r"^### (You|Prisma)\s*$\n(.*?)(?=^### (?:You|Prisma)\s*$|\Z)", re.MULTILINE | re.DOTALL)
+_CHAT_TOOL_LINE_RE = re.compile(r"^>\s*(?:🔧\s*)?used\s*`([a-zA-Z0-9_]+)`:\s*(.*)$", re.MULTILINE)
+
+
+def _render_chat_body(messages: list[ChatMessage]) -> str:
+    parts = []
+    for msg in messages:
+        heading = _CHAT_ROLE_HEADING[msg.role]
+        parts.append(f"### {heading}\n")
+        for tc in msg.tool_calls:
+            parts.append(f"> used `{tc.tool}`: {tc.args.get('query', '')}\n")
+        if msg.tool_calls:
+            parts.append("\n")
+        parts.append(f"{msg.content}\n\n")
+    return "".join(parts)
+
+
+def _render_excerpt_body(summary: str | None, raw_turns: list[ChatMessage]) -> str:
+    """Summary on top (verbatim mode: omitted — see ADR-015's mode switch),
+    verbatim pinned turns below, each its own heading + block (same
+    `### You`/`### Prisma` convention _render_chat_body uses for the main
+    transcript, separated by a rule) rather than run together — see
+    VaultService.save_excerpt."""
+    parts = [f"## Summary\n\n{summary.strip()}\n\n## Pinned turns\n"] if summary is not None else ["## Pinned turns\n"]
+    for i, msg in enumerate(raw_turns):
+        heading = _CHAT_ROLE_HEADING[msg.role]
+        if i > 0:
+            parts.append("\n---\n")
+        parts.append(f"\n### {heading}\n\n{msg.content}\n")
+    return "".join(parts)
+
+
+def _parse_chat_body(body: str) -> list[ChatMessage]:
+    messages: list[ChatMessage] = []
+    for heading, turn_body in _CHAT_TURN_RE.findall(body):
+        role = _CHAT_HEADING_ROLE[heading]
+        tool_calls = [
+            ToolCallRecord(tool=tool, args={"query": query})
+            for tool, query in _CHAT_TOOL_LINE_RE.findall(turn_body)
+        ]
+        content = _CHAT_TOOL_LINE_RE.sub("", turn_body).strip()
+        messages.append(ChatMessage(role=role, content=content, tool_calls=tool_calls))
+    return messages
 
 
 def _first_heading(body: str) -> str | None:
@@ -266,6 +317,7 @@ class VaultService:
             title=fm.get("title") or _first_heading(content) or path.stem,
             tags=list(dict.fromkeys(tags)),
             body=content,
+            promoted_from_chat=fm.get("promoted_from_chat"),
             path=path,
             created_at=datetime.fromtimestamp(stat.st_mtime),
             modified_at=datetime.fromtimestamp(stat.st_mtime),
@@ -296,6 +348,85 @@ class VaultService:
             created_at=datetime.fromtimestamp(stat.st_mtime),
             modified_at=datetime.fromtimestamp(stat.st_mtime),
         )
+
+    def get_chat(self, slug: str) -> Chat:
+        path = self._find_md(slug)
+        if path is None:
+            raise FileNotFoundError(f"chat not found: {slug!r}")
+        body = path.read_text(encoding="utf-8")
+        fm, content = _parse_frontmatter(body)
+        stat = path.stat()
+        return Chat(
+            slug=_file_slug(path.stem),
+            title=fm.get("title") or path.stem,
+            tags=list(fm.get("tags") or []),
+            messages=_parse_chat_body(content),
+            model=fm.get("model", "llama3"),
+            pinned_turns=list(fm.get("pinned_turns") or []),
+            excerpt_slug=fm.get("excerpt_slug"),
+            path=path,
+            created_at=datetime.fromtimestamp(stat.st_mtime),
+            modified_at=datetime.fromtimestamp(stat.st_mtime),
+        )
+
+    def create_chat(self, title: str, model: str = "llama3") -> Chat:
+        self.ensure_dirs()
+        slug = self._unique_slug(_slugify(title))
+        fm = {"type": "chat", "title": title, "model": model, "tags": ["chat"]}
+        path = self.default_dirs[NodeType.chat] / f"{slug}.md"
+        path.write_text(_render_frontmatter(fm), encoding="utf-8")
+        return self.get_chat(slug)
+
+    def save_chat(self, slug: str, messages: list[ChatMessage], model: str | None = None) -> Chat:
+        """`model`, when given, overwrites the chat's stored frontmatter
+        model — the model actually used for the turn just saved. Without
+        this, a chat created before a model rename/merge (e.g.
+        prisma-chat:7b -> prisma-llm:7b) would keep displaying its
+        original, now-stale name forever, even though every subsequent
+        turn actually used the current config's model."""
+        path = self._find_md(slug)
+        if path is None:
+            raise FileNotFoundError(f"chat not found: {slug!r}")
+        existing = path.read_text(encoding="utf-8")
+        fm, _ = _parse_frontmatter(existing)
+        if model is not None:
+            fm["model"] = model
+        path.write_text(_render_frontmatter(fm) + _render_chat_body(messages), encoding="utf-8")
+        return self.get_chat(slug)
+
+    def set_pinned_turns(self, chat_slug: str, indices: list[int]) -> Chat:
+        """Write-only: records which turn indices are currently pinned.
+        Does not regenerate the chat's single Excerpt note itself — that
+        needs an LLM call (ADR-015's compressed-mode Summary), which this
+        pure-storage layer has no access to. Callers (app.py) call this
+        first, then assemble the new Summary and call save_excerpt()."""
+        chat_path = self._find_md(chat_slug)
+        if chat_path is None:
+            raise FileNotFoundError(f"chat not found: {chat_slug!r}")
+        raw = chat_path.read_text(encoding="utf-8")
+        fm, content = _parse_frontmatter(raw)
+        fm["pinned_turns"] = sorted(set(indices))
+        chat_path.write_text(_render_frontmatter(fm) + content, encoding="utf-8")
+        return self.get_chat(chat_slug)
+
+    def save_excerpt(self, chat_slug: str, summary: str | None, raw_turns: list[ChatMessage]) -> Note:
+        """Create or update the *one* Excerpt note for this chat (ADR-015)
+        — Summary on top (verbatim mode: `summary=None`, no summary section
+        at all — pinned turns are the whole point in that mode), verbatim
+        copy of the pinned turns below. Reuses the existing note
+        (`Chat.excerpt_slug`) if one was already created for this chat,
+        rather than creating a new note per pin."""
+        chat = self.get_chat(chat_slug)
+        body = _render_excerpt_body(summary, raw_turns)
+        if chat.excerpt_slug:
+            return self.save_note(chat.excerpt_slug, body)
+        note = self.create_note(f"Excerpt — {chat.title}", body=body, promoted_from_chat=chat_slug)
+        chat_path = self._find_md(chat_slug)
+        raw = chat_path.read_text(encoding="utf-8")
+        fm, content = _parse_frontmatter(raw)
+        fm["excerpt_slug"] = note.slug
+        chat_path.write_text(_render_frontmatter(fm) + content, encoding="utf-8")
+        return note
 
     def get_any(self, slug: str) -> Note | Source | Chat | Stream:
         path = self._find_file(slug)
@@ -331,6 +462,8 @@ class VaultService:
             return self.get_source(slug)
         if nt == NodeType.stream:
             return self.get_stream(slug)
+        if nt == NodeType.chat:
+            return self.get_chat(slug)
         return self.get_note(slug)
 
     def slug_exists(self, slug: str) -> bool:
@@ -424,12 +557,17 @@ class VaultService:
 
     # ── Create / save ─────────────────────────────────────────────────────────
 
-    def create_note(self, title: str, body: str = "", tags: list[str] | None = None) -> Note:
+    def create_note(
+        self, title: str, body: str = "", tags: list[str] | None = None,
+        promoted_from_chat: str | None = None,
+    ) -> Note:
         self.ensure_dirs()
         slug = self._unique_slug(_slugify(title))
         fm = {"type": "note", "title": title}
         if tags:
             fm["tags"] = tags
+        if promoted_from_chat:
+            fm["promoted_from_chat"] = promoted_from_chat
         path = self.default_dirs[NodeType.note] / f"{slug}.md"
         path.write_text(_render_frontmatter(fm) + body, encoding="utf-8")
         return self.get_note(slug)

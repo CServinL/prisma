@@ -179,7 +179,7 @@ def status(verbose: bool):
             config = ConfigLoader()
             click.echo(f"  ✅ Config loaded: {config_path}")
             if verbose:
-                click.echo(f"     LLM:    {config.get('llm.provider', 'ollama')} / {config.get('llm.model', 'llama3.1:8b')}")
+                click.echo(f"     LLM:    {config.get('llm.provider', 'ollama')} / {config.get('llm.model', 'prisma-llm:7b')}")
                 click.echo(f"     Output: {config.get('output.directory', './outputs')}")
                 click.echo(f"     Zotero: mode={config.get('sources.zotero.mode', 'hybrid')}")
         except Exception as exc:
@@ -360,6 +360,22 @@ def serve(host: str, port: int, web_port: int, chroma_port: int, kg_port: int, s
         host=host, api_port=port, web_port=web_port,
         chroma_port=chroma_port, kg_port=kg_port, supervisor_port=supervisor_port, reload=reload,
     )
+
+
+@cli.command("reload-resources")
+@click.option("--supervisor-port", default=8760, show_default=True, help="Supervisor control port")
+def reload_resources(supervisor_port: int):
+    """Re-read compute_pools from config.yaml into an already-running
+    supervisor — no restart, no lost in-flight leases. For tuning
+    max_concurrent/per-model overrides against observed GPU utilization
+    without killing every worker just to pick up one changed number."""
+    import requests as _req
+    try:
+        r = _req.post(f"http://127.0.0.1:{supervisor_port}/supervisor/resources/reload", timeout=5)
+        r.raise_for_status()
+        click.echo(f"Reloaded pools: {', '.join(r.json().get('pools', []))}")
+    except _req.RequestException as exc:
+        raise click.ClickException(f"could not reach supervisor at port {supervisor_port}: {exc}")
 
 
 cli.add_command(streams_group)

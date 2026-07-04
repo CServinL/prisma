@@ -16,6 +16,21 @@
     } & {
       system?: { cpu_count: number | null; memory_total_mb: number | null; memory_available_mb: number | null };
     };
+    resources?: {
+      [pool: string]: {
+        type: "gpu" | "cloud";
+        capacity: number;
+        in_use: number;
+        active_model: string | null;
+        resident_models: string[];
+        vram_budget_mb: number | null;
+        models: string[];
+        model_capacity: { [model: string]: { in_use: number; limit: number; background_limit: number | null } };
+        stats: { granted: number; denied_capacity: number; denied_model_busy: number; denied_vram_budget: number };
+        leases: { request_id: string; holder: string; pid: number; model: string | null; held_for_s: number; timeout: number | null; priority: string }[];
+      };
+    };
+    chat_config?: { provider: string; model: string; pool: string };
   }
 
   interface NodeMeta {
@@ -41,6 +56,32 @@
     notes: NodeMeta[];
     chats: NodeMeta[];
     streams: NodeMeta[];
+  }
+
+  interface ToolCallOut {
+    tool: string;
+    args: Record<string, unknown>;
+  }
+
+  interface ChatTurn {
+    role: "user" | "assistant";
+    content: string;
+    timestamp: string;
+    sources_cited: string[];
+    tool_calls: ToolCallOut[];
+  }
+
+  interface ChatDetail {
+    slug: string;
+    title: string;
+    messages: ChatTurn[];
+    model: string;
+    pinned_turns: number[];
+    excerpt_slug: string | null;
+    context_tokens_used: number;
+    context_tokens_max: number;
+    excerpt_regenerating: boolean;
+    excerpt_summary_html: string | null;
   }
 
   interface RenderedNode {
@@ -110,6 +151,12 @@
   // independent processes/ports (see ADR-012) — the page's own origin is no
   // longer the same as the API's origin, even in browser/PWA mode.
   const webBase = typeof window !== "undefined" ? window.location.origin : "";
+
+  function formatTokenCount(n: number): string {
+    if (n >= 1_000_000) return (n / 1_000_000).toFixed(n % 1_000_000 === 0 ? 0 : 1) + "M";
+    if (n >= 1000) return (n / 1000).toFixed(n % 1000 === 0 ? 0 : 1) + "k";
+    return String(n);
+  }
 
   function _defaultApiBase(): string {
     if (typeof window === "undefined") return DEFAULT_API;
@@ -190,11 +237,18 @@
   let dragOverKey = $state<string | null>(null);
   let hoverExpandTimer: ReturnType<typeof setTimeout> | null = null;
   let activeNode = $state<RenderedNode | null>(null);
+  let activeChat = $state<ChatDetail | null>(null);
+  let chatInput = $state("");
+  let chatSending = $state(false);
   let serverOnline = $state(false);
   let kgState = $state<GState | null>(null);
   let kgLastIndexed = $state<string | null>(null);
   let serverStatus = $state<ServerStatus | null>(null);
+  type PoolStats = { granted: number; denied_capacity: number; denied_model_busy: number; denied_vram_budget: number };
+  let previousResourceStats = $state<Record<string, PoolStats>>({});
+  let recentResourceStats = $state<Record<string, PoolStats>>({});
   let statusPopoverOpen = $state(false);
+  let showResourcesPage = $state(false);
   let searchQuery = $state("");
   let searchResults = $state<SearchResult[]>([]);
   let searching = $state(false);
@@ -215,7 +269,7 @@
 
   let streams = $state<StreamMeta[]>([]);
   let chats = $state<NodeMeta[]>([]);
-  let sectionOpen = $state<Record<string, boolean>>({ vault: true, streams: true, chats: false, zotero: false });
+  let sectionOpen = $state<Record<string, boolean>>({ vault: true, streams: true, chats: false, zotero: false, system: false });
 
   interface ZoteroStatus { mode: string; available: boolean; db_path?: string; }
   interface ZoteroCollection { key: string; name: string; parent_key?: string; }
@@ -317,6 +371,12 @@
       const { slug: newSlug } = await r.json();
       await loadTree();
       if (activeNode?.slug === slug) await openNode(newSlug);
+      if (activeChat?.slug === slug) {
+        await loadChats();
+        await openChat(newSlug);
+      } else {
+        await loadChats();
+      }
     }
   }
 
@@ -325,7 +385,9 @@
     if (!confirm("Delete this item permanently?")) return;
     await fetch(`${apiBase}/nodes/${encodeURIComponent(slug)}`, { method: "DELETE" });
     await loadTree();
+    await loadChats();
     if (activeNode?.slug === slug) activeNode = null;
+    if (activeChat?.slug === slug) activeChat = null;
   }
 
   async function doCreateDir(parentKey: string) {
@@ -397,6 +459,106 @@
     } catch {}
   }
 
+  async function openChat(slug: string) {
+    activeNode = null;
+    showResourcesPage = false;
+    loadingNode = true;
+    try {
+      const r = await fetch(`${apiBase}/chats/${encodeURIComponent(slug)}`);
+      if (r.ok) activeChat = await r.json();
+    } finally {
+      loadingNode = false;
+    }
+  }
+
+  async function createChat() {
+    const r = await fetch(`${apiBase}/chats`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}),
+    });
+    if (r.ok) {
+      const chat = await r.json();
+      await loadChats();
+      await openChat(chat.slug);
+    }
+  }
+
+  async function sendChatMessage() {
+    if (!activeChat || !chatInput.trim() || chatSending) return;
+    const text = chatInput;
+    const slug = activeChat.slug;
+    chatInput = "";
+    chatSending = true;
+    activeChat.messages = [
+      ...activeChat.messages,
+      { role: "user", content: text, timestamp: new Date().toISOString(), sources_cited: [], tool_calls: [] },
+    ];
+    try {
+      const r = await fetch(`${apiBase}/chat`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message: text, chat_slug: slug }),
+      });
+      if (r.ok && activeChat?.slug === slug) {
+        const data = await r.json();
+        activeChat.messages = [
+          ...activeChat.messages,
+          { role: "assistant", content: data.reply, timestamp: new Date().toISOString(), sources_cited: [], tool_calls: data.tool_calls ?? [] },
+        ];
+      }
+    } finally {
+      chatSending = false;
+    }
+  }
+
+  async function deleteChatMessage(index: number) {
+    if (!activeChat) return;
+    if (!confirm("Remove this turn from the conversation?")) return;
+    const r = await fetch(`${apiBase}/chats/${encodeURIComponent(activeChat.slug)}/messages/${index}`, { method: "DELETE" });
+    if (r.ok) activeChat = await r.json();
+  }
+
+  async function togglePinTurn(index: number) {
+    if (!activeChat) return;
+    const slug = activeChat.slug;
+    const pinned = !activeChat.pinned_turns.includes(index);
+    const r = await fetch(`${apiBase}/chats/${encodeURIComponent(slug)}/turns/${index}/pin`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pinned }),
+    });
+    if (r.ok) {
+      activeChat = await r.json();
+      // Regeneration runs in the background (a slow/GPU-contended
+      // summarize() call must never block this request) — activeChat's
+      // excerpt_summary_html still holds the *previous* Summary until
+      // polling detects the new one is ready.
+      await loadTree();
+      if (activeChat?.excerpt_regenerating) pollExcerptRegeneration(slug);
+    }
+  }
+
+  function pollExcerptRegeneration(slug: string) {
+    const interval = setInterval(async () => {
+      if (!activeChat || activeChat.slug !== slug) { clearInterval(interval); return; }
+      const r = await fetch(`${apiBase}/chats/${encodeURIComponent(slug)}`);
+      if (!r.ok) { clearInterval(interval); return; }
+      const fresh = await r.json();
+      if (activeChat?.slug === slug) activeChat = fresh;
+      if (!fresh.excerpt_regenerating) clearInterval(interval);
+    }, 2000);
+  }
+
+  function scrollToTurn(index: number) {
+    const el = document.getElementById(`chat-turn-${index}`);
+    if (!el) return;
+    el.scrollIntoView({ behavior: "smooth", block: "center" });
+    el.classList.add("chat-turn-flash");
+    setTimeout(() => el.classList.remove("chat-turn-flash"), 1200);
+  }
+
+  function truncate(text: string, n: number): string {
+    const oneLine = text.trim().replace(/\s+/g, " ");
+    return oneLine.length > n ? oneLine.slice(0, n - 1) + "…" : oneLine;
+  }
+
   async function loadZoteroStatus() {
     try {
       const r = await fetch(`${apiBase}/zotero/status`);
@@ -447,6 +609,8 @@
   }
 
   async function loadHome() {
+    activeChat = null;
+    showResourcesPage = false;
     loadingNode = true;
     try {
       const r = await fetch(`${apiBase}/home`);
@@ -458,7 +622,7 @@
 
   function pollStatus() {
     fetchStatus();
-    setInterval(fetchStatus, 30_000);
+    setInterval(fetchStatus, 10_000);
   }
 
   async function fetchStatus() {
@@ -469,6 +633,24 @@
       const s: ServerStatus = await r.json();
       serverOnline = true;
       serverStatus = s;
+      if (s.resources) {
+        const deltas: Record<string, PoolStats> = {};
+        for (const [name, pool] of Object.entries(s.resources)) {
+          const prev = previousResourceStats[name];
+          deltas[name] = prev
+            ? {
+                granted: pool.stats.granted - prev.granted,
+                denied_capacity: pool.stats.denied_capacity - prev.denied_capacity,
+                denied_model_busy: pool.stats.denied_model_busy - prev.denied_model_busy,
+                denied_vram_budget: pool.stats.denied_vram_budget - prev.denied_vram_budget,
+              }
+            : { granted: 0, denied_capacity: 0, denied_model_busy: 0, denied_vram_budget: 0 };
+        }
+        recentResourceStats = deltas;
+        previousResourceStats = Object.fromEntries(
+          Object.entries(s.resources).map(([name, pool]) => [name, { ...pool.stats }]),
+        );
+      }
       kgState = s.knowledge_graph?.state ?? null;
       kgLastIndexed = s.knowledge_graph?.last_indexed ?? null;
       if (!wasOnline) {
@@ -510,6 +692,8 @@
   // ── Navigation ──────────────────────────────────────────────────────────────
 
   async function openNode(slug: string, fmt?: "html" | "md") {
+    activeChat = null;
+    showResourcesPage = false;
     loadingNode = true;
     try {
       const f = fmt ?? viewFormat;
@@ -520,6 +704,8 @@
   }
 
   async function openStream(slug: string) {
+    activeChat = null;
+    showResourcesPage = false;
     loadingNode = true;
     try {
       const r = await fetch(`${apiBase}/streams/${slug}/view`);
@@ -975,6 +1161,7 @@
       {/if}
     </div>
 
+
     {#if isTauri}
     <div class="window-controls">
       <button class="wc-btn" onmousedown={winMinimize} title="Minimize">&#x2212;</button>
@@ -983,6 +1170,8 @@
     </div>
     {/if}
   </div>
+
+  <div class="accent-divider"></div>
 
   <!-- Workspace -->
   <div class="workspace">
@@ -1109,6 +1298,7 @@
             <span class="section-chevron" class:open={sectionOpen.chats}>{sectionOpen.chats ? "▾" : "▸"}</span>
             <span class="section-label">Chats</span>
           </button>
+          <button class="section-action" onclick={() => createChat()}>+</button>
         </div>
         {#if sectionOpen.chats}
           <div class="section-body">
@@ -1116,15 +1306,16 @@
               {#each chats as c}
                 <button
                   class="tree-file"
-                  class:active={activeNode?.slug === c.slug}
-                  onclick={() => openNode(c.slug)}
+                  class:active={activeChat?.slug === c.slug}
+                  onclick={() => openChat(c.slug)}
+                  oncontextmenu={(e) => { e.preventDefault(); ctxMenu = { x: e.clientX, y: e.clientY, slug: c.slug, title: c.title, dirKey: null }; ctxMovePicker = false; }}
                 >
                   <span class="tree-type-dot nt-chat"></span>
                   <span class="tree-file-name">{c.title}</span>
                 </button>
               {/each}
             {:else}
-              <div class="sidebar-empty">No chats yet</div>
+              <div class="sidebar-empty">No chats yet — press + to start one</div>
             {/if}
           </div>
         {/if}
@@ -1200,6 +1391,26 @@
                 {/each}
               {/if}
             {/if}
+          </div>
+        {/if}
+
+        <!-- System section -->
+        <div class="section-header">
+          <button class="section-toggle" onclick={() => toggleSection("system")}>
+            <span class="section-chevron" class:open={sectionOpen.system}>{sectionOpen.system ? "▾" : "▸"}</span>
+            <span class="section-label">System</span>
+          </button>
+        </div>
+        {#if sectionOpen.system}
+          <div class="section-body">
+            <button
+              class="tree-file"
+              class:active={showResourcesPage}
+              onclick={() => { activeNode = null; activeChat = null; showResourcesPage = true; }}
+            >
+              <span class="tree-type-dot nt-stream"></span>
+              <span class="tree-file-name">Compute pools</span>
+            </button>
           </div>
         {/if}
       {/if}
@@ -1303,6 +1514,263 @@
           {@html activeNode.html}
         </div>
         {/if}
+      {:else if activeChat}
+        <div class="chat-view">
+          <div class="chat-conversation">
+            <div class="chat-header">
+              <span class="node-heading">{activeChat.title}</span>
+              <span class="chat-model" title="Configured chat model/pool">{serverStatus?.chat_config?.model ?? activeChat.model}{#if serverStatus?.chat_config?.pool} · {serverStatus.chat_config.pool}{/if}</span>
+              <span class="chat-context-usage" title="Session context usage vs. the configured rolling-history budget">{formatTokenCount(activeChat.context_tokens_used)} / {formatTokenCount(activeChat.context_tokens_max)}</span>
+            </div>
+            <div class="chat-turns">
+              {#if activeChat.messages.length === 0}
+                <div class="empty-state"><p>Ask anything about your vault.</p></div>
+              {/if}
+              {#each activeChat.messages as msg, i (i)}
+                <div class="chat-turn chat-turn-{msg.role}" id="chat-turn-{i}">
+                  <div class="chat-turn-header">
+                    <span class="chat-turn-role">{msg.role === "user" ? "You" : "Prisma"}</span>
+                    <span class="chat-turn-actions">
+                      <button
+                        class="chat-turn-action chat-pin-toggle"
+                        class:pinned={activeChat?.pinned_turns.includes(i)}
+                        title={activeChat?.pinned_turns.includes(i) ? "Unpin from Excerpt" : "Pin to Excerpt"}
+                        onclick={() => togglePinTurn(i)}
+                      >
+                        <svg viewBox="0 0 24 24" width="14" height="14" fill={activeChat?.pinned_turns.includes(i) ? "currentColor" : "none"} stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                          <path d="M12 21s-7-6.5-7-11a7 7 0 0 1 14 0c0 4.5-7 11-7 11z"/>
+                          <circle cx="12" cy="10" r="2.5" fill={activeChat?.pinned_turns.includes(i) ? "#0d1420" : "none"}/>
+                        </svg>
+                      </button>
+                      <button class="chat-turn-action" title="Delete this turn" onclick={() => deleteChatMessage(i)}>
+                        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                          <polyline points="3 6 5 6 21 6"/>
+                          <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>
+                          <path d="M10 11v6M14 11v6"/>
+                          <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/>
+                        </svg>
+                      </button>
+                    </span>
+                  </div>
+                  {#if msg.tool_calls?.length}
+                    <div class="chat-tool-calls">
+                      {#each msg.tool_calls as tc}
+                        <span class="chat-tool-call">used <code>{tc.tool}</code>{#if tc.args?.query}: {tc.args.query}{/if}</span>
+                      {/each}
+                    </div>
+                  {/if}
+                  <div class="chat-turn-content">{msg.content}</div>
+                </div>
+              {/each}
+              {#if chatSending}
+                <div class="chat-turn chat-turn-assistant chat-turn-pending">
+                  <span class="spinner"></span>
+                </div>
+              {/if}
+            </div>
+            <form class="chat-input-row" onsubmit={(e) => { e.preventDefault(); sendChatMessage(); }}>
+              <input
+                class="chat-input"
+                type="text"
+                placeholder="Ask about your vault…"
+                bind:value={chatInput}
+                disabled={chatSending}
+              />
+              <button class="chat-send-btn" type="submit" disabled={chatSending || !chatInput.trim()}>Send</button>
+            </form>
+          </div>
+          <div class="chat-notes-panel">
+            <div class="chat-notes-header">
+              <span class="chat-notes-title">Excerpt</span>
+              {#if activeChat.excerpt_regenerating}
+                <span class="chat-notes-regenerating" title="Regenerating the Excerpt in the background — showing the previous version until it's ready">
+                  <svg class="spin" viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
+                    <path d="M21 12a9 9 0 1 1-3-6.7"/>
+                  </svg>
+                  regenerating…
+                </span>
+              {/if}
+              <span class="chat-notes-count">{activeChat.pinned_turns.length}</span>
+            </div>
+            <div class="chat-notes-summary">
+              {#if activeChat.excerpt_summary_html}
+                <div class="rendered" use:contentClickDelegate>{@html activeChat.excerpt_summary_html}</div>
+              {:else}
+                <div class="empty-state chat-notes-empty">
+                  <p>Nothing pinned yet — pin a turn to start this chat's Excerpt, durable across this chat even after older turns roll off.</p>
+                </div>
+              {/if}
+            </div>
+            {#if activeChat.pinned_turns.length > 0}
+              <div class="chat-notes-pinned-list">
+                <div class="chat-notes-subheading">Pinned turns</div>
+                {#each activeChat.pinned_turns as idx (idx)}
+                  <button class="pinned-turn-item" onclick={() => scrollToTurn(idx)}>
+                    <span class="pinned-turn-role">{activeChat.messages[idx]?.role === "user" ? "You" : "Prisma"}</span>
+                    <span class="pinned-turn-preview">{truncate(activeChat.messages[idx]?.content ?? "", 70)}</span>
+                  </button>
+                {/each}
+              </div>
+            {/if}
+          </div>
+        </div>
+      {:else if showResourcesPage}
+        <div class="resources-page">
+          <div class="node-toolbar">
+            <span class="node-heading">Compute pools</span>
+          </div>
+          <div class="resources-body">
+            {#if !serverStatus?.resources}
+              <div class="empty-state"><p>Resource status unavailable.</p></div>
+            {:else}
+              {#each Object.entries(serverStatus.resources) as [name, pool]}
+                <div class="resource-card">
+                  <div class="resource-card-header">
+                    <span class="resource-pool-icon" title={pool.type}>
+                      {#if pool.type === "gpu"}
+                        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5">
+                          <rect x="6" y="6" width="12" height="12" rx="1"/>
+                          <rect x="9.5" y="9.5" width="5" height="5"/>
+                          <line x1="6" y1="9" x2="3" y2="9"/>
+                          <line x1="6" y1="12" x2="3" y2="12"/>
+                          <line x1="6" y1="15" x2="3" y2="15"/>
+                          <line x1="18" y1="9" x2="21" y2="9"/>
+                          <line x1="18" y1="12" x2="21" y2="12"/>
+                          <line x1="18" y1="15" x2="21" y2="15"/>
+                          <line x1="9" y1="6" x2="9" y2="3"/>
+                          <line x1="12" y1="6" x2="12" y2="3"/>
+                          <line x1="15" y1="6" x2="15" y2="3"/>
+                          <line x1="9" y1="18" x2="9" y2="21"/>
+                          <line x1="12" y1="18" x2="12" y2="21"/>
+                          <line x1="15" y1="18" x2="15" y2="21"/>
+                        </svg>
+                      {:else}
+                        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5">
+                          <path d="M7 16a4 4 0 0 1-1-7.9 5 5 0 0 1 9.6-2.4A4.5 4.5 0 0 1 20 10a4 4 0 0 1-1 6H7z"/>
+                          <line x1="8" y1="17" x2="8" y2="20"/>
+                          <circle cx="8" cy="21" r="1" fill="currentColor" stroke="none"/>
+                          <line x1="14" y1="17" x2="14" y2="20"/>
+                          <circle cx="14" cy="21" r="1" fill="currentColor" stroke="none"/>
+                        </svg>
+                      {/if}
+                    </span>
+                    <span class="resource-pool-name">{name}</span>
+                    <div class="resource-pool-capacity-group">
+                      {#if Object.keys(pool.model_capacity).length > 0}
+                        {#each Object.entries(pool.model_capacity) as [model, mc]}
+                          <span class="resource-pool-capacity" class:warn={mc.in_use >= mc.limit} title={model}>
+                            {model}: {mc.in_use} / {mc.limit}
+                          </span>
+                        {/each}
+                      {:else}
+                        <span class="resource-pool-capacity" class:warn={pool.in_use >= pool.capacity}>
+                          {pool.in_use} / {pool.capacity} in use
+                        </span>
+                      {/if}
+                    </div>
+                  </div>
+
+                  <div class="resource-facts">
+                    {#if pool.vram_budget_mb != null}
+                      <div class="resource-fact">
+                        <span class="resource-fact-label">VRAM budget</span>
+                        <span class="resource-fact-val">{pool.vram_budget_mb.toLocaleString()} MB</span>
+                      </div>
+                    {/if}
+                    {#if pool.active_model}
+                      <div class="resource-fact">
+                        <span class="resource-fact-label">Active model</span>
+                        <span class="resource-fact-val">{pool.active_model}</span>
+                      </div>
+                    {/if}
+                    {#if pool.resident_models.length > 0}
+                      <div class="resource-fact">
+                        <span class="resource-fact-label">Resident</span>
+                        <span class="resource-fact-val">{pool.resident_models.join(", ")}</span>
+                      </div>
+                    {/if}
+                    {#if pool.models.length > 0}
+                      <div class="resource-fact">
+                        <span class="resource-fact-label">Configured models</span>
+                        <span class="resource-fact-val">{pool.models.join(", ")}</span>
+                      </div>
+                    {/if}
+                  </div>
+
+                  <div class="resource-section-title">Active leases</div>
+                  {#if pool.leases.length === 0}
+                    <div class="resource-empty">None right now</div>
+                  {:else}
+                    <table class="resource-table">
+                      <thead>
+                        <tr>
+                          <th>Holder</th>
+                          <th>Model</th>
+                          <th>Priority</th>
+                          <th>Held for</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {#each pool.leases as lease}
+                          <tr>
+                            <td>{lease.holder}</td>
+                            <td>{lease.model ?? "—"}</td>
+                            <td>
+                              <span class="resource-priority-badge" class:interactive={lease.priority === "interactive"}>
+                                {lease.priority}
+                              </span>
+                            </td>
+                            <td>{lease.held_for_s}s</td>
+                          </tr>
+                        {/each}
+                      </tbody>
+                    </table>
+                  {/if}
+
+                  <div class="resource-section-title">Stats since server start</div>
+                  <div class="resource-stats-grid">
+                    <div class="resource-stat">
+                      <span class="resource-stat-val ok">{pool.stats.granted}</span>
+                      <span class="resource-stat-label">granted</span>
+                    </div>
+                    <div class="resource-stat">
+                      <span class="resource-stat-val" class:warn={pool.stats.denied_capacity > 0}>{pool.stats.denied_capacity}</span>
+                      <span class="resource-stat-label">denied (full)</span>
+                    </div>
+                    <div class="resource-stat">
+                      <span class="resource-stat-val" class:warn={pool.stats.denied_model_busy > 0}>{pool.stats.denied_model_busy}</span>
+                      <span class="resource-stat-label">denied (busy)</span>
+                    </div>
+                    <div class="resource-stat">
+                      <span class="resource-stat-val" class:warn={pool.stats.denied_vram_budget > 0}>{pool.stats.denied_vram_budget}</span>
+                      <span class="resource-stat-label">denied (VRAM)</span>
+                    </div>
+                  </div>
+
+                  <div class="resource-section-title">Since last refresh (~10s)</div>
+                  <div class="resource-stats-grid">
+                    <div class="resource-stat">
+                      <span class="resource-stat-val ok">{recentResourceStats[name]?.granted ?? 0}</span>
+                      <span class="resource-stat-label">granted</span>
+                    </div>
+                    <div class="resource-stat">
+                      <span class="resource-stat-val" class:warn={(recentResourceStats[name]?.denied_capacity ?? 0) > 0}>{recentResourceStats[name]?.denied_capacity ?? 0}</span>
+                      <span class="resource-stat-label">denied (full)</span>
+                    </div>
+                    <div class="resource-stat">
+                      <span class="resource-stat-val" class:warn={(recentResourceStats[name]?.denied_model_busy ?? 0) > 0}>{recentResourceStats[name]?.denied_model_busy ?? 0}</span>
+                      <span class="resource-stat-label">denied (busy)</span>
+                    </div>
+                    <div class="resource-stat">
+                      <span class="resource-stat-val" class:warn={(recentResourceStats[name]?.denied_vram_budget ?? 0) > 0}>{recentResourceStats[name]?.denied_vram_budget ?? 0}</span>
+                      <span class="resource-stat-label">denied (VRAM)</span>
+                    </div>
+                  </div>
+                </div>
+              {/each}
+            {/if}
+          </div>
+        </div>
       {:else}
         <div class="empty-state">
           <p>Select a note or source from the sidebar.</p>
@@ -1354,6 +1822,7 @@
     </div>
   </div>
   {/if}
+
 
   <!-- Deep search panel -->
   {#if showDeepSearch}
@@ -1586,10 +2055,27 @@
     gap: 10px;
     padding: 0 0 0 14px;
     background: #080c16;
-    border-bottom: 1px solid #1a2d4a;
     flex-shrink: 0;
     height: 38px;
     user-select: none;
+  }
+
+  /* A restrained accent seam between the title bar and the workspace,
+     modeled on Starfield's own accent bar: solid, flat horizontal stripes
+     stacked vertically (each stripe runs the full width, hard edge to the
+     next, no blending), all equal height. This crimson/orange/tan/navy set
+     is reserved for very highlighted elements only — not the
+     note/source/chat/stream semantic palette used elsewhere. */
+  .accent-divider {
+    height: 12px;
+    flex-shrink: 0;
+    background: linear-gradient(
+      180deg,
+      #c8203a 0px, #c8203a 3px,
+      #dd6b3a 3px, #dd6b3a 6px,
+      #ddb066 6px, #ddb066 9px,
+      #2c4d75 9px, #2c4d75 12px
+    );
   }
 
   .drag-area {
@@ -2415,6 +2901,522 @@
     background: #080f1e;
     padding: 4px 10px;
     border-radius: 4px;
+  }
+
+  /* ── Chat view ─────────────────────────────────────────────────────── */
+  .chat-view {
+    flex: 1;
+    display: flex;
+    flex-direction: row;
+    overflow: hidden;
+  }
+  .chat-conversation {
+    flex: 1 1 60%;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  .chat-notes-panel {
+    flex: 0 0 340px;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    border-left: 1px solid #1a2d4a;
+    background: #080c16;
+  }
+  .chat-notes-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 7px 18px;
+    border-bottom: 1px solid #1a2d4a;
+    flex-shrink: 0;
+    min-height: 34px;
+  }
+  .chat-notes-title {
+    font-size: 12px;
+    font-weight: 600;
+    color: #c8ddf0;
+    flex: 1;
+  }
+  .chat-notes-regenerating {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 10px;
+    color: #facc15;
+  }
+  .chat-notes-regenerating .spin {
+    animation: spin 1s linear infinite;
+  }
+  @keyframes spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+  }
+  .chat-notes-count {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 10px;
+    color: #6a8aae;
+    background: #0d1420;
+    border: 1px solid #1a2d4a;
+    padding: 1px 6px;
+    border-radius: 10px;
+  }
+  .chat-notes-empty {
+    color: #2a4060;
+    font-size: 12px;
+    text-align: center;
+    padding: 14px 10px;
+  }
+  .chat-notes-summary {
+    /* flex-grow:0 — this must hug its own content, not stretch to fill
+       the panel. Forcing it to fill available height (flex-grow:1) was
+       the actual bug behind "a lot of empty space": short summary text
+       left a big dead gap between the text and the divider below it,
+       regardless of any margin/line-height tweak on the text itself.
+       Capped + scrollable so a *long* summary still doesn't push the
+       pinned-turns list off-screen. */
+    flex: 0 1 auto;
+    max-height: 65%;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 8px 14px;
+    border-bottom: 1px solid #1a2d4a;
+  }
+  .chat-notes-summary :global(.rendered) {
+    /* .rendered's own base rule (padding: 28px 36px, flex: 1) is built for
+       full-page note reading — applying it inside this ~300px sidebar was
+       the actual "huge padding" bug, not anything on the outer container
+       or on individual elements. This is the fix that was actually needed. */
+    padding: 0;
+    flex: initial;
+    overflow-y: visible;
+  }
+  /* Tighter than the generic .rendered scale (built for full-width note
+     pages) — this is a 340px sidebar, the default h1/h2 sizes and margins
+     wasted a lot of it for no reason. */
+  .chat-notes-summary :global(h1),
+  .chat-notes-summary :global(h2),
+  .chat-notes-summary :global(h3) {
+    font-size: 12px;
+    font-weight: 600;
+    color: #c8ddf0;
+    margin: 10px 0 4px;
+  }
+  .chat-notes-summary :global(h1:first-child),
+  .chat-notes-summary :global(h2:first-child),
+  .chat-notes-summary :global(h3:first-child) {
+    margin-top: 0;
+  }
+  .chat-notes-summary :global(p) {
+    color: #9ab4c8;
+    font-size: 12px;
+    line-height: 1.5;
+    margin-bottom: 8px;
+  }
+  .chat-notes-summary :global(ul),
+  .chat-notes-summary :global(ol) {
+    /* list-style-position: inside (not the default "outside") so wrapped
+       lines align flush with the marker instead of leaving a hanging-indent
+       gap down the left side of every item — in a ~300px sidebar that gap
+       reads as a lot of wasted empty margin. */
+    list-style-position: inside;
+    margin: 0 0 8px;
+    padding: 0;
+    font-size: 12px;
+    color: #9ab4c8;
+  }
+  .chat-notes-summary :global(li) {
+    margin-bottom: 4px;
+    line-height: 1.4;
+  }
+  .chat-notes-summary :global(li p) {
+    /* The renderer wraps list-item text in its own <p>, which otherwise
+       stacks its 8px margin-bottom on top of <li>'s own spacing — most of
+       what read as "huge margins" between list entries. */
+    margin: 0;
+    display: inline;
+  }
+  .chat-notes-summary :global(pre) {
+    font-size: 11px;
+    margin-bottom: 8px;
+  }
+  .chat-notes-pinned-list {
+    /* Sized to its actual content (up to a cap), not a fixed share of the
+       panel — with only 1-2 pinned turns this used to leave a lot of dead
+       space below the list while starving the Summary above it.
+       flex-shrink:0 so it can't be squeezed by the Summary's own flex-grow
+       (that's what "cant even see the pinned turns" was — this list has to
+       actually get the space its max-height reserves, not just be capped
+       from growing past it). */
+    flex: 0 0 auto;
+    max-height: 40%;
+    overflow-y: auto;
+    padding: 8px 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .chat-notes-subheading {
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    color: #6a8aae;
+    margin-bottom: 4px;
+  }
+  .pinned-turn-item {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    width: 100%;
+    text-align: left;
+    background: none;
+    border: none;
+    border-radius: 4px;
+    padding: 5px 6px;
+    cursor: pointer;
+    color: #9ab4c8;
+  }
+  .pinned-turn-item:hover {
+    background: #0d1420;
+    color: #c8ddf0;
+  }
+  .pinned-turn-role {
+    font-size: 10px;
+    font-weight: 600;
+    color: #6a8aae;
+    flex-shrink: 0;
+  }
+  .pinned-turn-preview {
+    font-size: 12px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .chat-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 7px 18px;
+    background: #080c16;
+    border-bottom: 1px solid #1a2d4a;
+    flex-shrink: 0;
+    min-height: 34px;
+  }
+  .chat-model {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 10px;
+    color: #c084fc;
+    background: #1a0d2a;
+    border: 1px solid #2a1a4a;
+    padding: 2px 6px;
+    border-radius: 3px;
+  }
+  .chat-context-usage {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 10px;
+    color: #6a8aae;
+    background: #0d1420;
+    border: 1px solid #1a2d4a;
+    padding: 2px 6px;
+    border-radius: 3px;
+  }
+  .chat-turns {
+    flex: 1;
+    overflow-y: auto;
+    padding: 18px 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+  .chat-turn {
+    max-width: 80%;
+    padding: 10px 14px;
+    border-radius: 8px;
+    position: relative;
+    transition: box-shadow 0.3s;
+  }
+  .chat-turn-flash {
+    box-shadow: 0 0 0 2px #facc15;
+  }
+  /* User: handwritten feel — slanted, warmer accent, distinct from the system's own voice */
+  .chat-turn-user {
+    align-self: flex-end;
+    background: #12203a;
+    border: 1px solid #1a3a6a;
+    font-style: italic;
+  }
+  /* Assistant: robot feel — monospace, cool purple accent matching the chat node-type color */
+  .chat-turn-assistant {
+    align-self: flex-start;
+    background: #150d24;
+    border: 1px solid #2a1a4a;
+    font-family: "JetBrains Mono", monospace;
+  }
+  .chat-turn-pending {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 14px;
+  }
+  .chat-turn-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 4px;
+  }
+  .chat-turn-role {
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: #6a8aae;
+  }
+  .chat-turn-actions {
+    display: flex;
+    gap: 4px;
+  }
+  .chat-turn-action {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: #8aa8c8;
+    padding: 3px 5px;
+    border-radius: 3px;
+    opacity: 0;
+    transition: opacity 0.1s;
+  }
+  .chat-turn:hover .chat-turn-action {
+    opacity: 0.7;
+  }
+  .chat-turn-action:hover {
+    opacity: 1;
+    background: #1a2d4a;
+  }
+  .chat-pin-toggle.pinned {
+    /* Stays visible even when the turn isn't hovered — pinned state
+       shouldn't be hidden by default, only the other hover-revealed
+       actions (delete, unpinned pin) should be. */
+    opacity: 1;
+    color: #facc15;
+    border: 1px solid #facc15;
+  }
+  .chat-tool-calls {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    margin-bottom: 6px;
+    font-family: "JetBrains Mono", monospace;
+    font-size: 10px;
+    color: #8a6ab0;
+  }
+  .chat-tool-calls code {
+    color: #c084fc;
+  }
+  .chat-turn-content {
+    color: #c8ddf0;
+    line-height: 1.6;
+    font-size: 13px;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+  .chat-input-row {
+    display: flex;
+    gap: 8px;
+    padding: 12px 18px;
+    background: #080c16;
+    border-top: 1px solid #1a2d4a;
+    flex-shrink: 0;
+  }
+  .chat-input {
+    flex: 1;
+    background: #0d1420;
+    border: 1px solid #1a2d4a;
+    border-radius: 6px;
+    color: #c8ddf0;
+    padding: 8px 12px;
+    font-size: 13px;
+    font-family: inherit;
+  }
+  .chat-input:focus {
+    outline: none;
+    border-color: #4a9eff;
+  }
+  .chat-send-btn {
+    background: #1a3a6a;
+    border: 1px solid #2a5aaa;
+    color: #c8ddf0;
+    padding: 8px 18px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 13px;
+  }
+  .chat-send-btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+  .chat-send-btn:not(:disabled):hover {
+    background: #2a5aaa;
+  }
+  /* ── Compute pools page ───────────────────────────────────────────────── */
+  .resources-page {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  .resources-body {
+    flex: 1;
+    overflow-y: auto;
+    padding: 20px 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+  }
+  .resource-card {
+    background: #0d1420;
+    border: 1px solid #1a2d4a;
+    border-radius: 10px;
+    padding: 16px 20px;
+  }
+  .resource-card-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 12px;
+  }
+  .resource-pool-icon {
+    display: inline-flex;
+    align-items: center;
+    color: #4a9eff;
+    margin-right: 8px;
+  }
+  .resource-pool-name {
+    font-size: 15px;
+    font-weight: 600;
+    color: #e8edf8;
+    font-family: "JetBrains Mono", monospace;
+  }
+  .resource-pool-capacity-group {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    justify-content: flex-end;
+  }
+  .resource-pool-capacity {
+    font-size: 12px;
+    color: #4ade80;
+    background: #0d2a0d;
+    border: 1px solid #1a4a1a;
+    padding: 3px 10px;
+    border-radius: 12px;
+  }
+  .resource-pool-capacity.warn {
+    color: #facc15;
+    background: #1a1a0d;
+    border-color: #3a3010;
+  }
+  .resource-facts {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+    gap: 10px 24px;
+    margin-bottom: 16px;
+    padding-bottom: 16px;
+    border-bottom: 1px solid #1a2d4a;
+  }
+  .resource-fact {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .resource-fact-label {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: #6a8aae;
+  }
+  .resource-fact-val {
+    font-size: 13px;
+    color: #c8ddf0;
+    font-family: "JetBrains Mono", monospace;
+  }
+  .resource-section-title {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: #6a8aae;
+    margin: 14px 0 8px;
+  }
+  .resource-empty {
+    font-size: 12px;
+    color: #2a4060;
+  }
+  .resource-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+  }
+  .resource-table th {
+    text-align: left;
+    color: #6a8aae;
+    font-weight: 600;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    padding: 4px 10px 6px 0;
+    border-bottom: 1px solid #1a2d4a;
+  }
+  .resource-table td {
+    padding: 6px 10px 6px 0;
+    color: #c8ddf0;
+    font-family: "JetBrains Mono", monospace;
+    border-bottom: 1px solid #10192a;
+  }
+  .resource-priority-badge {
+    font-size: 10px;
+    text-transform: uppercase;
+    padding: 2px 7px;
+    border-radius: 3px;
+    background: #1a2d4a;
+    color: #8aa8c8;
+  }
+  .resource-priority-badge.interactive {
+    background: #1a0d2a;
+    color: #c084fc;
+  }
+  .resource-stats-grid {
+    display: flex;
+    gap: 24px;
+    flex-wrap: wrap;
+  }
+  .resource-stat {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+    min-width: 70px;
+  }
+  .resource-stat-val {
+    font-size: 20px;
+    font-weight: 600;
+    font-family: "JetBrains Mono", monospace;
+    color: #4ade80;
+  }
+  .resource-stat-val.warn {
+    color: #facc15;
+  }
+  .resource-stat-label {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: #6a8aae;
   }
 
   .spinner {

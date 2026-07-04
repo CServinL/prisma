@@ -70,8 +70,18 @@ from prisma.services.zotero import ZoteroMode, ZoteroService
 _t("zotero ok")
 
 _t("importing vault_models")
-from prisma.storage.models.vault_models import NodeType, RenderedNode, StreamRunResult, VaultListing, VaultTreeNode
+from prisma.storage.models.vault_models import (
+    Chat, ChatMessage, ChatRole, NodeType, RenderedNode, StreamRunResult, ToolCallRecord,
+    VaultListing, VaultTreeNode,
+)
 _t("vault_models ok")
+
+_t("importing chat")
+from prisma.agents.chat_agent import ChatAgent
+from prisma.services.chat_llm import ChatLLM
+from prisma.services.chat_prompts import load_excerpt_summary_prompt, load_system_prompt
+from prisma.services.chat_tools import ChatToolbox
+_t("chat ok")
 
 
 # ── WebSocket connection manager ──────────────────────────────────────────────
@@ -152,6 +162,36 @@ def _build_chroma(vault: "VaultService") -> ChromaIndexer:
         return ChromaIndexer(vault)
 
 
+def _chat_blocked_reason(chroma: ChromaIndexer, kg: KnowledgeGraphClient) -> str | None:
+    """Why the shared local-ollama pool might be denying chat's model right
+    now — model_affinity makes "busy with a different model" look identical
+    to "unreachable" from ChatLLM's own point of view, so this checks the
+    two other Ollama callers directly to give a real answer instead of a
+    generic failure message."""
+    try:
+        if kg.status().get("state") == "indexing":
+            return "the knowledge graph is currently indexing your vault"
+    except Exception:
+        pass
+    try:
+        if chroma.status().get("current_activity"):
+            return "the semantic search index is currently updating"
+    except Exception:
+        pass
+    return None
+
+
+def _build_chat_agent(vault: "VaultService", chroma: ChromaIndexer, kg: KnowledgeGraphClient) -> ChatAgent:
+    from prisma.utils.config import ConfigLoader
+    cfg = ConfigLoader()
+    llm = ChatLLM(cfg.get_chat_config(), ollama_host=cfg.get_llm_config().host)
+    toolbox = ChatToolbox(chroma, kg, vault)
+    return ChatAgent(
+        llm, toolbox, system_prompt=load_system_prompt(),
+        blocked_reason=lambda: _chat_blocked_reason(chroma, kg),
+    )
+
+
 from prisma.utils.text import significant_words as _significant_words
 
 
@@ -162,6 +202,8 @@ _t("building indexer")
 _indexer = KnowledgeGraphClient(port=_kg_port())
 _t("building chroma")
 _chroma = _build_chroma(_vault)
+_t("building chat agent")
+_chat_agent = _build_chat_agent(_vault, _chroma, _indexer)
 _t("building zotero")
 _zotero = _build_zotero()
 _t("module-level init done")
@@ -269,6 +311,25 @@ class RenderRequest(BaseModel):
 
 class RenderResponse(BaseModel):
     html: str
+
+
+class ChatRequest(BaseModel):
+    message: str
+    chat_slug: str  # create via POST /chats first — /chat only ever sends a message
+
+
+class ChatResponse(BaseModel):
+    chat_slug: str
+    reply: str
+    tool_calls: list[ToolCallRecord]
+
+
+class CreateChatRequest(BaseModel):
+    title: Optional[str] = None  # None auto-generates a timestamp title
+
+
+class SetTurnPinnedRequest(BaseModel):
+    pinned: bool
 
 
 class JobStatus(BaseModel):
@@ -434,6 +495,12 @@ def status():
         "ollama": {"reachable": _indexer._ollama_ready()},
         "resources": resource_lock.status("127.0.0.1", resource_lock.default_port()),
         "processes": resource_lock.process_status("127.0.0.1", resource_lock.default_port()),
+        # The chat.model/pool actually configured right now — the UI shows
+        # this instead of a chat's own stored frontmatter model, which is
+        # only a snapshot from whenever that chat last saved a turn (see
+        # vault.py's save_chat docstring) and can otherwise go stale across
+        # a model rename/merge.
+        "chat_config": {"provider": _chat_agent.provider, "model": _chat_agent.model, "pool": _chat_agent.pool},
     }
 
 
@@ -487,6 +554,188 @@ def knowledge_graph_drop():
 def render_markdown(req: RenderRequest):
     html, _, _ = vault_render(req.markdown, _vault)
     return RenderResponse(html=html)
+
+
+@app.post("/chats", response_model=Chat, status_code=201)
+def create_chat(req: CreateChatRequest):
+    from datetime import datetime
+    title = req.title or f"Chat — {datetime.now():%Y-%m-%d %H:%M}"
+    chat_node = _vault.create_chat(title=title, model=_chat_agent.model)
+    _activity.info("action=create_chat slug=%s", chat_node.slug)
+    return _with_context_usage(chat_node)
+
+
+_excerpt_regenerating_lock = threading.Lock()
+_excerpt_regenerating: dict[str, bool] = {}
+
+
+def _excerpt_summary_html(note_body: str) -> str | None:
+    """Splits the Excerpt note's raw markdown on the "## Pinned turns"
+    marker _render_excerpt_body always emits, and renders only the Summary
+    portion. None if there's no "## Summary" heading at all (verbatim
+    mode — see ADR-015 — produces no Summary). The UI shows this on its
+    own; the raw pinned turns are a separate clickable list built from
+    pinned_turns + messages directly, not from re-rendering this note's
+    own "Pinned turns" section."""
+    before, _, _ = note_body.partition("\n## Pinned turns")
+    before = before.strip()
+    if not before.startswith("## Summary"):
+        return None
+    summary_md = before[len("## Summary"):].strip()
+    html, _, _ = vault_render(summary_md, _vault)
+    return html
+
+
+def _with_context_usage(chat_node: Chat) -> Chat:
+    """Attaches response-only fields (ADR-015) — not persisted, computed
+    fresh on every response since they depend on the live-configured
+    ChatAgent / in-memory regeneration state, not stored chat data."""
+    promoted_notes = []
+    if chat_node.excerpt_slug:
+        try:
+            note = _vault.get_note(chat_node.excerpt_slug)
+            promoted_notes.append(note)
+            chat_node.excerpt_summary_html = _excerpt_summary_html(note.body)
+        except FileNotFoundError:
+            pass
+    used, maximum = _chat_agent.context_usage(chat_node.messages, promoted_notes=promoted_notes)
+    chat_node.context_tokens_used = used
+    chat_node.context_tokens_max = maximum
+    with _excerpt_regenerating_lock:
+        chat_node.excerpt_regenerating = _excerpt_regenerating.get(chat_node.slug, False)
+    return chat_node
+
+
+@app.get("/chats/{slug}", response_model=Chat)
+def get_chat(slug: str):
+    try:
+        return _with_context_usage(_vault.get_chat(slug))
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"chat not found: {slug!r}")
+
+
+@app.post("/chat", response_model=ChatResponse)
+def chat(req: ChatRequest):
+    try:
+        chat_node = _vault.get_chat(req.chat_slug)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"chat not found: {req.chat_slug!r}")
+    history = chat_node.messages
+    # The chat's single Excerpt (ADR-015) is durable context — always
+    # included, independent of the (bounded, rolling) raw history, so the
+    # model doesn't re-litigate what's already been settled.
+    promoted_notes = []
+    if chat_node.excerpt_slug:
+        try:
+            promoted_notes.append(_vault.get_note(chat_node.excerpt_slug))
+        except FileNotFoundError:
+            _log.warning("chat %r: excerpt note %r no longer exists", chat_node.slug, chat_node.excerpt_slug)
+    user_msg = ChatMessage(role=ChatRole.user, content=req.message)
+    assistant_msg = _chat_agent.respond(history, req.message, promoted_notes=promoted_notes)
+    _vault.save_chat(chat_node.slug, history + [user_msg, assistant_msg], model=_chat_agent.model)
+    _activity.info("action=chat slug=%s tool_calls=%d", chat_node.slug, len(assistant_msg.tool_calls))
+    return ChatResponse(
+        chat_slug=chat_node.slug, reply=assistant_msg.content, tool_calls=assistant_msg.tool_calls,
+    )
+
+
+def _regenerate_excerpt_now(slug: str, pinned_indices: list[int]) -> None:
+    """ADR-015: regenerates the chat's single Excerpt note from whatever's
+    currently pinned, in whichever mode currently applies
+    (ChatAgent.excerpt_mode(), budget-driven) — compressed (LLM-condensed
+    Summary via ChatAgent.summarize() + load_excerpt_summary_prompt()) or
+    verbatim (no LLM call, no Summary section, pinned turns kept exactly as
+    written). Synchronous — call via _regenerate_excerpt_async unless
+    already off the request thread."""
+    chat_node = _vault.get_chat(slug)
+    pinned_turns = [chat_node.messages[i] for i in pinned_indices]
+    summary: str | None
+    if not pinned_turns:
+        summary = "(nothing pinned yet)"
+    else:
+        turns_text = "\n\n".join(f"{m.role.value}: {m.content}" for m in pinned_turns)
+        if _chat_agent.excerpt_mode(turns_text) == "verbatim":
+            summary = None
+        else:
+            summary = _chat_agent.summarize(load_excerpt_summary_prompt(), turns_text)
+            if summary is None:
+                summary = "(summary unavailable — the language model couldn't be reached; raw pinned turns below are still current)"
+    _vault.save_excerpt(slug, summary, pinned_turns)
+
+
+def _regenerate_excerpt_async(slug: str, pinned_indices: list[int]) -> None:
+    """Kicks off _regenerate_excerpt_now on a background thread so
+    pin/unpin/delete return immediately — a slow or GPU-contended
+    summarize() call (kg extraction competing for the same local model is
+    a real, observed cause) must never leave the user staring at a blocked
+    request. The UI shows the *previous* Excerpt content plus a visible
+    "regenerating" indicator (Chat.excerpt_regenerating, see
+    _with_context_usage) until this clears, then refetches."""
+    with _excerpt_regenerating_lock:
+        _excerpt_regenerating[slug] = True
+
+    def _run() -> None:
+        try:
+            _regenerate_excerpt_now(slug, pinned_indices)
+        except Exception as exc:
+            _log.warning("excerpt regeneration failed for chat %r: %s", slug, exc)
+        finally:
+            with _excerpt_regenerating_lock:
+                _excerpt_regenerating[slug] = False
+
+    threading.Thread(target=_run, daemon=True, name=f"excerpt-regen-{slug}").start()
+
+
+@app.post("/chats/{slug}/turns/{index}/pin", response_model=Chat)
+def set_turn_pinned(slug: str, index: int, req: SetTurnPinnedRequest):
+    """Pin/unpin one turn — always a deliberate user action per turn, never
+    automatic. Returns immediately with pinned_turns already updated;
+    Excerpt regeneration happens in the background (see
+    _regenerate_excerpt_async) — the response's excerpt_regenerating flag
+    tells the UI to keep showing the previous Excerpt content until it
+    clears."""
+    try:
+        chat_node = _vault.get_chat(slug)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"chat not found: {slug!r}")
+    if index < 0 or index >= len(chat_node.messages):
+        raise HTTPException(status_code=400, detail=f"invalid turn index: {index}")
+
+    pinned = set(chat_node.pinned_turns)
+    if req.pinned:
+        pinned.add(index)
+    else:
+        pinned.discard(index)
+    pinned_indices = sorted(pinned)
+    updated = _vault.set_pinned_turns(slug, pinned_indices)
+    _regenerate_excerpt_async(slug, pinned_indices)
+    _activity.info("action=set_turn_pinned chat_slug=%s index=%d pinned=%s", slug, index, req.pinned)
+    return _with_context_usage(updated)
+
+
+@app.delete("/chats/{slug}/messages/{index}", response_model=Chat)
+def delete_chat_message(slug: str, index: int):
+    """Manual curation of a chat's history — a research conversation is a
+    persistent artifact, not ephemeral, so pruning is a deliberate user
+    action rather than automatic summarization (which risks silently
+    dropping a real discovery)."""
+    try:
+        chat_node = _vault.get_chat(slug)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"chat not found: {slug!r}")
+    if index < 0 or index >= len(chat_node.messages):
+        raise HTTPException(status_code=400, detail=f"message index out of range: {index}")
+    messages = chat_node.messages[:index] + chat_node.messages[index + 1:]
+    updated = _vault.save_chat(slug, messages)
+    # Deleting a turn shifts every later index — pinned_turns must be
+    # re-indexed (dropping the deleted turn if it was itself pinned) or the
+    # Excerpt would silently start pointing at the wrong turns.
+    new_pinned = sorted(i if i < index else i - 1 for i in chat_node.pinned_turns if i != index)
+    if new_pinned != chat_node.pinned_turns:
+        updated = _vault.set_pinned_turns(slug, new_pinned)
+        _regenerate_excerpt_async(slug, new_pinned)
+    _activity.info("action=delete_chat_message slug=%s index=%d", slug, index)
+    return _with_context_usage(updated)
 
 
 # ── Vault routes ──────────────────────────────────────────────────────────────
@@ -563,6 +812,22 @@ def rename_node(slug: str, req: RenameRequest):
         raise HTTPException(status_code=404, detail=str(e))
     except (FileExistsError, ValueError) as e:
         raise HTTPException(status_code=409, detail=str(e))
+
+@app.post("/nodes/{slug}/taint")
+def taint_node(slug: str):
+    """Force one specific node to be re-extracted/re-embedded on the next
+    cycle — without touching the rest of the index/graph. Unlike
+    /knowledge-graph/taint (which just marks the whole index stale), this
+    targets a single file via both ChromaIndexer.taint_file and
+    KnowledgeGraphService.taint_file (see their docstrings — both work by
+    dropping the file's manifest entry and enqueuing it directly)."""
+    path = _vault._find_file(slug)
+    if path is None:
+        raise HTTPException(status_code=404, detail=f"node not found: {slug!r}")
+    rel = str(path.relative_to(_vault.root))
+    chroma_tainted = _chroma.taint_file(rel)
+    kg_tainted = _indexer.taint_file(rel)
+    return {"chroma_tainted": chroma_tainted, "kg_tainted": kg_tainted}
 
 @app.delete("/nodes/{slug}")
 def delete_node(slug: str):

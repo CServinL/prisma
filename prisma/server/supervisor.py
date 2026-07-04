@@ -19,6 +19,11 @@ Exposes a minimal control surface on a loopback-only port:
        -> {"granted": bool, "resource": str|null, "request_id": str|null}
   POST /supervisor/resources/release
        {"resource": "local_ollama", "request_id": "..."}
+  POST /supervisor/resources/reload
+       Re-reads compute_pools from config.yaml into the running
+       ResourceManager — no restart, no lost in-flight leases. For tuning
+       max_concurrent/per-model overrides against real observed GPU
+       utilization without killing every worker to pick up one number.
 
 Compute-resource locking (GPU/LLM/embeddings): the supervisor has no idea
 which actions actually use a GPU, or whether "the LLM" is a local GPU, a
@@ -76,34 +81,108 @@ def _venv_bin(name: str) -> str:
     return str(candidate) if candidate.exists() else name
 
 
-def _load_compute_pools() -> tuple[dict[str, int], set[str]]:
+def _ollama_base_url() -> str:
+    try:
+        import yaml
+        cfg_path = Path.home() / ".config" / "prisma" / "config.yaml"
+        cfg = yaml.safe_load(cfg_path.read_text()) or {}
+        host = cfg.get("llm", {}).get("host", "localhost:11434")
+        return f"http://{host}"
+    except Exception:
+        return "http://localhost:11434"
+
+
+def _query_ollama_resident_mb(base_url: str, timeout: float = 2.0) -> dict[str, int] | None:
+    """model name -> real size_vram in MB, straight from Ollama's own
+    `/api/ps` — ground truth for what's actually loaded and its real cost
+    right now, rather than tracking (and risking drift from) our own guess.
+    Verified empirically 2026-07-02: Ollama's OLLAMA_MAX_LOADED_MODELS=0
+    ("auto") already loads multiple different models concurrently when they
+    fit — the assumption that a GPU can only ever hold one resident model
+    at a time (baked into `model_affinity`) was never actually true for
+    this setup, just untested. Returns None (not {}) on any failure to
+    reach Ollama, so callers can fail safe (treat as "can't verify") rather
+    than silently treating unreachable as "nothing's loaded.\""""
+    import json
+    import urllib.request
+    try:
+        with urllib.request.urlopen(f"{base_url}/api/ps", timeout=timeout) as resp:
+            data = json.loads(resp.read())
+        return {m["name"]: int(m.get("size_vram", 0)) // (1024 * 1024) for m in data.get("models", [])}
+    except Exception:
+        return None
+
+
+def _load_compute_pools() -> tuple[
+    dict[str, int], set[str], dict[str, set[str]], dict[str, dict[str, int]],
+    dict[str, int | None], dict[str, dict[str, int]], dict[str, dict[str, int]],
+]:
     """Named compute pools and their concurrency limits, e.g.:
 
         compute_pools:
-          - name: local_ollama       # a single GPU / single Ollama instance
-            max_concurrent: 3        # can only hold one model's weights at a time
-          - name: gpu1_ollama        # a second GPU, pinned to a different model
-            max_concurrent: 2
-          - name: cloud_api
-            max_concurrent: 4
-            model_affinity: false    # auto-scaled/auto-routed — no swap penalty to model
+          - name: local-ollama       # a single GPU / single Ollama instance
+            type: gpu                # models here can genuinely coexist in VRAM
+            provider: ollama          # informational — for humans reading this file
+            max_concurrent: 3         # fallback for any model below with no override
+            vram_budget_mb: 14000     # total VRAM this pool may commit across ALL resident models
+            models:
+              - name: prisma-llm:7b
+                max_concurrent: 4      # matches this machine's OLLAMA_NUM_PARALLEL
+                background_max_concurrent: 3  # reserve >=1 slot for interactive (chat)
+                vram_mb: 7500          # estimate used only before it's ever been observed loaded
+              - name: nomic-embed-text
+                vram_mb: 1000
+          - name: openrouter
+            type: cloud               # auto-scaled/auto-routed — no swap penalty to model
+            provider: openrouter
+            max_concurrent: 8
+            models: [anthropic/claude-3.5-sonnet]
 
-    One pool = one hardware unit that can hold exactly one resident model at
-    a time (one GPU, or one Ollama instance bound to one GPU) — that's the
-    thing `model_affinity` describes, and it **defaults to true**, because
-    that's what real hardware does. If a machine has several GPUs and you
-    want them able to hold different models at once (or the same model
-    spread across more of them for extra concurrency), declare one pool per
-    GPU rather than one lump pool — acquire() already tries every pool with
-    no preferred one specified, so it naturally lands same-model requests on
-    whichever GPU already has that model loaded (or an idle one), and turns
-    away a different model from a busy one until it drains. The only pools
-    that should set `model_affinity: false` are ones with no such constraint
-    at all — a cloud API that auto-scales/auto-routes across models with no
-    reload penalty. Defaults to a single pool ("default", concurrency 1,
-    affinity true) if this section is omitted entirely — the common case of
-    one machine, one local GPU, one Ollama instance, zero config required.
-    See ResourceManager for what `model_affinity` changes about acquire().
+    `type: gpu` pools model actual GPU VRAM sharing, which turned out to be
+    richer than "one resident model at a time": verified empirically
+    2026-07-01/02 that Ollama's `OLLAMA_MAX_LOADED_MODELS=0` ("auto") mode
+    already loads *multiple* different models concurrently when they fit —
+    the original `model_affinity` design (strict single-resident-model,
+    still the default below when `vram_budget_mb` is omitted) was a
+    conservative assumption, never actually verified against real behavior.
+    When `vram_budget_mb` is set, `ResourceManager.acquire()` queries
+    Ollama's own `/api/ps` live for what's *actually* resident and its real
+    reported VRAM cost, and admits a not-yet-loaded model if the real
+    current total plus its own `vram_mb` estimate fits under the budget —
+    ground truth from Ollama beats a static guess for "what's loaded now,"
+    but a new model's cost can only be estimated ahead of its first load.
+    Falls back to the strict single-resident-model check if Ollama can't be
+    reached (fail safe, not fail open — better to under-parallelize for one
+    cycle than risk overcommitting VRAM on a guess). `type: cloud` = no
+    such constraint at all (`model_affinity: false`'s old meaning). A pool
+    with no `type` falls back to the legacy `model_affinity` key (default
+    true) for configs written before `type` existed — `type` wins when
+    both are present.
+
+    Each `models` entry is either a plain string (uses the pool's own
+    `max_concurrent`, no `vram_mb`/`background_max_concurrent`) or a
+    `{name, max_concurrent?, vram_mb?, background_max_concurrent?}`
+    mapping. `max_concurrent` still matters even with a VRAM budget: it
+    bounds how many *simultaneous same-model* calls run at once, a
+    separate concern from whether a second, different model may also load
+    alongside it. `background_max_concurrent` reserves headroom for
+    interactive traffic: `ResourceManager.acquire(..., priority=...)`
+    callers tagged `"interactive"` (a live user request — chat) may use
+    the model's full `max_concurrent`, while `"background"` callers (kg
+    extraction, chroma embedding — the default) are capped at this smaller
+    number, so interactive work never has to queue behind bulk background
+    work filling every slot. Also used to auto-route a request to the
+    right pool by model name (see ResourceManager.acquire) — e.g. so an
+    OpenRouter model can never accidentally land in a `type: gpu` pool. A
+    pool with `models` omitted (or empty) is untyped — a fallback candidate
+    for any model no other pool explicitly claims, matching pre-`models`
+    config files.
+
+    If a machine has several GPUs, declare one `type: gpu` pool per GPU
+    rather than one lump pool. Defaults to a single pool ("default",
+    concurrency 1, type gpu, no VRAM budget — i.e. strict single-model
+    behavior) if this section is omitted entirely — the safest possible
+    assumption when nothing is configured.
     """
     try:
         import yaml
@@ -112,11 +191,40 @@ def _load_compute_pools() -> tuple[dict[str, int], set[str]]:
         pools = cfg.get("compute_pools")
         if pools:
             capacity = {p["name"]: int(p.get("max_concurrent", 1)) for p in pools}
-            affinity = {p["name"] for p in pools if p.get("model_affinity", True)}
-            return capacity, affinity
+            affinity = {
+                p["name"] for p in pools
+                if (p.get("type") == "gpu") or (p.get("type") is None and p.get("model_affinity", True))
+            }
+            pool_models: dict[str, set[str]] = {}
+            model_concurrency: dict[str, dict[str, int]] = {}
+            pool_vram_budget: dict[str, int | None] = {}
+            model_vram: dict[str, dict[str, int]] = {}
+            model_background_limit: dict[str, dict[str, int]] = {}
+            for p in pools:
+                names: set[str] = set()
+                overrides: dict[str, int] = {}
+                vram: dict[str, int] = {}
+                background: dict[str, int] = {}
+                for entry in p.get("models", []):
+                    if isinstance(entry, dict):
+                        names.add(entry["name"])
+                        if "max_concurrent" in entry:
+                            overrides[entry["name"]] = int(entry["max_concurrent"])
+                        if "vram_mb" in entry:
+                            vram[entry["name"]] = int(entry["vram_mb"])
+                        if "background_max_concurrent" in entry:
+                            background[entry["name"]] = int(entry["background_max_concurrent"])
+                    else:
+                        names.add(entry)
+                pool_models[p["name"]] = names
+                model_concurrency[p["name"]] = overrides
+                pool_vram_budget[p["name"]] = int(p["vram_budget_mb"]) if "vram_budget_mb" in p else None
+                model_vram[p["name"]] = vram
+                model_background_limit[p["name"]] = background
+            return capacity, affinity, pool_models, model_concurrency, pool_vram_budget, model_vram, model_background_limit
     except Exception:
         pass
-    return {"default": 1}, {"default"}
+    return {"default": 1}, {"default"}, {"default": set()}, {"default": {}}, {"default": None}, {"default": {}}, {"default": {}}
 
 
 def _die_with_parent() -> None:
@@ -289,50 +397,205 @@ class ResourceManager:
     know which situation it's in.
     """
 
-    def __init__(self, pools: dict[str, int], model_affinity: set[str] = frozenset()) -> None:
+    def __init__(
+        self, pools: dict[str, int], model_affinity: set[str] = frozenset(),
+        pool_models: dict[str, set[str]] | None = None,
+        model_concurrency: dict[str, dict[str, int]] | None = None,
+        vram_budget: dict[str, int | None] | None = None,
+        model_vram: dict[str, dict[str, int]] | None = None,
+        model_background_limit: dict[str, dict[str, int]] | None = None,
+        ollama_base_url: str = "http://localhost:11434",
+    ) -> None:
         self._lock = threading.Lock()
         self._capacity = dict(pools)
         self._model_affinity = set(model_affinity)
-        # pool -> {request_id: {holder, pid, model, acquired_at, timeout}}
+        self._pool_models = {name: set(models) for name, models in (pool_models or {}).items()}
+        # pool -> {model: max_concurrent override} — different models resident
+        # on the same GPU can have different safe concurrency ceilings (a
+        # bigger num_ctx eats more VRAM per concurrent call). Falls back to
+        # the pool's own max_concurrent for any model with no override.
+        self._model_concurrency = {name: dict(m) for name, m in (model_concurrency or {}).items()}
+        # pool -> total VRAM (MB) it may commit across ALL resident models at
+        # once. None means "no budget configured" — falls back to the
+        # strict single-resident-model rule for that pool (see acquire()).
+        self._vram_budget = dict(vram_budget or {})
+        # pool -> {model: estimated VRAM MB} — only used for a model that
+        # isn't ALREADY resident (Ollama's own /api/ps gives the real cost
+        # for anything already loaded; this estimate is only needed to
+        # answer "would loading it push us over budget" ahead of time).
+        self._model_vram = {name: dict(m) for name, m in (model_vram or {}).items()}
+        # pool -> {model: max concurrent *background*-priority leases} — a
+        # reservation, not a separate pool: interactive (chat) leases still
+        # count against the same shared total, but background (kg
+        # extraction, chroma embedding) leases alone are capped below the
+        # model's full concurrency, guaranteeing interactive traffic always
+        # has at least one free slot rather than queueing behind bulk work.
+        self._model_background_limit = {name: dict(m) for name, m in (model_background_limit or {}).items()}
+        self._ollama_base_url = ollama_base_url
+        # pool -> {request_id: {holder, pid, model, acquired_at, timeout, priority}}
         self._leases: dict[str, dict[str, dict]] = {name: {} for name in pools}
         self._active_model: dict[str, str | None] = {name: None for name in pools}
         # Cumulative since supervisor start — answers "why is the server
         # busy" without grepping logs for 409s: how often has this pool
-        # actually granted vs. turned work away, and why (full vs. busy with
-        # a different model). See status().
+        # actually granted vs. turned work away, and why (full, busy with a
+        # different model under strict affinity, or over the VRAM budget).
+        # See status().
         self._stats: dict[str, dict[str, int]] = {
-            name: {"granted": 0, "denied_capacity": 0, "denied_model_busy": 0} for name in pools
+            name: {"granted": 0, "denied_capacity": 0, "denied_model_busy": 0, "denied_vram_budget": 0}
+            for name in pools
         }
+
+    def _candidate_pools(self, pool: str | None, model: str | None) -> list[str]:
+        if pool:
+            return [pool]
+        if model:
+            # Prefer pools that explicitly declare this model, so e.g. an
+            # OpenRouter model auto-routes to a cloud pool and never lands in
+            # a `type: gpu` pool by accident of dict iteration order. Pools
+            # with no `models` declared at all are untyped — a fallback for
+            # any model no other pool explicitly claims (matches config
+            # files written before `models` existed).
+            declared = [name for name, models in self._pool_models.items() if model in models]
+            if declared:
+                return declared
+            untyped = [name for name, models in self._pool_models.items() if not models]
+            if untyped:
+                return untyped
+        return list(self._capacity)
+
+    def _effective_capacity(self, pool: str, model: str | None) -> int:
+        """The concurrency ceiling that actually applies right now: a
+        per-model override if this pool declares one for `model`, else the
+        pool's own max_concurrent. On a `type: gpu` pool only one model is
+        ever resident at a time, so "the incoming/active model's own limit"
+        is always well-defined — no ambiguity about whose limit should win."""
+        if model is not None:
+            override = self._model_concurrency.get(pool, {}).get(model)
+            if override is not None:
+                return override
+        return self._capacity[pool]
 
     def acquire(
         self, holder: str, pid: int, pool: str | None = None, timeout: float | None = None,
-        model: str | None = None,
+        model: str | None = None, priority: str = "background",
     ) -> tuple[str | None, str | None]:
-        """Acquire a slot in `pool`, or the first pool with free capacity if
-        not specified. Returns (pool_name, request_id), both None if no
-        capacity is available anywhere (including: a model_affinity pool is
-        busy with a different model)."""
+        """Acquire a slot in `pool`, or auto-route by `model` against each
+        pool's declared `models` allowlist, or the first pool with free
+        capacity if neither narrows it down. Returns (pool_name, request_id),
+        both None if no capacity is available anywhere (including: a
+        `type: gpu` pool is busy with a different model and has no VRAM
+        budget configured to admit it alongside, or is over budget).
+
+        `priority`: "interactive" (a live user request — chat) or
+        "background" (bulk/automated work — kg extraction, chroma
+        embedding). Interactive callers may use a model's full configured
+        concurrency; background callers are capped at that model's
+        `background_max_concurrent` (if set), guaranteeing interactive
+        traffic never has to queue behind bulk background work filling
+        every slot."""
         with self._lock:
-            candidates = [pool] if pool else list(self._capacity)
+            candidates = self._candidate_pools(pool, model)
             for name in candidates:
                 if name not in self._capacity:
                     continue
-                if name in self._model_affinity:
+                vram_aware = name in self._model_affinity and self._vram_budget.get(name) is not None
+                if name in self._model_affinity and not vram_aware:
                     active = self._active_model[name]
                     if active is not None and active != model:
                         self._stats[name]["denied_model_busy"] += 1
+                        log.info(
+                            "acquire denied: pool=%s holder=%s pid=%d model=%s priority=%s "
+                            "reason=model_busy active=%s",
+                            name, holder, pid, model, priority, active,
+                        )
                         continue  # busy with a different model — must drain first
-                if len(self._leases[name]) < self._capacity[name]:
+                elif vram_aware and model is not None:
+                    resident = _query_ollama_resident_mb(self._ollama_base_url)
+                    if resident is None:
+                        # Can't verify Ollama's real state — fail safe to the
+                        # strict single-resident-model rule rather than guess.
+                        # vram-aware pools don't maintain _active_model (it'd
+                        # be ambiguous with several models resident at once),
+                        # so derive "busy with a different model" from actual
+                        # lease data instead.
+                        other_models = {l["model"] for l in self._leases[name].values() if l["model"] != model}
+                        if other_models:
+                            self._stats[name]["denied_model_busy"] += 1
+                            log.info(
+                                "acquire denied: pool=%s holder=%s pid=%d model=%s priority=%s "
+                                "reason=model_busy (ollama unreachable, other resident models=%s)",
+                                name, holder, pid, model, priority, sorted(other_models),
+                            )
+                            continue
+                    elif model not in resident:
+                        estimated_mb = self._model_vram.get(name, {}).get(model, 0)
+                        current_mb = sum(resident.values())
+                        if current_mb + estimated_mb > self._vram_budget[name]:
+                            self._stats[name]["denied_vram_budget"] += 1
+                            log.info(
+                                "acquire denied: pool=%s holder=%s pid=%d model=%s priority=%s "
+                                "reason=vram_budget current_mb=%d estimated_mb=%d budget_mb=%d resident=%s",
+                                name, holder, pid, model, priority, current_mb, estimated_mb,
+                                self._vram_budget[name], resident,
+                            )
+                            continue
+                # Per-model overrides apply on any model_affinity pool. On a
+                # VRAM-budget pool several different models can hold leases
+                # at once, so the count must be scoped to just this model's
+                # own leases — on a strict (non-budget) pool every lease is
+                # already guaranteed to be for the same resident model, so
+                # the plain total is equivalent and cheaper.
+                limit = self._effective_capacity(name, model if name in self._model_affinity else None)
+                # Interactive traffic (chat) must never queue behind bulk
+                # background work (kg extraction, chroma embedding) filling
+                # every slot. Background requests are capped below the
+                # model's full concurrency limit when a reservation is
+                # configured, guaranteeing at least (limit - background_limit)
+                # slots stay free for interactive callers at all times — no
+                # live preemption needed, just a smaller ceiling for the
+                # lower-priority tier.
+                #
+                # Critically, a background request's own count must only
+                # include *other background* leases, not interactive ones —
+                # counting interactive leases against background's reduced
+                # limit let a single active chat silently steal from
+                # background's own quota (observed: background denied at
+                # in_use=3/limit=3 with only 2 of those 3 leases actually
+                # being background). Interactive's own check is unaffected:
+                # it always compares against the full (unreduced) limit, so
+                # it never queues behind background regardless of this.
+                if priority == "background":
+                    background_limit = self._model_background_limit.get(name, {}).get(model)
+                    if background_limit is not None:
+                        limit = min(limit, background_limit)
+                    in_use = sum(
+                        1 for l in self._leases[name].values()
+                        if l["priority"] == "background" and (not vram_aware or l["model"] == model)
+                    )
+                else:
+                    in_use = (
+                        sum(1 for l in self._leases[name].values() if l["model"] == model)
+                        if vram_aware else len(self._leases[name])
+                    )
+                if in_use < limit:
                     request_id = f"{holder}-{pid}-{uuid.uuid4().hex[:8]}"
                     self._leases[name][request_id] = {
                         "holder": holder, "pid": pid, "model": model,
-                        "acquired_at": time.monotonic(), "timeout": timeout,
+                        "acquired_at": time.monotonic(), "timeout": timeout, "priority": priority,
                     }
-                    if name in self._model_affinity:
+                    if name in self._model_affinity and not vram_aware:
                         self._active_model[name] = model
                     self._stats[name]["granted"] += 1
                     return name, request_id
                 self._stats[name]["denied_capacity"] += 1
+                holders = ", ".join(
+                    f"{l['holder']}:{l['model']}({l['priority']})" for l in self._leases[name].values()
+                )
+                log.info(
+                    "acquire denied: pool=%s holder=%s pid=%d model=%s priority=%s reason=capacity "
+                    "in_use=%d limit=%d current_leases=[%s]",
+                    name, holder, pid, model, priority, in_use, limit, holders,
+                )
         return None, None
 
     def _clear_active_model_if_idle(self, pool: str) -> None:
@@ -374,14 +637,70 @@ class ResourceManager:
                     del leases[rid]
                 self._clear_active_model_if_idle(name)
 
+    def reload_config(
+        self, pools: dict[str, int], model_affinity: set[str] = frozenset(),
+        pool_models: dict[str, set[str]] | None = None,
+        model_concurrency: dict[str, dict[str, int]] | None = None,
+        vram_budget: dict[str, int | None] | None = None,
+        model_vram: dict[str, dict[str, int]] | None = None,
+        model_background_limit: dict[str, dict[str, int]] | None = None,
+    ) -> None:
+        """Re-read compute_pools from config.yaml into a *running*
+        ResourceManager, without restarting the supervisor or touching
+        in-flight leases. Motivated by tuning `max_concurrent`/per-model
+        overrides against real observed GPU utilization (e.g. a model turns
+        out to have more VRAM headroom than its configured concurrency
+        assumed) — that shouldn't require killing every worker and losing
+        whatever they were mid-doing just to pick up one changed number.
+        Existing leases for a pool that still exists are left alone even if
+        its capacity shrank below the current lease count (no forced
+        eviction — they'll simply block new acquires until they drain); a
+        pool removed from config entirely keeps its existing leases
+        releasable but stops accepting new ones (acquire() already skips
+        any name not in the fresh self._capacity)."""
+        with self._lock:
+            self._capacity = dict(pools)
+            self._model_affinity = set(model_affinity)
+            self._pool_models = {name: set(models) for name, models in (pool_models or {}).items()}
+            self._model_concurrency = {name: dict(m) for name, m in (model_concurrency or {}).items()}
+            self._vram_budget = dict(vram_budget or {})
+            self._model_vram = {name: dict(m) for name, m in (model_vram or {}).items()}
+            self._model_background_limit = {name: dict(m) for name, m in (model_background_limit or {}).items()}
+            for name in pools:
+                self._leases.setdefault(name, {})
+                self._active_model.setdefault(name, None)
+                self._stats.setdefault(
+                    name, {"granted": 0, "denied_capacity": 0, "denied_model_busy": 0, "denied_vram_budget": 0},
+                )
+
     def status(self) -> dict:
         with self._lock:
             now = time.monotonic()
             return {
                 name: {
+                    "type": "gpu" if name in self._model_affinity else "cloud",
                     "capacity": self._capacity[name],
                     "in_use": len(leases),
                     "active_model": self._active_model[name] if name in self._model_affinity else None,
+                    "resident_models": sorted({l["model"] for l in leases.values() if l["model"]}),
+                    "vram_budget_mb": self._vram_budget.get(name),
+                    "models": sorted(self._pool_models.get(name, set())),
+                    # Per-model effective capacity — the flat "capacity" above
+                    # is only the pool-wide *fallback*; a model with its own
+                    # override (common on a VRAM-budget pool with several
+                    # models) has a different real ceiling, and showing the
+                    # fallback instead was a genuinely confusing display bug
+                    # (looked like "1/3" when the real limit for the
+                    # resident model was actually 4).
+                    "model_capacity": {
+                        model: {
+                            "in_use": sum(1 for l in leases.values() if l["model"] == model),
+                            "limit": self._effective_capacity(name, model),
+                            "background_limit": self._model_background_limit.get(name, {}).get(model),
+                        }
+                        for model in sorted({l["model"] for l in leases.values() if l["model"]}
+                                             | set(self._model_concurrency.get(name, {})))
+                    },
                     "stats": dict(self._stats[name]),
                     "leases": [
                         {
@@ -391,6 +710,7 @@ class ResourceManager:
                             "model": l["model"],
                             "held_for_s": round(now - l["acquired_at"], 1),
                             "timeout": l["timeout"],
+                            "priority": l.get("priority", "background"),
                         }
                         for rid, l in leases.items()
                     ],
@@ -502,6 +822,7 @@ def _make_handler(supervisor: Supervisor):
                     return
                 resource, request_id = supervisor.resources.acquire(
                     holder, pid, body.get("resource"), body.get("timeout"), body.get("model"),
+                    priority=body.get("priority", "background"),
                 )
                 self._json(200 if resource else 409, {
                     "granted": resource is not None, "resource": resource, "request_id": request_id,
@@ -514,6 +835,14 @@ def _make_handler(supervisor: Supervisor):
                     return
                 supervisor.resources.release(resource, request_id)
                 self._json(200, {"status": "released"})
+            elif self.path == "/supervisor/resources/reload":
+                (capacity, affinity, pool_models, model_concurrency,
+                 vram_budget, model_vram, model_background_limit) = _load_compute_pools()
+                supervisor.resources.reload_config(
+                    capacity, affinity, pool_models, model_concurrency,
+                    vram_budget, model_vram, model_background_limit,
+                )
+                self._json(200, {"status": "reloaded", "pools": list(capacity)})
             else:
                 self._json(404, {"error": "not found"})
 
@@ -564,7 +893,7 @@ def main(
         "kg": Worker("kg", [_venv_bin("uvicorn"), "prisma.server.kg_app:app", "--host", host, "--port", str(kg_port)],
                      stop_timeout=15.0, env={"PRISMA_SUPERVISOR_PORT": str(supervisor_port)}),
     }
-    resources = ResourceManager(*_load_compute_pools())
+    resources = ResourceManager(*_load_compute_pools(), ollama_base_url=_ollama_base_url())
 
     supervisor = Supervisor(workers, resources)
     supervisor.start_all()

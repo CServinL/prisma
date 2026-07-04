@@ -186,47 +186,78 @@ actually picked up, not now.
 
 ## Chat module (Phase 2 — the actual consumer of all the above)
 
-Design discussion 2026-07-01. Not started; capturing the architecture before
-it's lost.
+Design discussion 2026-07-01. **First working increment built 2026-07-02** —
+see below for what's actually shipped vs. still sketched.
 
-- [ ] **Backend-agnostic LLM interface, built now rather than retrofitted
-      later.** Prisma's design intent is cross-backend (Ollama first, then
-      OpenRouter, then Anthropic API — per the user, not yet in any code
-      today). `analysis_agent.py` currently hardcodes Ollama's
-      `/api/generate` directly; the chat module should NOT repeat that
-      pattern. One thin interface, Ollama as the only implementation
-      initially, so later backends are additive. Decide separately (later,
-      not blocking) whether to retrofit `analysis_agent.py` onto the same
-      interface or leave its working Ollama-specific code alone.
+- [x] **Backend-agnostic LLM interface, built now rather than retrofitted
+      later.** Built as `prisma/services/chat_llm.py`'s `ChatLLM` — the
+      `openai` SDK against a configurable `base_url`, per ADR-014 (chose
+      this over `litellm`/`pydantic-ai` — see that ADR and its appendix for
+      the full reasoning, including an empirical tool-calling reliability
+      test). Ollama is the only backend today (`chat.provider: ollama` in
+      `config.yaml`, its own `ChatConfig` — independent of `llm.model`,
+      which stays extraction-only); OpenRouter/Anthropic are additive later,
+      OpenRouter needs no new adapter (already OpenAI-compatible), Anthropic
+      will. `analysis_agent.py` was deliberately left on its own working
+      Ollama-specific code, not retrofitted — per the original note below.
       `compute_pools`' `model_affinity: false` for auto-scaled cloud APIs
       already anticipated this — no rework needed at the resource-lock layer.
 - [ ] **Core problem the chat architecture must solve**: local models have
       small context windows (8-16k tokens) — chat cannot feed full files as
       context. Retrieval must hand the model compact representations
       (ChromaDB chunks, graph nodes/edges), not raw documents.
-- [ ] **Agentic tool-loop, not a fixed single-shot RAG pipeline.** The chat
-      LLM gets callable tools and decides what to fetch, rather than the
-      server stuffing one prompt upfront:
-      - `search_vault(query)` → ChromaDB top-k chunks
-      - `graph_context(query|node)` → Kùzu neighbor-expansion /
-        `ranked_nodes`-equivalent
-      - `expand_node(id)` → one-hop graph traversal, on demand
+- [x] **Agentic tool-loop, not a fixed single-shot RAG pipeline** (first two
+      tools). `prisma/agents/chat_agent.py`'s `ChatAgent.respond()` — the
+      model decides what to fetch, rather than the server stuffing one
+      prompt upfront:
+      - `search_vault(query)` → ChromaDB top-k chunks (built —
+        `ChatToolbox._search_vault` in `prisma/services/chat_tools.py`)
+      - `graph_context(query)` → `KnowledgeGraphClient.query()` (built —
+        `ChatToolbox._graph_context`; not yet the full neighbor-expansion
+        sophistication, same deferred scope as ADR-009's follow-up notes)
+      - `expand_node(id)` → one-hop graph traversal, on demand — **not
+        built yet.** These 5 remaining tools need a real user-facing
+        *application*, not just an LLM-callable function — cservinl wants
+        this revisited periodically, not treated as a checklist item alone
+        (2026-07-02). Worked example given for this one: in the chat UI,
+        selecting text and hovering ~1s could trigger a live visualization
+        of other vault connections to that selection, using `expand_node`
+        directly — a tangible interactive feature, not just a tool the
+        model calls on its own initiative.
       - `get_full_text(source_file, section?)` → last resort, deliberate,
-        never the default
+        never the default — **not built yet, and reconsidered 2026-07-02**:
+        cservinl raised that a flat raw-text dump is the wrong shape given
+        the chat model's limited context (`prisma-llm:7b` at 32768, real
+        headroom already shared with history/tool round-trips) — source
+        access needs to be *delegated*, not inlined. Proposed instead: a
+        dedicated **consultation sub-agent** whose only job is to
+        map-reduce over one large source's sections (reusing `semchunk`'s
+        chunking — same pattern `KnowledgeGraphService._extract_file`
+        already uses), asking "does this section help answer {question}"
+        per chunk, and returning only the distilled result to the main
+        chat loop — not raw text. Meaningful overlap with existing kg
+        extraction worth resolving before building this: `graph_context`
+        already gives cheap access to what's already been extracted from a
+        source; the real gap this fills is going deeper than that when a
+        specific source is clearly central and the graph's extracted
+        nodes/edges aren't enough. Not just linear map-reduce over one
+        document, either — cservinl noted the consultation agent may itself
+        need its own tools (`expand_node`, graph DB queries, its own
+        semantic search) to actually *follow threads* across the graph
+        while consulting a source, not just summarize it in isolation —
+        i.e. a nested agent with its own tool loop, not a flat summarizer
+        function. Not scoped/built yet — needs its own design pass, not
+        bolted on alongside other in-flight chat work.
       - `god_nodes()` / `surprising_connections()` / `suggest_questions()` —
         associative exploration tools (see the framing note above — these
         are retrieval primitives for the model, not user-facing reports)
-- [ ] **Each tool needs a full tool-calling contract, not just an
-      implementation** — a Python function alone isn't usable by the model.
-      Per tool: name, parameter JSON schema, a description that states *when*
-      to call it (not just what it does), and a documented return shape the
-      model can reliably parse. Sketch (to refine when actually built):
-      - `search_vault(query: str)` — "default first step for almost any
-        question." Returns `[{text, source_file, score}]`.
-      - `graph_context(query: str)` / `expand_node(id: str)` — "call when the
-        question is about how things relate, or vector search results seem
-        scattered/incomplete." Returns `[{entity, relation, related_entity,
-        source_file}]`.
+        — **not built yet.** Same "needs a real application" open question
+        as `expand_node` above.
+- [x] **Each tool needs a full tool-calling contract, not just an
+      implementation.** Built as `ToolSpec` (name, marker, description) in
+      `chat_tools.py`, rendered into the system prompt by
+      `system_prompt_tool_section()`. Only `search_vault`/`graph_context`
+      have specs today; the remaining sketch below is unchanged/not yet built:
       - `god_nodes()` — "call for broad/orienting questions with no specific
         narrow target, e.g. 'what are the big themes in my notes about X',
         or to orient before diving into specifics." Returns ranked
@@ -238,29 +269,33 @@ it's lost.
       - `suggest_questions()` — "call to propose grounded follow-ups at the
         end of an answer, or when the user seems stuck / asks what to
         explore next." Returns `[{question, grounding_source_file}]`.
-      - `get_full_text(source_file, section?)` — "last resort — only when a
-        specific document is clearly central and its full content is
-        genuinely needed. Never call by default." Returns raw text (still
-        `semchunk`-bounded to fit the remaining context budget).
-- [ ] **Bounded loop** — cap tool-call iterations per turn (same shape as
-      Graphify's `max_retry_depth`), so the agentic loop can't quietly burn
-      the shared GPU pool indefinitely.
-- [ ] **One unified response sanitizer, not three separate passes.** Decided
+      - `expand_node(id: str)` / `get_full_text(source_file, section?)` —
+        "last resort — only when a specific document is clearly central and
+        its full content is genuinely needed. Never call by default."
+- [x] **Bounded loop** — `MAX_TOOL_ITERATIONS = 4` in `chat_agent.py`, same
+      spirit as Graphify's old `max_retry_depth`, so the agentic loop can't
+      quietly burn the shared GPU pool indefinitely.
+- [~] **One unified response sanitizer, not three separate passes.** Tool-call
+      detection + injection sanitization are built and shared (see below);
+      output-truncation handling is still not built (same gap noted
+      originally). Decided
       2026-07-01: tool-call *detection* is keyword/pattern-based (the model
       writes a recognizable text pattern, not a native structured
       function-call), because local Ollama models — especially smaller
       quantized ones — don't reliably support/respect native tool-calling
       the way larger cloud models do. That detection lives in the same
       response-processing pass as:
-      - **Injection sanitization** — any vault content returned by a tool
-        needs the same untrusted-content wrapping Graphify's
-        `<untrusted_source>` handling does today (regex-stripping injected
-        closing tags etc.) — worth directly adapting that approach. This is
-        the mandatory baseline layer, always on.
+      - **Injection sanitization** — **built and shared**: the
+        `<untrusted_source>` wrapping/defanging logic was extracted out of
+        `knowledge_graph_service.py` into `prisma/services/injection_defense.py`
+        (`wrap_untrusted`/`neutralise_injection_sentinels`) so both the
+        knowledge graph's extraction calls and `ChatToolbox`'s tool results
+        share one implementation instead of two copies to keep in sync.
+        This is the mandatory baseline layer, always on.
       - **Optional second layer (off by default): a small local ML
         injection classifier, scoped only to tool-result content** (never
         user input — see rationale below). Threat model: prisma is
-        single-user/local-first, but the user *does* want wider adoption —
+        single-user/local-first, but cservinl *does* want wider adoption —
         each install is still single-user, so the threat that actually
         matters is indirect injection from unvetted ingested content
         (a downloaded paper/web page crafted to look like instructions once
@@ -298,10 +333,366 @@ it's lost.
       interface pays off again: a future cloud backend with solid native
       tool-calling could use that instead, while Ollama uses the
       pattern-based fallback, both behind the same interface.
-- [ ] **All LLM calls the chat loop makes — including every repeated
-      tool-loop iteration — go through `resource_lock.lease()`.** An agentic
-      loop is *more* Ollama traffic per user turn than anything today; no new
-      call site should bypass the pool arbitration built this session.
+
+      **Verified empirically, 2026-07-02** (not just assumed): considered
+      `pydantic-ai` for the whole agentic tool-loop — its `Agent`/`@tool`
+      abstraction maps directly onto the tool-contract design above and
+      would remove real hand-rolled loop/schema code. But `pydantic-ai`'s
+      tool-calling relies on the model's *native* function-calling protocol,
+      with no pattern-based fallback of its own. Ran a disposable 5-prompt
+      comparison against `qwen2.5:7b` (the realistic local chat-model
+      stand-in, since `llama3.1:8b` isn't actually pulled despite
+      `installation.md` naming it default) — native tool-calling (Ollama's
+      `/api/chat` `tools` param) vs. a hand-written pattern prompt:
+      native got 2/5 clean (picked the *wrong* tool for a clearly relational
+      question, and over-triggered a vault search for something the model
+      already knew unprompted), pattern-based got 4/5 clean. **Decision:
+      skip `pydantic-ai` for now, keep the hand-rolled pattern-based loop**
+      — this is a genuine result on the actual candidate model, not just
+      inherited caution. Revisit `pydantic-ai` if/when a more capable model
+      (larger local model, or a cloud backend once ADR-014 wires one up)
+      becomes the default chat backend — cloud models are typically far
+      more reliable at native tool-calling, and `pydantic-ai` supports
+      custom OpenAI-compatible `base_url`s, so it would compose fine with
+      ADR-014's Option B (and its planned Option D migration) if adopted
+      later for a backend where native tool-calling actually holds up.
+- [x] **All LLM calls the chat loop makes — including every repeated
+      tool-loop iteration — go through `resource_lock.lease()`.** Every
+      `ChatLLM.complete()` call is lease-gated (holder `"api"`, matching the
+      process chat runs in), same as knowledge-graph extraction and
+      ChromaDB embedding. Verified live: with the `kg` worker mid-extraction
+      (holding `local-ollama`'s `model_affinity` lock on `prisma-llm:7b`), a
+      chat request for a *different* model (`qwen2.5:7b`) correctly failed
+      open with a graceful "couldn't reach the model" reply rather than
+      hanging or crashing — real contention this design anticipated (ADR-012),
+      not a bug.
+- [x] **Chat persistence** (not originally a checklist item, but needed to
+      actually ship anything): transcripts are plain markdown in
+      `vault/chats/`, `type: chat` frontmatter (which is *all* that's needed
+      for the existing trust-tier machinery — `KnowledgeGraphService._trust_tier_for()`
+      already mapped this to `trust_tier: "chat"`, `search()` already excludes
+      it — no kg-side changes required). Turns use `### You` / `### Prisma`
+      headings (readable in any plain markdown viewer, not just this app);
+      tool calls are recorded in-transcript as `> 🔧 used \`tool\`: query`
+      lines, not just returned as ephemeral API response data — so tool use
+      is visible even when reopening a saved chat later, addressing the
+      "show when a tool was used" UX ask directly in the stored format, not
+      just the live response. Rendering is plain string-building
+      (`VaultService._render_chat_body`/`_parse_chat_body`), not a template
+      engine (Jinja2 was considered and rejected — too much machinery for a
+      small fixed template) — but still fully `Pydantic`-modeled
+      (`ChatMessage`, `ToolCallRecord` in `vault_models.py`), consistent with
+      "Pydantic at every turn." **Gap found and fixed along the way**:
+      `ChromaIndexer` had no exclusion for `vault/chats/` at all — unlike the
+      knowledge graph, ChromaDB's metadata has no `trust_tier` field to
+      filter by at query time, so chat transcripts would have leaked into
+      `search_vault` results with no way to filter them back out. Fixed in
+      both the watcher's exclusion tuple and `_full_index()`'s file list.
+- [x] **System prompt is user-editable**, not baked into code or
+      `config.yaml`: `prisma/services/chat_prompts.py` materializes
+      `~/.config/prisma/chat_system_prompt.md` with a sensible default on
+      first use (same bootstrap pattern as `config.yaml` itself), and reads
+      it verbatim thereafter.
+- [ ] **`/chat` endpoint is single-shot, not streaming** — `POST /chat`
+      returns the whole reply once the tool loop finishes; no WebSocket/SSE
+      streaming yet, even though ADR-010 already has a WebSocket transport
+      for other purposes. Fine for now, worth revisiting once real response
+      latency (esp. multi-tool-call turns) makes streaming feel worthwhile
+      in the UI.
+- [ ] **No UI wired up yet** — `POST /chat` exists and is tested/verified
+      live, but `ui/src/routes/` has no chat view/component calling it yet.
+      **(In progress 2026-07-02 — see below, this is the current work.)**
+
+### Chat memory model — "meeting, not the meeting notes" (2026-07-02)
+
+**Superseded and built 2026-07-03 — see ADR-015 (Proposed → compressed mode
+built).** The N-independent-notes design below turned out to read wrong
+once cservinl clarified the intended model: one Excerpt per chat (Summary +
+raw pinned copy), not a pile of separate notes, with compressed-vs-verbatim
+pinning selected by the chat backend's actual context budget. Left in place
+below as the historical record of the first increment; do not extend this
+design further.
+
+**Compressed mode built** (verbatim mode — large-context cloud backends —
+still not built, no such backend configured yet):
+- `Chat.promoted_excerpts`/`pinned_excerpts` (list of independent note
+  slugs) replaced with `Chat.pinned_turns: list[int]` (indices into
+  `messages`, same identity convention `DELETE .../messages/{index}`
+  already used) + `Chat.excerpt_slug: str | None` (the chat's one Excerpt
+  note, created lazily on first pin).
+- `POST /chats/{slug}/promote` and `POST /chats/{slug}/excerpts/{slug}/pin`
+  (old N-notes endpoints) replaced with one
+  `POST /chats/{slug}/turns/{index}/pin` (body: `{pinned: bool}`) —
+  pin/unpin a turn, which regenerates the chat's single Excerpt note from
+  whatever's currently pinned: `ChatAgent.summarize()` (new one-shot
+  completion method, bypasses the tool loop) +
+  `chat_prompts.load_excerpt_summary_prompt()` (new user-editable prompt,
+  same bootstrap-to-`~/.config/prisma/` pattern as the chat system prompt)
+  produce the Summary; `VaultService.save_excerpt()` writes Summary + a
+  verbatim copy of the pinned turns into one note, reusing it on every
+  subsequent pin/unpin rather than creating a new note each time.
+- UI: per-turn Pin button is now a real toggle (filled icon when pinned,
+  matches current `pinned_turns`), no more "promote to note" dialog asking
+  for a title/body — pinning is a single click, title is auto-derived
+  server-side. Excerpts panel shows the one Excerpt note directly (Summary
+  + raw copy), not a list of independent note cards.
+- [x] **Context-usage label** — `ChatAgent.context_usage(history,
+      promoted_notes)` returns `(tokens_used, max_tokens)`, reusing the same
+      system-prompt/tool-section/Excerpt/bounded-history assembly
+      `respond()` sends. `max_tokens` is `max_history_tokens` (the session's
+      configured budget), not the backend's raw context ceiling — resolved
+      explicitly in ADR-015. Attached to every `Chat` API response (not
+      persisted — computed fresh each time) via `app.py`'s
+      `_with_context_usage()` helper. UI shows it `k`/`M`-formatted
+      (`formatTokenCount()`) next to the model badge, e.g. `1.2k / 16k`.
+- [x] **Verbatim mode + the budget-driven mode switch** —
+      `ChatConfig.context_window` (new field, defaults to 32768, matching
+      `prisma-llm:7b`'s real ceiling) + `ChatAgent.excerpt_mode(pinned_text)`.
+      **Real bug caught live and fixed same-session**: the first version
+      checked only "is pinned content a small fraction of the window" — but
+      a single pinned turn is a small fraction of *any* window, so it put
+      even the local 32768-token model into verbatim mode almost
+      immediately (observed: pinning one turn never showed a Summary at
+      all). Fixed to a two-part check: `context_window` must first clear
+      `LARGE_CONTEXT_WINDOW_THRESHOLD` (200,000) before verbatim is even
+      considered — today's local model always stays compressed
+      unconditionally — and only then does the percentage check
+      (`VERBATIM_MODE_MAX_RATIO`, 15%) decide between the two. Verbatim
+      mode skips `summarize()` entirely (`save_excerpt(slug, summary=None,
+      ...)` omits the "## Summary" heading) — genuinely simpler than
+      compressed mode, not just a different code path. Deleting a pinned
+      turn (`DELETE /chats/{slug}/messages/{index}`) now re-indexes
+      `pinned_turns` and regenerates the Excerpt too — a separate real bug
+      the index-based pinning model introduced that didn't exist under the
+      old slug-based design, caught and fixed in the same pass
+      (`_regenerate_excerpt_now()`, shared between both endpoints). Verbatim
+      mode has no practical effect yet — only the local, small-context
+      model is configured — but activates automatically once a
+      larger-context backend is, no further code changes needed.
+- [x] **Real bug fixed same-session, caught live**: `excerpt_mode()`'s first
+      version checked only "is pinned content a small fraction of the
+      window" — but that's true for almost any small pinned set on *any*
+      backend, so it put even the local 32768-token model into verbatim
+      mode immediately (cservinl: "I still don't see the summary"). Fixed
+      to require the backend's `context_window` itself clear
+      `LARGE_CONTEXT_WINDOW_THRESHOLD` (200,000) before verbatim is even
+      considered — today's local model now always stays compressed,
+      unconditionally.
+- [x] **Excerpt regeneration made asynchronous** — `summarize()` is a
+      synchronous LLM call that can be slow or fail outright under real GPU
+      contention (observed live: a `kg` extraction call timing out at 300s
+      on the same shared local model, right as chat tried to regenerate an
+      Excerpt). `set_turn_pinned`/`delete_chat_message` now return
+      immediately with `pinned_turns` already updated;
+      `_regenerate_excerpt_async()` runs the actual summarize+save on a
+      background thread, tracked in an in-memory `_excerpt_regenerating`
+      registry (not persisted — ephemeral UI status only) surfaced as
+      `Chat.excerpt_regenerating`. UI: pinning shows the *previous* Excerpt
+      content immediately (never blocks on the LLM call) with a visible
+      "regenerating…" spinner in the Excerpts panel header, polling
+      `GET /chats/{slug}` every 2s until the flag clears, then refetching.
+
+### Next session: chat responses are too verbose, wasting context budget
+
+cservinl (2026-07-03): the model generates excessively long, example-heavy
+answers by default, filling the rolling-history budget (`max_history_tokens`)
+much faster than necessary — fewer real turns fit before
+`_bounded_history` starts dropping the oldest ones. Needs prompt-level
+constraints in `DEFAULT_CHAT_SYSTEM_PROMPT`
+(`prisma/services/chat_prompts.py`), something like:
+- "Don't generate examples/code samples unless explicitly asked for one."
+- Other brevity guidance to discourage padding out answers with
+  restated context, redundant elaboration, or unsolicited walkthroughs
+  (the kind of output seen filling the context-usage label much faster
+  than the actual conversational content would need).
+
+Not scoped/built yet — needs its own pass: figure out the right set of
+constraints without making the model unhelpfully terse for questions that
+*do* warrant a fuller answer, and verify live rather than guessing (same
+discipline as the tool-calling comparison in ADR-014's appendix).
+
+Design discussion after the first increment shipped: cservinl reframed how
+a chat's context should be bounded, using a meeting analogy — the initial
+prompt is the agenda, the raw back-and-forth is the meeting itself (can be
+rolled/pruned freely, not precious on its own), and the actually-valuable
+artifact is the "meeting notes" distilled out of it. This directly explains
+two fields that already existed in `vault_models.py` unused —
+`Chat.promoted_excerpts` and `Note.promoted_from_chat` — they were the
+original design intent for exactly this, just never wired up.
+
+- [x] **Bounded rolling history** (the technical safety net) —
+      `ChatAgent._bounded_history()`: token-budget-based (reusing the same
+      `len(s)//4` heuristic used elsewhere), drops the *oldest* messages
+      first once `max_history_tokens` (default 16000, see
+      `DEFAULT_MAX_HISTORY_TOKENS`'s comment for the reasoning against
+      `prisma-llm:7b`'s real 32768-token ctx) would be exceeded. Silent and
+      lossy for the raw transcript's presence in the model's *working*
+      context only — never touches what's actually saved to disk
+      (`save_chat()` always persists the complete history).
+- [x] **Manual curation — delete a specific turn.**
+      `DELETE /chats/{slug}/messages/{index}` removes one message and
+      resaves. Deliberately not automatic (no AI-driven pruning/summarization)
+      — cservinl was explicit that these chats are research media, not
+      ephemeral, so *what* gets removed from the working conversation must
+      be a human decision, never a model's.
+- [x] **Promote to Note — the actual "meeting notes."**
+      `POST /chats/{slug}/promote` (body: `title`, `body`, `tags?`) →
+      `VaultService.promote_chat_excerpt()` creates a real `Note` with
+      `promoted_from_chat: <chat_slug>` in its frontmatter, and appends the
+      note's slug to the chat's own `promoted_excerpts`. Always an explicit
+      user action (a "assistant proposes, user approves" trigger was
+      considered and explicitly deferred — cservinl chose user-only for now).
+- [x] **Promoted notes are re-injected as durable context** — the part that
+      actually prevents "revisiting already-discussed things" or repeating
+      a corrected mistake. `ChatAgent.respond()` takes `promoted_notes:
+      list[Note]`, rendered via `_promoted_context_block()` into the system
+      prompt as an "already established, don't re-litigate" block —
+      deliberately **not** subject to `_bounded_history`'s truncation, since
+      the whole point is that this survives even after the raw turns that
+      produced it roll away. `/chat` resolves `chat_node.promoted_excerpts`
+      slugs to real `Note`s via `_vault.get_note()` before calling
+      `respond()`. Verified live end-to-end for create/promote/persist;
+      the actual "does the LLM call see it" step is covered by unit tests
+      (`test_respond_promoted_notes_survive_history_truncation` etc.) rather
+      than a live run — hit real `local-ollama` GPU contention (kg's own
+      post-restart full reindex) both times attempted live, same expected
+      `model_affinity` behavior already documented elsewhere in this file.
+- [ ] **Only promotions from a chat's own history are in scope for now** —
+      cross-chat retrieval of promoted notes from *other*, topically-related
+      past chats was raised and explicitly deferred: that's really a
+      `search_vault`-shaped retrieval problem (notes are already vault
+      content, findable that way), not an "always inject" one. Not built.
+- [ ] **Consultation sub-agent for large sources — reconsidered scope for
+      `get_full_text`.** A flat raw-text dump is the wrong shape given the
+      chat model's real, finite context. Proposed instead: a dedicated
+      sub-agent that map-reduces over one source's sections (reusing
+      `semchunk`, same pattern `KnowledgeGraphService._extract_file` already
+      uses) and returns only a distilled answer — and, per cservinl's
+      follow-up, this sub-agent may need its *own* tools (`expand_node`,
+      graph DB queries, its own semantic search) to actually follow threads
+      across the graph while consulting a source, i.e. a nested agent with
+      its own tool loop, not a flat summarizer function. Meaningful overlap
+      with existing kg extraction to resolve first. Not scoped/built —
+      deliberately not bolted on alongside the rest of this session's chat
+      work; needs its own design pass.
+
+### Full chat UI (2026-07-02) — built
+
+cservinl was explicit: not a minimal chat box, a *completed* UI. Built into
+`ui/src/routes/+page.svelte` (the existing single-file SPA pattern this UI
+already uses for notes/sources/streams — no new route/component-library
+architecture introduced, stays consistent):
+
+- [x] **Chat list** — sidebar "Chats" section already existed (`loadChats()`
+      via `GET /notes?node_type=chat`) but its click handler was wired to
+      `openNode()`, which would have broken on a `Chat` (no `.body` field).
+      Fixed to `openChat()`. Added a `+` create button (mirrors the Streams
+      section's pattern exactly) and right-click rename/delete via the
+      existing generic `ctxMenu`/`doRename`/`doDelete` — delete needed no
+      new endpoint (`DELETE /nodes/{slug}` already worked generically),
+      just extended `doRename`/`doDelete` to also refresh `chats` state.
+- [x] **Conversation view** — new `{:else if activeChat}` branch in
+      `<main>`, styled turns per role: user turns right-aligned/italic
+      ("handwritten" feel), assistant turns left-aligned/monospace ("robot"
+      feel, matching the JetBrains Mono already used for technical UI
+      elsewhere) — addresses the original styling ask without adding a new
+      webfont. Tool-call lines rendered per turn (`🔧 used`, matching the
+      persisted markdown convention). Hover-revealed per-turn actions:
+      📌 promote, 🗑 delete.
+- [x] **Send message** — `sendChatMessage()`, optimistic local append of
+      the user's turn, then `POST /chat`, appends the real assistant reply
+      + its `tool_calls` on response.
+- [x] **Delete a turn** — `deleteChatMessage(index)` →
+      `DELETE /chats/{slug}/messages/{index}`.
+- [x] **Promote to note** — `startPromote(index)` pre-fills a modal (reused
+      the existing `.settings-panel` modal pattern from the stream-creation
+      form) with the turn's content as a starting point; user edits
+      title/body and confirms → `POST /chats/{slug}/promote`.
+
+Verified: `npm run check` (0 errors/warnings), `npm run build` succeeds,
+and the built bundle was grepped directly to confirm the new code is
+actually in the served static output — but genuine browser/visual
+verification (does it *look* right, does clicking actually feel right)
+was **not done** — this environment has no browser-driving tool available.
+cservinl should try it live (`prisma serve`, open `/app`) before considering
+this truly done.
+
+### Compute-pool model-awareness, real num_ctx correction, model merge (2026-07-02)
+
+Live testing of the UI (indexer running at only ~20-40% GPU utilization)
+surfaced that `compute_pools` was under-using real headroom, which led to
+several linked fixes:
+
+- [x] **`compute_pools` schema evolved**: `type: gpu|cloud` replaces the
+      `model_affinity` boolean (legacy key still read as a fallback), and
+      each pool's `models` list can now declare **per-model
+      `max_concurrent` overrides** (`{name, max_concurrent}` or a plain
+      string for "use the pool default") — different models sharing one
+      GPU can have genuinely different safe concurrency ceilings. Also
+      used to auto-route a request to the right pool by model name, so a
+      cloud model can never accidentally land in a `type: gpu` pool and
+      get misattributed as its resident model. See `ResourceManager`
+      (`prisma/server/supervisor.py`) and its test suite.
+- [x] **Live resource-pool reload**: `POST /supervisor/resources/reload` +
+      `prisma reload-resources` CLI command re-read `compute_pools` into a
+      *running* supervisor — no restart, no lost in-flight leases. Built
+      specifically so tuning `max_concurrent` against observed GPU
+      utilization doesn't require killing every worker.
+- [x] **`resource_lock.lease()`/`acquire()` gained a `pool` parameter** —
+      previously there was no way for a caller to request a *specific*
+      named pool at all (a real gap found and dropped earlier when first
+      scoping `ChatConfig`, now actually wired end-to-end since the
+      `openrouter` pool needs it to stay isolated from `local-ollama`'s
+      `model_affinity` serialization).
+- [x] **Real correctness bug found and fixed**: `prisma-kg:7b`'s
+      `num_ctx=65536` was never actually in effect — Qwen2.5-7B's own
+      architecture caps at 32768 tokens, and Ollama silently clamps a
+      higher configured `num_ctx` instead of erroring. `ollama show
+      --modelfile` only echoes what was configured, not what's enforced;
+      `/api/ps`'s loaded `context_length` is the one to trust. See
+      ADR-013's follow-up section for the full correction.
+- [x] **`prisma-kg:7b` and `prisma-chat:7b` merged into `prisma-llm:7b`** —
+      since both were silently running at the same real 32768 context the
+      whole time, keeping two identical tags was pure duplication.
+      `KnowledgeGraphService.ollama_model` and `ChatConfig.model` both
+      default to it now.
+- [x] **`OLLAMA_NUM_PARALLEL` bumped 3 → 4** (systemd override,
+      `sudo systemctl edit ollama`) after observing real GPU utilization
+      had headroom to spare — verified live: 4 genuinely concurrent calls
+      to `prisma-llm:7b` at 32768 ctx used only ~7GB VRAM total, ~9GB still
+      free of 16GB. `compute_pools.local-ollama.models`'s `prisma-llm:7b`
+      entry updated to `max_concurrent: 4` to match — deliberately not set
+      higher than Ollama's own real parallelism, since that would just
+      mean queueing at the Ollama layer, not actual added concurrency.
+- [x] **`OLLAMA_NUM_PARALLEL` systemd override removed entirely** — reverted
+      to Ollama's own default (`0`/"auto"), which picks parallel-slot count
+      per model from actual free VRAM, same as `OLLAMA_MAX_LOADED_MODELS=0`
+      already does for model count. `compute_pools.local-ollama.models`'s
+      `prisma-llm:7b` `max_concurrent`/`background_max_concurrent` raised
+      (4→6 / 3→5) to stop artificially capping below what the GPU can
+      absorb; `vram_budget_mb` + the live `/api/ps` VRAM check are the real
+      backstop now, not a static parallelism number. See
+      `docs/ollama-concurrency.md`'s follow-up section.
+- [x] **Real bug found and fixed while watching live logs**:
+      `ChromaIndexer._loop()` cleared `self._pending` *before* attempting
+      the embed lease, unconditionally — same class of bug as kg's earlier
+      manifest-advance-on-failure issue. Two concrete failure modes fixed:
+      1. A file that changed while the embed lease was busy (e.g. kg's own
+         long-running extraction holding the shared pool) was silently
+         dropped from tracking forever, never retried unless it changed
+         again.
+      2. **Deletions were needlessly gated behind the same lease** even
+         though removing a vector from ChromaDB needs no Ollama call at
+         all — a file deleted from the vault while the pool happened to be
+         busy would also lose its deletion tracking, for no real reason.
+      Fixed by extracting the per-cycle logic into `_process_incremental()`
+      (now independently testable), separating deletions (always
+      processed) from embeds (lease-gated), and re-queuing only the
+      embed-needing files back into `_pending` on denial rather than the
+      whole batch. Caught live: a real server log showed Chroma retrying
+      for ~10s against kg's long-held lease, then logging "skipped — no
+      compute lease available" — the fix means that log line is now
+      accurate (it *will* retry next cycle) instead of quietly lying.
 
 ## Cutover
 

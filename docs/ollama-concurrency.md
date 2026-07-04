@@ -177,3 +177,57 @@ independent, and the caller just says which model, not which pool."
 | One local GPU, one Ollama instance | single pool, `model_affinity: true` (default) | same-model calls batch up to `max_concurrent`; different-model calls fully serialize (this doc's benchmark) |
 | Local AI server with N GPUs, models pinned per GPU | one pool per GPU, each `model_affinity: true` | different models run genuinely concurrently, each on its own GPU; same-model traffic can also spill across GPUs if declared that way |
 | Cloud API | single pool, `model_affinity: false` | any mix of models runs concurrently up to `max_concurrent`, no serialization — the only case where this is actually true |
+
+## Follow-up (2026-07-02): `NUM_PARALLEL` 3 → 4, and a related correction
+
+Two changes since the recommendation above, both driven by real
+measurements rather than re-guessing:
+
+**The model consolidation.** `prisma-kg:7b` and `prisma-chat:7b` (two
+separate tags, one supposedly at `num_ctx=65536`, the other at `32768`)
+turned out to be running at the *same* effective context the whole time —
+Qwen2.5-7B's own architecture caps at 32768 tokens, and Ollama silently
+clamps a higher configured `num_ctx` rather than erroring. The 65536 claim
+in this project's docs (ADR-013, `installation.md`) was wrong — verified
+via `ollama show --modelfile`, which only echoes back the *configured*
+value, not the actually-enforced one (`/api/ps`'s `context_length` is the
+one to trust). Since both tags were functionally identical, they were
+merged into one, `prisma-llm:7b`, used for both knowledge graph extraction
+and chat.
+
+**`OLLAMA_NUM_PARALLEL` bumped 3 → 4.** With actual GPU utilization
+observed at only ~20-40% during single-threaded extraction, there was
+clearly more headroom than 3 parallel slots were using. Bumped the systemd
+override to `OLLAMA_NUM_PARALLEL=4` and verified live: 4 genuinely
+concurrent calls to `prisma-llm:7b` at 32768 ctx completed successfully
+using **~7GB VRAM total, ~9GB still free** of 16GB — comfortably safe, and
+consistent with this doc's own conclusion #1 above (the pool's
+`max_concurrent` must match the backend's actual configured parallelism).
+`compute_pools.local-ollama.models` in `~/.config/prisma/config.yaml` was
+updated to `max_concurrent: 4` for `prisma-llm:7b` to match. A live-reload
+endpoint (`POST /supervisor/resources/reload`, `prisma reload-resources`
+CLI command) was added at the same time so tuning this kind of number
+doesn't require restarting the whole supervisor and losing in-flight
+leases — see ADR-012's follow-up section.
+
+## Follow-up (2026-07-02): the systemd override was removed entirely
+
+The `OLLAMA_NUM_PARALLEL` systemd drop-in
+(`/etc/systemd/system/ollama.service.d/override.conf`) has been **deleted**,
+not bumped again. Ollama's own default for this setting is `0` ("auto") —
+it picks a parallel-slot count per model based on actual free VRAM at load
+time, the same mechanism `OLLAMA_MAX_LOADED_MODELS=0` already uses to
+auto-manage how many distinct models stay resident (see the top of this
+doc's original conclusions — that recommendation, "keep `NUM_PARALLEL`
+pinned and match the pool to it," was reasonable for a benchmark run in
+isolation, but pinning it statically fights Ollama's own memory-aware
+scheduler once real background load — kg extraction concurrency, chat, and
+embedding — is competing for the same GPU).
+
+Prisma's own `max_concurrent` in `~/.config/prisma/config.yaml` no longer
+represents "match the backend's fixed parallelism" — it's now a generous
+ceiling, and `vram_budget_mb` plus `ResourceManager.acquire`'s live
+`/api/ps` query (real reported VRAM per resident model, not a static
+estimate) are the actual backstop against overcommit. This is a deliberate
+trade: less predictable per-call latency in exchange for not artificially
+capping concurrency below what the GPU can genuinely absorb.

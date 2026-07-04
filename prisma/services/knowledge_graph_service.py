@@ -40,6 +40,7 @@ from watchdog.events import FileSystemEventHandler, FileSystemEvent
 from watchdog.observers import Observer
 
 from prisma.services import resource_lock
+from prisma.services.injection_defense import wrap_untrusted
 from prisma.services.vault import VaultService
 from prisma.storage.models.vault_models import NodeType
 
@@ -63,34 +64,34 @@ _TRUST_TIER_BY_NODE_TYPE: dict[NodeType, str] = {
     NodeType.stream: "note",
 }
 
-# ── Injection defense, adapted from graphify's llm.py `_wrap_untrusted` /
-# `_neutralise_injection_sentinels` — same threat (a downloaded paper/web
-# page crafted to look like instructions once it's in the model's context),
-# same mechanical mitigation. See TODO.md's sanitizer section.
-_INJECTION_SENTINELS = re.compile(
-    r"</?untrusted_source\b[^>]*>"
-    r"|<\|(?:im_start|im_end|system|user|assistant|endoftext)\|>"
-    r"|<<SYS>>|<</SYS>>"
-    r"|\[/?INST\]"
-    r"|^\s*###?\s*(?:system|instruction)s?\s*:?\s*$",
-    re.IGNORECASE | re.MULTILINE,
-)
-
-
-def _neutralise_injection_sentinels(text: str) -> str:
-    return _INJECTION_SENTINELS.sub(lambda m: m.group(0)[0] + "​" + m.group(0)[1:], text)
-
-
-def _wrap_untrusted(rel: str, content: str) -> str:
-    sha = hashlib.sha256(content.encode("utf-8", errors="replace")).hexdigest()
-    safe = _neutralise_injection_sentinels(content)
-    return f'<untrusted_source path="{rel}" sha256="{sha}">\n{safe}\n</untrusted_source>'
-
-
 _EXTRACTION_SYSTEM = """\
 You are a knowledge-graph extraction agent. Extract entities and relationships \
 from the single document section provided. Output ONLY valid JSON — no \
 explanation, no markdown fences, no preamble.
+
+What counts as a real entity — extract:
+- The document's own central contributions: named methods, models, systems, \
+  frameworks, datasets, metrics it introduces or evaluates (e.g. "MEMIT", "GPT-J").
+- Named baselines/prior work it directly compares against or builds on (e.g. "ROME", "MEND").
+- Authors and their institutional affiliations, when given.
+- Core recurring concepts the document's argument actually depends on.
+
+What is NOT a real entity — do not extract:
+- Illustrative examples, analogies, or toy cases used only to explain a concept \
+  (e.g. a worked example like "Michael Jordan plays basketball" used to illustrate \
+  a (subject, relation, object) triple, or "Polaris is in Ursa Minor" used to \
+  illustrate what a language model can recall). These are throwaway props for \
+  the reader, not things the document is about — never create nodes for them, \
+  even if named entities appear inside them.
+- Generic section labels, figure/table captions, or narration about the document \
+  itself ("Ablation Study", "Related Work") unless the section body names a \
+  specific method/dataset/result being discussed — prefer the specific thing \
+  named over the generic label.
+
+Preserve exact terminology: copy method/model names and acronyms verbatim from \
+the text (e.g. "MEMIT", not a paraphrase or partial fragment of it) — never \
+invent, abbreviate, or garble a name you're not certain of; when genuinely \
+unsure of an entity's exact form, omit it rather than guess.
 
 Rules:
 - EXTRACTED: relationship explicit in the text (citation, reference, explicit claim)
@@ -112,11 +113,23 @@ Output exactly this schema:
 """
 
 
+_MARKDOWN_FENCE_RE = re.compile(r"^```(?:json)?\s*\n?|\n?```\s*$")
+
+
 def _parse_extraction_response(text: str) -> tuple[list[dict], list[dict]]:
     """Parse the model's JSON response. Returns ([], []) on any malformed output
-    — one bad section must not abort the whole extraction pass."""
+    — one bad section must not abort the whole extraction pass.
+
+    The system prompt explicitly forbids markdown fences, but the model
+    still wraps output in ```json ... ``` fairly often on longer inputs
+    (confirmed empirically: a controlled test at ~8k/~11k input tokens got
+    wrapped responses every time, vs. a clean unwrapped response at ~1.2k
+    tokens for the identical target content) — silently discarding a
+    perfectly good extraction as "found nothing" was a real, previously
+    unnoticed bug, not a sign of the model's entity recall actually
+    degrading with length."""
     try:
-        data = json.loads(text)
+        data = json.loads(_MARKDOWN_FENCE_RE.sub("", text.strip()))
         return data.get("nodes", []) or [], data.get("edges", []) or []
     except (json.JSONDecodeError, AttributeError):
         return [], []
@@ -127,13 +140,14 @@ class KnowledgeGraphService:
         self,
         vault: VaultService,
         interval_minutes: int = 10,
-        ollama_model: str = "prisma-kg:7b",
+        ollama_model: str = "prisma-llm:7b",
         ollama_base_url: str = "http://localhost:11434",
-        token_budget: int = 8000,
+        token_budget: int = 2000,
         index_extensions: tuple[str, ...] = DEFAULT_INDEX_EXTENSIONS,
         supervisor_host: str = "127.0.0.1",
         supervisor_port: int | None = None,
         kg_dir: Path | None = None,
+        extraction_concurrency: int = 3,
     ) -> None:
         self._vault = vault
         self._interval = interval_minutes * 60
@@ -141,21 +155,55 @@ class KnowledgeGraphService:
         self._base_url = ollama_base_url
         # Per-section token budget, not per-file — this is the actual fix for
         # the token-budget cliff a single oversized file used to hit. Model
-        # runs with num_ctx=65536 (see Modelfile); 8000 leaves generous
-        # headroom for the system prompt, <untrusted_source> wrapping, and
-        # the model's own JSON output, while still cutting most documents
-        # down to a single section instead of many.
+        # runs with num_ctx=32768 (Qwen2.5-7B's own architectural maximum —
+        # Ollama silently clamps a higher configured num_ctx rather than
+        # erroring, so this is the real enforced ceiling, verified via
+        # /api/ps's loaded context_length, not just the Modelfile's own
+        # PARAMETER line). This used to default to 8000 ("leaves generous
+        # headroom... while cutting most documents to a single section"),
+        # but a controlled test on real paper content
+        # (docs/kg-extraction-context-length.md) found that traded away most
+        # of the graph's actual value: the same ~7,800 tokens of real content
+        # produced ~10x fewer unique entities and ~4x fewer relationships as
+        # one 8000-token call than as four ~2000-token calls, with far more
+        # duplication too. More, smaller calls beats fewer, bigger ones here.
         self._token_budget = token_budget
         self.index_extensions = index_extensions
+        # Each section's Ollama call is independently resource_lock-gated as
+        # priority="background". Cross-file fan-out (_extract_files_concurrently)
+        # and within-file section fan-out (_extract_file) are two separate
+        # thread pools, both sized off extraction_concurrency — run together
+        # they can multiply demand past that number (e.g. 3 files x 3
+        # sections = up to 9 calls in flight at once), which just floods the
+        # supervisor with requests it was always going to deny. This
+        # semaphore is the actual single gate on total concurrent Ollama
+        # calls across both pools, so demand never overshoots what's meant
+        # to be granted — set it equal to the model's
+        # background_max_concurrent in config.yaml so kg's real demand
+        # matches its real supply instead of hammering acquire() with
+        # doomed requests.
+        self._extraction_concurrency = max(1, extraction_concurrency)
+        self._extraction_semaphore = threading.Semaphore(self._extraction_concurrency)
         self._supervisor_host = supervisor_host
         self._supervisor_port = supervisor_port if supervisor_port is not None else resource_lock.default_port()
 
         self._kg_dir = kg_dir or (vault.root / "kg-out")
-        self._manifest_path = self._kg_dir / "manifest.json"
-        self._manifest: dict[str, str] = {}  # rel path -> content sha256
 
         self._db = None
         self._conn = None
+        # In-memory mirror of the IndexedFile table, fully preloaded once in
+        # _ensure_connection() and kept in sync write-through on every
+        # change (see _set_indexed_hash/_delete_file/taint_file/drop_index).
+        # This is a cache in front of Kùzu, not a replacement for it — Kùzu
+        # stays the durable source of truth, this just avoids a DB
+        # round-trip (and lock hold) for the read that happens on every
+        # single file _extract_file considers. Because it's a *full*
+        # preload rather than lazy/on-demand, a cache miss is always a
+        # complete answer ("never indexed") rather than "not loaded yet" —
+        # there's no scenario where a caller needs to fall back to a real
+        # Kùzu query or get told "busy," which a partial/lazy cache would
+        # need to handle.
+        self._indexed_cache: dict[str, str] = {}
 
         self._state: IndexState = "stale"
         self._last_indexed: datetime | None = None
@@ -202,20 +250,43 @@ class KnowledgeGraphService:
             if self._state != "indexing":
                 self._state = "stale"
 
+    def taint_file(self, rel_path: str) -> bool:
+        """Force one specific file to be re-extracted on the next cycle,
+        without touching the rest of the graph. Removes its IndexedFile
+        tracking node (an unchanged file's content hash would otherwise
+        still match, and _extract_file skips it — the same check a real
+        edit defeats) and enqueues it directly rather than waiting for a
+        real filesystem event or the next full rescan. Returns False if the
+        file doesn't exist in the vault."""
+        path = self._vault.root / rel_path
+        if not path.exists():
+            return False
+        with self._lock:
+            if self._conn is not None:
+                try:
+                    self._conn.execute(
+                        "MATCH (f:IndexedFile {source_file: $rel}) DETACH DELETE f", {"rel": rel_path},
+                    )
+                    self._indexed_cache.pop(rel_path, None)
+                except Exception as exc:
+                    _log.warning("taint_file: failed to clear tracking node for %s: %s", rel_path, exc)
+            self._pending.add(path)
+        return True
+
     def drop_index(self) -> None:
         """Drop the graph entirely and force a cold rebuild on the next cycle.
         Called by app.py's POST /knowledge-graph/drop."""
-        if self._conn is not None:
-            try:
-                self._conn.execute("MATCH (e:Entity) DETACH DELETE e")
-            except Exception as exc:
-                _log.warning("drop_index failed: %s", exc)
         with self._lock:
-            self._manifest = {}
+            if self._conn is not None:
+                try:
+                    self._conn.execute("MATCH (e:Entity) DETACH DELETE e")
+                    self._conn.execute("MATCH (f:IndexedFile) DETACH DELETE f")
+                    self._indexed_cache.clear()
+                except Exception as exc:
+                    _log.warning("drop_index failed: %s", exc)
             self._state = "stale"
             self._last_indexed = None
             self._last_error = None
-        self._save_manifest()
 
     def _ollama_ready(self) -> bool:
         import socket
@@ -262,11 +333,19 @@ class KnowledgeGraphService:
             "FROM Entity TO Entity, relation STRING, confidence STRING, "
             "confidence_score DOUBLE, weight DOUBLE, source_file STRING)"
         )
-        if self._manifest_path.exists():
-            try:
-                self._manifest = json.loads(self._manifest_path.read_text(encoding="utf-8"))
-            except Exception:
-                self._manifest = {}
+        # Tracks "has this file already been extracted, and at what content
+        # hash" directly in Kùzu — the same durable store as the graph
+        # itself — instead of a separate manifest.json that could drift out
+        # of sync with what Kùzu actually has (that mismatch was a real bug:
+        # restarting kg lost track of files it had already durably graphed).
+        self._conn.execute(
+            "CREATE NODE TABLE IF NOT EXISTS IndexedFile("
+            "source_file STRING, content_hash STRING, PRIMARY KEY(source_file))"
+        )
+        result = self._conn.execute("MATCH (f:IndexedFile) RETURN f.source_file, f.content_hash")
+        while result.has_next():
+            source_file, content_hash = result.get_next()
+            self._indexed_cache[source_file] = content_hash
 
     # ── Extraction ────────────────────────────────────────────────────────────
 
@@ -280,31 +359,38 @@ class KnowledgeGraphService:
         file that changed while Ollama was unreachable to be marked
         processed anyway, silently never retried. One section's failure
         must not abort the whole file's extraction, so this returns rather
-        than raises."""
-        prompt = _wrap_untrusted(rel_path, section_text)
-        with resource_lock.lease(
-            self._supervisor_host, self._supervisor_port,
-            holder=_RESOURCE_HOLDER, model=self._ollama_model,
-        ) as granted:
-            if not granted:
-                return [], [], False
-            try:
-                resp = requests.post(
-                    f"{self._base_url}/api/generate",
-                    json={
-                        "model": self._ollama_model,
-                        "system": _EXTRACTION_SYSTEM,
-                        "prompt": prompt,
-                        "stream": False,
-                        "options": {"temperature": 0.1},
-                    },
-                    # Larger sections (up to token_budget) take longer to
-                    # process now that num_ctx is 65536 instead of 16384.
-                    timeout=300,
-                )
-            except requests.RequestException as exc:
-                _log.warning("extraction call failed for %s: %s", rel_path, exc)
-                return [], [], False
+        than raises. Gated by self._extraction_semaphore — see its comment
+        in __init__ for why: without it, the cross-file and within-file
+        thread pools can multiply demand well past what the supervisor
+        will ever grant, so excess threads sit here waiting for a slot
+        instead of hammering resource_lock's internal retry/backoff against
+        an already-full pool."""
+        with self._extraction_semaphore:
+            prompt = wrap_untrusted(rel_path, section_text)
+            with resource_lock.lease(
+                self._supervisor_host, self._supervisor_port,
+                holder=_RESOURCE_HOLDER, model=self._ollama_model,
+            ) as granted:
+                if not granted:
+                    return [], [], False
+                try:
+                    resp = requests.post(
+                        f"{self._base_url}/api/generate",
+                        json={
+                            "model": self._ollama_model,
+                            "system": _EXTRACTION_SYSTEM,
+                            "prompt": prompt,
+                            "stream": False,
+                            "format": "json",
+                            "options": {"temperature": 0.1},
+                        },
+                        # Larger sections (up to token_budget) take longer to
+                        # process now that num_ctx is 32768 instead of 16384.
+                        timeout=300,
+                    )
+                except requests.RequestException as exc:
+                    _log.warning("extraction call failed for %s: %s", rel_path, exc)
+                    return [], [], False
         if resp.status_code != 200:
             _log.warning("extraction failed for %s: status=%d", rel_path, resp.status_code)
             return [], [], False
@@ -315,10 +401,18 @@ class KnowledgeGraphService:
     def _extract_file(self, path: Path, trust_tier: str) -> bool:
         """Per-section extraction — chunk within the document by token
         budget (semchunk), not per-file, so no single file can ever be too
-        big to extract. Each section's nodes/edges are upserted
-        independently. Returns True if the manifest changed (content hash
-        differs from last time)."""
+        big to extract. Sections are independent (each is its own
+        resource_lock-gated Ollama call and its own upsert), so they're
+        fanned out across a small thread pool instead of run one at a time —
+        that's what actually lets background extraction use more than one
+        of the supervisor's reserved background slots at once. Kùzu's
+        connection isn't thread-safe, so upserts (and the IndexedFile
+        tracking reads/writes) are serialized behind self._lock as each
+        section completes; the network calls themselves run concurrently.
+        Returns True if the file's content actually changed since it was
+        last indexed."""
         import semchunk
+        import concurrent.futures
 
         try:
             rel = str(path.relative_to(self._vault.root))
@@ -327,32 +421,59 @@ class KnowledgeGraphService:
             return False
 
         content_hash = hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()
-        if self._manifest.get(rel) == content_hash:
-            return False
+        with self._lock:
+            if self._indexed_hash(rel) == content_hash:
+                return False
 
         chunker = semchunk.chunkerify(lambda s: len(s) // 4, chunk_size=self._token_budget)
         sections = chunker(text) if text.strip() else []
 
         any_upserted = False
         all_ok = True
-        for i, section in enumerate(sections):
-            self._set_activity(f"extracting {rel} (section {i + 1}/{len(sections)})")
-            nodes, edges, ok = self._call_ollama_extract(rel, section)
-            all_ok = all_ok and ok
-            if nodes or edges:
-                self._upsert(rel, trust_tier, nodes, edges)
-                any_upserted = True
+        if sections:
+            self._set_activity(f"extracting {rel} ({len(sections)} section(s), up to {self._extraction_concurrency} concurrent)")
+            max_workers = min(len(sections), self._extraction_concurrency)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+                futures = [pool.submit(self._call_ollama_extract, rel, section) for section in sections]
+                for future in concurrent.futures.as_completed(futures):
+                    nodes, edges, ok = future.result()
+                    all_ok = all_ok and ok
+                    if nodes or edges:
+                        with self._lock:
+                            self._upsert(rel, trust_tier, nodes, edges)
+                        any_upserted = True
 
-        # Only advance the manifest on genuine success — otherwise a file
+        # Only advance the tracked hash on genuine success — otherwise a file
         # that changed while Ollama was unreachable would never be retried
         # (see _call_ollama_extract's docstring). A section that succeeded
-        # but legitimately found nothing still counts as success.
+        # but legitimately found nothing still counts as success. Written
+        # immediately (not batched) so a restart mid-scan never loses track
+        # of files already durably indexed.
         if all_ok:
             with self._lock:
-                self._manifest[rel] = content_hash
+                self._set_indexed_hash(rel, content_hash)
         else:
             _log.warning("knowledge graph: extraction incomplete for %s — will retry next cycle", rel)
         return any_upserted
+
+    def _indexed_hash(self, rel: str) -> str | None:
+        """Caller must hold self._lock. Reads the in-memory cache only —
+        no Kùzu query — since _indexed_cache is a full mirror of the
+        IndexedFile table, kept in sync on every write."""
+        return self._indexed_cache.get(rel)
+
+    def _set_indexed_hash(self, rel: str, content_hash: str) -> None:
+        """Caller must hold self._lock. Write-through: Kùzu first (the
+        durable store), then the cache — if the Kùzu write fails, the
+        cache must not silently disagree with what's actually persisted."""
+        try:
+            self._conn.execute(
+                "MERGE (f:IndexedFile {source_file: $rel}) SET f.content_hash = $hash",
+                {"rel": rel, "hash": content_hash},
+            )
+            self._indexed_cache[rel] = content_hash
+        except Exception as exc:
+            _log.warning("failed to record indexed hash for %s: %s", rel, exc)
 
     def _upsert(self, rel: str, trust_tier: str, nodes: list[dict], edges: list[dict]) -> None:
         for n in nodes:
@@ -398,9 +519,10 @@ class KnowledgeGraphService:
         except ValueError:
             return False
         try:
-            self._conn.execute("MATCH (e:Entity {source_file: $rel}) DETACH DELETE e", {"rel": rel})
             with self._lock:
-                self._manifest.pop(rel, None)
+                self._conn.execute("MATCH (e:Entity {source_file: $rel}) DETACH DELETE e", {"rel": rel})
+                self._conn.execute("MATCH (f:IndexedFile {source_file: $rel}) DETACH DELETE f", {"rel": rel})
+                self._indexed_cache.pop(rel, None)
             return True
         except Exception as exc:
             _log.warning("delete failed for %s: %s", rel, exc)
@@ -417,6 +539,33 @@ class KnowledgeGraphService:
 
     # ── Background loop ───────────────────────────────────────────────────────
 
+    def _extract_files_concurrently(self, paths: list[Path]) -> int:
+        """Fan out _extract_file across several files at once, bounded by
+        the same extraction_concurrency width as within-file section
+        extraction. Most vault files chunk to a single section, so this —
+        not the within-file fan-out — is what actually puts more than one
+        background extraction call in flight at a time. Safe to over-fan-out
+        relative to the supervisor's background_max_concurrent: acquire()
+        is the real admission control, this is just offering it enough
+        concurrent demand to have something to grant.
+
+        Each file's indexed hash is written to Kùzu the instant that file
+        finishes (see _extract_file/_set_indexed_hash) — no separate save
+        step needed here, so a restart or crash partway through a long full
+        vault scan never loses track of files already durably indexed."""
+        import concurrent.futures
+
+        if not paths:
+            return 0
+        max_workers = min(len(paths), self._extraction_concurrency)
+        changed = 0
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = {pool.submit(self._extract_file, path, self._trust_tier_for(path)): path for path in paths}
+            for future in concurrent.futures.as_completed(futures):
+                if future.result():
+                    changed += 1
+        return changed
+
     def _loop(self) -> None:
         self._stop_event.wait(timeout=20)
         self._full_index()
@@ -426,21 +575,16 @@ class KnowledgeGraphService:
                 self._pending.clear()
             if pending:
                 _log.info("knowledge graph incremental update: %d files flagged by watcher", len(pending))
-                changed = 0
+                existing = [path for path in pending if path.exists()]
                 for path in pending:
-                    if path.exists():
-                        if self._extract_file(path, self._trust_tier_for(path)):
-                            changed += 1
-                    else:
+                    if not path.exists():
                         self._delete_file(path)
+                changed = self._extract_files_concurrently(existing)
                 if changed:
-                    self._save_manifest()
                     with self._lock:
                         self._last_indexed = datetime.now()
                         self._state = "idle"
-                elif not any(p.exists() for p in pending):
-                    self._save_manifest()
-                else:
+                elif existing:
                     _log.info("knowledge graph incremental update: no real content change — watcher false-positive")
                 self._set_activity(None)
             self._stop_event.wait(timeout=60)
@@ -451,13 +595,8 @@ class KnowledgeGraphService:
         try:
             all_files = [p for p in self._vault._all_md_files() if p.suffix in self.index_extensions]
             _log.info("knowledge graph full index start: %d files total", len(all_files))
-            changed = 0
-            for i, path in enumerate(all_files):
-                self._set_activity(f"scanning file {i + 1}/{len(all_files)}: {path.name}")
-                if self._extract_file(path, self._trust_tier_for(path)):
-                    changed += 1
-            if changed:
-                self._save_manifest()
+            self._set_activity(f"scanning {len(all_files)} file(s), up to {self._extraction_concurrency} concurrent")
+            changed = self._extract_files_concurrently(all_files)
             with self._lock:
                 self._last_indexed = datetime.now()
                 self._state = "idle"
@@ -471,19 +610,50 @@ class KnowledgeGraphService:
                 self._last_error = str(exc)
             _log.error("knowledge graph full index failed: %s", exc)
 
-    def _save_manifest(self) -> None:
-        with self._lock:
-            data = dict(self._manifest)
-        try:
-            self._manifest_path.write_text(json.dumps(data), encoding="utf-8")
-        except Exception:
-            pass
-
     # ── Retrieval ─────────────────────────────────────────────────────────────
     # Basic term-match + one-hop neighbor expansion — full ranked_nodes/
     # surprising_connections parity explicitly deferred (see TODO.md). This
     # is enough to keep /search and ollama_deep_search working without
     # regression while that refinement is deferred.
+
+    def entities_for_file(self, rel_path: str) -> dict:
+        """Raw entities/edges extracted from one specific file — for
+        inspecting extraction quality directly (search/ranked_nodes only
+        ever return file-level scores, never the underlying nodes)."""
+        if self._conn is None:
+            return {"entities": [], "edges": []}
+        entities: list[dict] = []
+        try:
+            result = self._conn.execute(
+                "MATCH (e:Entity {source_file: $rel}) "
+                "RETURN e.id, e.label, e.file_type, e.trust_tier, e.source_location",
+                {"rel": rel_path},
+            )
+            while result.has_next():
+                eid, label, file_type, trust_tier, source_location = result.get_next()
+                entities.append({
+                    "id": eid, "label": label, "file_type": file_type,
+                    "trust_tier": trust_tier, "source_location": source_location,
+                })
+        except Exception as exc:
+            _log.warning("entities_for_file failed for %s: %s", rel_path, exc)
+            return {"entities": [], "edges": []}
+        edges: list[dict] = []
+        try:
+            result = self._conn.execute(
+                "MATCH (a:Entity)-[r:RelatesTo {source_file: $rel}]->(b:Entity) "
+                "RETURN a.id, r.relation, b.id, r.confidence, r.confidence_score",
+                {"rel": rel_path},
+            )
+            while result.has_next():
+                src, relation, dst, confidence, confidence_score = result.get_next()
+                edges.append({
+                    "source": src, "relation": relation, "target": dst,
+                    "confidence": confidence, "confidence_score": confidence_score,
+                })
+        except Exception as exc:
+            _log.warning("entities_for_file edges failed for %s: %s", rel_path, exc)
+        return {"entities": entities, "edges": edges}
 
     def search(self, question: str, top_k: int = 20) -> list[dict]:
         terms = [t.lower() for t in re.findall(r"[a-zA-Z0-9_]+", question) if len(t) > 2]

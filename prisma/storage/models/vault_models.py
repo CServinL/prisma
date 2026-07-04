@@ -99,11 +99,17 @@ class Source(VaultNodeBase):
     original_ext: str | None = None
 
 
+class ToolCallRecord(BaseModel):
+    tool: str
+    args: dict = Field(default_factory=dict)
+
+
 class ChatMessage(BaseModel):
     role: ChatRole
     content: str
     timestamp: datetime = Field(default_factory=datetime.utcnow)
     sources_cited: list[str] = Field(default_factory=list)
+    tool_calls: list[ToolCallRecord] = Field(default_factory=list)
 
 
 class Chat(VaultNodeBase):
@@ -111,7 +117,33 @@ class Chat(VaultNodeBase):
     messages: list[ChatMessage] = Field(default_factory=list)
     context_slugs: list[str] = Field(default_factory=list)
     model: str = "llama3"
-    promoted_excerpts: list[str] = Field(default_factory=list)
+    # Indices into `messages` that are currently pinned — same identity
+    # convention DELETE /chats/{slug}/messages/{index} already uses. One
+    # Excerpt per chat (ADR-015), not N independent notes: pinning/unpinning
+    # a turn regenerates the single `excerpt_slug` note's Summary + raw copy
+    # from whatever's currently pinned, rather than creating a new note.
+    pinned_turns: list[int] = Field(default_factory=list)
+    excerpt_slug: str | None = None
+    # Populated only in API responses (app.py), never persisted — vault.py's
+    # get_chat() leaves these at their defaults; it has no ChatAgent access
+    # to compute a real estimate. The context-usage label (ADR-015).
+    context_tokens_used: int = 0
+    context_tokens_max: int = 0
+    # True while a background thread is regenerating the Excerpt note after
+    # a pin/unpin (app.py's _excerpt_regenerating registry) — not persisted,
+    # in-memory only. The UI keeps showing the *previous* Excerpt content
+    # while this is true, with a visible "regenerating" indicator, rather
+    # than blocking the pin action on a synchronous LLM call.
+    excerpt_regenerating: bool = False
+    # Rendered HTML of just the Summary portion of the Excerpt note (split
+    # server-side on the "## Pinned turns" marker _render_excerpt_body
+    # always emits) — None if there's no Excerpt yet, or verbatim mode
+    # produced no Summary at all. The UI shows this on its own; the raw
+    # pinned turns are shown as a separate clickable list built directly
+    # from pinned_turns + messages, not from re-rendering the note's own
+    # "Pinned turns" section — clicking an item scrolls/highlights that
+    # turn in the rolling conversation instead of duplicating its text.
+    excerpt_summary_html: str | None = None
 
 
 class Stream(VaultNodeBase):

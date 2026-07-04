@@ -43,8 +43,20 @@ class KnowledgeGraphClient:
     def drop_index(self) -> None:
         self._post("/drop_index")
 
+    def taint_file(self, rel_path: str) -> bool:
+        data = self._post("/taint_file", params={"rel": rel_path})
+        return bool(data.get("tainted")) if data else False
+
     def status(self) -> dict:
-        return self._get("/status") or {"state": "stale", "last_indexed": None, "last_error": "kg process unreachable"}
+        # Polled on every app.py /status request (itself polled by the UI
+        # every ~10s with a 3s abort). A restarting/slow kg must not block
+        # that whole response for up to self._timeout (10s default) — a
+        # short, independent timeout here degrades gracefully to "kg
+        # unreachable" instead of making the entire app look offline over
+        # one subsystem's restart.
+        return self._get("/status", timeout=2.0) or {
+            "state": "stale", "last_indexed": None, "last_error": "kg process unreachable",
+        }
 
     def search(self, question: str, top_k: int = 20) -> list[dict]:
         return self._get("/search", params={"q": question, "top_k": top_k}) or []
@@ -56,7 +68,8 @@ class KnowledgeGraphClient:
         return self._get("/query", params={"q": question, "budget": budget}) or []
 
     def _ollama_ready(self) -> bool:
-        data = self._get("/ollama_ready")
+        # Also polled on every /status request — see status()'s comment.
+        data = self._get("/ollama_ready", timeout=2.0)
         return bool(data.get("reachable")) if data else False
 
     def ollama_deep_search(self, question: str, top_k: int = 10, chroma=None) -> list[dict]:
@@ -76,17 +89,20 @@ class KnowledgeGraphClient:
 
     # ── Internal ──────────────────────────────────────────────────────────
 
-    def _get(self, path: str, params: dict | None = None):
+    def _get(self, path: str, params: dict | None = None, timeout: float | None = None):
         try:
-            resp = requests.get(f"{self._base_url}{path}", params=params, timeout=self._timeout)
+            resp = requests.get(f"{self._base_url}{path}", params=params, timeout=timeout or self._timeout)
             resp.raise_for_status()
             return resp.json()
         except requests.RequestException as exc:
             _log.warning("kg process unreachable at %s%s: %s", self._base_url, path, exc)
             return None
 
-    def _post(self, path: str) -> None:
+    def _post(self, path: str, params: dict | None = None, timeout: float | None = None):
         try:
-            requests.post(f"{self._base_url}{path}", timeout=self._timeout)
+            resp = requests.post(f"{self._base_url}{path}", params=params, timeout=timeout or self._timeout)
+            resp.raise_for_status()
+            return resp.json()
         except requests.RequestException as exc:
             _log.warning("kg process unreachable at %s%s: %s", self._base_url, path, exc)
+            return None

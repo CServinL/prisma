@@ -129,6 +129,33 @@ leaving generous room under 65536 for the system prompt, the
 `<untrusted_source>` injection-defense wrapping, and the model's own JSON
 output.
 
+#### Follow-up (2026-07-02): the 65536 claim was wrong, and the models were merged
+
+The "increased to 65536 tokens, verified empirically" claim above is
+**incorrect** — worth leaving visible rather than silently edited, since
+the mistake and how it was found are useful on their own. `ollama show
+--modelfile` only echoes back the `num_ctx` value that was *configured*,
+not what's actually *enforced*. Qwen2.5-7B's own architecture caps at
+32768 tokens of context; Ollama silently clamps any higher configured
+`num_ctx` down to that ceiling rather than erroring or warning. The "~9GB
+VRAM" measurement above was real, but it was measuring the model running
+at the true clamped 32768, not 65536 — the verification checked the wrong
+thing (the Modelfile's own echo) instead of `/api/ps`'s actually-loaded
+`context_length`.
+
+Once this surfaced, it also meant `prisma-kg:7b` and `prisma-chat:7b`
+(ADR-014) — two separate tags, believed to need different `num_ctx` values
+— had been running at the *same* real context the entire time. Since they
+were functionally identical, they were merged into one tag, `prisma-llm:7b`,
+used for both extraction and chat. `KnowledgeGraphService`'s
+`ollama_model` default and `ChatConfig.model`'s default both point at it
+now. `token_budget=8000` (per-section chunk size) is unaffected by this
+correction — it was always comfortably under even the true 32768 ceiling,
+so extraction correctness was never actually at risk, only the documented
+context-window number was wrong. See `docs/ollama-concurrency.md`'s own
+follow-up section for the full story, including a related
+`OLLAMA_NUM_PARALLEL` 3→4 bump discovered around the same time.
+
 ## Alternatives Considered
 
 See "Storage" above for the graph-backend alternatives (keep

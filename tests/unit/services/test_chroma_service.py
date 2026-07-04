@@ -127,6 +127,31 @@ def test_full_index_sets_activity_per_file_then_clears(indexer, vault):
     assert indexer.status()["current_activity"] is None
 
 
+def test_full_index_skips_chats_directory(indexer, vault):
+    # ChromaDB has no trust_tier field to filter chat content out at query
+    # time (unlike the knowledge graph) — chats must never enter the index.
+    chat_file = vault.root / "chats" / "session.md"
+    chat_file.parent.mkdir(parents=True, exist_ok=True)
+    chat_file.write_text("---\ntype: chat\n---\n### You\nhi", encoding="utf-8")
+    note_file = vault.root / "notes" / "test.md"
+    note_file.parent.mkdir(parents=True, exist_ok=True)
+    note_file.write_text("# Title\nSome content.", encoding="utf-8")
+
+    col = _mock_chroma_collection()
+    client = _mock_chroma_client(col)
+    embed = [[0.1] * 768]
+
+    with patch("chromadb.HttpClient", return_value=client):
+        indexer._ensure_client()
+        with patch("prisma.services.chroma_service.resource_lock.acquire", return_value=(True, "local-ollama", "req-1")), \
+             patch("prisma.services.chroma_service.resource_lock.release"), \
+             patch("prisma.services.chroma_service._embed_texts", return_value=embed):
+            indexer._full_index()
+
+    assert "chats/session.md" not in indexer._manifest
+    assert "notes/test.md" in indexer._manifest
+
+
 def test_query_empty_collection_returns_empty(indexer):
     col = _mock_chroma_collection()
     col.count.return_value = 0
@@ -273,6 +298,52 @@ def test_full_index_skips_when_lease_denied(indexer, vault):
                     indexer._full_index()
 
     assert not mock_upsert.called
+
+
+# ── Incremental update: lease-denial must not silently drop tracked files ────
+
+def test_process_incremental_requeues_files_when_lease_denied(indexer, vault):
+    md_file = vault.root / "notes" / "test.md"
+    md_file.parent.mkdir(parents=True, exist_ok=True)
+    md_file.write_text("# Title\nSome content.", encoding="utf-8")
+
+    with patch("prisma.services.chroma_service.resource_lock.acquire", return_value=(False, None, None)), \
+         patch("prisma.services.resource_lock.backoff.retry_with_backoff",
+               side_effect=lambda attempt, is_success, **kw: attempt()), \
+         patch.object(indexer, "_upsert_file") as mock_upsert:
+        indexer._process_incremental({md_file})
+
+    assert not mock_upsert.called
+    assert md_file in indexer._pending  # re-queued, not silently dropped
+
+
+def test_process_incremental_deletion_unaffected_by_lease_denial(indexer, vault):
+    missing_file = vault.root / "notes" / "deleted.md"  # doesn't exist on disk
+
+    with patch("prisma.services.chroma_service.resource_lock.acquire", return_value=(False, None, None)), \
+         patch("prisma.services.resource_lock.backoff.retry_with_backoff",
+               side_effect=lambda attempt, is_success, **kw: attempt()), \
+         patch.object(indexer, "_delete_file", return_value=True) as mock_delete:
+        indexer._process_incremental({missing_file})
+
+    mock_delete.assert_called_once_with(missing_file)
+    assert missing_file not in indexer._pending  # deletions never need a lease, never re-queued
+
+
+def test_process_incremental_succeeds_and_saves_manifest_when_granted(indexer, vault):
+    md_file = vault.root / "notes" / "test.md"
+    md_file.parent.mkdir(parents=True, exist_ok=True)
+    md_file.write_text("# Title\nSome content.", encoding="utf-8")
+
+    with patch("prisma.services.chroma_service.resource_lock.acquire", return_value=(True, "local-ollama", "req-1")), \
+         patch("prisma.services.resource_lock.release"), \
+         patch.object(indexer, "_upsert_file", return_value=True) as mock_upsert, \
+         patch.object(indexer, "_save_manifest") as mock_save:
+        indexer._process_incremental({md_file})
+
+    mock_upsert.assert_called_once_with(md_file)
+    mock_save.assert_called_once()
+    assert md_file not in indexer._pending
 
 
 def test_save_and_load_manifest(indexer, vault):

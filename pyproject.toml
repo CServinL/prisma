@@ -22,6 +22,7 @@ dependencies = [
     "chromadb>=0.6",
     "kuzu>=0.11",
     "semchunk>=4.1",
+    "openai>=1.0",
 ]
 
 [project.optional-dependencies]

@@ -264,6 +264,49 @@ before, just attributed to the correct worker for `release_all_held_by()`
 to fire on crash/restart. Gets its own log file (`kg.log`, `/logs?concern=kg`),
 same pattern as `chroma`/`ollama`/`activity`/`maintenance`.
 
+#### Follow-up — model-aware pools, live config reload, and named-pool routing (2026-07-02)
+
+Three refinements to the compute-pool model, driven by real usage rather
+than designed up front:
+
+- **`compute_pools` schema gained `type: gpu|cloud` and per-model
+  `max_concurrent` overrides.** The original `model_affinity` boolean
+  still works (read as a fallback when `type` is absent), but `type` is
+  now the primary way to declare a pool's behavior, and each pool's
+  `models` list can assign a *specific* model its own concurrency ceiling
+  (`{name, max_concurrent}`, or a plain string to just use the pool's
+  default) — motivated by kg extraction and chat running genuinely
+  different-sized workloads on the same physical GPU (see ADR-013's
+  follow-up: they later turned out to be the same model anyway, but the
+  mechanism itself is real and still used — analysis_agent's `llama3.1:8b`
+  and the embedding model share the pool with different implicit costs).
+  `models` doubles as an auto-routing table: `ResourceManager.acquire()`
+  now prefers whichever pool explicitly declares the requested model
+  before falling back to "any pool with room," so a cloud model can never
+  accidentally land in a `type: gpu` pool and get misattributed as its
+  resident model — a real gap this closes, not a hypothetical one: chat
+  needed exactly this once a `openrouter` pool was added
+  alongside `local-ollama`.
+- **`resource_lock.acquire()`/`lease()` gained a real `pool` parameter.**
+  Previously the *client* side had no way to request a specific pool at
+  all — the server-side `ResourceManager.acquire()` always supported it,
+  but nothing ever sent it over the wire (this exact gap was found and
+  the corresponding `ChatConfig.pool` field deliberately dropped earlier,
+  rather than shipping a config option that silently did nothing). Now
+  wired end-to-end: `ChatLLM` passes `chat.pool` from config, so cloud
+  calls stay correctly isolated from the local GPU pool's model_affinity
+  serialization instead of relying on auto-routing alone.
+- **`POST /supervisor/resources/reload`** (+ `prisma reload-resources` CLI)
+  re-reads `compute_pools` into a *running* `ResourceManager` — no
+  restart, no lost in-flight leases. Built after discovering, live, that
+  `local-ollama`'s GPU was sitting at ~20-40% utilization during
+  extraction — tuning `max_concurrent` to actually use that headroom
+  shouldn't require killing every worker just to pick up one changed
+  number. `ResourceManager.reload_config()` swaps the capacity/affinity/
+  model-routing dicts under the lock; existing leases for a pool that
+  still exists are left untouched even if its capacity shrank below the
+  current lease count (no forced eviction).
+
 #### Future consideration: transport for the lease protocol
 
 Acquire/release currently go over plain HTTP to the supervisor's control

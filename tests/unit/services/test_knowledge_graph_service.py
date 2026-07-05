@@ -2,29 +2,17 @@
 graph module that replaces the third-party `graphify` pip dependency.
 See TODO.md and docs/wiki/adr/ADR-012-process-supervision.md.
 """
-import json
-from unittest.mock import MagicMock, patch
+from pathlib import Path
+from unittest.mock import patch
 
 import pytest
-import requests
 
 from prisma.services.knowledge_graph_service import (
+    Edge,
+    Extraction,
     KnowledgeGraphService,
-    _parse_extraction_response,
+    Node,
 )
-
-
-def test_parse_extraction_response_valid_json():
-    text = json.dumps({"nodes": [{"id": "a"}], "edges": [{"source": "a", "target": "b"}]})
-    nodes, edges = _parse_extraction_response(text)
-    assert nodes == [{"id": "a"}]
-    assert edges == [{"source": "a", "target": "b"}]
-
-
-def test_parse_extraction_response_malformed_json_returns_empty():
-    nodes, edges = _parse_extraction_response("not json at all {{{")
-    assert nodes == []
-    assert edges == []
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -44,11 +32,15 @@ def kg(vault, tmp_path):
     return service
 
 
-def _mock_ollama_response(nodes=None, edges=None):
-    resp = MagicMock()
-    resp.status_code = 200
-    resp.json.return_value = {"response": json.dumps({"nodes": nodes or [], "edges": edges or []})}
-    return resp
+def _extraction(nodes=None, edges=None) -> Extraction:
+    return Extraction(
+        nodes=[Node(**n) for n in (nodes or [])],
+        edges=[Edge(**e) for e in (edges or [])],
+    )
+
+
+def _patch_create(kg, **kwargs):
+    return patch.object(kg._instructor_client.chat.completions, "create", **kwargs)
 
 
 # ── Extraction + upsert ───────────────────────────────────────────────────────
@@ -56,9 +48,9 @@ def _mock_ollama_response(nodes=None, edges=None):
 def test_extract_file_upserts_nodes(kg, vault):
     f = vault.root / "notes" / "test.md"
     f.write_text("---\ntype: note\n---\n# Title\nSome content about neural networks.", encoding="utf-8")
-    resp = _mock_ollama_response(nodes=[{"id": "test_neural_networks", "label": "Neural Networks"}])
+    result = _extraction(nodes=[{"id": "test_neural_networks", "label": "Neural Networks"}])
 
-    with patch("prisma.services.knowledge_graph_service.requests.post", return_value=resp), \
+    with _patch_create(kg, return_value=result), \
          patch("prisma.services.resource_lock.acquire", return_value=(True, "local-ollama", "req-1")):
         changed = kg._extract_file(f, "note")
 
@@ -73,19 +65,19 @@ def test_extract_file_upserts_nodes(kg, vault):
 def test_extract_file_upserts_edges(kg, vault):
     f = vault.root / "notes" / "test.md"
     f.write_text("---\ntype: source\n---\nPaper A relates to Paper B.", encoding="utf-8")
-    resp = _mock_ollama_response(
+    result = _extraction(
         nodes=[{"id": "a", "label": "A"}, {"id": "b", "label": "B"}],
         edges=[{"source": "a", "target": "b", "relation": "cites", "confidence": "EXTRACTED"}],
     )
 
-    with patch("prisma.services.knowledge_graph_service.requests.post", return_value=resp), \
+    with _patch_create(kg, return_value=result), \
          patch("prisma.services.resource_lock.acquire", return_value=(True, "local-ollama", "req-1")):
         kg._extract_file(f, "source")
 
-    result = kg._conn.execute("MATCH (a:Entity)-[r:RelatesTo]->(b:Entity) RETURN a.id, r.relation, b.id")
+    query = kg._conn.execute("MATCH (a:Entity)-[r:RelatesTo]->(b:Entity) RETURN a.id, r.relation, b.id")
     rows = []
-    while result.has_next():
-        rows.append(result.get_next())
+    while query.has_next():
+        rows.append(query.get_next())
     assert ["a", "cites", "b"] in rows
 
 
@@ -93,13 +85,13 @@ def test_extract_file_skips_call_when_lease_denied(kg, vault):
     f = vault.root / "notes" / "test.md"
     f.write_text("---\ntype: note\n---\nSome content.", encoding="utf-8")
 
-    with patch("prisma.services.knowledge_graph_service.requests.post") as mock_post, \
+    with _patch_create(kg) as mock_create, \
          patch("prisma.services.resource_lock.acquire", return_value=(False, None, None)), \
          patch("prisma.services.resource_lock.backoff.retry_with_backoff",
                side_effect=lambda attempt, is_success, **kw: attempt()):
         kg._extract_file(f, "note")
 
-    assert not mock_post.called
+    assert not mock_create.called
 
 
 def test_extract_file_does_not_advance_manifest_when_lease_denied(kg, vault):
@@ -110,7 +102,7 @@ def test_extract_file_does_not_advance_manifest_when_lease_denied(kg, vault):
     f = vault.root / "notes" / "test.md"
     f.write_text("---\ntype: note\n---\nSome content.", encoding="utf-8")
 
-    with patch("prisma.services.knowledge_graph_service.requests.post"), \
+    with _patch_create(kg), \
          patch("prisma.services.resource_lock.acquire", return_value=(False, None, None)), \
          patch("prisma.services.resource_lock.backoff.retry_with_backoff",
                side_effect=lambda attempt, is_success, **kw: attempt()):
@@ -125,7 +117,7 @@ def test_extract_file_retries_after_connection_error_on_next_call(kg, vault):
     f = vault.root / "notes" / "test.md"
     f.write_text("---\ntype: note\n---\nSome content.", encoding="utf-8")
 
-    with patch("prisma.services.knowledge_graph_service.requests.post", side_effect=requests.ConnectionError("down")), \
+    with _patch_create(kg, side_effect=ConnectionError("down")), \
          patch("prisma.services.resource_lock.acquire", return_value=(True, "local-ollama", "req-1")), \
          patch("prisma.services.resource_lock.release"):
         kg._extract_file(f, "note")
@@ -133,8 +125,8 @@ def test_extract_file_retries_after_connection_error_on_next_call(kg, vault):
     with kg._lock:
         assert kg._indexed_hash("notes/test.md") is None
 
-    good = _mock_ollama_response(nodes=[{"id": "ok", "label": "OK"}])
-    with patch("prisma.services.knowledge_graph_service.requests.post", return_value=good), \
+    good = _extraction(nodes=[{"id": "ok", "label": "OK"}])
+    with _patch_create(kg, return_value=good), \
          patch("prisma.services.resource_lock.acquire", return_value=(True, "local-ollama", "req-1")), \
          patch("prisma.services.resource_lock.release"):
         changed = kg._extract_file(f, "note")
@@ -149,9 +141,9 @@ def test_extract_file_advances_manifest_when_section_legitimately_finds_nothing(
     # call — it must still count as "processed" so it isn't retried forever.
     f = vault.root / "notes" / "test.md"
     f.write_text("---\ntype: note\n---\nSome content.", encoding="utf-8")
-    empty = _mock_ollama_response(nodes=[], edges=[])
+    empty = _extraction(nodes=[], edges=[])
 
-    with patch("prisma.services.knowledge_graph_service.requests.post", return_value=empty), \
+    with _patch_create(kg, return_value=empty), \
          patch("prisma.services.resource_lock.acquire", return_value=(True, "local-ollama", "req-1")), \
          patch("prisma.services.resource_lock.release"):
         changed = kg._extract_file(f, "note")
@@ -161,43 +153,52 @@ def test_extract_file_advances_manifest_when_section_legitimately_finds_nothing(
         assert kg._indexed_hash("notes/test.md") is not None  # but genuinely processed, not retried
 
 
-def test_extract_file_one_bad_section_does_not_abort_others(kg, vault):
-    # Force a small token budget so this modest test body still splits into
-    # multiple sections — the service's real default is much larger now.
+def test_extract_file_stops_remaining_sections_after_one_chunk_fails(kg, vault):
+    # Real behavior change (2026-07-05, per cservinl): a failed chunk now
+    # stops the rest of *this file*'s sections rather than letting them
+    # keep running — no point spending GPU time on sections belonging to a
+    # file that's getting tainted and fully re-extracted next cycle anyway.
+    # extraction_concurrency=1 makes this deterministic in the test: with
+    # exactly one worker, sections run strictly in submission order, so a
+    # failure on the first one guarantees no later one has started yet.
     kg._token_budget = 1500
+    kg._extraction_concurrency = 1
     f = vault.root / "notes" / "test.md"
     body = "# One\n" + ("First section content. " * 400) + "\n# Two\n" + ("Second section content. " * 400)
     f.write_text(f"---\ntype: note\n---\n{body}", encoding="utf-8")
-    good = _mock_ollama_response(nodes=[{"id": "ok", "label": "OK"}])
-    bad = MagicMock(status_code=200)
-    bad.json.return_value = {"response": "not valid json"}
-    # First section's response is malformed; every later section (however many
-    # semchunk produces for this body) succeeds — one bad section must not
-    # abort the rest.
-    responses = iter([bad] + [good] * 20)
+    good = _extraction(nodes=[{"id": "ok", "label": "OK"}])
+    call_count = {"n": 0}
 
-    with patch("prisma.services.knowledge_graph_service.requests.post", side_effect=lambda *a, **kw: next(responses)), \
+    def _side_effect(*a, **kw):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise ValueError("bad response")
+        return good
+
+    with _patch_create(kg, side_effect=_side_effect), \
          patch("prisma.services.resource_lock.acquire", return_value=(True, "local-ollama", "req-1")), \
          patch("prisma.services.resource_lock.release"):
         changed = kg._extract_file(f, "note")
 
-    assert changed is True
+    assert changed is False
+    assert call_count["n"] == 1  # remaining sections never attempted
     result = kg._conn.execute("MATCH (e:Entity {id: 'ok'}) RETURN e.id")
-    assert result.has_next()
+    assert not result.has_next()
+    with kg._lock:
+        assert f in kg._pending  # tainted — retried on the next background cycle
 
 
-def test_extract_file_survives_response_json_raising(kg, vault):
-    # Regression: resp.json() and _parse_extraction_response() used to run
-    # outside the request try/except, so a truncated/non-JSON HTTP body
-    # raised unhandled inside the thread-pool worker instead of being
-    # treated as "this section failed, retry next cycle" like every other
-    # failure mode in _call_ollama_extract.
+def test_extract_file_survives_extraction_call_raising(kg, vault):
+    # Regression: response parsing/validation used to run outside the
+    # request try/except, so a malformed response raised unhandled inside
+    # the thread-pool worker instead of being treated as "this section
+    # failed, retry next cycle" like every other failure mode in
+    # _call_ollama_extract. Instructor's own retry-exhaustion exception
+    # (or any other failure it raises) must be handled the same way.
     f = vault.root / "notes" / "test.md"
     f.write_text("---\ntype: note\n---\nSome content.", encoding="utf-8")
-    broken = MagicMock(status_code=200)
-    broken.json.side_effect = json.JSONDecodeError("bad", "doc", 0)
 
-    with patch("prisma.services.knowledge_graph_service.requests.post", return_value=broken), \
+    with _patch_create(kg, side_effect=ValueError("validation failed")), \
          patch("prisma.services.resource_lock.acquire", return_value=(True, "local-ollama", "req-1")), \
          patch("prisma.services.resource_lock.release"):
         changed = kg._extract_file(f, "note")
@@ -212,33 +213,33 @@ def test_extract_file_survives_response_json_raising(kg, vault):
 def test_extract_file_skips_unchanged_content(kg, vault):
     f = vault.root / "notes" / "test.md"
     f.write_text("---\ntype: note\n---\nSame content.", encoding="utf-8")
-    resp = _mock_ollama_response(nodes=[{"id": "a", "label": "A"}])
+    result = _extraction(nodes=[{"id": "a", "label": "A"}])
 
-    with patch("prisma.services.knowledge_graph_service.requests.post", return_value=resp) as mock_post, \
+    with _patch_create(kg, return_value=result) as mock_create, \
          patch("prisma.services.resource_lock.acquire", return_value=(True, "local-ollama", "req-1")):
         first = kg._extract_file(f, "note")
-        calls_after_first = mock_post.call_count
+        calls_after_first = mock_create.call_count
         second = kg._extract_file(f, "note")
 
     assert first is True
     assert second is False
-    assert mock_post.call_count == calls_after_first  # no new calls on unchanged content
+    assert mock_create.call_count == calls_after_first  # no new calls on unchanged content
 
 
 def test_extract_file_reextracts_on_content_change(kg, vault):
     f = vault.root / "notes" / "test.md"
     f.write_text("---\ntype: note\n---\nOriginal.", encoding="utf-8")
-    resp = _mock_ollama_response(nodes=[{"id": "a", "label": "A"}])
+    result = _extraction(nodes=[{"id": "a", "label": "A"}])
 
-    with patch("prisma.services.knowledge_graph_service.requests.post", return_value=resp) as mock_post, \
+    with _patch_create(kg, return_value=result) as mock_create, \
          patch("prisma.services.resource_lock.acquire", return_value=(True, "local-ollama", "req-1")):
         kg._extract_file(f, "note")
-        calls_after_first = mock_post.call_count
+        calls_after_first = mock_create.call_count
         f.write_text("---\ntype: note\n---\nCompletely different text now.", encoding="utf-8")
         changed = kg._extract_file(f, "note")
 
     assert changed is True
-    assert mock_post.call_count > calls_after_first
+    assert mock_create.call_count > calls_after_first
 
 
 # ── Deletion ──────────────────────────────────────────────────────────────────
@@ -246,15 +247,15 @@ def test_extract_file_reextracts_on_content_change(kg, vault):
 def test_delete_file_removes_nodes(kg, vault):
     f = vault.root / "notes" / "gone.md"
     f.write_text("---\ntype: note\n---\nContent.", encoding="utf-8")
-    resp = _mock_ollama_response(nodes=[{"id": "gone_node", "label": "Gone"}])
+    result = _extraction(nodes=[{"id": "gone_node", "label": "Gone"}])
 
-    with patch("prisma.services.knowledge_graph_service.requests.post", return_value=resp), \
+    with _patch_create(kg, return_value=result), \
          patch("prisma.services.resource_lock.acquire", return_value=(True, "local-ollama", "req-1")):
         kg._extract_file(f, "note")
 
     assert kg._delete_file(f) is True
-    result = kg._conn.execute("MATCH (e:Entity {id: 'gone_node'}) RETURN e.id")
-    assert not result.has_next()
+    query = kg._conn.execute("MATCH (e:Entity {id: 'gone_node'}) RETURN e.id")
+    assert not query.has_next()
     with kg._lock:
         assert kg._indexed_hash("notes/gone.md") is None
 
@@ -285,10 +286,10 @@ def test_search_ranks_by_term_match(kg, vault):
     f1.write_text("---\ntype: note\n---\nAbout neural networks.", encoding="utf-8")
     f2 = vault.root / "notes" / "b.md"
     f2.write_text("---\ntype: note\n---\nAbout cooking recipes.", encoding="utf-8")
-    resp_a = _mock_ollama_response(nodes=[{"id": "a_neural_networks", "label": "Neural Networks"}])
-    resp_b = _mock_ollama_response(nodes=[{"id": "b_recipes", "label": "Recipes"}])
+    result_a = _extraction(nodes=[{"id": "a_neural_networks", "label": "Neural Networks"}])
+    result_b = _extraction(nodes=[{"id": "b_recipes", "label": "Recipes"}])
 
-    with patch("prisma.services.knowledge_graph_service.requests.post", side_effect=[resp_a, resp_b]), \
+    with _patch_create(kg, side_effect=[result_a, result_b]), \
          patch("prisma.services.resource_lock.acquire", return_value=(True, "local-ollama", "req-1")), \
          patch("prisma.services.resource_lock.release"):
         kg._extract_file(f1, "note")
@@ -302,9 +303,9 @@ def test_search_ranks_by_term_match(kg, vault):
 def test_search_excludes_chat_trust_tier(kg, vault):
     f = vault.root / "chats" / "conversation.md"
     f.write_text("---\ntype: chat\n---\nDiscussed neural networks here.", encoding="utf-8")
-    resp = _mock_ollama_response(nodes=[{"id": "chat_neural_networks", "label": "Neural Networks"}])
+    result = _extraction(nodes=[{"id": "chat_neural_networks", "label": "Neural Networks"}])
 
-    with patch("prisma.services.knowledge_graph_service.requests.post", return_value=resp), \
+    with _patch_create(kg, return_value=result), \
          patch("prisma.services.resource_lock.acquire", return_value=(True, "local-ollama", "req-1")):
         kg._extract_file(f, "chat")
 
@@ -316,9 +317,9 @@ def test_search_excludes_chat_trust_tier(kg, vault):
 def test_search_returns_empty_for_no_matching_terms(kg, vault):
     f = vault.root / "notes" / "a.md"
     f.write_text("---\ntype: note\n---\ncontent", encoding="utf-8")
-    resp = _mock_ollama_response(nodes=[{"id": "a_thing", "label": "Thing"}])
+    result = _extraction(nodes=[{"id": "a_thing", "label": "Thing"}])
 
-    with patch("prisma.services.knowledge_graph_service.requests.post", return_value=resp), \
+    with _patch_create(kg, return_value=result), \
          patch("prisma.services.resource_lock.acquire", return_value=(True, "local-ollama", "req-1")):
         kg._extract_file(f, "note")
 
@@ -339,9 +340,9 @@ def test_status_starts_stale(vault, tmp_path):
 def test_full_index_clears_activity_when_done(kg, vault):
     f = vault.root / "notes" / "a.md"
     f.write_text("---\ntype: note\n---\ncontent", encoding="utf-8")
-    resp = _mock_ollama_response(nodes=[{"id": "a_thing", "label": "Thing"}])
+    result = _extraction(nodes=[{"id": "a_thing", "label": "Thing"}])
 
-    with patch("prisma.services.knowledge_graph_service.requests.post", return_value=resp), \
+    with _patch_create(kg, return_value=result), \
          patch("prisma.services.resource_lock.acquire", return_value=(True, "local-ollama", "req-1")):
         kg._full_index()
 
@@ -351,9 +352,9 @@ def test_full_index_clears_activity_when_done(kg, vault):
 def test_extract_file_sets_activity_during_extraction(kg, vault):
     f = vault.root / "notes" / "a.md"
     f.write_text("---\ntype: note\n---\ncontent", encoding="utf-8")
-    resp = _mock_ollama_response(nodes=[{"id": "a_thing", "label": "Thing"}])
+    result = _extraction(nodes=[{"id": "a_thing", "label": "Thing"}])
 
-    with patch("prisma.services.knowledge_graph_service.requests.post", return_value=resp), \
+    with _patch_create(kg, return_value=result), \
          patch("prisma.services.resource_lock.acquire", return_value=(True, "local-ollama", "req-1")), \
          patch.object(kg, "_set_activity", wraps=kg._set_activity) as mock_set_activity:
         kg._extract_file(f, "note")
@@ -372,9 +373,9 @@ def test_mark_stale_does_not_override_indexing_state(kg):
 def test_full_index_sets_idle_and_last_indexed(kg, vault):
     f = vault.root / "notes" / "a.md"
     f.write_text("---\ntype: note\n---\ncontent", encoding="utf-8")
-    resp = _mock_ollama_response(nodes=[{"id": "a_thing", "label": "Thing"}])
+    result = _extraction(nodes=[{"id": "a_thing", "label": "Thing"}])
 
-    with patch("prisma.services.knowledge_graph_service.requests.post", return_value=resp), \
+    with _patch_create(kg, return_value=result), \
          patch("prisma.services.resource_lock.acquire", return_value=(True, "local-ollama", "req-1")):
         kg._full_index()
 
@@ -382,3 +383,206 @@ def test_full_index_sets_idle_and_last_indexed(kg, vault):
     assert status["state"] == "idle"
     assert status["last_indexed"] is not None
     assert status["last_error"] is None
+
+
+# ── Knowledge Graph progress page ─────────────────────────────────────────────
+
+def test_full_index_resets_sync_progress_when_done(kg, vault):
+    # sync_total=0 after completion means "no active full sync" to the UI —
+    # distinct from a genuine "0 of N done" mid-sync state.
+    f = vault.root / "notes" / "a.md"
+    f.write_text("---\ntype: note\n---\ncontent", encoding="utf-8")
+    result = _extraction(nodes=[{"id": "a_thing", "label": "Thing"}])
+
+    with _patch_create(kg, return_value=result), \
+         patch("prisma.services.resource_lock.acquire", return_value=(True, "local-ollama", "req-1")):
+        kg._full_index()
+
+    status = kg.status()
+    assert status["sync_total"] == 0
+    assert status["sync_done"] == 0
+    assert status["current_file"] is None
+
+
+def test_extract_files_concurrently_skips_all_when_generation_is_stale(kg, vault):
+    # Simulates drop_index() having bumped _index_generation after this
+    # call's generation was captured — nothing should be submitted at all.
+    f = vault.root / "notes" / "a.md"
+    f.write_text("---\ntype: note\n---\ncontent", encoding="utf-8")
+
+    with patch.object(kg, "_extract_file") as mock_extract_file:
+        changed = kg._extract_files_concurrently([f], generation=kg._index_generation - 1)
+
+    assert changed == 0
+    assert not mock_extract_file.called
+
+
+def test_drop_index_clears_graph_and_resets_progress_state(kg, vault):
+    f = vault.root / "notes" / "a.md"
+    f.write_text("---\ntype: note\n---\ncontent", encoding="utf-8")
+    result = _extraction(nodes=[{"id": "a_thing", "label": "Thing"}])
+
+    with _patch_create(kg, return_value=result), \
+         patch("prisma.services.resource_lock.acquire", return_value=(True, "local-ollama", "req-1")):
+        kg._extract_file(f, "note")
+
+    query = kg._conn.execute("MATCH (e:Entity {id: 'a_thing'}) RETURN e.id")
+    assert query.has_next()
+
+    with patch.object(kg, "_full_index"):  # avoid spawning a real reindex thread in the test
+        kg.drop_index()
+
+    query = kg._conn.execute("MATCH (e:Entity {id: 'a_thing'}) RETURN e.id")
+    assert not query.has_next()
+    status = kg.status()
+    assert status["state"] == "stale"
+    assert status["sync_total"] == 0
+    assert status["sync_done"] == 0
+    assert status["current_file"] is None
+
+
+def test_drop_index_bumps_index_generation(kg):
+    before = kg._index_generation
+    with patch.object(kg, "_full_index"):
+        kg.drop_index()
+    assert kg._index_generation == before + 1
+
+
+def test_full_index_tracks_progress_while_running(kg, vault):
+    # Real bug this guards against: progress must be visible *during* a
+    # full index, not just correctly reset once it's done — patch
+    # _extract_files_concurrently to capture sync_total/on_file_done
+    # behavior mid-run without needing a slow multi-file real extraction.
+    f1 = vault.root / "notes" / "a.md"
+    f1.write_text("---\ntype: note\n---\ncontent one", encoding="utf-8")
+    f2 = vault.root / "notes" / "b.md"
+    f2.write_text("---\ntype: note\n---\ncontent two", encoding="utf-8")
+    seen_total = {}
+
+    def fake_extract_files_concurrently(paths, on_file_done=None, generation=None):
+        seen_total["sync_total"] = kg.status()["sync_total"]
+        if on_file_done:
+            on_file_done()
+            seen_total["sync_done_after_one"] = kg.status()["sync_done"]
+        return 0
+
+    with patch.object(kg, "_extract_files_concurrently", side_effect=fake_extract_files_concurrently):
+        kg._full_index()
+
+    assert seen_total["sync_total"] == 2
+    assert seen_total["sync_done_after_one"] == 1
+
+
+def test_extract_file_tracks_current_file_chunk_progress(kg, vault):
+    kg._token_budget = 1500
+    f = vault.root / "notes" / "test.md"
+    body = "# One\n" + ("First section content. " * 400) + "\n# Two\n" + ("Second section content. " * 400)
+    f.write_text(f"---\ntype: note\n---\n{body}", encoding="utf-8")
+    result = _extraction(nodes=[{"id": "ok", "label": "OK"}])
+
+    with _patch_create(kg, return_value=result), \
+         patch("prisma.services.resource_lock.acquire", return_value=(True, "local-ollama", "req-1")), \
+         patch("prisma.services.resource_lock.release"):
+        kg._extract_file(f, "note")
+
+    status = kg.status()
+    # Extraction finished, so chunks_done should have reached the total —
+    # current_file itself is only meaningful mid-extraction (not cleared
+    # here, since _extract_file doesn't clear it — only _full_index does).
+    assert status["current_file_chunks_total"] > 0
+    assert status["current_file_chunks_done"] == status["current_file_chunks_total"]
+
+
+def test_call_ollama_extract_records_chunk_duration(kg, vault):
+    f = vault.root / "notes" / "test.md"
+    f.write_text("---\ntype: note\n---\nSome content.", encoding="utf-8")
+    result = _extraction(nodes=[{"id": "ok", "label": "OK"}])
+
+    with _patch_create(kg, return_value=result), \
+         patch("prisma.services.resource_lock.acquire", return_value=(True, "local-ollama", "req-1")), \
+         patch("prisma.services.resource_lock.release"):
+        kg._extract_file(f, "note")
+
+    status = kg.status()
+    assert status["chunk_duration_samples"] == 1
+    assert status["chunk_avg_duration_ms"] is not None
+    assert status["chunk_avg_duration_ms"] >= 0
+
+
+def test_chunk_avg_duration_is_none_when_no_calls_made_yet(kg):
+    status = kg.status()
+    assert status["chunk_avg_duration_ms"] is None
+    assert status["chunk_duration_samples"] == 0
+
+
+def test_call_ollama_extract_records_chunk_size(kg, vault):
+    f = vault.root / "notes" / "test.md"
+    section = "word " * 40  # ~200 chars -> ~50 estimated tokens (len//4)
+    f.write_text(f"---\ntype: note\n---\n{section}", encoding="utf-8")
+    result = _extraction(nodes=[{"id": "ok", "label": "OK"}])
+
+    with _patch_create(kg, return_value=result), \
+         patch("prisma.services.resource_lock.acquire", return_value=(True, "local-ollama", "req-1")), \
+         patch("prisma.services.resource_lock.release"):
+        kg._extract_file(f, "note")
+
+    status = kg.status()
+    assert status["chunk_avg_size_tokens"] is not None
+    assert status["chunk_avg_size_tokens"] > 0
+
+
+def test_chunk_avg_size_is_none_when_no_calls_made_yet(kg):
+    status = kg.status()
+    assert status["chunk_avg_size_tokens"] is None
+
+
+def test_call_ollama_extract_tracks_instructor_retry_count(kg, vault):
+    # Simulate what Instructor itself does internally on a validation
+    # failure: fire the hooks object's parse:error event before eventually
+    # succeeding. Our mock stands in for Instructor's real retry loop here.
+    f = vault.root / "notes" / "test.md"
+    f.write_text("---\ntype: note\n---\nSome content.", encoding="utf-8")
+    good = _extraction(nodes=[{"id": "ok", "label": "OK"}])
+
+    def _side_effect(*a, **kw):
+        hooks = kw["hooks"]
+        hooks.emit_parse_error(ValueError("bad json"), attempt_number=1, max_attempts=3, is_last_attempt=False)
+        hooks.emit_parse_error(ValueError("bad json"), attempt_number=2, max_attempts=3, is_last_attempt=False)
+        return good
+
+    with _patch_create(kg, side_effect=_side_effect), \
+         patch("prisma.services.resource_lock.acquire", return_value=(True, "local-ollama", "req-1")), \
+         patch("prisma.services.resource_lock.release"):
+        kg._extract_file(f, "note")
+
+    status = kg.status()
+    assert status["chunk_avg_retries"] == 2
+
+
+def test_dropped_chunk_recorded_in_memory_and_on_disk(kg, vault):
+    f = vault.root / "notes" / "test.md"
+    f.write_text("---\ntype: note\n---\nSome content that will fail extraction.", encoding="utf-8")
+
+    with _patch_create(kg, side_effect=ValueError("validation retries exhausted")), \
+         patch("prisma.services.resource_lock.acquire", return_value=(True, "local-ollama", "req-1")), \
+         patch("prisma.services.resource_lock.release"):
+        kg._extract_file(f, "note")
+
+    status = kg.status()
+    assert status["dropped_chunks_total"] == 1
+    assert len(status["dropped_chunks_recent"]) == 1
+    dropped = status["dropped_chunks_recent"][0]
+    assert dropped["source_file"] == "notes/test.md"
+    assert "validation retries exhausted" in dropped["error"]
+    assert dropped["dead_letter_path"] is not None
+    dead_letter = Path(dropped["dead_letter_path"])
+    assert dead_letter.exists()
+    content = dead_letter.read_text(encoding="utf-8")
+    assert "notes/test.md" in content
+    assert "Some content that will fail extraction." in content
+
+
+def test_dropped_chunks_total_is_zero_when_nothing_failed(kg):
+    status = kg.status()
+    assert status["dropped_chunks_total"] == 0
+    assert status["dropped_chunks_recent"] == []

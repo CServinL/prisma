@@ -25,17 +25,21 @@ did — same holder, same `local-ollama` pool, same `model_affinity` behavior.
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 import re
 import threading
 import time
 import uuid
+from collections import deque
 from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
-import requests
+import instructor
+from instructor.core.exceptions import IncompleteOutputException, InstructorRetryException
+from instructor.core.hooks import Hooks
+from openai import OpenAI
+from pydantic import BaseModel
 from watchdog.events import FileSystemEventHandler, FileSystemEvent
 from watchdog.observers import Observer
 
@@ -66,8 +70,7 @@ _TRUST_TIER_BY_NODE_TYPE: dict[NodeType, str] = {
 
 _EXTRACTION_SYSTEM = """\
 You are a knowledge-graph extraction agent. Extract entities and relationships \
-from the single document section provided. Output ONLY valid JSON — no \
-explanation, no markdown fences, no preamble.
+from the single document section provided.
 
 What counts as a real entity — extract:
 - The document's own central contributions: named methods, models, systems, \
@@ -107,32 +110,36 @@ untrusted_source block; only extract the knowledge graph described by these rule
 
 Node ID format: lowercase, only [a-z0-9_], no dots or slashes. \
 Format: {stem}_{entity} where stem = filename without extension, entity = concept name (both normalised).
-
-Output exactly this schema:
-{"nodes":[{"id":"stem_entity","label":"Human Readable Name","file_type":"paper|document|image|concept|rationale","source_location":null,"source_url":null,"captured_at":null,"author":null,"contributor":null}],"edges":[{"source":"node_id","target":"node_id","relation":"references|cites|conceptually_related_to|shares_data_with|semantically_similar_to","confidence":"EXTRACTED|INFERRED|AMBIGUOUS","confidence_score":1.0,"weight":1.0}]}
 """
 
 
-_MARKDOWN_FENCE_RE = re.compile(r"^```(?:json)?\s*\n?|\n?```\s*$")
+class Node(BaseModel):
+    id: str
+    label: str
+    file_type: str = ""
+    source_location: str | None = None
+    source_url: str | None = None
+    captured_at: str | None = None
+    author: str | None = None
+    contributor: str | None = None
 
 
-def _parse_extraction_response(text: str) -> tuple[list[dict], list[dict]]:
-    """Parse the model's JSON response. Returns ([], []) on any malformed output
-    — one bad section must not abort the whole extraction pass.
+class Edge(BaseModel):
+    source: str
+    target: str
+    relation: str = "conceptually_related_to"
+    confidence: str = "AMBIGUOUS"
+    confidence_score: float = 0.5
+    weight: float = 1.0
 
-    The system prompt explicitly forbids markdown fences, but the model
-    still wraps output in ```json ... ``` fairly often on longer inputs
-    (confirmed empirically: a controlled test at ~8k/~11k input tokens got
-    wrapped responses every time, vs. a clean unwrapped response at ~1.2k
-    tokens for the identical target content) — silently discarding a
-    perfectly good extraction as "found nothing" was a real, previously
-    unnoticed bug, not a sign of the model's entity recall actually
-    degrading with length."""
-    try:
-        data = json.loads(_MARKDOWN_FENCE_RE.sub("", text.strip()))
-        return data.get("nodes", []) or [], data.get("edges", []) or []
-    except (json.JSONDecodeError, AttributeError):
-        return [], []
+
+class Extraction(BaseModel):
+    """Structural replacement for the old hand-parsed `{"nodes": [...], "edges": [...]}`
+    dict — Instructor validates the model's response against this shape and
+    retries on failure, instead of a markdown-fence-stripping regex plus
+    manual `.get()` defaulting."""
+    nodes: list[Node] = []
+    edges: list[Edge] = []
 
 
 class KnowledgeGraphService:
@@ -140,9 +147,9 @@ class KnowledgeGraphService:
         self,
         vault: VaultService,
         interval_minutes: int = 10,
-        ollama_model: str = "prisma-llm:7b",
+        ollama_model: str = "qwen2.5:7b-32k",
         ollama_base_url: str = "http://localhost:11434",
-        token_budget: int = 2000,
+        token_budget: int = 1000,
         index_extensions: tuple[str, ...] = DEFAULT_INDEX_EXTENSIONS,
         supervisor_host: str = "127.0.0.1",
         supervisor_port: int | None = None,
@@ -153,6 +160,17 @@ class KnowledgeGraphService:
         self._interval = interval_minutes * 60
         self._ollama_model = ollama_model
         self._base_url = ollama_base_url
+        # Instructor validates the extraction response against `Extraction`
+        # and retries on validation failure, replacing the old markdown-fence
+        # regex + manual dict parsing. Mode.JSON (not the default Mode.TOOLS)
+        # matches the previous format="json" approach and avoids native
+        # tool-calling — ADR-014's own tool-calling test found that
+        # unreliable for this local model (qwen2.5:7b class), so JSON mode is
+        # the consistent choice here too.
+        self._instructor_client = instructor.from_openai(
+            OpenAI(base_url=f"{ollama_base_url}/v1", api_key="ollama", timeout=300.0),
+            mode=instructor.Mode.JSON,
+        )
         # Per-section token budget, not per-file — this is the actual fix for
         # the token-budget cliff a single oversized file used to hit. Model
         # runs with num_ctx=32768 (Qwen2.5-7B's own architectural maximum —
@@ -167,6 +185,11 @@ class KnowledgeGraphService:
         # produced ~10x fewer unique entities and ~4x fewer relationships as
         # one 8000-token call than as four ~2000-token calls, with far more
         # duplication too. More, smaller calls beats fewer, bigger ones here.
+        # Lowered again to 1000 (2026-07-05) after live extraction dropped a
+        # dense chunk whose JSON output exceeded max_tokens at 2000 —
+        # smaller input means proportionally smaller (less truncation-prone)
+        # output, same direction as the finding above, not yet its own
+        # controlled test.
         self._token_budget = token_budget
         self.index_extensions = index_extensions
         # Each section's Ollama call is independently resource_lock-gated as
@@ -212,6 +235,38 @@ class KnowledgeGraphService:
         # "extracting notes/big-paper.md (section 3/7)" — so /status answers
         # "what is the server working on" without grepping kg.log.
         self._current_activity: str | None = None
+
+        # Knowledge Graph progress page state (replaces an earlier, since
+        # reverted, generic "ollama stats" page — this is scoped to what's
+        # actually useful: full-sync progress, current file's chunk
+        # progress, and a rolling window of real chunk-call durations).
+        self._sync_total = 0
+        self._sync_done = 0
+        self._current_file: str | None = None
+        self._current_file_chunks_total = 0
+        self._current_file_chunks_done = 0
+        self._chunk_durations: deque[float] = deque(maxlen=100)
+        # Estimated token size of each chunk sent for extraction (same
+        # len(s)//4 heuristic semchunk itself uses for token_budget) — lets
+        # the progress page show whether token_budget is actually being
+        # respected in practice, not just requested.
+        self._chunk_sizes: deque[int] = deque(maxlen=100)
+        # Instructor's own validation-retry count per chunk (Hooks'
+        # "parse:error" fires once per failed-validation reprompt — a
+        # separate real Ollama call each time, all counted within one
+        # chunk's measured duration above). High retry counts mean the
+        # model is struggling to produce schema-conformant output for that
+        # content, not that the call itself is slow.
+        self._chunk_retries: deque[int] = deque(maxlen=100)
+        # Chunks that failed even after all retries — a small dead-letter
+        # queue, both in-memory (for the progress page) and on disk (the
+        # actual failed chunk text, for offline analysis of *why* it failed).
+        self._dropped_chunks: deque[dict] = deque(maxlen=50)
+        self._dropped_chunks_total = 0
+        # Bumped by drop_index() to invalidate whatever full-index run
+        # happens to already be in flight — see drop_index's own docstring
+        # for why a plain "clear the graph" wasn't enough on its own.
+        self._index_generation = 0
 
         self._lock = threading.Lock()
         self._pending: set[Path] = set()
@@ -274,8 +329,31 @@ class KnowledgeGraphService:
         return True
 
     def drop_index(self) -> None:
-        """Drop the graph entirely and force a cold rebuild on the next cycle.
-        Called by app.py's POST /knowledge-graph/drop."""
+        """Drop the graph entirely and start a genuinely fresh full index —
+        not just cleared data underneath whatever full-index run (e.g. the
+        one `_loop()` always starts at server startup) happens to already
+        be in flight. A bare "clear the Cypher data" used to leave that
+        run's file list, `_sync_total`/`_sync_done`, and in-flight upserts
+        completely unaware anything happened — files it had already
+        finished before the drop lost both their graph entities *and*
+        their IndexedFile hash, with nothing left to notice they needed
+        redoing until the next restart.
+
+        Sequence: (1) bump `_index_generation` so that run's own file/chunk
+        submission loop (see `_extract_files_concurrently`/
+        `_call_ollama_extract`) stops dispatching anything new the moment
+        it next checks, (2) block until every currently in-flight Ollama
+        call actually finishes — a real barrier via the extraction
+        semaphore, letting whatever's mid-call finish gracefully rather
+        than aborting it, (3) only then clear the graph, (4) kick off a
+        fresh `_full_index()` in its own thread. Called by app.py's
+        POST /knowledge-graph/drop."""
+        with self._lock:
+            self._index_generation += 1
+        for _ in range(self._extraction_concurrency):
+            self._extraction_semaphore.acquire()
+        for _ in range(self._extraction_concurrency):
+            self._extraction_semaphore.release()
         with self._lock:
             if self._conn is not None:
                 try:
@@ -287,6 +365,12 @@ class KnowledgeGraphService:
             self._state = "stale"
             self._last_indexed = None
             self._last_error = None
+            self._sync_total = 0
+            self._sync_done = 0
+            self._current_file = None
+            self._current_file_chunks_total = 0
+            self._current_file_chunks_done = 0
+        threading.Thread(target=self._full_index, daemon=True, name="knowledge-graph-reindex").start()
 
     def _ollama_ready(self) -> bool:
         import socket
@@ -303,6 +387,23 @@ class KnowledgeGraphService:
                 "last_indexed": self._last_indexed.isoformat() if self._last_indexed else None,
                 "last_error": self._last_error,
                 "current_activity": self._current_activity,
+                "sync_total": self._sync_total,
+                "sync_done": self._sync_done,
+                "current_file": self._current_file,
+                "current_file_chunks_done": self._current_file_chunks_done,
+                "current_file_chunks_total": self._current_file_chunks_total,
+                "chunk_avg_duration_ms": (
+                    sum(self._chunk_durations) / len(self._chunk_durations) if self._chunk_durations else None
+                ),
+                "chunk_duration_samples": len(self._chunk_durations),
+                "chunk_avg_retries": (
+                    sum(self._chunk_retries) / len(self._chunk_retries) if self._chunk_retries else None
+                ),
+                "chunk_avg_size_tokens": (
+                    sum(self._chunk_sizes) / len(self._chunk_sizes) if self._chunk_sizes else None
+                ),
+                "dropped_chunks_total": self._dropped_chunks_total,
+                "dropped_chunks_recent": list(self._dropped_chunks),
             }
 
     def _set_activity(self, activity: str | None) -> None:
@@ -349,23 +450,47 @@ class KnowledgeGraphService:
 
     # ── Extraction ────────────────────────────────────────────────────────────
 
-    def _call_ollama_extract(self, rel_path: str, section_text: str) -> tuple[list[dict], list[dict], bool]:
+    def _call_ollama_extract(
+        self,
+        rel_path: str,
+        section_text: str,
+        stop_event: threading.Event | None = None,
+        generation: int | None = None,
+    ) -> tuple[list[dict], list[dict], bool]:
         """One resource_lock-gated Ollama call for a single section. Returns
         (nodes, edges, ok) — `ok=False` means the call itself was denied a
-        lease or failed (no reachable Ollama, bad status, connection error),
-        distinct from a *successful* call that legitimately found nothing to
-        extract. Callers must not treat those the same: conflating them was
-        a real bug (see roadmap.md's Ollama resilience item) — it caused a
-        file that changed while Ollama was unreachable to be marked
-        processed anyway, silently never retried. One section's failure
-        must not abort the whole file's extraction, so this returns rather
-        than raises. Gated by self._extraction_semaphore — see its comment
-        in __init__ for why: without it, the cross-file and within-file
-        thread pools can multiply demand well past what the supervisor
-        will ever grant, so excess threads sit here waiting for a slot
-        instead of hammering resource_lock's internal retry/backoff against
-        an already-full pool."""
+        lease or failed (no reachable Ollama, bad status, connection error,
+        a sibling section in the same file already failed and set
+        `stop_event`, or `drop_index()` bumped `_index_generation` out from
+        under this file's own extraction — see `drop_index`'s docstring for
+        why that check has to reach all the way down here: the semaphore
+        barrier `drop_index()` waits on only proves no call is *currently*
+        running, not that a file's own sliding-window submission loop won't
+        start a fresh one immediately after, into a graph that just got
+        cleared), distinct from a *successful* call that legitimately found
+        nothing to extract. Callers must not treat those the same:
+        conflating them was a real bug (see roadmap.md's Ollama resilience
+        item) — it caused a file that changed while Ollama was unreachable
+        to be marked processed anyway, silently never retried. Returns
+        rather than raises so one section's failure can be handled by the
+        caller (`_extract_file` now stops the rest of that file's sections
+        on the first failure — see its own docstring). Gated by
+        self._extraction_semaphore — see its comment in __init__ for why:
+        without it, the cross-file and within-file thread pools can
+        multiply demand well past what the supervisor will ever grant, so
+        excess threads sit here waiting for a slot instead of hammering
+        resource_lock's internal retry/backoff against an already-full
+        pool."""
+        def _superseded() -> bool:
+            return (stop_event is not None and stop_event.is_set()) or (
+                generation is not None and self._index_generation != generation
+            )
+
+        if _superseded():
+            return [], [], False
         with self._extraction_semaphore:
+            if _superseded():
+                return [], [], False
             prompt = wrap_untrusted(rel_path, section_text)
             with resource_lock.lease(
                 self._supervisor_host, self._supervisor_port,
@@ -373,66 +498,153 @@ class KnowledgeGraphService:
             ) as granted:
                 if not granted:
                     return [], [], False
-                try:
-                    resp = requests.post(
-                        f"{self._base_url}/api/generate",
-                        json={
-                            "model": self._ollama_model,
-                            "system": _EXTRACTION_SYSTEM,
-                            "prompt": prompt,
-                            "stream": False,
-                            "format": "json",
-                            # No cap here meant no defense against a
-                            # confused/looping generation for one section —
-                            # observed live: calls taking 2-5 minutes each
-                            # (some hitting this very timeout) on a GPU
-                            # sitting at ~32% utilization the whole time,
-                            # consistent with the model generating a very
-                            # long, repetitive output rather than being
-                            # compute/GPU-bound (single-stream decode is
-                            # memory-bound, so low GPU% during a long
-                            # generation is normal, not a sign of throttling).
-                            # 2000 matches token_budget itself — a structured
-                            # JSON extraction of one section's entities
-                            # shouldn't need to be longer than the section
-                            # it's summarizing.
-                            "options": {"temperature": 0.1, "num_predict": 2000},
-                        },
-                        # Larger sections (up to token_budget) take longer to
-                        # process now that num_ctx is 32768 instead of 16384.
-                        timeout=300,
-                    )
-                except requests.RequestException as exc:
-                    _log.warning("extraction call failed for %s: %s", rel_path, exc)
-                    return [], [], False
-        if resp.status_code != 200:
-            _log.warning("extraction failed for %s: status=%d", rel_path, resp.status_code)
-            return [], [], False
-        # Deliberately outside both the lease and the request try/except
-        # above (releases the GPU slot before parsing) — but that left a
-        # gap: a malformed/truncated response body raised unhandled here,
-        # inside a thread-pool worker, instead of being treated as "this
-        # section's extraction failed, retry next cycle" like every other
-        # failure mode in this method.
-        try:
-            data = resp.json()
-            nodes, edges = _parse_extraction_response(data.get("response", ""))
-        except Exception as exc:
-            _log.warning("extraction response parse failed for %s: %s", rel_path, exc)
-            return [], [], False
-        return nodes, edges, True
+                t0 = time.monotonic()
+                retry_count = 0
 
-    def _extract_file(self, path: Path, trust_tier: str) -> bool:
+                def _on_parse_error(error: Exception, **kw) -> None:
+                    nonlocal retry_count
+                    retry_count += 1
+
+                hooks = Hooks()
+                hooks.on("parse:error", _on_parse_error)
+                try:
+                    extraction = self._instructor_client.chat.completions.create(
+                        model=self._ollama_model,
+                        messages=[
+                            {"role": "system", "content": _EXTRACTION_SYSTEM},
+                            {"role": "user", "content": prompt},
+                        ],
+                        response_model=Extraction,
+                        temperature=0.1,
+                        # No cap here meant no defense against a
+                        # confused/looping generation for one section —
+                        # observed live: calls taking 2-5 minutes each
+                        # (some hitting this very timeout) on a GPU
+                        # sitting at ~32% utilization the whole time,
+                        # consistent with the model generating a very
+                        # long, repetitive output rather than being
+                        # compute/GPU-bound (single-stream decode is
+                        # memory-bound, so low GPU% during a long
+                        # generation is normal, not a sign of throttling).
+                        # Originally set to 2000 (== token_budget) on the
+                        # assumption that a structured JSON extraction
+                        # shouldn't need to be longer than the section it's
+                        # summarizing — wrong in practice: a dense paper's
+                        # entity/relationship list can legitimately exceed
+                        # its own input length as JSON, and Instructor
+                        # treats a length-truncated response as immediately
+                        # fatal (IncompleteOutputException, not retryable —
+                        # retrying would just truncate at the same cap
+                        # again). Confirmed live: a Chinchilla-scaling-laws
+                        # chunk was dropped for exactly this reason. 4000
+                        # gives real headroom while still bounding the
+                        # runaway-generation failure mode this cap exists
+                        # for in the first place.
+                        max_tokens=4000,
+                        # Instructor re-prompts on validation failure — each
+                        # retry is a real Ollama call, so it must happen
+                        # inside this lease, not after releasing it.
+                        max_retries=3,
+                        hooks=hooks,
+                    )
+                except Exception as exc:
+                    # Covers both connection-level failures (openai.OpenAIError
+                    # and subclasses) and validation-retry-exhaustion
+                    # (instructor.core.exceptions.InstructorError) the same
+                    # way every other failure mode in this method is
+                    # handled: log and retry next cycle, don't raise inside
+                    # a thread-pool worker. Classified for the dead-letter
+                    # record so "why" is visible without reading logs:
+                    # "truncated" (hit max_tokens before finishing — not
+                    # something a same-cap retry would fix), "invalid"
+                    # (schema validation kept failing after all retries),
+                    # or "connection" (Ollama unreachable/timed out).
+                    if isinstance(exc, IncompleteOutputException):
+                        reason = "truncated"
+                    elif isinstance(exc, InstructorRetryException):
+                        reason = "invalid"
+                    else:
+                        reason = "connection"
+                    _log.warning("extraction call failed for %s: %s", rel_path, exc)
+                    self._record_dropped_chunk(rel_path, section_text, str(exc), retry_count, reason)
+                    return [], [], False
+        with self._lock:
+            self._chunk_durations.append((time.monotonic() - t0) * 1000)
+            self._chunk_retries.append(retry_count)
+            self._chunk_sizes.append(len(section_text) // 4)
+        return (
+            [n.model_dump() for n in extraction.nodes],
+            [e.model_dump() for e in extraction.edges],
+            True,
+        )
+
+    def _record_dropped_chunk(
+        self, rel_path: str, section_text: str, error: str, retry_count: int, reason: str,
+    ) -> None:
+        """A chunk that failed even after Instructor's retries — recorded
+        both in-memory (for the progress page) and to its own file on disk
+        (the actual chunk text, for offline analysis of *why* it failed —
+        garbled input, adversarial content, a genuinely too-hard section,
+        etc.). Never raises: a dead-letter write failing must not turn into
+        a second, unrelated failure on top of the extraction failure it's
+        trying to record.
+
+        `reason` is one of "truncated" (hit max_tokens before finishing),
+        "invalid" (schema validation kept failing), or "connection"
+        (Ollama unreachable/timed out) — see the classification in
+        `_call_ollama_extract`'s except block."""
+        timestamp = datetime.now()
+        dead_letter_path: str | None = None
+        try:
+            dead_letter_dir = self._kg_dir / "dead_letters"
+            dead_letter_dir.mkdir(parents=True, exist_ok=True)
+            safe_name = rel_path.replace("/", "_")
+            path = dead_letter_dir / f"{timestamp.strftime('%Y%m%dT%H%M%S')}_{safe_name}.txt"
+            path.write_text(
+                f"# source_file: {rel_path}\n# reason: {reason}\n# error: {error}\n"
+                f"# retries: {retry_count}\n# time: {timestamp.isoformat()}\n\n{section_text}",
+                encoding="utf-8",
+            )
+            dead_letter_path = str(path)
+        except Exception as exc:
+            _log.warning("failed to write dead-letter chunk for %s: %s", rel_path, exc)
+        with self._lock:
+            self._dropped_chunks_total += 1
+            self._dropped_chunks.append({
+                "source_file": rel_path, "error": error, "retries": retry_count, "reason": reason,
+                "time": timestamp.isoformat(), "dead_letter_path": dead_letter_path,
+            })
+
+    def _extract_file(self, path: Path, trust_tier: str, generation: int | None = None) -> bool:
         """Per-section extraction — chunk within the document by token
         budget (semchunk), not per-file, so no single file can ever be too
         big to extract. Sections are independent (each is its own
-        resource_lock-gated Ollama call and its own upsert), so they're
-        fanned out across a small thread pool instead of run one at a time —
-        that's what actually lets background extraction use more than one
-        of the supervisor's reserved background slots at once. Kùzu's
-        connection isn't thread-safe, so upserts (and the IndexedFile
-        tracking reads/writes) are serialized behind self._lock as each
-        section completes; the network calls themselves run concurrently.
+        resource_lock-gated Ollama call and its own upsert), fanned out
+        across a small thread pool. Kùzu's connection isn't thread-safe, so
+        upserts (and the IndexedFile tracking reads/writes) are serialized
+        behind self._lock as each section completes; the network calls
+        themselves run concurrently.
+
+        The first chunk to fail (denied lease, connection error, truncated
+        output, validation-retries-exhausted — anything `_call_ollama_extract`
+        returns ok=False for) stops the rest of *this file*'s sections — no
+        point spending GPU time on sections belonging to a file that's
+        getting tainted and fully re-extracted next cycle anyway. This is a
+        real guarantee, not best-effort: sections are submitted in a
+        bounded sliding window (at most `extraction_concurrency` in flight
+        at once), and a new one is only submitted after an earlier one
+        finishes *and* is checked for failure first — never pre-submitted
+        all at once. A naive "pre-submit everything, cancel on first
+        failure" design was tried and rejected: `Future.cancel()` only
+        works on a future that hasn't started running yet, and a idle
+        worker thread can grab the next queued task before the main thread
+        even reacts to the failure — a real race, not just a hypothetical
+        one, that made `extraction_concurrency=1` look "sequential enough"
+        to be safe when it wasn't. The sliding window closes it: nothing
+        for this file is ever queued ahead of a failure being noticed.
+        Other files are unaffected — this is a fresh stop_event per
+        _extract_file call.
+
         Returns True if the file's content actually changed since it was
         last indexed."""
         import semchunk
@@ -456,16 +668,49 @@ class KnowledgeGraphService:
         all_ok = True
         if sections:
             self._set_activity(f"extracting {rel} ({len(sections)} section(s), up to {self._extraction_concurrency} concurrent)")
+            with self._lock:
+                self._current_file = rel
+                self._current_file_chunks_total = len(sections)
+                self._current_file_chunks_done = 0
+            stop_event = threading.Event()
             max_workers = min(len(sections), self._extraction_concurrency)
             with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
-                futures = [pool.submit(self._call_ollama_extract, rel, section) for section in sections]
-                for future in concurrent.futures.as_completed(futures):
-                    nodes, edges, ok = future.result()
-                    all_ok = all_ok and ok
-                    if nodes or edges:
+                next_index = 0
+                in_flight: dict[concurrent.futures.Future, None] = {}
+
+                def _submit_next() -> None:
+                    nonlocal next_index
+                    if stop_event.is_set() or next_index >= len(sections):
+                        return
+                    if generation is not None and self._index_generation != generation:
+                        return
+                    in_flight[pool.submit(
+                        self._call_ollama_extract, rel, sections[next_index], stop_event, generation,
+                    )] = None
+                    next_index += 1
+
+                for _ in range(max_workers):
+                    _submit_next()
+                while in_flight:
+                    done, _ = concurrent.futures.wait(list(in_flight), return_when=concurrent.futures.FIRST_COMPLETED)
+                    for future in done:
+                        del in_flight[future]
+                        nodes, edges, ok = future.result()
                         with self._lock:
-                            self._upsert(rel, trust_tier, nodes, edges)
-                        any_upserted = True
+                            self._current_file_chunks_done += 1
+                        if not ok:
+                            if all_ok:  # first failure for this file — stop the rest, only log/taint once
+                                _log.warning(
+                                    "knowledge graph: chunk failed for %s — stopping remaining sections, tainting file",
+                                    rel,
+                                )
+                                stop_event.set()
+                            all_ok = False
+                        elif nodes or edges:
+                            with self._lock:
+                                self._upsert(rel, trust_tier, nodes, edges)
+                            any_upserted = True
+                        _submit_next()
 
         # Only advance the tracked hash on genuine success — otherwise a file
         # that changed while Ollama was unreachable would never be retried
@@ -477,7 +722,12 @@ class KnowledgeGraphService:
             with self._lock:
                 self._set_indexed_hash(rel, content_hash)
         else:
-            _log.warning("knowledge graph: extraction incomplete for %s — will retry next cycle", rel)
+            # Tainted: queued into the same set the filesystem watcher uses,
+            # so the next background cycle (up to 60s away) retries the
+            # whole file rather than waiting for a real edit or a full
+            # restart to notice it never finished.
+            with self._lock:
+                self._pending.add(path)
         return any_upserted
 
     def _indexed_hash(self, rel: str) -> str | None:
@@ -563,7 +813,7 @@ class KnowledgeGraphService:
 
     # ── Background loop ───────────────────────────────────────────────────────
 
-    def _extract_files_concurrently(self, paths: list[Path]) -> int:
+    def _extract_files_concurrently(self, paths: list[Path], on_file_done=None, generation: int | None = None) -> int:
         """Fan out _extract_file across several files at once, bounded by
         the same extraction_concurrency width as within-file section
         extraction. Most vault files chunk to a single section, so this —
@@ -576,7 +826,16 @@ class KnowledgeGraphService:
         Each file's indexed hash is written to Kùzu the instant that file
         finishes (see _extract_file/_set_indexed_hash) — no separate save
         step needed here, so a restart or crash partway through a long full
-        vault scan never loses track of files already durably indexed."""
+        vault scan never loses track of files already durably indexed.
+
+        `generation` (only set by _full_index) gates new submissions the
+        same bounded-sliding-window way _extract_file gates chunks within
+        one file: files are submitted incrementally, at most
+        extraction_concurrency in flight, and a new one is only submitted
+        if drop_index() hasn't bumped _index_generation since this run
+        started. Lets drop_index() cleanly supersede an in-flight full
+        index instead of it running on with a stale file list underneath a
+        just-cleared graph."""
         import concurrent.futures
 
         if not paths:
@@ -584,10 +843,30 @@ class KnowledgeGraphService:
         max_workers = min(len(paths), self._extraction_concurrency)
         changed = 0
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
-            futures = {pool.submit(self._extract_file, path, self._trust_tier_for(path)): path for path in paths}
-            for future in concurrent.futures.as_completed(futures):
-                if future.result():
-                    changed += 1
+            next_index = 0
+            in_flight: dict[concurrent.futures.Future, None] = {}
+
+            def _submit_next() -> None:
+                nonlocal next_index
+                if generation is not None and self._index_generation != generation:
+                    return
+                if next_index >= len(paths):
+                    return
+                path = paths[next_index]
+                in_flight[pool.submit(self._extract_file, path, self._trust_tier_for(path), generation)] = None
+                next_index += 1
+
+            for _ in range(max_workers):
+                _submit_next()
+            while in_flight:
+                done, _ = concurrent.futures.wait(list(in_flight), return_when=concurrent.futures.FIRST_COMPLETED)
+                for future in done:
+                    del in_flight[future]
+                    if future.result():
+                        changed += 1
+                    if on_file_done:
+                        on_file_done()
+                    _submit_next()
         return changed
 
     def _loop(self) -> None:
@@ -616,22 +895,49 @@ class KnowledgeGraphService:
     def _full_index(self) -> None:
         with self._lock:
             self._state = "indexing"
+            self._index_generation += 1
+            generation = self._index_generation
         try:
             all_files = [p for p in self._vault._all_md_files() if p.suffix in self.index_extensions]
             _log.info("knowledge graph full index start: %d files total", len(all_files))
             self._set_activity(f"scanning {len(all_files)} file(s), up to {self._extraction_concurrency} concurrent")
-            changed = self._extract_files_concurrently(all_files)
             with self._lock:
+                self._sync_total = len(all_files)
+                self._sync_done = 0
+
+            def _on_file_done() -> None:
+                with self._lock:
+                    self._sync_done += 1
+
+            changed = self._extract_files_concurrently(all_files, on_file_done=_on_file_done, generation=generation)
+            with self._lock:
+                if self._index_generation != generation:
+                    # Superseded by a newer drop_index()/full index while
+                    # this one was still winding down — its "done" isn't
+                    # the real, current state, so don't clobber whatever
+                    # the newer run has already set.
+                    return
                 self._last_indexed = datetime.now()
                 self._state = "idle"
                 self._last_error = None
+                # Full sync is over — 0 means "no active full sync" to the
+                # progress page, distinct from "0 of N done."
+                self._sync_total = 0
+                self._sync_done = 0
+                self._current_file = None
+                self._current_file_chunks_total = 0
+                self._current_file_chunks_done = 0
             self._set_activity(None)
             _log.info("knowledge graph full index done: %d files indexed, %d changed", len(all_files), changed)
         except Exception as exc:
             self._set_activity(None)
             with self._lock:
+                if self._index_generation != generation:
+                    return
                 self._state = "stale"
                 self._last_error = str(exc)
+                self._sync_total = 0
+                self._sync_done = 0
             _log.error("knowledge graph full index failed: %s", exc)
 
     # ── Retrieval ─────────────────────────────────────────────────────────────

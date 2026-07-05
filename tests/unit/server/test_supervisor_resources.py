@@ -468,7 +468,7 @@ def test_load_compute_pools_parses_vram_budget_and_model_vram(tmp_path, monkeypa
         "    max_concurrent: 3\n"
         "    vram_budget_mb: 14000\n"
         "    models:\n"
-        "      - name: prisma-llm:7b\n"
+        "      - name: qwen2.5:7b-32k\n"
         "        vram_mb: 7500\n"
         "      - name: nomic-embed-text\n"
         "        vram_mb: 1000\n"
@@ -480,7 +480,7 @@ def test_load_compute_pools_parses_vram_budget_and_model_vram(tmp_path, monkeypa
     capacity, affinity, pool_models, model_concurrency, vram_budget, model_vram, model_background_limit = _load_compute_pools()
 
     assert vram_budget == {"local-ollama": 14000, "cloud_api": None}
-    assert model_vram["local-ollama"] == {"prisma-llm:7b": 7500, "nomic-embed-text": 1000}
+    assert model_vram["local-ollama"] == {"qwen2.5:7b-32k": 7500, "nomic-embed-text": 1000}
 
 
 # ── VRAM-budget-aware pools: models genuinely coexist when they fit ─────────
@@ -489,12 +489,12 @@ def test_acquire_admits_second_model_when_ollama_reports_room():
     rm = ResourceManager(
         {"local-ollama": 4}, model_affinity={"local-ollama"},
         vram_budget={"local-ollama": 14000},
-        model_vram={"local-ollama": {"prisma-llm:7b": 7500, "nomic-embed-text": 1000}},
+        model_vram={"local-ollama": {"qwen2.5:7b-32k": 7500, "nomic-embed-text": 1000}},
     )
     pid = os.getpid()
 
-    with patch("prisma.server.supervisor._query_ollama_resident_mb", return_value={"prisma-llm:7b": 7000}):
-        r1, rid1 = rm.acquire("kg", pid, model="prisma-llm:7b")  # already resident per the mock
+    with patch("prisma.server.supervisor._query_ollama_resident_mb", return_value={"qwen2.5:7b-32k": 7000}):
+        r1, rid1 = rm.acquire("kg", pid, model="qwen2.5:7b-32k")  # already resident per the mock
         r2, rid2 = rm.acquire("chroma", pid, model="nomic-embed-text")  # not yet resident, but fits
 
     assert r1 == "local-ollama" and rid1 is not None
@@ -505,11 +505,11 @@ def test_acquire_denies_second_model_when_over_vram_budget():
     rm = ResourceManager(
         {"local-ollama": 4}, model_affinity={"local-ollama"},
         vram_budget={"local-ollama": 8000},  # tight budget
-        model_vram={"local-ollama": {"prisma-llm:7b": 7500, "some-other-model": 5000}},
+        model_vram={"local-ollama": {"qwen2.5:7b-32k": 7500, "some-other-model": 5000}},
     )
     pid = os.getpid()
 
-    with patch("prisma.server.supervisor._query_ollama_resident_mb", return_value={"prisma-llm:7b": 7500}):
+    with patch("prisma.server.supervisor._query_ollama_resident_mb", return_value={"qwen2.5:7b-32k": 7500}):
         r, rid = rm.acquire("api", pid, model="some-other-model")  # 7500 + 5000 > 8000
 
     assert r is None and rid is None
@@ -520,12 +520,12 @@ def test_acquire_grants_already_resident_model_regardless_of_new_model_cost():
     rm = ResourceManager(
         {"local-ollama": 4}, model_affinity={"local-ollama"},
         vram_budget={"local-ollama": 8000},
-        model_vram={"local-ollama": {"prisma-llm:7b": 7500}},
+        model_vram={"local-ollama": {"qwen2.5:7b-32k": 7500}},
     )
     pid = os.getpid()
 
-    with patch("prisma.server.supervisor._query_ollama_resident_mb", return_value={"prisma-llm:7b": 7500}):
-        r, rid = rm.acquire("kg", pid, model="prisma-llm:7b")  # already resident — no budget math needed
+    with patch("prisma.server.supervisor._query_ollama_resident_mb", return_value={"qwen2.5:7b-32k": 7500}):
+        r, rid = rm.acquire("kg", pid, model="qwen2.5:7b-32k")  # already resident — no budget math needed
 
     assert r == "local-ollama" and rid is not None
 
@@ -534,12 +534,12 @@ def test_acquire_falls_back_to_strict_affinity_when_ollama_unreachable():
     rm = ResourceManager(
         {"local-ollama": 4}, model_affinity={"local-ollama"},
         vram_budget={"local-ollama": 14000},
-        model_vram={"local-ollama": {"prisma-llm:7b": 7500, "nomic-embed-text": 1000}},
+        model_vram={"local-ollama": {"qwen2.5:7b-32k": 7500, "nomic-embed-text": 1000}},
     )
     pid = os.getpid()
 
     with patch("prisma.server.supervisor._query_ollama_resident_mb", return_value=None):
-        rm.acquire("kg", pid, model="prisma-llm:7b")
+        rm.acquire("kg", pid, model="qwen2.5:7b-32k")
         r2, rid2 = rm.acquire("chroma", pid, model="nomic-embed-text")
 
     # Can't verify Ollama's real state — fails safe to strict single-model rule
@@ -551,14 +551,14 @@ def test_acquire_per_model_concurrency_still_enforced_on_vram_budget_pool():
     rm = ResourceManager(
         {"local-ollama": 4}, model_affinity={"local-ollama"},
         vram_budget={"local-ollama": 14000},
-        model_concurrency={"local-ollama": {"prisma-llm:7b": 1}},
-        model_vram={"local-ollama": {"prisma-llm:7b": 7500}},
+        model_concurrency={"local-ollama": {"qwen2.5:7b-32k": 1}},
+        model_vram={"local-ollama": {"qwen2.5:7b-32k": 7500}},
     )
     pid = os.getpid()
 
     with patch("prisma.server.supervisor._query_ollama_resident_mb", return_value={}):
-        r1, rid1 = rm.acquire("kg", pid, model="prisma-llm:7b")
-        r2, rid2 = rm.acquire("chat", pid, model="prisma-llm:7b")  # same model, but over its own max_concurrent=1
+        r1, rid1 = rm.acquire("kg", pid, model="qwen2.5:7b-32k")
+        r2, rid2 = rm.acquire("chat", pid, model="qwen2.5:7b-32k")  # same model, but over its own max_concurrent=1
 
     assert r1 == "local-ollama" and rid1 is not None
     assert r2 is None and rid2 is None
@@ -572,11 +572,11 @@ def test_status_reports_resident_models_and_vram_budget():
     pid = os.getpid()
 
     with patch("prisma.server.supervisor._query_ollama_resident_mb", return_value={}):
-        rm.acquire("kg", pid, model="prisma-llm:7b")
+        rm.acquire("kg", pid, model="qwen2.5:7b-32k")
         rm.acquire("chroma", pid, model="nomic-embed-text")
 
     status = rm.status()["local-ollama"]
-    assert status["resident_models"] == ["nomic-embed-text", "prisma-llm:7b"]
+    assert status["resident_models"] == ["nomic-embed-text", "qwen2.5:7b-32k"]
     assert status["vram_budget_mb"] == 14000
 
 
@@ -588,16 +588,16 @@ def test_status_reports_per_model_effective_capacity_not_flat_pool_default():
     rm = ResourceManager(
         {"local-ollama": 3}, model_affinity={"local-ollama"},
         vram_budget={"local-ollama": 14000},
-        model_concurrency={"local-ollama": {"prisma-llm:7b": 4}},
-        model_background_limit={"local-ollama": {"prisma-llm:7b": 3}},
+        model_concurrency={"local-ollama": {"qwen2.5:7b-32k": 4}},
+        model_background_limit={"local-ollama": {"qwen2.5:7b-32k": 3}},
     )
     pid = os.getpid()
 
     with patch("prisma.server.supervisor._query_ollama_resident_mb", return_value={}):
-        rm.acquire("kg", pid, model="prisma-llm:7b")
+        rm.acquire("kg", pid, model="qwen2.5:7b-32k")
 
     model_capacity = rm.status()["local-ollama"]["model_capacity"]
-    assert model_capacity["prisma-llm:7b"] == {"in_use": 1, "limit": 4, "background_limit": 3}
+    assert model_capacity["qwen2.5:7b-32k"] == {"in_use": 1, "limit": 4, "background_limit": 3}
 
 
 # ── Priority tiers: interactive must never queue behind background work ──────
@@ -605,14 +605,14 @@ def test_status_reports_per_model_effective_capacity_not_flat_pool_default():
 def test_background_capped_below_full_concurrency_reserves_room_for_interactive():
     rm = ResourceManager(
         {"local-ollama": 4}, model_affinity={"local-ollama"},
-        model_background_limit={"local-ollama": {"prisma-llm:7b": 3}},
+        model_background_limit={"local-ollama": {"qwen2.5:7b-32k": 3}},
     )
     pid = os.getpid()
 
-    r1, _ = rm.acquire("kg", pid, model="prisma-llm:7b", priority="background")
-    r2, _ = rm.acquire("kg", pid, model="prisma-llm:7b", priority="background")
-    r3, _ = rm.acquire("kg", pid, model="prisma-llm:7b", priority="background")
-    r4, rid4 = rm.acquire("kg", pid, model="prisma-llm:7b", priority="background")  # 4th background — over its cap
+    r1, _ = rm.acquire("kg", pid, model="qwen2.5:7b-32k", priority="background")
+    r2, _ = rm.acquire("kg", pid, model="qwen2.5:7b-32k", priority="background")
+    r3, _ = rm.acquire("kg", pid, model="qwen2.5:7b-32k", priority="background")
+    r4, rid4 = rm.acquire("kg", pid, model="qwen2.5:7b-32k", priority="background")  # 4th background — over its cap
 
     assert [r1, r2, r3] == ["local-ollama"] * 3
     assert r4 is None and rid4 is None
@@ -621,15 +621,15 @@ def test_background_capped_below_full_concurrency_reserves_room_for_interactive(
 def test_interactive_still_granted_when_background_fills_its_own_cap():
     rm = ResourceManager(
         {"local-ollama": 4}, model_affinity={"local-ollama"},
-        model_background_limit={"local-ollama": {"prisma-llm:7b": 3}},
+        model_background_limit={"local-ollama": {"qwen2.5:7b-32k": 3}},
     )
     pid = os.getpid()
 
-    rm.acquire("kg", pid, model="prisma-llm:7b", priority="background")
-    rm.acquire("kg", pid, model="prisma-llm:7b", priority="background")
-    rm.acquire("kg", pid, model="prisma-llm:7b", priority="background")
+    rm.acquire("kg", pid, model="qwen2.5:7b-32k", priority="background")
+    rm.acquire("kg", pid, model="qwen2.5:7b-32k", priority="background")
+    rm.acquire("kg", pid, model="qwen2.5:7b-32k", priority="background")
 
-    r_chat, rid_chat = rm.acquire("api", pid, model="prisma-llm:7b", priority="interactive")
+    r_chat, rid_chat = rm.acquire("api", pid, model="qwen2.5:7b-32k", priority="interactive")
 
     assert r_chat == "local-ollama" and rid_chat is not None  # uses the 4th slot background couldn't touch
 
@@ -643,16 +643,16 @@ def test_active_interactive_lease_does_not_shrink_backgrounds_own_quota():
     # in_use=3/limit=3 with only 2 of those 3 leases actually being kg's.
     rm = ResourceManager(
         {"local-ollama": 6}, model_affinity={"local-ollama"},
-        model_background_limit={"local-ollama": {"prisma-llm:7b": 3}},
+        model_background_limit={"local-ollama": {"qwen2.5:7b-32k": 3}},
     )
     pid = os.getpid()
 
-    r_chat, _ = rm.acquire("api", pid, model="prisma-llm:7b", priority="interactive")
+    r_chat, _ = rm.acquire("api", pid, model="qwen2.5:7b-32k", priority="interactive")
     assert r_chat == "local-ollama"
 
-    r1, _ = rm.acquire("kg", pid, model="prisma-llm:7b", priority="background")
-    r2, _ = rm.acquire("kg", pid, model="prisma-llm:7b", priority="background")
-    r3, _ = rm.acquire("kg", pid, model="prisma-llm:7b", priority="background")
+    r1, _ = rm.acquire("kg", pid, model="qwen2.5:7b-32k", priority="background")
+    r2, _ = rm.acquire("kg", pid, model="qwen2.5:7b-32k", priority="background")
+    r3, _ = rm.acquire("kg", pid, model="qwen2.5:7b-32k", priority="background")
 
     assert [r1, r2, r3] == ["local-ollama"] * 3  # background still gets its full quota of 3
 
@@ -666,17 +666,17 @@ def test_background_denied_when_interactive_alone_fills_the_pool_to_full_capacit
     # and get granted anyway, pushing the pool past its configured ceiling.
     rm = ResourceManager(
         {"local-ollama": 6}, model_affinity={"local-ollama"},
-        model_background_limit={"local-ollama": {"prisma-llm:7b": 3}},
+        model_background_limit={"local-ollama": {"qwen2.5:7b-32k": 3}},
     )
     pid = os.getpid()
 
     interactive_leases = [
-        rm.acquire("api", pid, model="prisma-llm:7b", priority="interactive")
+        rm.acquire("api", pid, model="qwen2.5:7b-32k", priority="interactive")
         for _ in range(6)
     ]
     assert all(r == "local-ollama" for r, _ in interactive_leases)  # fills the pool to its real max_concurrent
 
-    r_bg, rid_bg = rm.acquire("kg", pid, model="prisma-llm:7b", priority="background")
+    r_bg, rid_bg = rm.acquire("kg", pid, model="qwen2.5:7b-32k", priority="background")
 
     assert r_bg is None and rid_bg is None  # must not be granted just because background_in_use is 0
 
@@ -688,13 +688,13 @@ def test_interactive_defaults_to_background_priority_when_unspecified():
     # needing to be updated.
     rm = ResourceManager(
         {"local-ollama": 4}, model_affinity={"local-ollama"},
-        model_background_limit={"local-ollama": {"prisma-llm:7b": 3}},
+        model_background_limit={"local-ollama": {"qwen2.5:7b-32k": 3}},
     )
     pid = os.getpid()
 
     for _ in range(3):
-        rm.acquire("kg", pid, model="prisma-llm:7b")  # no priority passed
-    r4, rid4 = rm.acquire("kg", pid, model="prisma-llm:7b")
+        rm.acquire("kg", pid, model="qwen2.5:7b-32k")  # no priority passed
+    r4, rid4 = rm.acquire("kg", pid, model="qwen2.5:7b-32k")
 
     assert r4 is None and rid4 is None
 
@@ -703,8 +703,8 @@ def test_no_background_limit_configured_uses_full_concurrency_for_both_tiers():
     rm = ResourceManager({"local-ollama": 2}, model_affinity={"local-ollama"})
     pid = os.getpid()
 
-    r1, _ = rm.acquire("kg", pid, model="prisma-llm:7b", priority="background")
-    r2, _ = rm.acquire("kg", pid, model="prisma-llm:7b", priority="background")
+    r1, _ = rm.acquire("kg", pid, model="qwen2.5:7b-32k", priority="background")
+    r2, _ = rm.acquire("kg", pid, model="qwen2.5:7b-32k", priority="background")
 
     assert r1 == "local-ollama" and r2 == "local-ollama"  # no reservation configured — unaffected
 
@@ -719,14 +719,14 @@ def test_load_compute_pools_parses_background_max_concurrent(tmp_path, monkeypat
         "    type: gpu\n"
         "    max_concurrent: 4\n"
         "    models:\n"
-        "      - name: prisma-llm:7b\n"
+        "      - name: qwen2.5:7b-32k\n"
         "        background_max_concurrent: 3\n"
     )
 
     result = _load_compute_pools()
     model_background_limit = result[6]
 
-    assert model_background_limit["local-ollama"] == {"prisma-llm:7b": 3}
+    assert model_background_limit["local-ollama"] == {"qwen2.5:7b-32k": 3}
 
 
 # ── Memory/capacity reporting ─────────────────────────────────────────────────

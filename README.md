@@ -14,7 +14,7 @@
 
 **Prisma** is a Research Library Assistant that helps researchers intelligently organize, curate, and enhance their research libraries using **Zotero as the primary organization tool**. It discovers research content, assesses relevance, and provides intelligent library management.
 
-**Architecture:** CLI → Coordinator → Source Integrations (External APIs + Zotero Libraries) → Zotero Storage → LLM Analysis → Library Enhancement
+**Architecture:** `prisma serve` runs a small supervisor that isolates the API, Web UI, ChromaDB, and native knowledge-graph module into independent, crash-recoverable processes — a flat-Markdown vault (notes, sources, chats, streams) is the shared workspace, with a CLI, REST/WebSocket API, and installable PWA/desktop UI all operating on it.
 
 ## System Requirements
 
@@ -38,7 +38,9 @@
 - **🤖 AI-Powered Curation**: Uses local LLMs for intelligent research assessment and organization
 - **📊 Library Organization**: Generates structured research organization and enhanced library management
 - **🗂️ Vault Workspace**: A local, flat-Markdown second brain for notes, sources, and chats — `prisma serve` opens it as a web app, installable PWA, or native desktop shell
-- **🔍 Semantic Search**: ChromaDB embeddings + a native knowledge graph re-rank results beyond keyword matching
+- **💬 Chat**: Ask Prisma questions about your vault — grounded in ChromaDB semantic search + native knowledge-graph context, with tool-calling, citations, and a pinning/Excerpt model for managing context budget across local or cloud-capable LLM backends
+- **🕸️ Native Knowledge Graph**: Entity/relationship extraction (structured LLM output, no third-party dependency) stored in an embedded graph DB, re-ranking search results and answering "what connects to what" — with a live progress UI (sync status, extraction stats, failure inspection)
+- **🔍 Semantic Search**: ChromaDB embeddings + the knowledge graph re-rank results beyond keyword matching
 
 ## Research Library Management Process
 

@@ -238,7 +238,7 @@ def test_excerpt_mode_always_compressed_on_a_small_context_window_regardless_of_
     # window must never produce verbatim mode, no matter how tiny the
     # pinned content is.
     llm = MagicMock()
-    llm.context_window = 32768  # today's local prisma-llm:7b
+    llm.context_window = 32768  # today's local qwen2.5:7b-32k
     agent = _agent(llm=llm)
 
     tiny_text = "x" * 40  # ~10 tokens — trivially small

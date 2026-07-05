@@ -50,7 +50,7 @@ class ZoteroConfig(BaseModel):
 class LLMConfig(BaseModel):
     """LLM configuration"""
     provider: str = Field("ollama", description="LLM provider")
-    model: str = Field("prisma-llm:7b", description="Model name")
+    model: str = Field("qwen2.5:7b-32k", description="Model name")
     host: str = Field("localhost:11434", description="Host and port")
     max_concurrent_inferences: int = Field(1, ge=1, le=16, description="Max simultaneous Ollama requests")
 
@@ -63,7 +63,7 @@ class LLMConfig(BaseModel):
 class ChatConfig(BaseModel):
     """Chat module LLM backend configuration (ADR-014: openai SDK, multi-base_url)."""
     provider: str = Field("ollama", description="ollama | openrouter | anthropic")
-    model: str = Field("prisma-llm:7b", description="Model name for the chosen provider")
+    model: str = Field("qwen2.5:7b-32k", description="Model name for the chosen provider")
     base_url: Optional[str] = Field(
         None, description="Override the provider's default base_url; None derives it from provider"
     )
@@ -80,7 +80,7 @@ class ChatConfig(BaseModel):
             "This backend's real usable context window (verified via /api/ps's context_length "
             "for Ollama, not a claimed/configured value — see ADR-013's follow-up section on why "
             "that distinction matters). Drives ADR-015's compressed-vs-verbatim Excerpt mode: a "
-            "small window (today's local prisma-llm:7b) needs pinned turns compressed into a "
+            "small window (today's local qwen2.5:7b-32k) needs pinned turns compressed into a "
             "Summary; a large one (a future cloud backend) can afford to keep them verbatim."
         ),
     )

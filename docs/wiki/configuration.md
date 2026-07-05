@@ -71,8 +71,26 @@ search:
 # ── LLM ─────────────────────────────────────────────────────────────────────
 llm:
   provider: "ollama"
-  model: "llama3.1:8b"
+  model: "qwen2.5:7b-32k"
   host: "localhost:11434"               # WSL: use Windows host IP
+
+# ── Chat (ADR-014: backend-agnostic — ollama today, openrouter/anthropic-capable) ──
+chat:
+  provider: "ollama"                    # ollama | openrouter | anthropic
+  model: "qwen2.5:7b-32k"
+  pool: "local-ollama"                  # must match a compute_pools entry below
+  context_window: 32768                 # this backend's real usable context (verify via /api/ps, not a claimed value)
+  max_tokens: 2000                      # hard cap on generated tokens per completion
+  # base_url: null                      # override the provider's default; omit to derive from provider
+  # api_key_env: null                   # env var holding the API key (omit for local Ollama)
+
+# ── Compute pools (GPU/inference lease arbitration — ADR-012) ────────────────
+# compute_pools:
+#   - name: local-ollama          # single GPU — N concurrent calls to the SAME model
+#     max_concurrent: 3           # model_affinity omitted — defaults to true
+#   - name: cloud_api
+#     max_concurrent: 4           # rate-limited cloud inference endpoint
+#     model_affinity: false       # auto-scaled/auto-routed — no reload penalty to model
 
 # ── Output ───────────────────────────────────────────────────────────────────
 output:
@@ -96,6 +114,8 @@ retrieval:
 # ── Knowledge graph — native KnowledgeGraphService (Kùzu-backed) ─────────────
 kg:
   index_extensions: [".md", ".txt"]   # file types included in the graph index
+  token_budget: 1000                  # per-section chunk size sent to the LLM (smaller = better extraction quality, see docs/kg-extraction-context-length.md)
+  extraction_concurrency: 3           # max concurrent extraction calls (cross-file + within-file combined)
 ```
 
 ---

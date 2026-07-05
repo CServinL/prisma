@@ -390,7 +390,7 @@ class VaultService:
         """`model`, when given, overwrites the chat's stored frontmatter
         model — the model actually used for the turn just saved. Without
         this, a chat created before a model rename/merge (e.g.
-        prisma-chat:7b -> prisma-llm:7b) would keep displaying its
+        prisma-chat:7b -> qwen2.5:7b-32k) would keep displaying its
         original, now-stale name forever, even though every subsequent
         turn actually used the current config's model."""
         with self._chat_write_lock:

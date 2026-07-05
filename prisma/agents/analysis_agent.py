@@ -138,12 +138,13 @@ class AnalysisAgent:
         if error:
             _ollama_log.warning("op=%s model=%s elapsed_ms=%.0f error=%s", op, self.model, elapsed_ms, error)
             return
-        prompt_tokens = data.get("prompt_eval_count", "?") if data else "?"
-        gen_tokens = data.get("eval_count", "?") if data else "?"
+        prompt_tokens = data.get("prompt_eval_count") if data else None
+        gen_tokens = data.get("eval_count") if data else None
         extra = " ".join(f"{k}={v}" for k, v in kw.items())
         _ollama_log.info(
             "op=%s model=%s elapsed_ms=%.0f prompt_tokens=%s gen_tokens=%s%s",
-            op, self.model, elapsed_ms, prompt_tokens, gen_tokens,
+            op, self.model, elapsed_ms, prompt_tokens if prompt_tokens is not None else "?",
+            gen_tokens if gen_tokens is not None else "?",
             f" {extra}" if extra else "",
         )
 
@@ -202,6 +203,7 @@ Provide a clear, academic summary focusing on the main contribution and signific
         Returns:
             Dict with relevance assessment results
         """
+        t0 = time.monotonic()
         try:
             prompt = f"""Analyze whether this research paper is semantically relevant to the research topic.
 
@@ -226,13 +228,16 @@ REASONING: [2-3 sentences explaining the semantic connection or lack thereof]"""
             response = self._call_ollama_generate(
                 prompt, options={"temperature": 0.3, "num_predict": 250}, timeout=45,
             )
+            elapsed_ms = (time.monotonic() - t0) * 1000
 
             if response is not None and response.status_code == 200:
-                result = response.json().get('response', '').strip()
+                data = response.json()
+                self._log_ollama("assess_relevance", elapsed_ms, data)
+                result = data.get('response', '').strip()
                 return self._parse_semantic_relevance(result)
             else:
                 status = response.status_code if response is not None else "no compute lease available"
-                print(f"[WARNING] Semantic relevance assessment failed: {status}")
+                self._log_ollama("assess_relevance", elapsed_ms, None, error=str(status))
                 return LLMRelevanceResult(
                     is_relevant=False,
                     relevance_level="UNKNOWN",
@@ -240,12 +245,13 @@ REASONING: [2-3 sentences explaining the semantic connection or lack thereof]"""
                     reasoning=f"LLM request failed with status {status}",
                     semantic_score=0.0
                 )
-                
+
         except Exception as e:
-            print(f"[WARNING] Semantic relevance assessment failed: {e}")
+            elapsed_ms = (time.monotonic() - t0) * 1000
+            self._log_ollama("assess_relevance", elapsed_ms, None, error=str(e))
             return LLMRelevanceResult(
                 is_relevant=False,
-                relevance_level="UNKNOWN", 
+                relevance_level="UNKNOWN",
                 confidence=0.0,
                 reasoning=f"Assessment failed due to error: {e}",
                 semantic_score=0.0

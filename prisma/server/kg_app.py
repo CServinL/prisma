@@ -47,9 +47,9 @@ def _ollama_model() -> str:
         import yaml
         cfg_path = Path.home() / ".config" / "prisma" / "config.yaml"
         cfg = yaml.safe_load(cfg_path.read_text()) or {}
-        return cfg.get("llm", {}).get("model", "prisma-llm:7b")
+        return cfg.get("llm", {}).get("model", "qwen2.5:7b-32k")
     except Exception:
-        return "prisma-llm:7b"
+        return "qwen2.5:7b-32k"
 
 
 def _index_extensions() -> tuple[str, ...]:
@@ -78,16 +78,21 @@ def _extraction_concurrency() -> int:
 
 def _token_budget() -> int:
     # See docs/kg-extraction-context-length.md — a controlled test on real
-    # paper content found the previous default (8000) produced ~10x fewer
-    # unique entities and ~4x fewer relationships than chunking the same
-    # content at ~2000 tokens per section, not just marginally worse.
+    # paper content found the old 8000 default produced ~10x fewer unique
+    # entities and ~4x fewer relationships than chunking the same content
+    # at ~2000 tokens per section, not just marginally worse. Lowered
+    # further to 1000 (2026-07-05, per cservinl) after live extraction hit
+    # a dense chunk whose JSON output exceeded max_tokens and got dropped —
+    # smaller input chunks mean proportionally smaller (and less likely to
+    # truncate) output, consistent with that doc's own "smaller is better"
+    # finding trend, though not yet re-verified with its own controlled test.
     try:
         import yaml
         cfg_path = Path.home() / ".config" / "prisma" / "config.yaml"
         cfg = yaml.safe_load(cfg_path.read_text()) or {}
-        return int(cfg.get("kg", {}).get("token_budget", 2000))
+        return int(cfg.get("kg", {}).get("token_budget", 1000))
     except Exception:
-        return 2000
+        return 1000
 
 
 _vault = VaultService(vault_root=_resolve_vault_root())

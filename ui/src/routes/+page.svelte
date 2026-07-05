@@ -6,7 +6,16 @@
     online: boolean;
     config: { ok: boolean; error: string | null };
     pending_jobs: number;
-    knowledge_graph: { state: GState; last_indexed: string | null; last_error?: string | null; current_activity?: string | null };
+    knowledge_graph: {
+      state: GState; last_indexed: string | null; last_error?: string | null; current_activity?: string | null;
+      sync_total?: number; sync_done?: number;
+      current_file?: string | null; current_file_chunks_done?: number; current_file_chunks_total?: number;
+      chunk_avg_duration_ms?: number | null; chunk_duration_samples?: number;
+      chunk_avg_retries?: number | null;
+      chunk_avg_size_tokens?: number | null;
+      dropped_chunks_total?: number;
+      dropped_chunks_recent?: { source_file: string; error: string; retries: number; reason: string; time: string; dead_letter_path: string | null }[];
+    };
     chroma?: { chunks: number; files_indexed: number; model: string; current_activity?: string | null } | null;
     vault?: { root: string; notes: number; sources: number; chats: number; streams: number };
     zotero?: { mode: string; available: boolean } | null;
@@ -249,6 +258,7 @@
   let recentResourceStats = $state<Record<string, PoolStats>>({});
   let statusPopoverOpen = $state(false);
   let showResourcesPage = $state(false);
+  let showKgProgressPage = $state(false);
   let searchQuery = $state("");
   let searchResults = $state<SearchResult[]>([]);
   let searching = $state(false);
@@ -462,6 +472,7 @@
   async function openChat(slug: string) {
     activeNode = null;
     showResourcesPage = false;
+    showKgProgressPage = false;
     loadingNode = true;
     try {
       const r = await fetch(`${apiBase}/chats/${encodeURIComponent(slug)}`);
@@ -627,6 +638,7 @@
   async function loadHome() {
     activeChat = null;
     showResourcesPage = false;
+    showKgProgressPage = false;
     loadingNode = true;
     try {
       const r = await fetch(`${apiBase}/home`);
@@ -710,6 +722,7 @@
   async function openNode(slug: string, fmt?: "html" | "md") {
     activeChat = null;
     showResourcesPage = false;
+    showKgProgressPage = false;
     loadingNode = true;
     try {
       const f = fmt ?? viewFormat;
@@ -722,6 +735,7 @@
   async function openStream(slug: string) {
     activeChat = null;
     showResourcesPage = false;
+    showKgProgressPage = false;
     loadingNode = true;
     try {
       const r = await fetch(`${apiBase}/streams/${slug}/view`);
@@ -1422,10 +1436,18 @@
             <button
               class="tree-file"
               class:active={showResourcesPage}
-              onclick={() => { activeNode = null; activeChat = null; showResourcesPage = true; }}
+              onclick={() => { activeNode = null; activeChat = null; showResourcesPage = true; showKgProgressPage = false; }}
             >
               <span class="tree-type-dot nt-stream"></span>
               <span class="tree-file-name">Compute pools</span>
+            </button>
+            <button
+              class="tree-file"
+              class:active={showKgProgressPage}
+              onclick={() => { activeNode = null; activeChat = null; showResourcesPage = false; showKgProgressPage = true; }}
+            >
+              <span class="tree-type-dot nt-stream"></span>
+              <span class="tree-file-name">Knowledge Graph</span>
             </button>
           </div>
         {/if}
@@ -1787,6 +1809,120 @@
             {/if}
           </div>
         </div>
+      {:else if showKgProgressPage}
+        <div class="resources-page">
+          <div class="node-toolbar">
+            <span class="node-heading">Knowledge Graph</span>
+          </div>
+          <div class="resources-body">
+            {#if !serverStatus?.knowledge_graph}
+              <div class="empty-state"><p>Knowledge graph status unavailable.</p></div>
+            {:else}
+              {@const kg = serverStatus.knowledge_graph}
+              <div class="resource-card">
+                <div class="resource-card-header">
+                  <span class="resource-pool-name">Full sync</span>
+                </div>
+                <div class="resource-facts">
+                  {#if (kg.sync_total ?? 0) > 0}
+                    <div class="resource-fact">
+                      <span class="resource-fact-label">Progress</span>
+                      <span class="resource-fact-val">{kg.sync_done ?? 0} / {kg.sync_total}</span>
+                    </div>
+                  {:else}
+                    <div class="resource-fact">
+                      <span class="resource-fact-label">State</span>
+                      <span class="resource-fact-val">{kg.state}</span>
+                    </div>
+                  {/if}
+                  {#if kg.last_indexed}
+                    <div class="resource-fact">
+                      <span class="resource-fact-label">Last full sync completed</span>
+                      <span class="resource-fact-val">{new Date(kg.last_indexed).toLocaleString()}</span>
+                    </div>
+                  {/if}
+                </div>
+
+                {#if kg.current_file}
+                  <div class="resource-section-title">Now extracting</div>
+                  <div class="resource-facts-stacked">
+                    <div class="resource-fact">
+                      <span class="resource-fact-label">File</span>
+                      <span class="resource-fact-val">{kg.current_file}</span>
+                    </div>
+                    <div class="resource-fact">
+                      <span class="resource-fact-label">Chunk</span>
+                      <span class="resource-fact-val">{kg.current_file_chunks_done ?? 0} of {kg.current_file_chunks_total ?? 0}</span>
+                    </div>
+                  </div>
+                {/if}
+
+                <div class="resource-section-title">Chunk duration</div>
+                <div class="resource-facts">
+                  {#if kg.chunk_avg_duration_ms != null}
+                    <div class="resource-fact">
+                      <span class="resource-fact-label">Average (last {kg.chunk_duration_samples})</span>
+                      <span class="resource-fact-val">{kg.chunk_avg_duration_ms.toFixed(0)}ms</span>
+                    </div>
+                    <div class="resource-fact">
+                      <span class="resource-fact-label">Avg. Instructor retries</span>
+                      <span class="resource-fact-val" class:warn={(kg.chunk_avg_retries ?? 0) > 0}>
+                        {(kg.chunk_avg_retries ?? 0).toFixed(2)}
+                      </span>
+                    </div>
+                    <div class="resource-fact">
+                      <span class="resource-fact-label">Avg. size (tokens, est.)</span>
+                      <span class="resource-fact-val">{(kg.chunk_avg_size_tokens ?? 0).toFixed(0)}</span>
+                    </div>
+                  {:else}
+                    <div class="resource-empty">No chunks extracted yet</div>
+                  {/if}
+                </div>
+
+                <div class="resource-section-title">Dropped chunks</div>
+                <div class="resource-facts">
+                  <div class="resource-fact">
+                    <span class="resource-fact-label">Total (this session)</span>
+                    <span class="resource-fact-val" class:warn={(kg.dropped_chunks_total ?? 0) > 0}>
+                      {kg.dropped_chunks_total ?? 0}
+                    </span>
+                  </div>
+                </div>
+                {#if kg.dropped_chunks_recent && kg.dropped_chunks_recent.length > 0}
+                  <table class="resource-table">
+                    <thead>
+                      <tr>
+                        <th>Time</th>
+                        <th>File</th>
+                        <th>Reason</th>
+                        <th>Retries</th>
+                        <th>Error</th>
+                        <th>Dead letter file</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {#each kg.dropped_chunks_recent as d}
+                        <tr>
+                          <td>{new Date(d.time).toLocaleTimeString()}</td>
+                          <td>{d.source_file}</td>
+                          <td>{d.reason}</td>
+                          <td>{d.retries}</td>
+                          <td>{d.error}</td>
+                          <td>{d.dead_letter_path ?? "—"}</td>
+                        </tr>
+                      {/each}
+                    </tbody>
+                  </table>
+                {/if}
+
+                {#if kg.last_error}
+                  <div class="resource-section-title">Last error</div>
+                  <div class="resource-empty">{kg.last_error}</div>
+                {/if}
+              </div>
+            {/if}
+          </div>
+        </div>
       {:else}
         <div class="empty-state">
           <p>Select a note or source from the sidebar.</p>
@@ -2076,22 +2212,16 @@
     user-select: none;
   }
 
-  /* A restrained accent seam between the title bar and the workspace,
-     modeled on Starfield's own accent bar: solid, flat horizontal stripes
-     stacked vertically (each stripe runs the full width, hard edge to the
-     next, no blending), all equal height. This crimson/orange/tan/navy set
-     is reserved for very highlighted elements only — not the
+  /* A restrained accent seam between the title bar and the workspace.
+     Same crimson/orange/tan/navy set as before, but blended into a smooth
+     gradient rather than hard-stopped stripes — stacked flat bands read as
+     a UI glitch at this height, a blend reads as a deliberate accent. This
+     palette is reserved for very highlighted elements only — not the
      note/source/chat/stream semantic palette used elsewhere. */
   .accent-divider {
     height: 12px;
     flex-shrink: 0;
-    background: linear-gradient(
-      180deg,
-      #c8203a 0px, #c8203a 3px,
-      #dd6b3a 3px, #dd6b3a 6px,
-      #ddb066 6px, #ddb066 9px,
-      #2c4d75 9px, #2c4d75 12px
-    );
+    background: linear-gradient(180deg, #c8203a 0%, #dd6b3a 33%, #ddb066 66%, #2c4d75 100%);
   }
 
   .drag-area {
@@ -3346,6 +3476,14 @@
     padding-bottom: 16px;
     border-bottom: 1px solid #1a2d4a;
   }
+  .resource-facts-stacked {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin-bottom: 16px;
+    padding-bottom: 16px;
+    border-bottom: 1px solid #1a2d4a;
+  }
   .resource-fact {
     display: flex;
     flex-direction: column;
@@ -3361,6 +3499,10 @@
     font-size: 13px;
     color: #c8ddf0;
     font-family: "JetBrains Mono", monospace;
+    overflow-wrap: break-word;
+  }
+  .resource-fact-val.warn {
+    color: #f59e0b;
   }
   .resource-section-title {
     font-size: 11px;
@@ -3394,6 +3536,7 @@
     color: #c8ddf0;
     font-family: "JetBrains Mono", monospace;
     border-bottom: 1px solid #10192a;
+    overflow-wrap: break-word;
   }
   .resource-priority-badge {
     font-size: 10px;

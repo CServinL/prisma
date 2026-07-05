@@ -1,8 +1,9 @@
 # Roadmap
 
-## Current State (Phase 0 — MVP)
+## Current State
 
-Core pipeline is working:
+Prisma is a production system, not a prototype — the phases below track
+active feature work, not "is this usable yet." Core pipeline:
 
 | Feature | Status |
 |---------|--------|
@@ -34,16 +35,21 @@ Core pipeline is working:
 
 ## Phase 2 — Conversational Chat & On-Demand Knowledge Graphs
 
-- **Chat** — ask Prisma questions about your vault (papers, notes, sources). Answers
-  are grounded via ChromaDB semantic retrieval + native knowledge-graph context,
-  synthesized by the local LLM (Ollama), with citations back to source notes.
-  Chat sessions are saved to the vault (`chats/` — already modeled in
-  `VaultService`, currently always empty since no chat UI exists yet). Full
-  architecture (tool-calling loop, trust tiers, injection sanitization) in
-  `TODO.md`.
+- **Chat** — ✅ Done. Ask Prisma questions about your vault (papers, notes,
+  sources); answers are grounded via ChromaDB semantic retrieval + native
+  knowledge-graph context, synthesized by a backend-agnostic LLM interface
+  (Ollama today, OpenRouter/Anthropic-capable by design — ADR-014), with
+  tool-calling, injection sanitization, and trust tiers (chat content is
+  never citable as fact material). Chat sessions persist to the vault
+  (`chats/`) with a pinning/Excerpt model (ADR-015) that compresses or
+  keeps pinned turns verbatim depending on the backend's real context
+  budget. Full architecture in `TODO.md`'s "Chat module" section.
 - **Native knowledge graph module** — ✅ Done. Entity/relationship extraction
-  and storage are no longer a third-party dependency — see ADR-009's
-  follow-up section for why and `TODO.md` for what's still deferred
+  (Instructor-based structured LLM output, ADR-016) and storage (Kùzu, an
+  embedded graph DB) are no longer a third-party dependency — see ADR-013
+  for the replacement and ADR-009's follow-up section for why, plus a
+  progress UI page (sync status, chunk stats, dead-letter queue for failed
+  extractions). `TODO.md` has what's still deferred
   (`ranked_nodes`/`surprising_connections` sophistication, image extraction).
 - **Knowledge graphs from chat context** — ask Prisma to generate a knowledge graph
   for a chat's subject. The knowledge graph module builds this internally to
@@ -121,7 +127,7 @@ Platform matrix:
 
 ## Development Principles
 
-- MVP first — get core working before adding features
+- Core first — get a feature solidly working before layering the next one on
 - No cloud dependencies for core functionality — local LLM, local Zotero reads
 - Simple by default — complex features are opt-in via config
 - Academic integrity — maintain reproducibility and source attribution

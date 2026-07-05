@@ -1,6 +1,6 @@
 # kg extraction quality vs. input length
 
-Controlled test of whether `prisma-llm:7b`'s knowledge-graph extraction
+Controlled test of whether `qwen2.5:7b-32k`'s knowledge-graph extraction
 quality degrades as the input section grows — run 2026-07-02 after noticing
 garbled/stray entities on a real paper (`Meng_2023_MEMIT_Mass_Editing_Memory.md`:
 a hallucinated `EMIX` node, stray `Star Constellations`/`Percy Snow` entities
@@ -82,7 +82,7 @@ on a different model: checking the architecture's max via `/api/show` is not
 the same as checking what Ollama actually loaded the runner with. The first
 attempt at levels B/C (8k/11k tokens) silently produced garbage against the
 real 4096-token window; re-run with an explicit `options.num_ctx: 32768`
-override to match `prisma-llm:7b`'s real deployed setting fairly.
+override to match `qwen2.5:7b-32k`'s real deployed setting fairly.
 
 With that correction (`format: "json"` + explicit `num_ctx: 32768`):
 
@@ -154,7 +154,7 @@ on identical real content:
 For a fair comparison, the first big chunk (~7,987 tokens, covering roughly
 the paper's first half) is compared against the first 4 small chunks
 (~1,912+1,920+1,992+1,993 ≈ 7,817 tokens — covering essentially the same
-span of real content), extracted with `prisma-llm:7b`, `format: "json"`,
+span of real content), extracted with `qwen2.5:7b-32k`, `format: "json"`,
 `num_ctx=32768` for the big chunk (matching the real production setting)
 and `num_ctx=8192` for the small chunks (ample headroom for ~2k tokens of
 content).
@@ -260,3 +260,35 @@ calls per file in practice. Separately, once real production runs confirm
 shorter per-call latency at a smaller `token_budget` is exactly what makes
 raising concurrency safe again without returning to the GPU contention that
 motivated dropping it to 1.
+
+## Follow-up (2026-07-05): lowered again to 1000, plus max_tokens and stop-on-failure fixes
+
+Live extraction (not this doc's controlled test — real production traffic
+against the actual vault) hit a case this investigation didn't cover: a
+Chinchilla-scaling-laws paper's chunk produced JSON long enough to exceed
+`_call_ollama_extract`'s `max_tokens=2000` cap, got truncated mid-object,
+and failed validation permanently (Instructor treats a length-truncated
+response as immediately fatal — `IncompleteOutputException`, not
+retryable, since retrying at the same cap just truncates again the same
+way). Two changes, per cservinl:
+
+1. **`max_tokens` raised 2000 → 4000** in `_call_ollama_extract` — the
+   original assumption ("extraction JSON shouldn't need to be longer than
+   the section it's summarizing") doesn't hold for entity-dense papers.
+2. **`token_budget` lowered 2000 → 1000** (this doc's own default) — same
+   direction as Round 5's finding, on the theory that smaller input
+   sections produce proportionally smaller (less truncation-prone) output.
+   Not yet its own controlled test — worth re-running Round 5's method at
+   1000 if this doesn't hold up in practice.
+
+Separately, a dropped chunk used to leave its file in an ambiguous state —
+`all_ok=False` meant the file's indexed hash was never advanced, so it
+would *eventually* be retried (next full index or real edit), but nothing
+proactively re-queued it. `_extract_file` now: stops the rest of that
+file's sections the moment one fails (a bounded sliding-window submission,
+not a naive cancel-in-flight — see its own docstring for why the naive
+version was a real race, not just a hypothetical one), records the failure
+to a small dead-letter queue (`kg-out/dead_letters/*.txt`, the actual
+failed chunk text plus why it failed — `truncated`/`invalid`/`connection`),
+and adds the file straight to `self._pending` so the next background cycle
+(≤60s) retries it, instead of waiting on a real edit or a full restart.

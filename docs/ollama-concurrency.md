@@ -192,19 +192,19 @@ in this project's docs (ADR-013, `installation.md`) was wrong — verified
 via `ollama show --modelfile`, which only echoes back the *configured*
 value, not the actually-enforced one (`/api/ps`'s `context_length` is the
 one to trust). Since both tags were functionally identical, they were
-merged into one, `prisma-llm:7b`, used for both knowledge graph extraction
+merged into one, `qwen2.5:7b-32k`, used for both knowledge graph extraction
 and chat.
 
 **`OLLAMA_NUM_PARALLEL` bumped 3 → 4.** With actual GPU utilization
 observed at only ~20-40% during single-threaded extraction, there was
 clearly more headroom than 3 parallel slots were using. Bumped the systemd
 override to `OLLAMA_NUM_PARALLEL=4` and verified live: 4 genuinely
-concurrent calls to `prisma-llm:7b` at 32768 ctx completed successfully
+concurrent calls to `qwen2.5:7b-32k` at 32768 ctx completed successfully
 using **~7GB VRAM total, ~9GB still free** of 16GB — comfortably safe, and
 consistent with this doc's own conclusion #1 above (the pool's
 `max_concurrent` must match the backend's actual configured parallelism).
 `compute_pools.local-ollama.models` in `~/.config/prisma/config.yaml` was
-updated to `max_concurrent: 4` for `prisma-llm:7b` to match. A live-reload
+updated to `max_concurrent: 4` for `qwen2.5:7b-32k` to match. A live-reload
 endpoint (`POST /supervisor/resources/reload`, `prisma reload-resources`
 CLI command) was added at the same time so tuning this kind of number
 doesn't require restarting the whole supervisor and losing in-flight

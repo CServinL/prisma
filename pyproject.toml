@@ -23,6 +23,7 @@ dependencies = [
     "kuzu>=0.11",
     "semchunk>=4.1",
     "openai>=1.0",
+    "instructor>=1.15",
 ]
 
 [project.optional-dependencies]

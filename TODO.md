@@ -227,7 +227,7 @@ see below for what's actually shipped vs. still sketched.
       - `get_full_text(source_file, section?)` → last resort, deliberate,
         never the default — **not built yet, and reconsidered 2026-07-02**:
         cservinl raised that a flat raw-text dump is the wrong shape given
-        the chat model's limited context (`prisma-llm:7b` at 32768, real
+        the chat model's limited context (`qwen2.5:7b-32k` at 32768, real
         headroom already shared with history/tool round-trips) — source
         access needs to be *delegated*, not inlined. Proposed instead: a
         dedicated **consultation sub-agent** whose only job is to
@@ -361,7 +361,7 @@ see below for what's actually shipped vs. still sketched.
       `ChatLLM.complete()` call is lease-gated (holder `"api"`, matching the
       process chat runs in), same as knowledge-graph extraction and
       ChromaDB embedding. Verified live: with the `kg` worker mid-extraction
-      (holding `local-ollama`'s `model_affinity` lock on `prisma-llm:7b`), a
+      (holding `local-ollama`'s `model_affinity` lock on `qwen2.5:7b-32k`), a
       chat request for a *different* model (`qwen2.5:7b`) correctly failed
       open with a graceful "couldn't reach the model" reply rather than
       hanging or crashing — real contention this design anticipated (ADR-012),
@@ -447,7 +447,7 @@ still not built, no such backend configured yet):
       (`formatTokenCount()`) next to the model badge, e.g. `1.2k / 16k`.
 - [x] **Verbatim mode + the budget-driven mode switch** —
       `ChatConfig.context_window` (new field, defaults to 32768, matching
-      `prisma-llm:7b`'s real ceiling) + `ChatAgent.excerpt_mode(pinned_text)`.
+      `qwen2.5:7b-32k`'s real ceiling) + `ChatAgent.excerpt_mode(pinned_text)`.
       **Real bug caught live and fixed same-session**: the first version
       checked only "is pinned content a small fraction of the window" — but
       a single pinned turn is a small fraction of *any* window, so it put
@@ -525,7 +525,7 @@ original design intent for exactly this, just never wired up.
       `len(s)//4` heuristic used elsewhere), drops the *oldest* messages
       first once `max_history_tokens` (default 16000, see
       `DEFAULT_MAX_HISTORY_TOKENS`'s comment for the reasoning against
-      `prisma-llm:7b`'s real 32768-token ctx) would be exceeded. Silent and
+      `qwen2.5:7b-32k`'s real 32768-token ctx) would be exceeded. Silent and
       lossy for the raw transcript's presence in the model's *working*
       context only — never touches what's actually saved to disk
       (`save_chat()` always persists the complete history).
@@ -651,7 +651,7 @@ several linked fixes:
       --modelfile` only echoes what was configured, not what's enforced;
       `/api/ps`'s loaded `context_length` is the one to trust. See
       ADR-013's follow-up section for the full correction.
-- [x] **`prisma-kg:7b` and `prisma-chat:7b` merged into `prisma-llm:7b`** —
+- [x] **`prisma-kg:7b` and `prisma-chat:7b` merged into `qwen2.5:7b-32k`** —
       since both were silently running at the same real 32768 context the
       whole time, keeping two identical tags was pure duplication.
       `KnowledgeGraphService.ollama_model` and `ChatConfig.model` both
@@ -659,8 +659,8 @@ several linked fixes:
 - [x] **`OLLAMA_NUM_PARALLEL` bumped 3 → 4** (systemd override,
       `sudo systemctl edit ollama`) after observing real GPU utilization
       had headroom to spare — verified live: 4 genuinely concurrent calls
-      to `prisma-llm:7b` at 32768 ctx used only ~7GB VRAM total, ~9GB still
-      free of 16GB. `compute_pools.local-ollama.models`'s `prisma-llm:7b`
+      to `qwen2.5:7b-32k` at 32768 ctx used only ~7GB VRAM total, ~9GB still
+      free of 16GB. `compute_pools.local-ollama.models`'s `qwen2.5:7b-32k`
       entry updated to `max_concurrent: 4` to match — deliberately not set
       higher than Ollama's own real parallelism, since that would just
       mean queueing at the Ollama layer, not actual added concurrency.
@@ -668,7 +668,7 @@ several linked fixes:
       to Ollama's own default (`0`/"auto"), which picks parallel-slot count
       per model from actual free VRAM, same as `OLLAMA_MAX_LOADED_MODELS=0`
       already does for model count. `compute_pools.local-ollama.models`'s
-      `prisma-llm:7b` `max_concurrent`/`background_max_concurrent` raised
+      `qwen2.5:7b-32k` `max_concurrent`/`background_max_concurrent` raised
       (4→6 / 3→5) to stop artificially capping below what the GPU can
       absorb; `vram_budget_mb` + the live `/api/ps` VRAM check are the real
       backstop now, not a static parallelism number. See
@@ -719,9 +719,11 @@ items were fixed in the same pass (see `chat_llm.py`, `supervisor.py`,
 `vault.py`, `app.py`, `knowledge_graph_service.py`). These are lower-severity
 and deliberately deferred rather than fixed blind:
 
-- [ ] `analysis_agent.py::assess_relevance()` logs via `print()` instead of
+- [x] `analysis_agent.py::assess_relevance()` logs via `print()` instead of
       the `_log_ollama` logger every sibling method uses — observability
-      gap, not a behavior bug.
+      gap, not a behavior bug. Fixed 2026-07-05 while wiring up Ollama call
+      stats (see below): now uses `_log_ollama` with real timing, same as
+      every sibling method.
 - [ ] `analysis_agent.py::_relevance_chunk()` fails *open*
       (`[True]*len(candidates)`) on error, while the identity-check methods
       fail *closed* — needs a deliberate sign-off on which failure mode is
@@ -741,3 +743,104 @@ and deliberately deferred rather than fixed blind:
       Excerpt is meant to be machine-owned, not hand-editable. See
       `docs/wiki/adr/ADR-015-chat-excerpt-context-model.md`. Revisit only if
       this becomes an actual pain point.
+
+### Tool-stack follow-ups (2026-07-04, see ADR-016)
+
+Deferred (not rejected) items from the chunking/structured-extraction tool
+survey — `docs/wiki/adr/ADR-016-chunking-and-structured-extraction-tooling.md`
+has the full reasoning for these plus everything that was rejected outright.
+
+- [ ] Evaluate Crawl4AI for research-stream discovery beyond
+      arxiv/semanticscholar. `research_stream_manager.py` drives
+      `search_agent.py`'s structured-API-only search (`search_sources`);
+      Crawl4AI could extend discovery to journal pages, preprint mirrors,
+      or lab pages that don't have a clean API, by crawling and extracting
+      markdown directly. Not evaluated in depth — a product-scope decision
+      (does prisma want raw web ingestion at all), not just a code-fit one.
+- [ ] Assess DSPy for prompt optimization. Not surveyed in the ADR-016
+      round at all. Worth a look if prompt-optimization becomes a priority
+      for `analysis_agent.py`'s KEY:value-parsing prompts or kg's
+      extraction prompt.
+
+### Ollama call statistics — built, then reverted (2026-07-05)
+
+First attempt: a generic `ollama_stats.py` in-memory per-(op, model) counter
+module wired into all four real Ollama call sites, exposed via
+`GET /ollama-stats` and an "Ollama stats" UI page. **Reverted** — two real
+problems: (1) it duplicated most of what the existing Compute Pools page
+already shows via `resource_lock`'s own lease/grant counters, and (2) it's
+architecturally broken for kg extraction specifically — `ollama_stats` is a
+plain in-process dict, but kg extraction runs in its own supervised process
+(ADR-012), so kg's calls were invisible to the `/ollama-stats` endpoint
+(which lives in the `api` process) — confirmed live: only `embed` calls ever
+showed up, kg's calls never did. `assess_relevance()`'s `print()`→`_log_ollama`
+fix from this same pass was kept (see the correctness-audit section above),
+everything else was removed.
+
+Replaced with a narrower, more useful **Knowledge Graph progress page**
+(same session) — see below.
+
+### Knowledge Graph progress page (2026-07-05)
+
+- [x] `KnowledgeGraphService` now tracks, in `status()` (already proxied to
+      `api` via `KnowledgeGraphClient` — no new endpoint needed, reuses the
+      existing `/status` plumbing): full-sync progress (`sync_total`/
+      `sync_done`, scoped to an active `_full_index()` run only — 0/0 means
+      "no active full sync," not "0 of 0 done"), the file currently being
+      extracted plus its chunk progress (`current_file`,
+      `current_file_chunks_done`/`_total`), and a rolling last-100
+      chunk-call-duration window (`chunk_avg_duration_ms`,
+      `chunk_duration_samples`) recorded in `_call_ollama_extract`.
+- [x] UI: "Knowledge Graph" page under the System sidebar section (replaces
+      the reverted "Ollama stats" entry), reading straight from
+      `serverStatus.knowledge_graph` — already polled every 10s, so this is
+      live-updating for free, same as the Compute Pools page.
+- [x] Instructor retry visibility + dead-letter queue for dropped chunks,
+      plus stop-on-first-failure + auto-taint (2026-07-05, follow-up same
+      day). `_call_ollama_extract` wires an Instructor `Hooks` object to
+      count `parse:error` retries per chunk (`chunk_avg_retries`) and
+      classifies terminal failures as `truncated` (hit `max_tokens`),
+      `invalid` (validation kept failing), or `connection`. A dropped chunk
+      is recorded both in-memory (`dropped_chunks_total`/
+      `dropped_chunks_recent`) and to its own file under
+      `kg-out/dead_letters/*.txt` (the actual failed chunk text, for
+      offline "why did this fail" analysis). `_extract_file` now stops the
+      rest of that file's sections the moment one fails — via a bounded
+      sliding-window submission (at most `extraction_concurrency` in
+      flight, never all pre-submitted), not a naive cancel-in-flight (which
+      turned out to have a real race: an idle worker can grab the next
+      queued task before the main thread reacts to a failure, even at
+      concurrency=1) — and adds the file straight to `self._pending` so the
+      next background cycle (≤60s) retries it, rather than waiting on a
+      real edit or a full restart. Also: `max_tokens` raised 2000→4000 and
+      `token_budget` lowered 2000→1000 (both `~/.config/prisma/config.yaml`
+      and the code defaults) after a live dense chunk got dropped for
+      exceeding the old `max_tokens` cap — see
+      `docs/kg-extraction-context-length.md`'s 2026-07-05 follow-up section
+      for the full reasoning. Chunk size (`chunk_avg_size_tokens`) also now
+      tracked, to sanity-check `token_budget` is actually respected in
+      practice.
+
+### Deferred: try qwen3:14b for kg extraction (2026-07-05)
+
+- [ ] Evaluate `qwen3:14b` (dense, Q4) as a replacement for
+      `qwen2.5:7b-32k` in kg extraction. Reasoning for trying this
+      specific tag: dense-to-dense (7B→14B, not a MoE variant) means a
+      quality difference would reflect the model actually being better,
+      not an architecture confound; at Q4 quantization it should fit the
+      16GB dedicated VRAM budget (`vram_budget_mb: 14000`) alongside
+      `nomic-embed-text` without spilling into slower shared/system
+      memory — current `qwen2.5:7b-32k` already uses ~7.5GB at 32768 ctx,
+      so 14B roughly doubling that should still have headroom. MoE
+      variants (`qwen3:30b-a3b`) are architecturally interesting for this
+      memory-bound-decode workload (lower compute per token despite the
+      bigger label) but likely don't fit the VRAM budget once full expert
+      weights + KV cache + the embedding model are accounted for — not
+      worth trying first. `qwen3.5`/`qwen3.6` are too fresh to have any
+      real read on — skip for now.
+      **Method**: repeat `docs/kg-extraction-context-length.md`'s Round 5
+      methodology (same real paper, `token_budget=1000`, compare unique
+      entity/edge counts and per-chunk latency against current numbers) —
+      don't swap models on the strength of "newer," measure it the same
+      way every other model/token_budget decision in this project has
+      been made.

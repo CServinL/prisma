@@ -93,34 +93,35 @@ For WSL, install Ollama on **Windows** so it can use the GPU.
 winget install Ollama.Ollama
 setx OLLAMA_HOST "0.0.0.0:11434"   # allow WSL to connect
 # restart Ollama, then:
-ollama pull llama3.1:8b
+ollama pull qwen2.5:7b
 ```
 
 Pull the required models (once, after install and after each Ollama upgrade):
 
 | Model | Purpose |
 |---|---|
-| `ollama pull llama3.1:8b` | Default LLM for analysis (`analysis_agent.py`) |
-| `ollama pull qwen2.5:7b` | Base model `prisma-llm:7b` is built from below |
+| `ollama pull qwen2.5:7b` | Base model `qwen2.5:7b-32k` is built from below — used for analysis, knowledge graph extraction, and chat |
 | `ollama pull nomic-embed-text` | Semantic embeddings (ChromaDB vector search) |
 
-`prisma-llm:7b` — used for both knowledge graph extraction and chat — is
-**not** on the Ollama registry: it's `qwen2.5:7b` with `num_ctx` pinned to
-32768 via a custom Modelfile (no re-download, shares the same weights).
-32768 is not a tuning choice — it's Qwen2.5-7B's actual architectural
-maximum context length; Ollama silently clamps any higher `num_ctx` rather
-than erroring, so setting a bigger number doesn't get you more context, it
-just lies to you about what's really in effect. (Knowledge graph extraction
-and chat originally ran as two separate tags, `prisma-kg:7b` and
-`prisma-chat:7b`, on the mistaken belief they needed different `num_ctx`
-values — merged once it became clear both were silently clamped to the
-same 32768 ceiling anyway.)
+`qwen2.5:7b-32k` is **not** on the Ollama registry: it's `qwen2.5:7b` with
+`num_ctx` pinned to 32768 via a custom Modelfile (no re-download, shares
+the same weights) — the tag name states the one actual modification, so
+there's nothing hidden to go dig up. 32768 is not a tuning choice — it's
+Qwen2.5-7B's actual architectural maximum context length; Ollama silently
+clamps any higher `num_ctx` rather than erroring, so setting a bigger
+number doesn't get you more context, it just lies to you about what's
+really in effect. (Knowledge graph extraction and chat originally ran as
+two separate tags, `prisma-kg:7b` and `prisma-chat:7b`, on the mistaken
+belief they needed different `num_ctx` values — merged into one shared tag
+once it became clear both were silently clamped to the same 32768 ceiling
+anyway; that merged tag was later renamed from `prisma-llm:7b` to
+`qwen2.5:7b-32k` so the name itself documents what's different from stock.)
 
 ```bash
-ollama cp qwen2.5:7b prisma-llm:7b
-ollama show prisma-llm:7b --modelfile > /tmp/prisma-llm.modelfile
-echo 'PARAMETER num_ctx 32768' >> /tmp/prisma-llm.modelfile
-ollama create prisma-llm:7b -f /tmp/prisma-llm.modelfile
+ollama cp qwen2.5:7b qwen2.5:7b-32k
+ollama show qwen2.5:7b-32k --modelfile > /tmp/qwen2.5-7b-32k.modelfile
+echo 'PARAMETER num_ctx 32768' >> /tmp/qwen2.5-7b-32k.modelfile
+ollama create qwen2.5:7b-32k -f /tmp/qwen2.5-7b-32k.modelfile
 ```
 
 Verify the real, enforced context after creating it — don't trust
@@ -128,7 +129,7 @@ Verify the real, enforced context after creating it — don't trust
 not what's actually loaded:
 
 ```bash
-curl -s http://localhost:11434/api/generate -d '{"model":"prisma-llm:7b","prompt":"hi","options":{"num_predict":1}}' >/dev/null
+curl -s http://localhost:11434/api/generate -d '{"model":"qwen2.5:7b-32k","prompt":"hi","options":{"num_predict":1}}' >/dev/null
 curl -s http://localhost:11434/api/ps | python3 -c "import json,sys; print(json.load(sys.stdin)['models'][0]['context_length'])"
 # should print 32768 — if it's lower, the model's own architecture caps below that
 ```

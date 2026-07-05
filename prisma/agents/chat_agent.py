@@ -21,7 +21,7 @@ _log = logging.getLogger("prisma.chat_agent")
 
 MAX_TOOL_ITERATIONS = 4
 
-# prisma-llm:7b runs at num_ctx=32768 (Qwen2.5-7B's own architectural max —
+# qwen2.5:7b-32k runs at num_ctx=32768 (Qwen2.5-7B's own architectural max —
 # see ADR-014). Reserve generous headroom for the system prompt + tool section
 # (~500 tokens), the current user message, and up to MAX_TOOL_ITERATIONS
 # rounds of tool-result injection (a single search_vault call can return a
@@ -32,7 +32,7 @@ DEFAULT_MAX_HISTORY_TOKENS = 16000
 
 # ADR-015's compressed-vs-verbatim threshold. A backend's context_window
 # must be at least this large before verbatim mode is even considered —
-# today's local prisma-llm:7b (32768) stays compressed unconditionally;
+# today's local qwen2.5:7b-32k (32768) stays compressed unconditionally;
 # this is meant for a genuinely large-context cloud backend (the ADR's own
 # example: ~1M tokens). Set well above any locally-hosted 7B-13B class
 # model's real ceiling so a local model upgrade alone doesn't accidentally

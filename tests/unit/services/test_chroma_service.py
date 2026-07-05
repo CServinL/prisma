@@ -11,33 +11,40 @@ from prisma.services.chroma_service import ChromaIndexer, _chunk_markdown, _embe
 
 # ── _chunk_markdown ───────────────────────────────────────────────────────────
 
-def test_chunk_markdown_splits_by_heading():
+def test_chunk_markdown_preserves_content_across_chunks():
+    # No longer heading-anchored (semchunk splits by token budget, not
+    # markdown structure) — the contract that matters is that a forced
+    # split doesn't lose any of the original content.
     text = "# Intro\nsome text\n## Section A\nmore text\n## Section B\neven more"
-    chunks = _chunk_markdown(text)
-    assert len(chunks) == 3
-    assert any("some text" in c for c in chunks)
-    assert any("Section A" in c for c in chunks)
-    assert any("Section B" in c for c in chunks)
+    chunks = _chunk_markdown(text, chunk_size=8)
+    assert len(chunks) > 1
+    joined = "".join(chunks)
+    assert "some text" in joined
+    assert "Section A" in joined
+    assert "Section B" in joined
 
 
-def test_chunk_markdown_no_headings_returns_single_chunk():
+def test_chunk_markdown_short_text_returns_single_chunk():
     text = "No headings here. Just a paragraph."
     chunks = _chunk_markdown(text)
     assert len(chunks) == 1
     assert chunks[0] == text
 
 
-def test_chunk_markdown_large_section_splits():
-    # A section larger than max_chunk should be split further
+def test_chunk_markdown_large_text_splits_by_token_budget():
+    # semchunk estimates tokens as len(s)//4 here (matches kg's own
+    # estimator) — each chunk should respect that budget, with some
+    # slack for its atomic-unsplittable-fallback on text with no natural
+    # split points.
     body = "x" * 2000
-    chunks = _chunk_markdown(body, max_chunk=100)
+    chunks = _chunk_markdown(body, chunk_size=100)
     assert len(chunks) > 1
     for c in chunks:
-        assert len(c) <= 100
+        assert len(c) // 4 <= 100 + 5
 
 
 def test_chunk_markdown_empty_text_returns_one_chunk():
-    chunks = _chunk_markdown("", max_chunk=100)
+    chunks = _chunk_markdown("")
     assert len(chunks) == 1
 
 

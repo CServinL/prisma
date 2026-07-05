@@ -31,23 +31,12 @@ def _embed_texts(texts: list[str], model: str, base_url: str = "http://localhost
         return None
 
 
-def _chunk_markdown(text: str, max_chunk: int = 800) -> list[str]:
-    import re
-    sections = re.split(r"(?m)^#{1,2} ", text)
-    chunks: list[str] = []
-    step = max_chunk - 50
-    for section in sections:
-        section = section.strip()
-        if not section:
-            continue
-        if len(section) <= max_chunk:
-            chunks.append(section)
-        else:
-            for i in range(0, len(section), step):
-                chunk = section[i : i + max_chunk].strip()
-                if chunk:
-                    chunks.append(chunk)
-    return chunks or [text[:max_chunk]]
+def _chunk_markdown(text: str, chunk_size: int = 200) -> list[str]:
+    import semchunk
+    if not text.strip():
+        return [text]
+    chunker = semchunk.chunkerify(lambda s: len(s) // 4, chunk_size=chunk_size)
+    return chunker(text)
 
 
 class ChromaIndexer:

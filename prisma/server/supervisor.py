@@ -126,7 +126,7 @@ def _load_compute_pools() -> tuple[
             max_concurrent: 3         # fallback for any model below with no override
             vram_budget_mb: 14000     # total VRAM this pool may commit across ALL resident models
             models:
-              - name: prisma-llm:7b
+              - name: qwen2.5:7b-32k
                 max_concurrent: 4      # matches this machine's OLLAMA_NUM_PARALLEL
                 background_max_concurrent: 3  # reserve >=1 slot for interactive (chat)
                 vram_mb: 7500          # estimate used only before it's ever been observed loaded

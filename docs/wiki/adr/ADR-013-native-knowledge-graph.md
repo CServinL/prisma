@@ -146,7 +146,7 @@ thing (the Modelfile's own echo) instead of `/api/ps`'s actually-loaded
 Once this surfaced, it also meant `prisma-kg:7b` and `prisma-chat:7b`
 (ADR-014) — two separate tags, believed to need different `num_ctx` values
 — had been running at the *same* real context the entire time. Since they
-were functionally identical, they were merged into one tag, `prisma-llm:7b`,
+were functionally identical, they were merged into one tag, `qwen2.5:7b-32k`,
 used for both extraction and chat. `KnowledgeGraphService`'s
 `ollama_model` default and `ChatConfig.model`'s default both point at it
 now. `token_budget=8000` (per-section chunk size) is unaffected by this

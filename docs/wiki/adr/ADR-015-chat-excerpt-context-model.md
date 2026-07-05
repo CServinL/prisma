@@ -8,7 +8,7 @@ compressed mode, verbatim mode + the budget-driven mode switch
 (`ChatAgent.excerpt_mode()`), and the context-usage label
 (`ChatAgent.context_usage()` + the UI's `k`/`M`-formatted display). Verbatim
 mode has no practical effect yet since only the local, small-context
-`prisma-llm:7b` is configured — it activates automatically whenever a
+`qwen2.5:7b-32k` is configured — it activates automatically whenever a
 larger-context backend is, no further code changes needed.
 
 ## Context
@@ -71,7 +71,7 @@ using a cloud 1M-context model then we could have the real pinned items."
 The tradeoff genuinely depends on the backend, not on some universally
 correct answer:
 
-### Compressed mode (today's local `prisma-llm:7b`, 32768 real ctx)
+### Compressed mode (today's local `qwen2.5:7b-32k`, 32768 real ctx)
 
 Once a turn is pinned and folded into the Summary, its raw text stops being
 resent to the model as part of ongoing context — only the Summary

@@ -179,7 +179,7 @@ def status(verbose: bool):
             config = ConfigLoader()
             click.echo(f"  ✅ Config loaded: {config_path}")
             if verbose:
-                click.echo(f"     LLM:    {config.get('llm.provider', 'ollama')} / {config.get('llm.model', 'prisma-llm:7b')}")
+                click.echo(f"     LLM:    {config.get('llm.provider', 'ollama')} / {config.get('llm.model', 'qwen2.5:7b-32k')}")
                 click.echo(f"     Output: {config.get('output.directory', './outputs')}")
                 click.echo(f"     Zotero: mode={config.get('sources.zotero.mode', 'hybrid')}")
         except Exception as exc:

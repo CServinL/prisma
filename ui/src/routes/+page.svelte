@@ -541,7 +541,23 @@
       const r = await fetch(`${apiBase}/chats/${encodeURIComponent(slug)}`);
       if (!r.ok) { clearInterval(interval); return; }
       const fresh = await r.json();
-      if (activeChat?.slug === slug) activeChat = fresh;
+      // Merge only the Excerpt-related fields — never replace the whole
+      // object. A full replace here raced with sendChatMessage's optimistic
+      // append: if this poll's fetch happened to land while a /chat request
+      // was still in flight, `fresh.messages` wouldn't yet include the
+      // user's just-sent turn, and assigning it wholesale made that message
+      // visually vanish until the next reload.
+      if (activeChat?.slug === slug) {
+        activeChat = {
+          ...activeChat,
+          pinned_turns: fresh.pinned_turns,
+          excerpt_slug: fresh.excerpt_slug,
+          excerpt_regenerating: fresh.excerpt_regenerating,
+          excerpt_summary_html: fresh.excerpt_summary_html,
+          context_tokens_used: fresh.context_tokens_used,
+          context_tokens_max: fresh.context_tokens_max,
+        };
+      }
       if (!fresh.excerpt_regenerating) clearInterval(interval);
     }, 2000);
   }

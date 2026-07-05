@@ -567,6 +567,12 @@ def create_chat(req: CreateChatRequest):
 
 _excerpt_regenerating_lock = threading.Lock()
 _excerpt_regenerating: dict[str, bool] = {}
+# Monotonic per-slug counter so a slower, stale regeneration thread can tell
+# it's been superseded by a newer pin/unpin before it overwrites the Excerpt
+# with outdated content, and so the *older* thread never clears
+# excerpt_regenerating out from under a still-running newer one (which would
+# make the UI stop polling before the real latest result is ready).
+_excerpt_generation: dict[str, int] = {}
 
 
 def _excerpt_summary_html(note_body: str) -> str | None:
@@ -632,21 +638,32 @@ def chat(req: ChatRequest):
             _log.warning("chat %r: excerpt note %r no longer exists", chat_node.slug, chat_node.excerpt_slug)
     user_msg = ChatMessage(role=ChatRole.user, content=req.message)
     assistant_msg = _chat_agent.respond(history, req.message, promoted_notes=promoted_notes)
-    _vault.save_chat(chat_node.slug, history + [user_msg, assistant_msg], model=_chat_agent.model)
+    # append_messages (not save_chat with the pre-call `history` snapshot)
+    # re-reads the chat's *current* messages atomically right before
+    # writing — closes the race where a DELETE /chats/{slug}/messages/{index}
+    # landing while respond() was still running would otherwise get
+    # silently reverted by this write.
+    _vault.append_messages(chat_node.slug, [user_msg, assistant_msg], model=_chat_agent.model)
     _activity.info("action=chat slug=%s tool_calls=%d", chat_node.slug, len(assistant_msg.tool_calls))
     return ChatResponse(
         chat_slug=chat_node.slug, reply=assistant_msg.content, tool_calls=assistant_msg.tool_calls,
     )
 
 
-def _regenerate_excerpt_now(slug: str, pinned_indices: list[int]) -> None:
+def _regenerate_excerpt_now(slug: str, pinned_indices: list[int], generation: int) -> None:
     """ADR-015: regenerates the chat's single Excerpt note from whatever's
     currently pinned, in whichever mode currently applies
     (ChatAgent.excerpt_mode(), budget-driven) — compressed (LLM-condensed
     Summary via ChatAgent.summarize() + load_excerpt_summary_prompt()) or
     verbatim (no LLM call, no Summary section, pinned turns kept exactly as
     written). Synchronous — call via _regenerate_excerpt_async unless
-    already off the request thread."""
+    already off the request thread.
+
+    `generation` is checked immediately before the actual write: if a newer
+    pin/unpin has since been dispatched for this chat, this call's result is
+    stale (it was likely computed from an older pinned set, possibly after a
+    slow summarize() call) and is discarded rather than overwriting the
+    newer request's — eventual — result."""
     chat_node = _vault.get_chat(slug)
     pinned_turns = [chat_node.messages[i] for i in pinned_indices]
     summary: str | None
@@ -660,7 +677,10 @@ def _regenerate_excerpt_now(slug: str, pinned_indices: list[int]) -> None:
             summary = _chat_agent.summarize(load_excerpt_summary_prompt(), turns_text)
             if summary is None:
                 summary = "(summary unavailable — the language model couldn't be reached; raw pinned turns below are still current)"
-    _vault.save_excerpt(slug, summary, pinned_turns)
+    with _excerpt_regenerating_lock:
+        if _excerpt_generation.get(slug) != generation:
+            return  # superseded by a newer pin/unpin — don't overwrite with stale content
+        _vault.save_excerpt(slug, summary, pinned_turns)
 
 
 def _regenerate_excerpt_async(slug: str, pinned_indices: list[int]) -> None:
@@ -672,16 +692,23 @@ def _regenerate_excerpt_async(slug: str, pinned_indices: list[int]) -> None:
     "regenerating" indicator (Chat.excerpt_regenerating, see
     _with_context_usage) until this clears, then refetches."""
     with _excerpt_regenerating_lock:
+        generation = _excerpt_generation.get(slug, 0) + 1
+        _excerpt_generation[slug] = generation
         _excerpt_regenerating[slug] = True
 
     def _run() -> None:
         try:
-            _regenerate_excerpt_now(slug, pinned_indices)
+            _regenerate_excerpt_now(slug, pinned_indices, generation)
         except Exception as exc:
             _log.warning("excerpt regeneration failed for chat %r: %s", slug, exc)
         finally:
             with _excerpt_regenerating_lock:
-                _excerpt_regenerating[slug] = False
+                # Only clear the flag if no newer request has superseded
+                # this one — otherwise an older, slower thread finishing
+                # after a newer one started would incorrectly tell the UI
+                # "done" while the real latest regeneration is still running.
+                if _excerpt_generation.get(slug) == generation:
+                    _excerpt_regenerating[slug] = False
 
     threading.Thread(target=_run, daemon=True, name=f"excerpt-regen-{slug}").start()
 

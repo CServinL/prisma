@@ -173,6 +173,13 @@ built.
   one — real complexity cost for supporting both, though the alternative
   (picking one mode forever) would mean either wasting a large-context
   backend's headroom or risking overflow on a small-context one.
+- The Excerpt note is machine-owned: every pin/unpin regenerates its body
+  from the current pinned set and overwrites whatever was there. A direct
+  hand-edit to the Excerpt note is not preserved past the next regeneration.
+  Accepted as a known limitation rather than built out (edit-detection would
+  need its own diffing/merge design) — the Excerpt is meant to be read as a
+  distillation of the chat, not authored directly. See `TODO.md`'s
+  "Deferred from the correctness self-audit" section.
 
 ## Related
 

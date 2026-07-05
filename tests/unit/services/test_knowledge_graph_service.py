@@ -186,6 +186,27 @@ def test_extract_file_one_bad_section_does_not_abort_others(kg, vault):
     assert result.has_next()
 
 
+def test_extract_file_survives_response_json_raising(kg, vault):
+    # Regression: resp.json() and _parse_extraction_response() used to run
+    # outside the request try/except, so a truncated/non-JSON HTTP body
+    # raised unhandled inside the thread-pool worker instead of being
+    # treated as "this section failed, retry next cycle" like every other
+    # failure mode in _call_ollama_extract.
+    f = vault.root / "notes" / "test.md"
+    f.write_text("---\ntype: note\n---\nSome content.", encoding="utf-8")
+    broken = MagicMock(status_code=200)
+    broken.json.side_effect = json.JSONDecodeError("bad", "doc", 0)
+
+    with patch("prisma.services.knowledge_graph_service.requests.post", return_value=broken), \
+         patch("prisma.services.resource_lock.acquire", return_value=(True, "local-ollama", "req-1")), \
+         patch("prisma.services.resource_lock.release"):
+        changed = kg._extract_file(f, "note")
+
+    assert changed is False
+    with kg._lock:
+        assert kg._indexed_hash("notes/test.md") is None
+
+
 # ── Incremental caching ───────────────────────────────────────────────────────
 
 def test_extract_file_skips_unchanged_content(kg, vault):

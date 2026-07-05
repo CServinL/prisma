@@ -545,39 +545,50 @@ class ResourceManager:
                 # own leases — on a strict (non-budget) pool every lease is
                 # already guaranteed to be for the same resident model, so
                 # the plain total is equivalent and cheaper.
-                limit = self._effective_capacity(name, model if name in self._model_affinity else None)
+                full_limit = self._effective_capacity(name, model if name in self._model_affinity else None)
+                total_in_use = (
+                    sum(1 for l in self._leases[name].values() if l["model"] == model)
+                    if vram_aware else len(self._leases[name])
+                )
                 # Interactive traffic (chat) must never queue behind bulk
                 # background work (kg extraction, chroma embedding) filling
                 # every slot. Background requests are capped below the
                 # model's full concurrency limit when a reservation is
-                # configured, guaranteeing at least (limit - background_limit)
-                # slots stay free for interactive callers at all times — no
-                # live preemption needed, just a smaller ceiling for the
-                # lower-priority tier.
-                #
-                # Critically, a background request's own count must only
-                # include *other background* leases, not interactive ones —
-                # counting interactive leases against background's reduced
-                # limit let a single active chat silently steal from
-                # background's own quota (observed: background denied at
-                # in_use=3/limit=3 with only 2 of those 3 leases actually
-                # being background). Interactive's own check is unaffected:
-                # it always compares against the full (unreduced) limit, so
-                # it never queues behind background regardless of this.
+                # configured, guaranteeing at least (full_limit -
+                # background_limit) slots stay free for interactive callers
+                # at all times — no live preemption needed, just a smaller
+                # ceiling for the lower-priority tier.
                 if priority == "background":
                     background_limit = self._model_background_limit.get(name, {}).get(model)
-                    if background_limit is not None:
-                        limit = min(limit, background_limit)
+                    limit = min(full_limit, background_limit) if background_limit is not None else full_limit
+                    # Two independent ceilings, both must hold:
+                    # 1. background-scoped in_use < limit — protects
+                    #    interactive's reservation. Must count only *other
+                    #    background* leases, not interactive ones — counting
+                    #    interactive against this reduced limit let a single
+                    #    active chat silently steal from background's own
+                    #    quota (observed: background denied at in_use=3/
+                    #    limit=3 with only 2 of those 3 leases actually being
+                    #    background).
+                    # 2. total_in_use < full_limit — without this, once
+                    #    interactive alone has already filled the pool to
+                    #    its real max_concurrent, background_in_use is still
+                    #    0 (zero *background* leases so far) and would be
+                    #    granted anyway, pushing the pool past its
+                    #    configured ceiling entirely (found live: fixing #1
+                    #    alone, in an earlier pass, introduced this — the
+                    #    background-only count was never checked against
+                    #    real total capacity at all).
                     in_use = sum(
                         1 for l in self._leases[name].values()
                         if l["priority"] == "background" and (not vram_aware or l["model"] == model)
                     )
+                    admitted = in_use < limit and total_in_use < full_limit
                 else:
-                    in_use = (
-                        sum(1 for l in self._leases[name].values() if l["model"] == model)
-                        if vram_aware else len(self._leases[name])
-                    )
-                if in_use < limit:
+                    limit = full_limit
+                    in_use = total_in_use
+                    admitted = in_use < limit
+                if admitted:
                     request_id = f"{holder}-{pid}-{uuid.uuid4().hex[:8]}"
                     self._leases[name][request_id] = {
                         "holder": holder, "pid": pid, "model": model,
@@ -593,8 +604,8 @@ class ResourceManager:
                 )
                 log.info(
                     "acquire denied: pool=%s holder=%s pid=%d model=%s priority=%s reason=capacity "
-                    "in_use=%d limit=%d current_leases=[%s]",
-                    name, holder, pid, model, priority, in_use, limit, holders,
+                    "in_use=%d limit=%d total_in_use=%d full_limit=%d current_leases=[%s]",
+                    name, holder, pid, model, priority, in_use, limit, total_in_use, full_limit, holders,
                 )
         return None, None
 

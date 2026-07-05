@@ -710,3 +710,34 @@ several linked fixes:
 - [ ] Update/replace `tests/unit/services/test_graphify_service.py` and the
       graphify-specific parts of `tests/unit/server/test_supervisor_resources.py`.
 - [ ] Regenerate diagrams (`docs/diagrams/gen.sh`) once the new module lands.
+
+### Deferred from the correctness self-audit (2026-07-02)
+
+Found while auditing every LLM call site + the Excerpt/pinning data flow +
+supervisor concurrency after the kg `num_predict` incident. Critical/medium
+items were fixed in the same pass (see `chat_llm.py`, `supervisor.py`,
+`vault.py`, `app.py`, `knowledge_graph_service.py`). These are lower-severity
+and deliberately deferred rather than fixed blind:
+
+- [ ] `analysis_agent.py::assess_relevance()` logs via `print()` instead of
+      the `_log_ollama` logger every sibling method uses — observability
+      gap, not a behavior bug.
+- [ ] `analysis_agent.py::_relevance_chunk()` fails *open*
+      (`[True]*len(candidates)`) on error, while the identity-check methods
+      fail *closed* — needs a deliberate sign-off on which failure mode is
+      actually wanted here, not a reflexive flip.
+- [ ] Timeout values across `analysis_agent.py` are a mix of flat and
+      size-scaled — inconsistent in spirit but each individually reasonable;
+      revisit as a considered pass, not opportunistically.
+- [ ] VRAM-aware resource pool skips the budget check entirely if
+      `acquire(..., model=None)` — currently unreachable (every real caller
+      always passes `model=`), but a defensive gap for future callers.
+- [ ] Stale `pollExcerptRegeneration` interval (ui/src/routes/+page.svelte)
+      keeps firing up to one wasted request (~2s) after switching chats
+      before self-clearing — harmless, not fixed.
+- [x] Excerpt regeneration always overwrites the note body, so a hand-edit
+      to the Excerpt note is lost on the next pin/unpin. Decided: document
+      as an accepted limitation rather than build edit-detection — the
+      Excerpt is meant to be machine-owned, not hand-editable. See
+      `docs/wiki/adr/ADR-015-chat-excerpt-context-model.md`. Revisit only if
+      this becomes an actual pain point.

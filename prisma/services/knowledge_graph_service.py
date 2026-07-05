@@ -382,7 +382,21 @@ class KnowledgeGraphService:
                             "prompt": prompt,
                             "stream": False,
                             "format": "json",
-                            "options": {"temperature": 0.1},
+                            # No cap here meant no defense against a
+                            # confused/looping generation for one section —
+                            # observed live: calls taking 2-5 minutes each
+                            # (some hitting this very timeout) on a GPU
+                            # sitting at ~32% utilization the whole time,
+                            # consistent with the model generating a very
+                            # long, repetitive output rather than being
+                            # compute/GPU-bound (single-stream decode is
+                            # memory-bound, so low GPU% during a long
+                            # generation is normal, not a sign of throttling).
+                            # 2000 matches token_budget itself — a structured
+                            # JSON extraction of one section's entities
+                            # shouldn't need to be longer than the section
+                            # it's summarizing.
+                            "options": {"temperature": 0.1, "num_predict": 2000},
                         },
                         # Larger sections (up to token_budget) take longer to
                         # process now that num_ctx is 32768 instead of 16384.
@@ -394,8 +408,18 @@ class KnowledgeGraphService:
         if resp.status_code != 200:
             _log.warning("extraction failed for %s: status=%d", rel_path, resp.status_code)
             return [], [], False
-        data = resp.json()
-        nodes, edges = _parse_extraction_response(data.get("response", ""))
+        # Deliberately outside both the lease and the request try/except
+        # above (releases the GPU slot before parsing) — but that left a
+        # gap: a malformed/truncated response body raised unhandled here,
+        # inside a thread-pool worker, instead of being treated as "this
+        # section's extraction failed, retry next cycle" like every other
+        # failure mode in this method.
+        try:
+            data = resp.json()
+            nodes, edges = _parse_extraction_response(data.get("response", ""))
+        except Exception as exc:
+            _log.warning("extraction response parse failed for %s: %s", rel_path, exc)
+            return [], [], False
         return nodes, edges, True
 
     def _extract_file(self, path: Path, trust_tier: str) -> bool:

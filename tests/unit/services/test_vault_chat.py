@@ -92,6 +92,42 @@ def test_save_chat_then_get_chat_roundtrip(vault):
     assert reloaded.model == chat.model  # frontmatter preserved across save
 
 
+def test_append_messages_appends_to_current_disk_state_not_a_stale_snapshot(vault):
+    # Regression: /chat used to write `history + [new turns]` from a
+    # `history` snapshot taken *before* a possibly-slow LLM call — if
+    # something else (e.g. a delete) changed the chat's messages while that
+    # call was running, the eventual write would silently revert it.
+    # append_messages must always append onto whatever's on disk *right
+    # now*, not a caller-held snapshot.
+    chat = vault.create_chat("Test Session")
+    vault.save_chat(chat.slug, [ChatMessage(role=ChatRole.user, content="original")])
+
+    # Simulate something else changing the chat on disk after a caller
+    # would have taken its own snapshot.
+    vault.save_chat(chat.slug, [
+        ChatMessage(role=ChatRole.user, content="original"),
+        ChatMessage(role=ChatRole.assistant, content="inserted by someone else"),
+    ])
+
+    updated = vault.append_messages(chat.slug, [ChatMessage(role=ChatRole.user, content="new turn")])
+
+    contents = [m.content for m in updated.messages]
+    assert contents == ["original", "inserted by someone else", "new turn"]
+
+
+def test_append_messages_updates_model_like_save_chat(vault):
+    chat = vault.create_chat("Test Session", model="old-model")
+
+    updated = vault.append_messages(chat.slug, [ChatMessage(role=ChatRole.user, content="hi")], model="new-model")
+
+    assert updated.model == "new-model"
+
+
+def test_append_messages_raises_for_missing_chat(vault):
+    with pytest.raises(FileNotFoundError):
+        vault.append_messages("does-not-exist", [ChatMessage(role=ChatRole.user, content="x")])
+
+
 def test_get_any_dispatches_chat_type_to_get_chat(vault):
     chat = vault.create_chat("Test Session")
     result = vault.get_any(chat.slug)
@@ -137,6 +173,24 @@ def test_save_excerpt_reuses_existing_note_instead_of_creating_another(vault):
 def test_save_excerpt_raises_for_missing_chat(vault):
     with pytest.raises(FileNotFoundError):
         vault.save_excerpt("does-not-exist", "X", [])
+
+
+def test_save_excerpt_recreates_note_if_excerpt_slug_points_to_a_deleted_note(vault):
+    # Real bug found in self-audit: the generic delete-node endpoint has no
+    # special case for clearing Chat.excerpt_slug, so deleting the Excerpt
+    # note directly used to permanently break every future pin/unpin for
+    # that chat (save_note raised FileNotFoundError, silently swallowed by
+    # the caller). Must fall back to creating a fresh note instead.
+    chat = vault.create_chat("Research Session")
+    first = vault.save_excerpt(chat.slug, "First summary.", [])
+    (vault.root / "notes" / f"{first.slug}.md").unlink()  # simulate deletion out from under excerpt_slug
+
+    second = vault.save_excerpt(chat.slug, "Second summary.", [])
+
+    assert (vault.root / "notes" / f"{second.slug}.md").exists()
+    reloaded = vault.get_chat(chat.slug)
+    assert reloaded.excerpt_slug == second.slug
+    assert "Second summary." in vault.get_note(second.slug).body
 
 
 def test_save_excerpt_verbatim_mode_omits_summary_section(vault):

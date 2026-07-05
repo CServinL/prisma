@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import threading
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Iterator
@@ -173,6 +174,14 @@ class VaultService:
             NodeType.chat: self.root / default_chats,
             NodeType.stream: self.root / "streams",
         }
+        # Every chat write (save_chat/set_pinned_turns/save_excerpt) is a
+        # plain read-parse-write of a whole file with no locking — two
+        # requests for the same chat overlapping (e.g. quick successive
+        # pin/unpin clicks, or a pin racing a slow /chat completion) can
+        # each read stale state and one write silently clobbers the other's
+        # change. Chat writes are low-frequency; one process-wide lock is
+        # simple and sufficient — no need for per-slug lock management.
+        self._chat_write_lock = threading.Lock()
 
     def ensure_dirs(self) -> None:
         for d in self.default_dirs.values():
@@ -384,14 +393,38 @@ class VaultService:
         prisma-chat:7b -> prisma-llm:7b) would keep displaying its
         original, now-stale name forever, even though every subsequent
         turn actually used the current config's model."""
-        path = self._find_md(slug)
-        if path is None:
-            raise FileNotFoundError(f"chat not found: {slug!r}")
-        existing = path.read_text(encoding="utf-8")
-        fm, _ = _parse_frontmatter(existing)
-        if model is not None:
-            fm["model"] = model
-        path.write_text(_render_frontmatter(fm) + _render_chat_body(messages), encoding="utf-8")
+        with self._chat_write_lock:
+            path = self._find_md(slug)
+            if path is None:
+                raise FileNotFoundError(f"chat not found: {slug!r}")
+            existing = path.read_text(encoding="utf-8")
+            fm, _ = _parse_frontmatter(existing)
+            if model is not None:
+                fm["model"] = model
+            path.write_text(_render_frontmatter(fm) + _render_chat_body(messages), encoding="utf-8")
+        return self.get_chat(slug)
+
+    def append_messages(self, slug: str, new_messages: list[ChatMessage], model: str | None = None) -> Chat:
+        """Atomically append to whatever the chat's *current* on-disk
+        messages are, not a snapshot taken before some earlier operation
+        (e.g. an LLM call) started. `/chat`'s handler used to read
+        `history` before calling the model, then write `history +
+        [new turns]` once the call finished — if a `DELETE
+        /chats/{slug}/messages/{index}` landed in between, that stale
+        write would silently revive the just-deleted message. Reading and
+        writing under the same lock closes that window."""
+        with self._chat_write_lock:
+            path = self._find_md(slug)
+            if path is None:
+                raise FileNotFoundError(f"chat not found: {slug!r}")
+            existing = path.read_text(encoding="utf-8")
+            fm, content = _parse_frontmatter(existing)
+            if model is not None:
+                fm["model"] = model
+            current_messages = _parse_chat_body(content)
+            path.write_text(
+                _render_frontmatter(fm) + _render_chat_body(current_messages + new_messages), encoding="utf-8",
+            )
         return self.get_chat(slug)
 
     def set_pinned_turns(self, chat_slug: str, indices: list[int]) -> Chat:
@@ -400,13 +433,14 @@ class VaultService:
         needs an LLM call (ADR-015's compressed-mode Summary), which this
         pure-storage layer has no access to. Callers (app.py) call this
         first, then assemble the new Summary and call save_excerpt()."""
-        chat_path = self._find_md(chat_slug)
-        if chat_path is None:
-            raise FileNotFoundError(f"chat not found: {chat_slug!r}")
-        raw = chat_path.read_text(encoding="utf-8")
-        fm, content = _parse_frontmatter(raw)
-        fm["pinned_turns"] = sorted(set(indices))
-        chat_path.write_text(_render_frontmatter(fm) + content, encoding="utf-8")
+        with self._chat_write_lock:
+            chat_path = self._find_md(chat_slug)
+            if chat_path is None:
+                raise FileNotFoundError(f"chat not found: {chat_slug!r}")
+            raw = chat_path.read_text(encoding="utf-8")
+            fm, content = _parse_frontmatter(raw)
+            fm["pinned_turns"] = sorted(set(indices))
+            chat_path.write_text(_render_frontmatter(fm) + content, encoding="utf-8")
         return self.get_chat(chat_slug)
 
     def save_excerpt(self, chat_slug: str, summary: str | None, raw_turns: list[ChatMessage]) -> Note:
@@ -415,18 +449,28 @@ class VaultService:
         at all — pinned turns are the whole point in that mode), verbatim
         copy of the pinned turns below. Reuses the existing note
         (`Chat.excerpt_slug`) if one was already created for this chat,
-        rather than creating a new note per pin."""
-        chat = self.get_chat(chat_slug)
-        body = _render_excerpt_body(summary, raw_turns)
-        if chat.excerpt_slug:
-            return self.save_note(chat.excerpt_slug, body)
-        note = self.create_note(f"Excerpt — {chat.title}", body=body, promoted_from_chat=chat_slug)
-        chat_path = self._find_md(chat_slug)
-        raw = chat_path.read_text(encoding="utf-8")
-        fm, content = _parse_frontmatter(raw)
-        fm["excerpt_slug"] = note.slug
-        chat_path.write_text(_render_frontmatter(fm) + content, encoding="utf-8")
-        return note
+        rather than creating a new note per pin. If that note has since
+        been deleted out from under `excerpt_slug` (e.g. via the generic
+        delete-node endpoint, which has no special case for this), falls
+        back to creating a fresh one instead of raising — otherwise every
+        future pin/unpin for this chat would permanently fail with
+        `FileNotFoundError`, silently swallowed by the background
+        regeneration thread's blanket exception handler."""
+        with self._chat_write_lock:
+            chat = self.get_chat(chat_slug)
+            body = _render_excerpt_body(summary, raw_turns)
+            if chat.excerpt_slug:
+                try:
+                    return self.save_note(chat.excerpt_slug, body)
+                except FileNotFoundError:
+                    pass  # note deleted underneath us — fall through to create a fresh one
+            note = self.create_note(f"Excerpt — {chat.title}", body=body, promoted_from_chat=chat_slug)
+            chat_path = self._find_md(chat_slug)
+            raw = chat_path.read_text(encoding="utf-8")
+            fm, content = _parse_frontmatter(raw)
+            fm["excerpt_slug"] = note.slug
+            chat_path.write_text(_render_frontmatter(fm) + content, encoding="utf-8")
+            return note
 
     def get_any(self, slug: str) -> Note | Source | Chat | Stream:
         path = self._find_file(slug)

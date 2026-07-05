@@ -84,6 +84,15 @@ class ChatConfig(BaseModel):
             "Summary; a large one (a future cloud backend) can afford to keep them verbatim."
         ),
     )
+    max_tokens: int = Field(
+        2000,
+        description=(
+            "Hard cap on generated tokens per chat completion. Without this, a rambling or "
+            "confused generation has nothing to stop it (found live: the same gap in kg's "
+            "extraction calls let a single section's call run for minutes — see "
+            "knowledge_graph_service.py's _call_ollama_extract num_predict comment)."
+        ),
+    )
 
     @field_validator('provider')
     @classmethod

@@ -657,6 +657,30 @@ def test_active_interactive_lease_does_not_shrink_backgrounds_own_quota():
     assert [r1, r2, r3] == ["local-ollama"] * 3  # background still gets its full quota of 3
 
 
+def test_background_denied_when_interactive_alone_fills_the_pool_to_full_capacity():
+    # Regression: the fix above (background counts only its own leases) went
+    # one step too far — it never checked background's request against the
+    # pool's *total* real capacity at all. If interactive traffic alone has
+    # already filled the pool to its full max_concurrent, a background
+    # request would see background_in_use=0 (zero background leases so far)
+    # and get granted anyway, pushing the pool past its configured ceiling.
+    rm = ResourceManager(
+        {"local-ollama": 6}, model_affinity={"local-ollama"},
+        model_background_limit={"local-ollama": {"prisma-llm:7b": 3}},
+    )
+    pid = os.getpid()
+
+    interactive_leases = [
+        rm.acquire("api", pid, model="prisma-llm:7b", priority="interactive")
+        for _ in range(6)
+    ]
+    assert all(r == "local-ollama" for r, _ in interactive_leases)  # fills the pool to its real max_concurrent
+
+    r_bg, rid_bg = rm.acquire("kg", pid, model="prisma-llm:7b", priority="background")
+
+    assert r_bg is None and rid_bg is None  # must not be granted just because background_in_use is 0
+
+
 def test_interactive_defaults_to_background_priority_when_unspecified():
     # Existing callers (kg, chroma) that don't pass priority at all must
     # keep today's behavior — capped at the background limit, not the full

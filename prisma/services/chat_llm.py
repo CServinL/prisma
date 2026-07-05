@@ -37,7 +37,12 @@ class ChatLLM:
         self._ollama_host = ollama_host
         self._supervisor_host = supervisor_host
         self._supervisor_port = supervisor_port if supervisor_port is not None else resource_lock.default_port()
-        self._client = OpenAI(base_url=self._resolve_base_url(), api_key=self._resolve_api_key())
+        # timeout=180.0: without this, an OpenAI-SDK call has no default
+        # ceiling at all — found live: this call site was the one gap the
+        # kg-extraction num_predict bug didn't already cover elsewhere.
+        self._client = OpenAI(
+            base_url=self._resolve_base_url(), api_key=self._resolve_api_key(), timeout=180.0,
+        )
 
     @property
     def model(self) -> str:
@@ -92,6 +97,7 @@ class ChatLLM:
                     model=self._config.model,
                     messages=messages,
                     temperature=temperature,
+                    max_tokens=self._config.max_tokens,
                 )
             except Exception as exc:
                 _log.warning("chat completion failed: %s", exc)

@@ -9,7 +9,16 @@ import time
 from pathlib import Path
 from unittest.mock import patch
 
-from prisma.server.supervisor import ResourceManager, _load_compute_pools, _process_memory_mb, _system_info
+from prisma.server.supervisor import (
+    ResourceManager,
+    _load_compute_pools,
+    _load_vram_profiles,
+    _probe_model_vram,
+    _process_memory_mb,
+    _profile_missing_models,
+    _save_vram_profile,
+    _system_info,
+)
 
 
 def test_acquire_respects_pool_capacity():
@@ -547,6 +556,27 @@ def test_acquire_falls_back_to_strict_affinity_when_ollama_unreachable():
     assert rm.status()["local-ollama"]["stats"]["denied_model_busy"] == 1
 
 
+def test_acquire_denies_vram_aware_pool_when_model_missing():
+    # Real bug this guards against: supervisor.py's HTTP handler passes
+    # body.get("model") straight through, which is None if a request simply
+    # omits it — a real network-boundary case, not just a hypothetical
+    # internal caller. A vram-aware pool can't check budget/model-busy
+    # without knowing which model, so it must fail safe (deny) rather than
+    # silently skip the check and let an unidentified lease through
+    # uncounted against the VRAM budget.
+    rm = ResourceManager(
+        {"local-ollama": 4}, model_affinity={"local-ollama"},
+        vram_budget={"local-ollama": 14000},
+        model_vram={"local-ollama": {"qwen2.5:7b-32k": 7500}},
+    )
+    pid = os.getpid()
+
+    r, rid = rm.acquire("api", pid, model=None)
+
+    assert r is None and rid is None
+    assert rm.status()["local-ollama"]["stats"]["denied_vram_budget"] == 1
+
+
 def test_acquire_per_model_concurrency_still_enforced_on_vram_budget_pool():
     rm = ResourceManager(
         {"local-ollama": 4}, model_affinity={"local-ollama"},
@@ -747,3 +777,58 @@ def test_system_info_reports_cpu_count_and_memory():
     # memory fields may be None on non-Linux, but must be present as keys
     assert "memory_total_mb" in info
     assert "memory_available_mb" in info
+
+
+def test_probe_model_vram_returns_measured_value():
+    with patch("urllib.request.urlopen"), \
+         patch("prisma.server.supervisor._query_ollama_resident_mb", return_value={"qwen3:14b-32k": 11900}):
+        assert _probe_model_vram("http://localhost:11434", "qwen3:14b-32k") == 11900
+
+
+def test_probe_model_vram_returns_none_when_load_call_fails():
+    with patch("urllib.request.urlopen", side_effect=OSError("connection refused")):
+        assert _probe_model_vram("http://localhost:11434", "qwen3:14b-32k") is None
+
+
+def test_probe_model_vram_returns_none_when_model_not_resident_after_load():
+    with patch("urllib.request.urlopen"), \
+         patch("prisma.server.supervisor._query_ollama_resident_mb", return_value={"other-model": 500}):
+        assert _probe_model_vram("http://localhost:11434", "qwen3:14b-32k") is None
+
+
+def test_save_and_load_vram_profiles_roundtrip(tmp_path, monkeypatch):
+    profile_path = tmp_path / "model_vram_profiles.json"
+    monkeypatch.setattr("prisma.server.supervisor._model_vram_profile_path", lambda: profile_path)
+
+    assert _load_vram_profiles() == {}
+    _save_vram_profile("qwen3:14b-32k", 11900)
+    _save_vram_profile("nomic-embed-text", 1000)
+    assert _load_vram_profiles() == {"qwen3:14b-32k": 11900, "nomic-embed-text": 1000}
+
+
+def test_note_model_vram_updates_live_resource_manager():
+    rm = ResourceManager({"local-ollama": 4}, model_affinity={"local-ollama"}, vram_budget={"local-ollama": 14000})
+    rm.note_model_vram("local-ollama", "qwen3:14b-32k", 11900)
+    assert rm._model_vram["local-ollama"]["qwen3:14b-32k"] == 11900
+
+
+def test_profile_missing_models_skips_configured_and_saved_probes_only_the_rest(tmp_path, monkeypatch):
+    profile_path = tmp_path / "model_vram_profiles.json"
+    monkeypatch.setattr("prisma.server.supervisor._model_vram_profile_path", lambda: profile_path)
+    _save_vram_profile("already-profiled", 1234)
+
+    rm = ResourceManager(
+        {"local-ollama": 4}, model_affinity={"local-ollama"}, vram_budget={"local-ollama": 14000},
+        model_vram={"local-ollama": {"already-configured": 5000}},
+    )
+    pool_models = {"local-ollama": {"already-configured", "already-profiled", "needs-probe"}}
+
+    with patch("prisma.server.supervisor._probe_model_vram", return_value=9000) as probe:
+        _profile_missing_models(
+            rm, pool_models, {"local-ollama": 14000}, {"local-ollama"},
+            {"local-ollama": {"already-configured": 5000}}, "http://localhost:11434",
+        )
+
+    probe.assert_called_once_with("http://localhost:11434", "needs-probe")
+    assert rm._model_vram["local-ollama"]["needs-probe"] == 9000
+    assert _load_vram_profiles() == {"already-profiled": 1234, "needs-probe": 9000}

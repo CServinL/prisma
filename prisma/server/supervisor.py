@@ -170,6 +170,53 @@ def _probe_model_vram(base_url: str, model: str, timeout: float = 300.0) -> int 
     return resident[model]
 
 
+def _check_pool_vram_fit(
+    pool_models: dict[str, set[str]],
+    pool_vram_budget: dict[str, int | None],
+    affinity: set[str],
+    model_vram: dict[str, dict[str, int]],
+) -> dict[str, dict]:
+    """Sum each VRAM-budget-aware pool's configured models' vram_mb (a
+    config.yaml value, falling back to a saved auto-profile) against its
+    vram_budget_mb — catches "these models don't fit together" at
+    startup/config-load time instead of a human reasoning through the
+    arithmetic after chat becomes unusable during a sync (the real incident
+    in docs/qwen3-family-evaluation.md's Verdict section: qwen2.5:7b-32k +
+    qwen3:14b-32k + nomic-embed-text summed to 20400MB against a 14000MB
+    budget). Models with neither a config value nor a saved profile are
+    skipped from the sum (unknown, not zero) and reported separately, since
+    their absence makes this check optimistic rather than exact. Returns
+    {pool: {total_mb, budget_mb, unknown_models}} only for pools whose
+    already-known total exceeds budget — callers decide whether to just log
+    or hard-fail on that."""
+    saved_profiles = _load_vram_profiles()
+    problems: dict[str, dict] = {}
+    for pool_name in affinity:
+        budget = pool_vram_budget.get(pool_name)
+        if budget is None:
+            continue
+        configured = model_vram.get(pool_name, {})
+        total = 0
+        unknown: list[str] = []
+        for model in pool_models.get(pool_name, set()):
+            vram_mb = configured.get(model, saved_profiles.get(model))
+            if vram_mb is None:
+                unknown.append(model)
+            else:
+                total += vram_mb
+        if total > budget:
+            problems[pool_name] = {"total_mb": total, "budget_mb": budget, "unknown_models": unknown}
+            log.warning(
+                "vram fit: pool=%s configured models sum to %dMB, over its %dMB vram_budget_mb "
+                "(models excluded from this sum for having no config/profile value yet: %s) — "
+                "these models may not all coexist without an evict-and-reload cycle on every "
+                "switch between them; see docs/qwen3-family-evaluation.md's Verdict for a real "
+                "example of this failure mode",
+                pool_name, total, budget, unknown or "none",
+            )
+    return problems
+
+
 def _profile_missing_models(
     resources: "ResourceManager",
     pool_models: dict[str, set[str]],
@@ -191,10 +238,11 @@ def _profile_missing_models(
     used this session, in exchange for every configured model having a real
     profile before anything production-shaped needs one. Motivated directly
     by the qwen3:14b-32k / qwen2.5:7b-32k VRAM-conflict incident (see
-    docs/qwen3-family-evaluation.md's Verdict section) — the goal is for
-    the resource manager to eventually be able to sum a pool's models
-    against vram_budget_mb and flag "these don't fit together" before a
-    config change ships, not just react to it after the fact.
+    docs/qwen3-family-evaluation.md's Verdict section) — once every
+    configured model has a real profile, _check_pool_vram_fit() (called at
+    the end of this function) can sum a pool's models against
+    vram_budget_mb and flag "these don't fit together" before a config
+    change ships, not just react to it after the fact.
     """
     saved_profiles = _load_vram_profiles()
     for pool_name in affinity:
@@ -211,6 +259,11 @@ def _profile_missing_models(
             _save_vram_profile(model, vram_mb)
             resources.note_model_vram(pool_name, model, vram_mb)
             log.info("vram profile: %s measured at %dMB, saved", model, vram_mb)
+    # Re-check with the now-complete picture — a conflict previously
+    # "unknown model, can't tell" may now be a known "doesn't fit," since
+    # _check_pool_vram_fit re-reads the profile file fresh (includes
+    # whatever was just probed and saved above).
+    _check_pool_vram_fit(pool_models, pool_vram_budget, affinity, model_vram)
 
 
 def _load_compute_pools() -> tuple[
@@ -1036,6 +1089,11 @@ def main(
         capacity, affinity, pool_models, model_concurrency, pool_vram_budget, model_vram,
         model_background_limit, ollama_base_url=_ollama_base_url(),
     )
+    # Best-effort check with whatever's already known (config + previously
+    # saved profiles) — don't wait for the profiling thread below, which can
+    # take minutes if several models need a fresh probe. Re-checked with the
+    # complete picture at the end of that thread too.
+    _check_pool_vram_fit(pool_models, pool_vram_budget, affinity, model_vram)
     threading.Thread(
         target=_profile_missing_models,
         args=(resources, pool_models, pool_vram_budget, affinity, model_vram, _ollama_base_url()),

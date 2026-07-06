@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 from prisma.server.supervisor import (
     ResourceManager,
+    _check_pool_vram_fit,
     _load_compute_pools,
     _load_vram_profiles,
     _probe_model_vram,
@@ -832,3 +833,52 @@ def test_profile_missing_models_skips_configured_and_saved_probes_only_the_rest(
     probe.assert_called_once_with("http://localhost:11434", "needs-probe")
     assert rm._model_vram["local-ollama"]["needs-probe"] == 9000
     assert _load_vram_profiles() == {"already-profiled": 1234, "needs-probe": 9000}
+
+
+def test_check_pool_vram_fit_flags_pool_over_budget_from_config_alone(tmp_path, monkeypatch):
+    monkeypatch.setattr("prisma.server.supervisor._model_vram_profile_path", lambda: tmp_path / "profiles.json")
+    pool_models = {"local-ollama": {"qwen2.5:7b-32k", "qwen3:14b-32k", "nomic-embed-text"}}
+    model_vram = {"local-ollama": {"qwen2.5:7b-32k": 7500, "qwen3:14b-32k": 11900, "nomic-embed-text": 1000}}
+
+    problems = _check_pool_vram_fit(pool_models, {"local-ollama": 14000}, {"local-ollama"}, model_vram)
+
+    assert problems == {"local-ollama": {"total_mb": 20400, "budget_mb": 14000, "unknown_models": []}}
+
+
+def test_check_pool_vram_fit_falls_back_to_saved_profile_when_config_missing(tmp_path, monkeypatch):
+    profile_path = tmp_path / "profiles.json"
+    monkeypatch.setattr("prisma.server.supervisor._model_vram_profile_path", lambda: profile_path)
+    _save_vram_profile("qwen3:14b-32k", 11900)
+    pool_models = {"local-ollama": {"qwen2.5:7b-32k", "qwen3:14b-32k"}}
+    model_vram = {"local-ollama": {"qwen2.5:7b-32k": 7500}}  # qwen3:14b-32k only has a saved profile
+
+    problems = _check_pool_vram_fit(pool_models, {"local-ollama": 14000}, {"local-ollama"}, model_vram)
+
+    assert problems["local-ollama"]["total_mb"] == 19400
+
+
+def test_check_pool_vram_fit_excludes_unknown_models_from_sum_and_reports_them(tmp_path, monkeypatch):
+    monkeypatch.setattr("prisma.server.supervisor._model_vram_profile_path", lambda: tmp_path / "profiles.json")
+    pool_models = {"local-ollama": {"qwen2.5:7b-32k", "qwen3:14b-32k", "brand-new-model"}}
+    model_vram = {"local-ollama": {"qwen2.5:7b-32k": 7500, "qwen3:14b-32k": 11900}}
+
+    problems = _check_pool_vram_fit(pool_models, {"local-ollama": 14000}, {"local-ollama"}, model_vram)
+
+    assert problems["local-ollama"]["unknown_models"] == ["brand-new-model"]
+    assert problems["local-ollama"]["total_mb"] == 19400  # unknown model excluded, not treated as 0
+
+
+def test_check_pool_vram_fit_returns_empty_when_pool_fits(tmp_path, monkeypatch):
+    monkeypatch.setattr("prisma.server.supervisor._model_vram_profile_path", lambda: tmp_path / "profiles.json")
+    pool_models = {"local-ollama": {"qwen2.5:7b-32k", "nomic-embed-text"}}
+    model_vram = {"local-ollama": {"qwen2.5:7b-32k": 7500, "nomic-embed-text": 1000}}
+
+    assert _check_pool_vram_fit(pool_models, {"local-ollama": 14000}, {"local-ollama"}, model_vram) == {}
+
+
+def test_check_pool_vram_fit_skips_pool_without_vram_budget(tmp_path, monkeypatch):
+    monkeypatch.setattr("prisma.server.supervisor._model_vram_profile_path", lambda: tmp_path / "profiles.json")
+    pool_models = {"local-ollama": {"model-a", "model-b"}}
+    model_vram = {"local-ollama": {"model-a": 999999, "model-b": 999999}}
+
+    assert _check_pool_vram_fit(pool_models, {"local-ollama": None}, {"local-ollama"}, model_vram) == {}

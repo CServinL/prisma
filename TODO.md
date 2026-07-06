@@ -821,26 +821,68 @@ Replaced with a narrower, more useful **Knowledge Graph progress page**
       tracked, to sanity-check `token_budget` is actually respected in
       practice.
 
-### Deferred: try qwen3:14b for kg extraction (2026-07-05)
+### Resolved: qwen3 family evaluation (2026-07-05/06) — see docs/qwen3-family-evaluation.md
 
-- [ ] Evaluate `qwen3:14b` (dense, Q4) as a replacement for
-      `qwen2.5:7b-32k` in kg extraction. Reasoning for trying this
-      specific tag: dense-to-dense (7B→14B, not a MoE variant) means a
-      quality difference would reflect the model actually being better,
-      not an architecture confound; at Q4 quantization it should fit the
-      16GB dedicated VRAM budget (`vram_budget_mb: 14000`) alongside
-      `nomic-embed-text` without spilling into slower shared/system
-      memory — current `qwen2.5:7b-32k` already uses ~7.5GB at 32768 ctx,
-      so 14B roughly doubling that should still have headroom. MoE
-      variants (`qwen3:30b-a3b`) are architecturally interesting for this
-      memory-bound-decode workload (lower compute per token despite the
-      bigger label) but likely don't fit the VRAM budget once full expert
-      weights + KV cache + the embedding model are accounted for — not
-      worth trying first. `qwen3.5`/`qwen3.6` are too fresh to have any
-      real read on — skip for now.
-      **Method**: repeat `docs/kg-extraction-context-length.md`'s Round 5
-      methodology (same real paper, `token_budget=1000`, compare unique
-      entity/edge counts and per-chunk latency against current numbers) —
-      don't swap models on the strength of "newer," measure it the same
-      way every other model/token_budget decision in this project has
-      been made.
+- [x] Evaluated `qwen3:14b`, `qwen3.6:27b`, `qwen3:30b-a3b` (MoE), and
+      `qwen3.5:9b` against every existing controlled test this project has
+      run for `qwen2.5:7b-32k` (kg-extraction-context-length.md's Rounds,
+      ollama-concurrency.md's methodology, ADR-014's tool-calling appendix)
+      plus a net-new chat-summarization check. Full write-up:
+      `docs/qwen3-family-evaluation.md`.
+      **kg extraction: no adoption.** None of the four candidates beat
+      current production — `qwen3:14b` was slower and lower-quality on
+      identical real content (37 vs 47 unique entities, 3.9× slower); the
+      MoE variant was the single worst performer despite looking fast on
+      trivial completions; `qwen3.6:27b` doesn't fit VRAM at all (confirmed
+      47%/53% CPU/GPU split); `qwen3.5:9b` has an unfixable reliability
+      problem — a hybrid-thinking model whose reasoning tokens count
+      against `max_tokens` but aren't suppressible via `think:false` once
+      a long system prompt is involved (confirmed directly: burned all
+      4000 tokens with zero visible output on a real chunk).
+      **Chat summarization: `qwen3:14b` is worth adopting, but not yet —
+      tried and reverted same day.** Complete fact preservation (7/7
+      planted facts) vs. current production's 5/7 plus a subtle
+      misattribution, on identical constructed content — a real quality
+      win. Switched `chat.model` to `qwen3:14b-32k` briefly, but reverted
+      immediately once the actual consequence was worked through: combined
+      with `qwen2.5:7b-32k` (still needed for kg) and `nomic-embed-text`,
+      the three models' `vram_mb` (7500+11900+1000=20400) exceed the
+      pool's 14000 `vram_budget_mb` — with kg extraction running
+      continuously through a large vault sync, every chat turn would force
+      an evict-and-reload cycle in both directions, making chat
+      effectively unusable while a sync is in progress. That's a worse
+      regression than the summarization win is worth, so `chat.model` is
+      back to sharing kg's `qwen2.5:7b-32k` for now. Revisit once the
+      supervisor VRAM auto-profiling item below exists and can actually
+      answer "do these two models coexist without thrashing" before
+      config changes ship, rather than finding out live.
+
+### Planned: supervisor auto-profiles each configured model's real VRAM/GPU usage
+
+- [ ] Right now `compute_pools.*.models[].vram_mb` is a hand-measured
+      estimate cservinl enters manually (pull model, trivial generate,
+      read `/api/ps`'s `size_vram`, write the number into config.yaml —
+      exactly the manual process used throughout
+      `docs/qwen3-family-evaluation.md`). Automate this: when supervisor
+      starts, for any configured model missing a `vram_mb` entry, do a
+      one-time probe against the real running system (force a trivial
+      load, read `/api/ps`'s real reported VRAM) and persist the result
+      to a new file in the user's config folder (e.g.
+      `~/.config/prisma/model_vram_profiles.json`) as a distinct
+      "automated config" layer — `config.yaml`'s manual `vram_mb` (if
+      present) always wins over an auto-learned profile, which only fills
+      in what's missing.
+      **Real motivating case**: this exact session hit "these two models
+      don't fit together" (`qwen2.5:7b-32k` + `qwen3:14b-32k`) only by
+      manually reasoning through the arithmetic after the fact — with
+      real profiles for every configured model, `ResourceManager` could
+      compute "do all models configured for a pool with model_affinity
+      fit together" and warn or refuse at config-load time instead of a
+      human finding out live.
+      Open design question resolved: probe eagerly at supervisor startup
+      (not lazily on first real request, not an explicit admin-only
+      command) — scan configured models missing a profile and probe each
+      in the background right after startup. Trade-off accepted: this can
+      evict whatever's already resident and spends GPU time on a model
+      that might not get used this session, in exchange for profiles
+      existing before anything real needs them.

@@ -724,19 +724,46 @@ and deliberately deferred rather than fixed blind:
       gap, not a behavior bug. Fixed 2026-07-05 while wiring up Ollama call
       stats (see below): now uses `_log_ollama` with real timing, same as
       every sibling method.
-- [ ] `analysis_agent.py::_relevance_chunk()` fails *open*
+- [x] `analysis_agent.py::_relevance_chunk()` fails *open*
       (`[True]*len(candidates)`) on error, while the identity-check methods
-      fail *closed* — needs a deliberate sign-off on which failure mode is
-      actually wanted here, not a reflexive flip.
-- [ ] Timeout values across `analysis_agent.py` are a mix of flat and
-      size-scaled — inconsistent in spirit but each individually reasonable;
-      revisit as a considered pass, not opportunistically.
-- [ ] VRAM-aware resource pool skips the budget check entirely if
-      `acquire(..., model=None)` — currently unreachable (every real caller
-      always passes `model=`), but a defensive gap for future callers.
-- [ ] Stale `pollExcerptRegeneration` interval (ui/src/routes/+page.svelte)
-      keeps firing up to one wasted request (~2s) after switching chats
-      before self-clearing — harmless, not fixed.
+      fail *closed*. **Reviewed 2026-07-06, no change needed** — not
+      actually inconsistent once you look at what each boolean protects:
+      relevance failing open (treat as relevant) means a brief Ollama
+      outage never silently drops a possibly-good paper from the pipeline;
+      identity failing closed (assume NOT a duplicate) means the same
+      outage never silently merges two possibly-different papers into
+      one. Both defaults already share one underlying rule — "on LLM
+      failure, fail toward whatever loses the least data" — they just
+      read as opposite booleans because the two checks protect against
+      different mistakes (dropping vs. merging).
+- [x] Timeout values across `analysis_agent.py` are a mix of flat and
+      size-scaled. **Reviewed 2026-07-06, no change needed** — only
+      `check_identity_batch`'s LLM call actually scales (`timeout=10 + 15
+      * len(candidates)`), and that's because its response genuinely
+      scales with candidate count (one YES/NO + confidence + reason per
+      candidate). Every flat-timeout call site (`_get_ollama_summary`,
+      `assess_relevance`, `_relevance_chunk`, `_single_pair_check`) has a
+      response that stays small regardless of input size (a short
+      classification or a comma-separated number list) — the "mix" is
+      each call site correctly timed for its own actual output shape, not
+      an oversight.
+- [x] VRAM-aware resource pool skips the budget check entirely if
+      `acquire(..., model=None)`. **Fixed 2026-07-06** — this was
+      reachable, not just theoretical: `supervisor.py`'s HTTP handler
+      passes `body.get("model")` straight through, `None` if a request
+      simply omits it, and that's a real network boundary, not an
+      internal call every current client happens to populate correctly.
+      `ResourceManager.acquire()` now denies (fails safe) rather than
+      silently skipping the VRAM check when a vram-aware pool gets a
+      request with no model. Test:
+      `test_acquire_denies_vram_aware_pool_when_model_missing`.
+- [x] Stale `pollExcerptRegeneration` interval (ui/src/routes/+page.svelte)
+      kept firing up to one wasted request (~2s) after switching chats
+      before self-clearing. **Fixed 2026-07-06** — the interval handle is
+      now hoisted (`excerptPollInterval`) and cleared immediately at every
+      point that switches away from a chat (`openChat`, and the
+      Compute-pools/Knowledge-Graph nav buttons), instead of waiting for
+      the poll's own next 2s tick to notice and self-clear.
 - [x] Excerpt regeneration always overwrites the note body, so a hand-edit
       to the Excerpt note is lost on the next pin/unpin. Decided: document
       as an accepted limitation rather than build edit-detection — the
@@ -857,32 +884,31 @@ Replaced with a narrower, more useful **Knowledge Graph progress page**
       answer "do these two models coexist without thrashing" before
       config changes ship, rather than finding out live.
 
-### Planned: supervisor auto-profiles each configured model's real VRAM/GPU usage
+### Resolved: supervisor auto-profiles each configured model's real VRAM/GPU usage
 
-- [ ] Right now `compute_pools.*.models[].vram_mb` is a hand-measured
-      estimate cservinl enters manually (pull model, trivial generate,
-      read `/api/ps`'s `size_vram`, write the number into config.yaml —
-      exactly the manual process used throughout
-      `docs/qwen3-family-evaluation.md`). Automate this: when supervisor
-      starts, for any configured model missing a `vram_mb` entry, do a
-      one-time probe against the real running system (force a trivial
-      load, read `/api/ps`'s real reported VRAM) and persist the result
-      to a new file in the user's config folder (e.g.
-      `~/.config/prisma/model_vram_profiles.json`) as a distinct
-      "automated config" layer — `config.yaml`'s manual `vram_mb` (if
-      present) always wins over an auto-learned profile, which only fills
-      in what's missing.
-      **Real motivating case**: this exact session hit "these two models
-      don't fit together" (`qwen2.5:7b-32k` + `qwen3:14b-32k`) only by
-      manually reasoning through the arithmetic after the fact — with
-      real profiles for every configured model, `ResourceManager` could
-      compute "do all models configured for a pool with model_affinity
-      fit together" and warn or refuse at config-load time instead of a
-      human finding out live.
-      Open design question resolved: probe eagerly at supervisor startup
-      (not lazily on first real request, not an explicit admin-only
-      command) — scan configured models missing a profile and probe each
-      in the background right after startup. Trade-off accepted: this can
-      evict whatever's already resident and spends GPU time on a model
-      that might not get used this session, in exchange for profiles
-      existing before anything real needs them.
+- [x] Implemented 2026-07-06 in `prisma/server/supervisor.py`:
+      `_probe_model_vram()` force-loads a model via a trivial
+      `/api/generate` call and reads its real cost back from `/api/ps`;
+      `_load_vram_profiles()`/`_save_vram_profile()` persist to
+      `~/.config/prisma/model_vram_profiles.json`; `_profile_missing_models()`
+      runs once in a daemon thread at `main()` startup, skipping any model
+      that already has either a config.yaml `vram_mb` or a saved profile
+      (config always wins), and calls the new
+      `ResourceManager.note_model_vram()` so a freshly-learned profile takes
+      effect immediately, no restart needed. Still stdlib + yaml only, per
+      the module's existing constraint — no new dependencies. Tests in
+      `tests/unit/server/test_supervisor_resources.py`. This doesn't yet
+      make `ResourceManager` proactively warn "these configured models don't
+      fit together" (the qwen2.5/qwen3:14b incident's real trigger) — it
+      only makes sure every model *has* a real measured profile so that
+      check becomes possible later without another live-discovery cycle.
+### Planned follow-up: warn when a pool's configured models don't fit together
+
+- [ ] Now that every configured model gets a real measured VRAM profile
+      (see above), `ResourceManager`/`_load_compute_pools()` could sum a
+      `model_affinity` pool's models' `vram_mb` (config or learned profile)
+      against its `vram_budget_mb` and warn (or refuse to start) at
+      config-load time when they don't fit together — catching the
+      qwen2.5:7b-32k / qwen3:14b-32k incident *before* a config change
+      ships, instead of a human reasoning through the arithmetic after the
+      fact once chat became unusable during a sync.

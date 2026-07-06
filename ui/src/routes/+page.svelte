@@ -247,6 +247,7 @@
   let hoverExpandTimer: ReturnType<typeof setTimeout> | null = null;
   let activeNode = $state<RenderedNode | null>(null);
   let activeChat = $state<ChatDetail | null>(null);
+  let excerptPollInterval: ReturnType<typeof setInterval> | undefined;
   let chatInput = $state("");
   let chatSending = $state(false);
   let serverOnline = $state(false);
@@ -470,6 +471,7 @@
   }
 
   async function openChat(slug: string) {
+    clearInterval(excerptPollInterval);  // stop any poll for the chat we're leaving, immediately
     activeNode = null;
     showResourcesPage = false;
     showKgProgressPage = false;
@@ -547,10 +549,15 @@
   }
 
   function pollExcerptRegeneration(slug: string) {
-    const interval = setInterval(async () => {
-      if (!activeChat || activeChat.slug !== slug) { clearInterval(interval); return; }
+    // Stop any prior poll immediately rather than letting it self-clear on
+    // its own next 2s tick — that gap is what let a stale poll fire one
+    // wasted request against the wrong (or no-longer-active) chat right
+    // after switching away.
+    clearInterval(excerptPollInterval);
+    excerptPollInterval = setInterval(async () => {
+      if (!activeChat || activeChat.slug !== slug) { clearInterval(excerptPollInterval); return; }
       const r = await fetch(`${apiBase}/chats/${encodeURIComponent(slug)}`);
-      if (!r.ok) { clearInterval(interval); return; }
+      if (!r.ok) { clearInterval(excerptPollInterval); return; }
       const fresh = await r.json();
       // Merge only the Excerpt-related fields — never replace the whole
       // object. A full replace here raced with sendChatMessage's optimistic
@@ -569,7 +576,7 @@
           context_tokens_max: fresh.context_tokens_max,
         };
       }
-      if (!fresh.excerpt_regenerating) clearInterval(interval);
+      if (!fresh.excerpt_regenerating) clearInterval(excerptPollInterval);
     }, 2000);
   }
 
@@ -1436,7 +1443,7 @@
             <button
               class="tree-file"
               class:active={showResourcesPage}
-              onclick={() => { activeNode = null; activeChat = null; showResourcesPage = true; showKgProgressPage = false; }}
+              onclick={() => { clearInterval(excerptPollInterval); activeNode = null; activeChat = null; showResourcesPage = true; showKgProgressPage = false; }}
             >
               <span class="tree-type-dot nt-stream"></span>
               <span class="tree-file-name">Compute pools</span>
@@ -1444,7 +1451,7 @@
             <button
               class="tree-file"
               class:active={showKgProgressPage}
-              onclick={() => { activeNode = null; activeChat = null; showResourcesPage = false; showKgProgressPage = true; }}
+              onclick={() => { clearInterval(excerptPollInterval); activeNode = null; activeChat = null; showResourcesPage = false; showKgProgressPage = true; }}
             >
               <span class="tree-type-dot nt-stream"></span>
               <span class="tree-file-name">Knowledge Graph</span>

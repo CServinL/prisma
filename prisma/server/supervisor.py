@@ -113,6 +113,106 @@ def _query_ollama_resident_mb(base_url: str, timeout: float = 2.0) -> dict[str, 
         return None
 
 
+def _model_vram_profile_path() -> Path:
+    return Path.home() / ".config" / "prisma" / "model_vram_profiles.json"
+
+
+def _load_vram_profiles() -> dict[str, int]:
+    """Auto-learned model -> real resident VRAM MB, from past
+    _probe_model_vram() runs. Distinct from compute_pools.*.models[].vram_mb
+    in config.yaml: that's a manual, user-curated estimate and always wins
+    when present (see _profile_missing_models) — this file only fills in
+    models nobody ever measured by hand."""
+    try:
+        path = _model_vram_profile_path()
+        return json.loads(path.read_text()) if path.exists() else {}
+    except Exception:
+        return {}
+
+
+def _save_vram_profile(model: str, vram_mb: int) -> None:
+    path = _model_vram_profile_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        profiles = _load_vram_profiles()
+        profiles[model] = vram_mb
+        path.write_text(json.dumps(profiles, indent=2))
+    except Exception as exc:
+        log.warning("failed to save vram profile for %s: %s", model, exc)
+
+
+def _probe_model_vram(base_url: str, model: str, timeout: float = 300.0) -> int | None:
+    """One-time empirical measurement: force `model` to load via a trivial
+    generate call, then read its real resident cost back from Ollama's own
+    `/api/ps` — the same manual process used throughout
+    docs/qwen3-family-evaluation.md, automated. Returns None (not 0) if the
+    probe itself fails (Ollama unreachable, model not pulled, etc.) — callers
+    must not treat that as "this model uses 0MB.\""""
+    import urllib.request
+    try:
+        req = urllib.request.Request(
+            f"{base_url}/api/generate",
+            data=json.dumps({
+                "model": model, "prompt": "hi", "stream": False, "options": {"num_predict": 1},
+            }).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            resp.read()
+    except Exception as exc:
+        log.warning("vram profile: failed to load %s for probing: %s", model, exc)
+        return None
+    resident = _query_ollama_resident_mb(base_url)
+    if resident is None or model not in resident:
+        log.warning("vram profile: %s loaded but not found in /api/ps afterward", model)
+        return None
+    return resident[model]
+
+
+def _profile_missing_models(
+    resources: "ResourceManager",
+    pool_models: dict[str, set[str]],
+    pool_vram_budget: dict[str, int | None],
+    affinity: set[str],
+    model_vram: dict[str, dict[str, int]],
+    base_url: str,
+) -> None:
+    """Run once at supervisor startup, in its own daemon thread — for any
+    model in a VRAM-budget-aware pool with neither a config.yaml `vram_mb`
+    nor a previously saved profile, probe it for real and persist the
+    result, updating the live ResourceManager immediately so it takes
+    effect without a restart.
+
+    Deliberately eager (runs right at startup, not lazily on first real
+    acquire() and not gated behind an explicit admin command): trade-off
+    accepted per cservinl's explicit choice — this can evict whatever's
+    already resident and spends GPU time on a model that might not even get
+    used this session, in exchange for every configured model having a real
+    profile before anything production-shaped needs one. Motivated directly
+    by the qwen3:14b-32k / qwen2.5:7b-32k VRAM-conflict incident (see
+    docs/qwen3-family-evaluation.md's Verdict section) — the goal is for
+    the resource manager to eventually be able to sum a pool's models
+    against vram_budget_mb and flag "these don't fit together" before a
+    config change ships, not just react to it after the fact.
+    """
+    saved_profiles = _load_vram_profiles()
+    for pool_name in affinity:
+        if pool_vram_budget.get(pool_name) is None:
+            continue  # not vram-budget-aware — nothing here to inform
+        configured = model_vram.get(pool_name, {})
+        for model in pool_models.get(pool_name, set()):
+            if model in configured or model in saved_profiles:
+                continue
+            log.info("vram profile: probing %s (pool=%s, no config or saved profile)", model, pool_name)
+            vram_mb = _probe_model_vram(base_url, model)
+            if vram_mb is None:
+                continue
+            _save_vram_profile(model, vram_mb)
+            resources.note_model_vram(pool_name, model, vram_mb)
+            log.info("vram profile: %s measured at %dMB, saved", model, vram_mb)
+
+
 def _load_compute_pools() -> tuple[
     dict[str, int], set[str], dict[str, set[str]], dict[str, dict[str, int]],
     dict[str, int | None], dict[str, dict[str, int]], dict[str, dict[str, int]],
@@ -445,6 +545,14 @@ class ResourceManager:
             for name in pools
         }
 
+    def note_model_vram(self, pool: str, model: str, vram_mb: int) -> None:
+        """Record a freshly-measured VRAM estimate for `model` in `pool`
+        without a full reload_config() — used by the startup auto-profiling
+        probe (_profile_missing_models) so a newly-learned profile takes
+        effect immediately, without needing a supervisor restart."""
+        with self._lock:
+            self._model_vram.setdefault(pool, {})[model] = vram_mb
+
     def _candidate_pools(self, pool: str | None, model: str | None) -> list[str]:
         if pool:
             return [pool]
@@ -539,6 +647,23 @@ class ResourceManager:
                                 self._vram_budget[name], resident,
                             )
                             continue
+                elif vram_aware and model is None:
+                    # A vram-aware pool can't check budget/model-busy without
+                    # knowing which model this is for — this endpoint is a
+                    # real network boundary (supervisor.py's HTTP handler
+                    # passes body.get("model") straight through, `None` if a
+                    # request simply omits it), not just an internal
+                    # in-process call every real client happens to populate
+                    # correctly today. Fail safe (deny) rather than silently
+                    # skip the check and let an unidentified model's lease
+                    # through uncounted against the VRAM budget.
+                    self._stats[name]["denied_vram_budget"] += 1
+                    log.info(
+                        "acquire denied: pool=%s holder=%s pid=%d priority=%s "
+                        "reason=vram_budget (no model given, cannot verify VRAM headroom)",
+                        name, holder, pid, priority,
+                    )
+                    continue
                 # Per-model overrides apply on any model_affinity pool. On a
                 # VRAM-budget pool several different models can hold leases
                 # at once, so the count must be scoped to just this model's
@@ -904,7 +1029,18 @@ def main(
         "kg": Worker("kg", [_venv_bin("uvicorn"), "prisma.server.kg_app:app", "--host", host, "--port", str(kg_port)],
                      stop_timeout=15.0, env={"PRISMA_SUPERVISOR_PORT": str(supervisor_port)}),
     }
-    resources = ResourceManager(*_load_compute_pools(), ollama_base_url=_ollama_base_url())
+    capacity, affinity, pool_models, model_concurrency, pool_vram_budget, model_vram, model_background_limit = (
+        _load_compute_pools()
+    )
+    resources = ResourceManager(
+        capacity, affinity, pool_models, model_concurrency, pool_vram_budget, model_vram,
+        model_background_limit, ollama_base_url=_ollama_base_url(),
+    )
+    threading.Thread(
+        target=_profile_missing_models,
+        args=(resources, pool_models, pool_vram_budget, affinity, model_vram, _ollama_base_url()),
+        daemon=True, name="vram-profiler",
+    ).start()
 
     supervisor = Supervisor(workers, resources)
     supervisor.start_all()

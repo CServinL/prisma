@@ -902,13 +902,18 @@ Replaced with a narrower, more useful **Knowledge Graph progress page**
       fit together" (the qwen2.5/qwen3:14b incident's real trigger) — it
       only makes sure every model *has* a real measured profile so that
       check becomes possible later without another live-discovery cycle.
-### Planned follow-up: warn when a pool's configured models don't fit together
 
-- [ ] Now that every configured model gets a real measured VRAM profile
-      (see above), `ResourceManager`/`_load_compute_pools()` could sum a
-      `model_affinity` pool's models' `vram_mb` (config or learned profile)
-      against its `vram_budget_mb` and warn (or refuse to start) at
-      config-load time when they don't fit together — catching the
-      qwen2.5:7b-32k / qwen3:14b-32k incident *before* a config change
-      ships, instead of a human reasoning through the arithmetic after the
-      fact once chat became unusable during a sync.
+### Resolved: warn when a pool's configured models don't fit together
+
+- [x] Implemented 2026-07-06 in `prisma/server/supervisor.py`:
+      `_check_pool_vram_fit()` sums each VRAM-budget-aware pool's models'
+      `vram_mb` (config value, falling back to a saved auto-profile) against
+      `vram_budget_mb`, logging a warning (not a hard failure — a pool that
+      doesn't fit today may still be fine if the user never runs both
+      models at once) naming the total, the budget, and any models excluded
+      from the sum for having neither a config value nor a profile yet.
+      Called twice in `main()`: once immediately at startup with whatever's
+      already known (config + previously saved profiles, no probe wait),
+      and again at the end of `_profile_missing_models()`'s probing pass so
+      newly-learned profiles can surface a conflict that was previously
+      "unknown, can't tell." Tests in `tests/unit/server/test_supervisor_resources.py`.

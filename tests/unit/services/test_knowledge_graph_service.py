@@ -12,6 +12,7 @@ from prisma.services.knowledge_graph_service import (
     Extraction,
     KnowledgeGraphService,
     Node,
+    _sanitize_escape_sequences,
 )
 
 
@@ -41,6 +42,43 @@ def _extraction(nodes=None, edges=None) -> Extraction:
 
 def _patch_create(kg, **kwargs):
     return patch.object(kg._instructor_client.chat.completions, "create", **kwargs)
+
+
+# ── Escape-sequence sanitization ──────────────────────────────────────────────
+# Confirmed live 2026-07-07 (docs/kg-dead-letter-triage-2026-07-07.md): a real
+# paper's appendix of raw byte-sequence descriptions (e.g. `Hebrew: "\xd6"?`)
+# made the model try to preserve these sequences verbatim inside its JSON
+# string output, producing malformed `\u` escapes that failed Pydantic
+# validation across all 4 retries — every time, deterministically.
+
+def test_sanitize_escape_sequences_strips_hex_and_unicode_escapes():
+    text = 'Hebrew: "\\xd6"? and Arabic: unicode start "\\xd8" and Japanese: \\u0e98\\u3000'
+    result = _sanitize_escape_sequences(text)
+    assert "\\x" not in result
+    assert "\\u" not in result
+    assert "Hebrew" in result and "Arabic" in result and "Japanese" in result
+
+
+def test_sanitize_escape_sequences_leaves_normal_prose_untouched():
+    text = "MEMIT edits factual associations in GPT-J using a closed-form update."
+    assert _sanitize_escape_sequences(text) == text
+
+
+def test_extract_file_sanitizes_escape_sequences_before_calling_model(kg, vault):
+    f = vault.root / "notes" / "test.md"
+    f.write_text(
+        '---\ntype: note\n---\nHebrew: "\\xd6"? and Arabic: unicode start "\\xd8"?',
+        encoding="utf-8",
+    )
+    result = _extraction(nodes=[{"id": "ok", "label": "OK"}])
+
+    with _patch_create(kg, return_value=result) as mock_create, \
+         patch("prisma.services.resource_lock.acquire", return_value=(True, "local-ollama", "req-1")):
+        kg._extract_file(f, "note")
+
+    sent_prompt = mock_create.call_args.kwargs["messages"][1]["content"]
+    assert "\\xd6" not in sent_prompt
+    assert "\\xd8" not in sent_prompt
 
 
 # ── Extraction + upsert ───────────────────────────────────────────────────────

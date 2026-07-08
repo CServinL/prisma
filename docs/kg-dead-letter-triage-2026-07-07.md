@@ -196,17 +196,57 @@ the dead-letter file body, clearly delimited between
 before the actual failed chunk content. New test added:
 `test_dropped_chunk_summarizes_multiline_error_but_keeps_full_detail_on_disk`
 in `tests/unit/services/test_knowledge_graph_service.py`. Full unit suite
-(399 tests) passes. Not yet committed/pushed — left for your review since
-it's part of the same investigation as the proposals below.
+(399 tests) passes.
+
+## Update 2026-07-07 (later): proposal 1 and a fix for root cause 2 applied and validated
+
+Both approved and implemented, in `prisma/services/knowledge_graph_service.py`:
+
+- **Proposal 1** — the output-budget clause appended to `_EXTRACTION_SYSTEM`
+  (verbatim as tested above).
+- **A fix for root cause 2** — new `_sanitize_escape_sequences()`, applied
+  to `section_text` right before `wrap_untrusted()` builds the prompt in
+  `_call_ollama_extract`. Strips literal `\xNN`/`\uNNNN`-shaped sequences
+  (the exact adversarial pattern behind Bricken's malformed-JSON failures)
+  before the model ever sees them, rather than just failing faster once it
+  does. `section_text` itself (used for dead-letter recording) is left
+  untouched — only the copy sent to the model is sanitized.
+
+**Validated end-to-end against the real production code path** (not the
+ad-hoc `repro.py` script from earlier — this calls the actual, patched
+`KnowledgeGraphService._call_ollama_extract` directly, with
+`resource_lock.lease` stubbed to bypass supervisor arbitration since the
+prisma server wasn't running at validation time; everything else, prompt
+building, sanitization, the real Instructor client, is the genuine code
+path), against the real chunks that dead-lettered earlier today:
+
+| Chunk | Before | After |
+|---|---|---|
+| `Huang_2024_Hallucination_Survey.md` (author list, root cause 1) | truncated / 148 nodes-0 edges | **13 nodes, 12 edges, 43.8s** |
+| `Elhage_2021_...` (dense math prose, root cause 1) | truncated | **3 nodes, 3 edges, 19.7s** |
+| `Bricken_2023_...` (adversarial Unicode, root cause 2) | invalid JSON, 4 retries, 923.7s | **21 nodes, 20 edges, 123.1s** |
+
+All three real dead-lettering chunks from today now succeed cleanly. This
+directly supersedes the earlier finding that "proposal 1 alone would have
+closed 34/37, not all 37" — combined with the escape-sequence sanitization
+fix, all 3 confirmed failure shapes now pass.
+
+Tests added: `test_sanitize_escape_sequences_strips_hex_and_unicode_escapes`,
+`test_sanitize_escape_sequences_leaves_normal_prose_untouched`,
+`test_extract_file_sanitizes_escape_sequences_before_calling_model` in
+`tests/unit/services/test_knowledge_graph_service.py`. Full unit suite:
+402 passed.
 
 ## Proposals for cservinl to decide on
 
-1. **Add the output-budget clause to `_EXTRACTION_SYSTEM`** (empirically
-   validated above on the dominant failure class). Low risk — additive
-   prompt text, no schema change. Recommended first move; should collapse
-   most of the 34 "truncated" failures. Not yet applied to production code
-   — waiting on your review since it changes extraction behavior/output
-   shape (fewer entities per chunk, by design).
+Proposal 1 and the root-cause-2 fix (a variant of proposal 5's spirit —
+prevent the bad output rather than just fail faster on retry) are now
+**applied** (see Update above). Proposals 2-4 below are still open,
+unimplemented — smaller-scope efficiency/investigation items, not
+required to stop today's dead-lettering:
+
+1. ~~Add the output-budget clause to `_EXTRACTION_SYSTEM`~~ — **Applied**,
+   see Update above.
 2. **Exclude `html/<slug>/index.md` from KG extraction scope**, or dedupe
    by content hash against the cleaner `.md` sibling, to stop double-
    indexing the 3 known papers. Simple if you confirm these

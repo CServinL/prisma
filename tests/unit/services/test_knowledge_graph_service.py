@@ -13,6 +13,7 @@ from prisma.services.knowledge_graph_service import (
     KnowledgeGraphService,
     Node,
     _sanitize_escape_sequences,
+    _strip_dense_data_paragraphs,
 )
 
 
@@ -79,6 +80,55 @@ def test_extract_file_sanitizes_escape_sequences_before_calling_model(kg, vault)
     sent_prompt = mock_create.call_args.kwargs["messages"][1]["content"]
     assert "\\xd6" not in sent_prompt
     assert "\\xd8" not in sent_prompt
+
+
+# ── Dense data-table stripping ─────────────────────────────────────────────────
+# Confirmed live 2026-07-08 (docs/kg-dead-letter-triage-2026-07-07.md follow-up):
+# a real paper's flattened benchmark-score table (e.g. "hyperbaton 54.2 51.7
+# movie_dialog_same_or_diff 54.5 50.7 ...") made the model try to enumerate
+# every row as an entity, blowing past the output-budget instruction (64
+# nodes/61 edges against a stated cap of 15/20) even though it no longer hit
+# max_tokens. semchunk has no notion of table structure and each chunk is
+# extracted with no memory of neighboring chunks, so stripping this content
+# before chunking — rather than relying on the model to recognize and skip it
+# per chunk — removes the failure mode at the source.
+
+def test_strip_dense_data_paragraphs_removes_flattened_score_table():
+    table = (
+        "hyperbaton 54.2 51.7 movie_dialog_same_or_diff 54.5 50.7 "
+        "causal_judgment 57.4 50.8 winowhy 62.5 56.7 formal_fallacies 52.1 50.7 "
+        "movie_recommendation 75.6 50.5 crash_blossom 47.6 63.6"
+    )
+    text = f"Intro prose about the method.\n\n{table}\n\nMore prose after the table."
+    result = _strip_dense_data_paragraphs(text)
+    assert table not in result
+    assert "Intro prose about the method." in result
+    assert "More prose after the table." in result
+
+
+def test_strip_dense_data_paragraphs_leaves_normal_prose_untouched():
+    text = "MEMIT edits factual associations in GPT-J using a closed-form update."
+    assert _strip_dense_data_paragraphs(text) == text
+
+
+def test_strip_dense_data_paragraphs_leaves_short_paragraphs_with_numbers():
+    text = "The model achieves 54.2% accuracy on this task."
+    assert _strip_dense_data_paragraphs(text) == text
+
+
+def test_extract_file_strips_dense_data_table_before_chunking(kg, vault):
+    table = " ".join(f"task_{i} {i}.{i} {i}.{i+1}" for i in range(30))
+    f = vault.root / "notes" / "test.md"
+    f.write_text(f"---\ntype: note\n---\nIntro prose.\n\n{table}\n\nOutro prose.", encoding="utf-8")
+    result = _extraction(nodes=[{"id": "ok", "label": "OK"}])
+
+    with _patch_create(kg, return_value=result) as mock_create, \
+         patch("prisma.services.resource_lock.acquire", return_value=(True, "local-ollama", "req-1")):
+        kg._extract_file(f, "note")
+
+    sent_prompt = mock_create.call_args.kwargs["messages"][1]["content"]
+    assert "task_0" not in sent_prompt
+    assert "Intro prose." in sent_prompt or "Outro prose." in sent_prompt
 
 
 # ── Extraction + upsert ───────────────────────────────────────────────────────

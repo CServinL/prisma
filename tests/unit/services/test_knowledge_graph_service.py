@@ -582,6 +582,51 @@ def test_dropped_chunk_recorded_in_memory_and_on_disk(kg, vault):
     assert "Some content that will fail extraction." in content
 
 
+def test_dropped_chunk_summarizes_multiline_error_but_keeps_full_detail_on_disk(kg, vault):
+    f = vault.root / "notes" / "test.md"
+    f.write_text("---\ntype: note\n---\nSome content that will fail extraction.", encoding="utf-8")
+
+    # Shaped like a real InstructorRetryException.__str__() — a multi-page
+    # dump of every failed generation, ending in a <last_exception> block.
+    # Confirmed live 2026-07-07: this broke the dead-letter file's fixed
+    # 5-line header (the raw error was spliced directly into it) and dumped
+    # the whole thing into the KG progress page's dropped-chunks table cell.
+    multiline_error = (
+        "<failed_attempts>\n<generation number=\"1\">\n...\n</generation>\n</failed_attempts>\n\n"
+        "<last_exception>\n"
+        "    1 validation error for Extraction\n"
+        "  Invalid JSON: unexpected end of hex escape at line 29 column 45 "
+        "[type=json_invalid, input_value='...', input_type=str]\n"
+        "    For further information visit https://errors.pydantic.dev/2.12/v/json_invalid\n"
+        "</last_exception>\n"
+    )
+
+    with _patch_create(kg, side_effect=ValueError(multiline_error)), \
+         patch("prisma.services.resource_lock.acquire", return_value=(True, "local-ollama", "req-1")), \
+         patch("prisma.services.resource_lock.release"):
+        kg._extract_file(f, "note")
+
+    status = kg.status()
+    dropped = status["dropped_chunks_recent"][0]
+    assert "\n" not in dropped["error"]
+    assert "unexpected end of hex escape" in dropped["error"]
+    assert "<failed_attempts>" not in dropped["error"]
+
+    dead_letter = Path(dropped["dead_letter_path"])
+    content = dead_letter.read_text(encoding="utf-8")
+    lines = content.splitlines()
+    assert lines[0].startswith("# source_file:")
+    assert lines[1].startswith("# reason:")
+    assert lines[2].startswith("# error:")
+    assert "\n" not in lines[2]
+    assert lines[3].startswith("# retries:")
+    assert lines[4].startswith("# time:")
+    # full raw error preserved verbatim in the body, and the chunk content
+    # is still findable after it (not lost inside the error dump)
+    assert "<failed_attempts>" in content
+    assert "Some content that will fail extraction." in content
+
+
 def test_dropped_chunks_total_is_zero_when_nothing_failed(kg):
     status = kg.status()
     assert status["dropped_chunks_total"] == 0

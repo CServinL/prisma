@@ -131,6 +131,15 @@ own follow-up (see Outstanding) — it may mean Ollama's OpenAI-compat
 endpoint doesn't strictly enforce `max_tokens` across Instructor's
 internal reask calls the way it does on a fresh single call.
 
+**Confirmed: the output-budget prompt clause (proposal 1, root cause 1)
+does NOT fix this class.** Re-ran the exact same Bricken adversarial chunk
+with the capped prompt — same outcome: 4 retries, 923.7s, same error
+family (`Invalid JSON: unexpected end of hex escape at line 33 column 47`,
+just a different line/column than the original run). This confirms
+proposal 1 only closes root cause 1 (34/37 today); root cause 2 needs its
+own, separate fix (see proposals 4/5 below) — capping entity *count*
+doesn't touch a content-shape JSON-escaping bug.
+
 ## Root cause 3 (efficiency, not correctness): duplicate ingestion
 
 `Bricken_2023_Towards_Monosemanticity` exists in the vault **twice**:
@@ -226,24 +235,22 @@ it's part of the same investigation as the proposals below.
    outcome. Would need care not to also weaken retries for the more
    common, actually-recoverable validation failures.
 
-## Outstanding (not completed by investigation time)
+## Outstanding — now resolved
 
-- **The one test that matters most for scoping proposal 1 correctly**:
-  whether the capped prompt helps at all on `Bricken_2023_...`'s
-  adversarial-Unicode chunk (root cause 2). Still running after 12+
-  minutes at write time (vs. ~234s for a clean single-generation success
-  elsewhere tonight) — consistent with it going through the same
-  multi-generation retry escalation as the original failure, i.e. **the
-  cap likely does not fix root cause 2**, as expected going in (capping
-  entity *count* doesn't address a content-shape JSON-escaping bug), but
-  this is inference, not yet a confirmed result. If it comes back a clean
-  success, that would be a pleasant surprise worth re-examining; if it
-  fails the same way, that confirms proposal 1 only closes root cause 1
-  (34/37 today) and root causes 2/3/4 still need their own fixes.
-- Confirmed no regression on normal chunks (see control check above) and
-  confirmed the dense-math-prose class also fixed (Elhage). Both proposal-1
-  evidence points are now solid; only the adversarial-content class result
-  is still pending.
+All empirical tests planned at write time have completed:
+
+- **Root cause 1 (proposal 1)**: fully validated — fixes the author-list
+  class (Huang, 148/0 → 22/21), the dense-math-prose class (Elhage, hard
+  failure → 5/5), and doesn't regress a normal chunk (7/7 → 6/6). Confident
+  recommendation to adopt.
+- **Root cause 2 (Bricken adversarial Unicode)**: confirmed the capped
+  prompt does **not** help — re-ran the exact chunk under the capped
+  prompt, got the same outcome (4 retries, 923.7s, same
+  `Invalid JSON: unexpected end of hex escape` error family, just a
+  different line/column). This is a genuinely separate problem from root
+  cause 1 and needs its own fix (proposals 4/5), not just the prompt
+  clause. Confirms the overall picture: proposal 1 alone would have closed
+  34/37 of today's failures, not all 37.
 - Implementation note for proposal 2 (duplicate `html/index.md` exclusion):
   the KG service sources its file list via `self._vault._all_md_files()`
   in `_full_index()` (`knowledge_graph_service.py:936`), a call shared

@@ -14,6 +14,7 @@ from prisma.services.knowledge_graph_service import (
     Node,
     _sanitize_escape_sequences,
     _strip_dense_data_paragraphs,
+    _strip_reference_list_paragraphs,
 )
 
 
@@ -128,6 +129,55 @@ def test_extract_file_strips_dense_data_table_before_chunking(kg, vault):
 
     sent_prompt = mock_create.call_args.kwargs["messages"][1]["content"]
     assert "task_0" not in sent_prompt
+    assert "Intro prose." in sent_prompt or "Outro prose." in sent_prompt
+
+
+# ── Reference-list stripping ───────────────────────────────────────────────────
+# Confirmed live 2026-07-08: two real survey papers (Huang 2024 hallucination
+# survey, Liang 2022 multimodal ML survey) kept dead-lettering on max_tokens
+# after the dense-data-table fix alone — their failing chunks were flattened
+# bibliography entries ("[42] Author. Year. Title..."), not tables. PyMuPDF's
+# PDF-to-text extraction has no blank-line separation between consecutive
+# reference entries, so a paper's whole References section collapses into a
+# few huge paragraphs each packed with many "[NN]"-style markers back to back.
+# True bibliography paragraphs in both real papers had 13+ markers; ordinary
+# lit-review prose citing several works in one paragraph never exceeded 11 in
+# either paper — a clean, empirically-observed gap.
+
+def test_strip_reference_list_paragraphs_removes_flattened_bibliography():
+    refs = " ".join(f"[{i}] Some Author. 20{i:02d}. A Paper Title. Some Venue." for i in range(1, 15))
+    text = f"Intro prose about the method.\n\n{refs}\n\nMore prose after the references."
+    result = _strip_reference_list_paragraphs(text)
+    assert refs not in result
+    assert "Intro prose about the method." in result
+    assert "More prose after the references." in result
+
+
+def test_strip_reference_list_paragraphs_leaves_lit_review_prose_untouched():
+    # 11 markers — same shape as a real false-positive risk (a survey's
+    # literature-review paragraph citing several works in flowing prose),
+    # one below the empirically-observed threshold.
+    text = " ".join(f"Prior work [{i}] explores a related idea in this area." for i in range(1, 12))
+    assert _strip_reference_list_paragraphs(text) == text
+
+
+def test_strip_reference_list_paragraphs_leaves_normal_prose_untouched():
+    text = "MEMIT edits factual associations in GPT-J using a closed-form update."
+    assert _strip_reference_list_paragraphs(text) == text
+
+
+def test_extract_file_strips_reference_list_before_chunking(kg, vault):
+    refs = " ".join(f"[{i}] Some Author. 20{i:02d}. A Paper Title. Some Venue." for i in range(1, 15))
+    f = vault.root / "notes" / "test.md"
+    f.write_text(f"---\ntype: note\n---\nIntro prose.\n\n{refs}\n\nOutro prose.", encoding="utf-8")
+    result = _extraction(nodes=[{"id": "ok", "label": "OK"}])
+
+    with _patch_create(kg, return_value=result) as mock_create, \
+         patch("prisma.services.resource_lock.acquire", return_value=(True, "local-ollama", "req-1")):
+        kg._extract_file(f, "note")
+
+    sent_prompt = mock_create.call_args.kwargs["messages"][1]["content"]
+    assert "[1] Some Author" not in sent_prompt
     assert "Intro prose." in sent_prompt or "Outro prose." in sent_prompt
 
 

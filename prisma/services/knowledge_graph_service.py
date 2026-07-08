@@ -173,6 +173,38 @@ def _strip_dense_data_paragraphs(text: str) -> str:
     return "\n\n".join(p for p in paragraphs if not _looks_like_data_table(p))
 
 
+_REFERENCE_MARKER_RE = re.compile(r"\[\d{1,4}\]")
+
+
+def _looks_like_reference_list(paragraph: str) -> bool:
+    """A flattened bibliography block, not a citation-bearing prose
+    paragraph. PyMuPDF's PDF-to-text extraction has no blank-line separation
+    between consecutive numbered reference entries, so a paper's whole
+    "References" section collapses into a handful of huge (~5000+ char)
+    paragraphs each packed with many "[NN] Author. Year. Title..." entries
+    back to back.
+
+    Confirmed empirically against two real papers (Huang 2024 hallucination
+    survey, Liang 2022 multimodal ML survey): true bibliography paragraphs
+    have 13+ "[NN]"-style markers; ordinary lit-review prose that cites
+    several works in one paragraph never exceeds 11 in either paper — a
+    clean, non-arbitrary gap, not a tuned-to-the-edge-case threshold."""
+    return len(_REFERENCE_MARKER_RE.findall(paragraph)) >= 13
+
+
+def _strip_reference_list_paragraphs(text: str) -> str:
+    """Drop flattened bibliography paragraphs before chunking — same
+    rationale as `_strip_dense_data_paragraphs`, but for reference lists
+    instead of data tables: a chunk landing entirely inside a paper's
+    "References" section has dozens of distinct citations to enumerate, and
+    the model doesn't reliably cap itself at the prompt's stated entity
+    budget for this content shape either (confirmed live: real papers with
+    only this content shape — no dense tables — still dead-lettered on
+    `max_tokens` after the table-stripping fix alone)."""
+    paragraphs = text.split("\n\n")
+    return "\n\n".join(p for p in paragraphs if not _looks_like_reference_list(p))
+
+
 def _summarize_error(error: str, max_len: int = 300) -> str:
     """A short, single-line summary of an extraction failure, for the
     dead-letter file's header and the in-memory/status() record shown on
@@ -757,7 +789,7 @@ class KnowledgeGraphService:
                 return False
 
         chunker = semchunk.chunkerify(lambda s: len(s) // 4, chunk_size=self._token_budget)
-        chunkable_text = _strip_dense_data_paragraphs(text)
+        chunkable_text = _strip_reference_list_paragraphs(_strip_dense_data_paragraphs(text))
         sections = chunker(chunkable_text) if chunkable_text.strip() else []
 
         any_upserted = False

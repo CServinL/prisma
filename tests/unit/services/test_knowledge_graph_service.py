@@ -12,6 +12,7 @@ from prisma.services.knowledge_graph_service import (
     Extraction,
     KnowledgeGraphService,
     Node,
+    _sanitize_escape_sequences,
 )
 
 
@@ -41,6 +42,43 @@ def _extraction(nodes=None, edges=None) -> Extraction:
 
 def _patch_create(kg, **kwargs):
     return patch.object(kg._instructor_client.chat.completions, "create", **kwargs)
+
+
+# ── Escape-sequence sanitization ──────────────────────────────────────────────
+# Confirmed live 2026-07-07 (docs/kg-dead-letter-triage-2026-07-07.md): a real
+# paper's appendix of raw byte-sequence descriptions (e.g. `Hebrew: "\xd6"?`)
+# made the model try to preserve these sequences verbatim inside its JSON
+# string output, producing malformed `\u` escapes that failed Pydantic
+# validation across all 4 retries — every time, deterministically.
+
+def test_sanitize_escape_sequences_strips_hex_and_unicode_escapes():
+    text = 'Hebrew: "\\xd6"? and Arabic: unicode start "\\xd8" and Japanese: \\u0e98\\u3000'
+    result = _sanitize_escape_sequences(text)
+    assert "\\x" not in result
+    assert "\\u" not in result
+    assert "Hebrew" in result and "Arabic" in result and "Japanese" in result
+
+
+def test_sanitize_escape_sequences_leaves_normal_prose_untouched():
+    text = "MEMIT edits factual associations in GPT-J using a closed-form update."
+    assert _sanitize_escape_sequences(text) == text
+
+
+def test_extract_file_sanitizes_escape_sequences_before_calling_model(kg, vault):
+    f = vault.root / "notes" / "test.md"
+    f.write_text(
+        '---\ntype: note\n---\nHebrew: "\\xd6"? and Arabic: unicode start "\\xd8"?',
+        encoding="utf-8",
+    )
+    result = _extraction(nodes=[{"id": "ok", "label": "OK"}])
+
+    with _patch_create(kg, return_value=result) as mock_create, \
+         patch("prisma.services.resource_lock.acquire", return_value=(True, "local-ollama", "req-1")):
+        kg._extract_file(f, "note")
+
+    sent_prompt = mock_create.call_args.kwargs["messages"][1]["content"]
+    assert "\\xd6" not in sent_prompt
+    assert "\\xd8" not in sent_prompt
 
 
 # ── Extraction + upsert ───────────────────────────────────────────────────────
@@ -579,6 +617,51 @@ def test_dropped_chunk_recorded_in_memory_and_on_disk(kg, vault):
     assert dead_letter.exists()
     content = dead_letter.read_text(encoding="utf-8")
     assert "notes/test.md" in content
+    assert "Some content that will fail extraction." in content
+
+
+def test_dropped_chunk_summarizes_multiline_error_but_keeps_full_detail_on_disk(kg, vault):
+    f = vault.root / "notes" / "test.md"
+    f.write_text("---\ntype: note\n---\nSome content that will fail extraction.", encoding="utf-8")
+
+    # Shaped like a real InstructorRetryException.__str__() — a multi-page
+    # dump of every failed generation, ending in a <last_exception> block.
+    # Confirmed live 2026-07-07: this broke the dead-letter file's fixed
+    # 5-line header (the raw error was spliced directly into it) and dumped
+    # the whole thing into the KG progress page's dropped-chunks table cell.
+    multiline_error = (
+        "<failed_attempts>\n<generation number=\"1\">\n...\n</generation>\n</failed_attempts>\n\n"
+        "<last_exception>\n"
+        "    1 validation error for Extraction\n"
+        "  Invalid JSON: unexpected end of hex escape at line 29 column 45 "
+        "[type=json_invalid, input_value='...', input_type=str]\n"
+        "    For further information visit https://errors.pydantic.dev/2.12/v/json_invalid\n"
+        "</last_exception>\n"
+    )
+
+    with _patch_create(kg, side_effect=ValueError(multiline_error)), \
+         patch("prisma.services.resource_lock.acquire", return_value=(True, "local-ollama", "req-1")), \
+         patch("prisma.services.resource_lock.release"):
+        kg._extract_file(f, "note")
+
+    status = kg.status()
+    dropped = status["dropped_chunks_recent"][0]
+    assert "\n" not in dropped["error"]
+    assert "unexpected end of hex escape" in dropped["error"]
+    assert "<failed_attempts>" not in dropped["error"]
+
+    dead_letter = Path(dropped["dead_letter_path"])
+    content = dead_letter.read_text(encoding="utf-8")
+    lines = content.splitlines()
+    assert lines[0].startswith("# source_file:")
+    assert lines[1].startswith("# reason:")
+    assert lines[2].startswith("# error:")
+    assert "\n" not in lines[2]
+    assert lines[3].startswith("# retries:")
+    assert lines[4].startswith("# time:")
+    # full raw error preserved verbatim in the body, and the chunk content
+    # is still findable after it (not lost inside the error dump)
+    assert "<failed_attempts>" in content
     assert "Some content that will fail extraction." in content
 
 

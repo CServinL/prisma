@@ -162,7 +162,7 @@ class VaultService:
         self,
         vault_root: Path | str | None = None,
         default_notes: str = "notes",
-        default_sources: str = "sources",
+        default_sources: str = "Zotero Imported",
         default_chats: str = "chats",
     ) -> None:
         self.root = Path(vault_root or Path.home() / "prisma-vault").expanduser().resolve()
@@ -326,7 +326,7 @@ class VaultService:
             title=fm.get("title") or _first_heading(content) or path.stem,
             tags=list(dict.fromkeys(tags)),
             body=content,
-            promoted_from_chat=fm.get("promoted_from_chat"),
+            excerpt_of_chat=fm.get("excerpt_of_chat"),
             path=path,
             created_at=datetime.fromtimestamp(stat.st_mtime),
             modified_at=datetime.fromtimestamp(stat.st_mtime),
@@ -464,7 +464,7 @@ class VaultService:
                     return self.save_note(chat.excerpt_slug, body)
                 except FileNotFoundError:
                     pass  # note deleted underneath us — fall through to create a fresh one
-            note = self.create_note(f"Excerpt — {chat.title}", body=body, promoted_from_chat=chat_slug)
+            note = self.create_note(f"Excerpt — {chat.title}", body=body, excerpt_of_chat=chat_slug)
             chat_path = self._find_md(chat_slug)
             raw = chat_path.read_text(encoding="utf-8")
             fm, content = _parse_frontmatter(raw)
@@ -603,15 +603,15 @@ class VaultService:
 
     def create_note(
         self, title: str, body: str = "", tags: list[str] | None = None,
-        promoted_from_chat: str | None = None,
+        excerpt_of_chat: str | None = None,
     ) -> Note:
         self.ensure_dirs()
         slug = self._unique_slug(_slugify(title))
         fm = {"type": "note", "title": title}
         if tags:
             fm["tags"] = tags
-        if promoted_from_chat:
-            fm["promoted_from_chat"] = promoted_from_chat
+        if excerpt_of_chat:
+            fm["excerpt_of_chat"] = excerpt_of_chat
         path = self.default_dirs[NodeType.note] / f"{slug}.md"
         path.write_text(_render_frontmatter(fm) + body, encoding="utf-8")
         return self.get_note(slug)
@@ -765,12 +765,15 @@ class VaultService:
             return nodes
 
         streams_dir_name = self.default_dirs[NodeType.stream].name
+        chats_dir_name = self.default_dirs[NodeType.chat].name
         for entry in entries:
             name = entry.name
             if name in _SKIP_DIRS or name.startswith("."):
                 continue
             if entry.is_dir(follow_symlinks=True) and directory == self.root and name == streams_dir_name:
                 continue  # streams shown in the dedicated sidebar section, not the tree
+            if entry.is_dir(follow_symlinks=True) and directory == self.root and name == chats_dir_name:
+                continue  # chats shown in the dedicated sidebar section, not the tree
             if entry.is_dir(follow_symlinks=True):
                 children = self._tree_children(Path(entry.path))
                 if children:  # omit empty dirs
@@ -824,6 +827,8 @@ class VaultService:
                     else:
                         raw = path.read_text(encoding="utf-8")
                         fm, content = _parse_frontmatter(raw)
+                        if fm.get("excerpt_of_chat"):
+                            continue  # already shown in the chat's own Excerpt panel
                         nt = self._node_type_from_fm(fm)
                         title = fm.get("title") or _first_heading(content) or path.stem
                         stream_status = None

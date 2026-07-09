@@ -78,7 +78,7 @@ class Note(VaultNodeBase):
     node_type: NodeType = NodeType.note
     body: str = ""
     status: NoteStatus = NoteStatus.active
-    promoted_from_chat: str | None = None
+    excerpt_of_chat: str | None = None
     original_ext: str | None = None
 
 
@@ -95,7 +95,7 @@ class Source(VaultNodeBase):
     doi: str | None = None
     body: str = ""
     # Extension of the companion original file, e.g. ".pdf", ".html", ".svg".
-    # Companion lives at sources/<slug><original_ext>. None when only .md exists.
+    # Companion lives at <Zotero Imported dir>/<slug><original_ext>. None when only .md exists.
     original_ext: str | None = None
 
 

@@ -238,7 +238,7 @@
   let treeLoaded = $state(false);
   let sidebarEl = $state<HTMLElement | null>(null);
   // context menu
-  let ctxMenu = $state<{ x: number; y: number; slug: string | null; title: string; dirKey: string | null } | null>(null);
+  let ctxMenu = $state<{ x: number; y: number; slug: string | null; title: string; dirKey: string | null; isChat?: boolean } | null>(null);
   let ctxMovePicker = $state(false);
   let renameTarget = $state<{ slug: string; value: string } | null>(null);
   // drag and drop
@@ -916,7 +916,9 @@
 
   interface AppSettings { scale: number; server_url: string; }
 
-  const SCALE_OPTIONS = [1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0];
+  const SCALE_MIN = 1.0;
+  const SCALE_MAX = 5.0;
+  const SCALE_STEP = 0.5;
 
   let showSettings = $state(false);
   let cfg = $state<AppSettings>({ scale: 1.0, server_url: untrack(() => apiBase) });
@@ -1248,6 +1250,14 @@
                 ondrop={(e) => onDirDrop(e, dirPath)}
               >
                 <span class="tree-chevron" class:open>{open ? "▾" : "▸"}</span>
+                <svg class="tree-dir-icon" viewBox="0 0 24 24" fill="currentColor">
+                  {#if open}
+                    <path d="M3 6h6l2 2h10v2H3V6Z" opacity="0.55"/>
+                    <path d="M2 10h19l-2 9a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1L2 10Z"/>
+                  {:else}
+                    <path d="M3 6h6l2 2h10v11a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1Z"/>
+                  {/if}
+                </svg>
                 <span class="tree-dir-name">{node.name}</span>
               </button>
               {#if open}
@@ -1287,7 +1297,7 @@
         <div class="section-header">
           <button class="section-toggle" onclick={() => toggleSection("vault")}>
             <span class="section-chevron" class:open={sectionOpen.vault}>{sectionOpen.vault ? "▾" : "▸"}</span>
-            <span class="section-label">Vault</span>
+            <span class="section-label">Notes and Sources</span>
           </button>
         </div>
         {#if sectionOpen.vault}
@@ -1297,7 +1307,7 @@
                 {@render treeNode(node, "")}
               {/each}
             {:else}
-              <div class="sidebar-empty">Empty vault</div>
+              <div class="sidebar-empty">No notes or sources yet</div>
             {/if}
           </div>
         {/if}
@@ -1345,7 +1355,7 @@
                   class="tree-file"
                   class:active={activeChat?.slug === c.slug}
                   onclick={() => openChat(c.slug)}
-                  oncontextmenu={(e) => { e.preventDefault(); ctxMenu = { x: e.clientX, y: e.clientY, slug: c.slug, title: c.title, dirKey: null }; ctxMovePicker = false; }}
+                  oncontextmenu={(e) => { e.preventDefault(); ctxMenu = { x: e.clientX, y: e.clientY, slug: c.slug, title: c.title, dirKey: null, isChat: true }; ctxMovePicker = false; }}
                 >
                   <span class="tree-type-dot nt-chat"></span>
                   <span class="tree-file-name">{c.title}</span>
@@ -1582,17 +1592,15 @@
                         title={activeChat?.pinned_turns.includes(i) ? "Unpin from Excerpt" : "Pin to Excerpt"}
                         onclick={() => togglePinTurn(i)}
                       >
-                        <svg viewBox="0 0 24 24" width="14" height="14" fill={activeChat?.pinned_turns.includes(i) ? "currentColor" : "none"} stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor">
                           <path d="M12 21s-7-6.5-7-11a7 7 0 0 1 14 0c0 4.5-7 11-7 11z"/>
-                          <circle cx="12" cy="10" r="2.5" fill={activeChat?.pinned_turns.includes(i) ? "#0d1420" : "none"}/>
                         </svg>
                       </button>
                       <button class="chat-turn-action" title="Delete this turn" onclick={() => deleteChatMessage(i)}>
-                        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                          <polyline points="3 6 5 6 21 6"/>
-                          <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>
-                          <path d="M10 11v6M14 11v6"/>
-                          <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/>
+                        <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor">
+                          <rect x="9" y="3" width="6" height="2" rx="1"/>
+                          <rect x="4" y="6" width="16" height="2" rx="1"/>
+                          <path d="M6 9h12l-1 11a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2L6 9Z"/>
                         </svg>
                       </button>
                     </span>
@@ -1629,8 +1637,8 @@
               <span class="chat-notes-title">Excerpt</span>
               {#if activeChat.excerpt_regenerating}
                 <span class="chat-notes-regenerating" title="Regenerating the Excerpt in the background — showing the previous version until it's ready">
-                  <svg class="spin" viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
-                    <path d="M21 12a9 9 0 1 1-3-6.7"/>
+                  <svg class="spin" viewBox="0 0 24 24" width="11" height="11" fill="currentColor">
+                    <path d="M12 12V3a9 9 0 1 1-9 9Z"/>
                   </svg>
                   regenerating…
                 </span>
@@ -1673,29 +1681,29 @@
                   <div class="resource-card-header">
                     <span class="resource-pool-icon" title={pool.type}>
                       {#if pool.type === "gpu"}
-                        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5">
+                        <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
                           <rect x="6" y="6" width="12" height="12" rx="1"/>
-                          <rect x="9.5" y="9.5" width="5" height="5"/>
-                          <line x1="6" y1="9" x2="3" y2="9"/>
-                          <line x1="6" y1="12" x2="3" y2="12"/>
-                          <line x1="6" y1="15" x2="3" y2="15"/>
-                          <line x1="18" y1="9" x2="21" y2="9"/>
-                          <line x1="18" y1="12" x2="21" y2="12"/>
-                          <line x1="18" y1="15" x2="21" y2="15"/>
-                          <line x1="9" y1="6" x2="9" y2="3"/>
-                          <line x1="12" y1="6" x2="12" y2="3"/>
-                          <line x1="15" y1="6" x2="15" y2="3"/>
-                          <line x1="9" y1="18" x2="9" y2="21"/>
-                          <line x1="12" y1="18" x2="12" y2="21"/>
-                          <line x1="15" y1="18" x2="15" y2="21"/>
+                          <rect x="9.5" y="9.5" width="5" height="5" fill="#0d1420"/>
+                          <rect x="2" y="8.25" width="4" height="1.5" rx="0.5"/>
+                          <rect x="2" y="11.25" width="4" height="1.5" rx="0.5"/>
+                          <rect x="2" y="14.25" width="4" height="1.5" rx="0.5"/>
+                          <rect x="18" y="8.25" width="4" height="1.5" rx="0.5"/>
+                          <rect x="18" y="11.25" width="4" height="1.5" rx="0.5"/>
+                          <rect x="18" y="14.25" width="4" height="1.5" rx="0.5"/>
+                          <rect x="8.25" y="2" width="1.5" height="4" rx="0.5"/>
+                          <rect x="11.25" y="2" width="1.5" height="4" rx="0.5"/>
+                          <rect x="14.25" y="2" width="1.5" height="4" rx="0.5"/>
+                          <rect x="8.25" y="18" width="1.5" height="4" rx="0.5"/>
+                          <rect x="11.25" y="18" width="1.5" height="4" rx="0.5"/>
+                          <rect x="14.25" y="18" width="1.5" height="4" rx="0.5"/>
                         </svg>
                       {:else}
-                        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5">
+                        <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
                           <path d="M7 16a4 4 0 0 1-1-7.9 5 5 0 0 1 9.6-2.4A4.5 4.5 0 0 1 20 10a4 4 0 0 1-1 6H7z"/>
-                          <line x1="8" y1="17" x2="8" y2="20"/>
-                          <circle cx="8" cy="21" r="1" fill="currentColor" stroke="none"/>
-                          <line x1="14" y1="17" x2="14" y2="20"/>
-                          <circle cx="14" cy="21" r="1" fill="currentColor" stroke="none"/>
+                          <rect x="7.25" y="17" width="1.5" height="3" rx="0.75"/>
+                          <circle cx="8" cy="21" r="1"/>
+                          <rect x="13.25" y="17" width="1.5" height="3" rx="0.75"/>
+                          <circle cx="14" cy="21" r="1"/>
                         </svg>
                       {/if}
                     </span>
@@ -2058,11 +2066,16 @@
       {#if isTauri}
         <label class="setting-row">
           <span class="setting-label">Display scale</span>
-          <select bind:value={cfg.scale}>
-            {#each SCALE_OPTIONS as s}
-              <option value={s}>{s === 1.0 ? "1× (default)" : `${s}×`}</option>
-            {/each}
-          </select>
+          <div class="scale-slider-row">
+            <input
+              type="range"
+              min={SCALE_MIN}
+              max={SCALE_MAX}
+              step={SCALE_STEP}
+              bind:value={cfg.scale}
+            />
+            <span class="scale-slider-value">{cfg.scale === 1.0 ? "1× (default)" : `${cfg.scale}×`}</span>
+          </div>
           <span class="setting-hint">Applied immediately — persisted across restarts.</span>
         </label>
 
@@ -2109,7 +2122,9 @@
     <div class="ctx-menu" style="left:{ctxMenu.x}px; top:{ctxMenu.y}px">
       {#if !ctxMovePicker}
         {#if ctxMenu.slug}
-          <button class="ctx-item" onclick={() => ctxMovePicker = true}>Move to…</button>
+          {#if !ctxMenu.isChat}
+            <button class="ctx-item" onclick={() => ctxMovePicker = true}>Move to…</button>
+          {/if}
           <button class="ctx-item" onclick={() => { renameTarget = { slug: ctxMenu!.slug!, value: ctxMenu!.title }; ctxMenu = null; }}>Rename</button>
           <button class="ctx-item ctx-danger" onclick={() => doDelete(ctxMenu!.slug!)}>Delete</button>
         {/if}
@@ -2680,6 +2695,8 @@
 
   .tree-chevron { font-size: 9px; flex-shrink: 0; color: #2a4060; }
   .tree-chevron.open { color: #4a6a8a; }
+
+  .tree-dir-icon { width: 1em; height: 1em; flex-shrink: 0; color: #3a5a7a; }
 
   .tree-dir-name {
     overflow: hidden;
@@ -3705,6 +3722,27 @@
   }
   .setting-row select:focus,
   .setting-row input:focus { border-color: #4a9eff; }
+
+  .scale-slider-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .scale-slider-row input[type="range"] {
+    flex: 1;
+    width: auto;
+    padding: 0;
+    background: none;
+    border: none;
+    accent-color: #4a9eff;
+  }
+  .scale-slider-value {
+    font-size: 12px;
+    color: #e8edf8;
+    min-width: 84px;
+    text-align: right;
+    flex-shrink: 0;
+  }
 
   .setting-hint {
     font-size: 10px;

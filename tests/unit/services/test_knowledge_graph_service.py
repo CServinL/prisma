@@ -860,3 +860,28 @@ def test_dropped_chunks_total_is_zero_when_nothing_failed(kg):
     status = kg.status()
     assert status["dropped_chunks_total"] == 0
     assert status["dropped_chunks_recent"] == []
+
+
+def test_clear_dead_letters_removes_files_and_resets_counters(kg, vault):
+    f = vault.root / "notes" / "test.md"
+    f.write_text("---\ntype: note\n---\nSome content that will fail extraction.", encoding="utf-8")
+
+    with _patch_create(kg, side_effect=ValueError("validation retries exhausted")), \
+         patch("prisma.services.resource_lock.acquire", return_value=(True, "local-ollama", "req-1")), \
+         patch("prisma.services.resource_lock.release"):
+        kg._extract_file(f, "note")
+
+    dead_letter = Path(kg.status()["dropped_chunks_recent"][0]["dead_letter_path"])
+    assert dead_letter.exists()
+
+    removed = kg.clear_dead_letters()
+
+    assert removed == 1
+    assert not dead_letter.exists()
+    status = kg.status()
+    assert status["dropped_chunks_total"] == 0
+    assert status["dropped_chunks_recent"] == []
+
+
+def test_clear_dead_letters_returns_zero_when_none_exist(kg):
+    assert kg.clear_dead_letters() == 0

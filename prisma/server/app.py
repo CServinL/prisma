@@ -420,6 +420,18 @@ def reload_chroma():
     return {"status": "reloaded"}
 
 
+@app.post("/supervisor/restart/{name}")
+def restart_worker(name: str):
+    """Proxies to the supervisor's own POST /supervisor/restart/{name} —
+    lets the UI restart a single worker process (api/web/chroma/kg) without
+    needing direct access to the supervisor's loopback-only control port,
+    same pattern as resource_lock.status()/process_status() already use for
+    read-only supervisor data on /status."""
+    return resource_lock.restart_worker(
+        "127.0.0.1", resource_lock.default_port(), name,
+    )
+
+
 @app.post("/reload")
 def reload_server():
     global _vault, _indexer, _chroma, _zotero

@@ -64,6 +64,23 @@ def test_process_status_returns_empty_dict_when_unreachable():
     assert result == {}
 
 
+def test_restart_worker_returns_supervisor_response_on_success():
+    mock_resp = MagicMock()
+    mock_resp.json.return_value = {"status": "restarted", "worker": "api"}
+    with patch("prisma.services.resource_lock.requests.post", return_value=mock_resp) as mock_post:
+        result = resource_lock.restart_worker("127.0.0.1", 8760, "api")
+
+    mock_post.assert_called_once_with("http://127.0.0.1:8760/supervisor/restart/api", timeout=10.0)
+    assert result == {"status": "restarted", "worker": "api"}
+
+
+def test_restart_worker_returns_error_dict_when_unreachable():
+    with patch("prisma.services.resource_lock.requests.post", side_effect=requests.ConnectionError("down")):
+        result = resource_lock.restart_worker("127.0.0.1", 8760, "api")
+
+    assert "error" in result
+
+
 def test_lease_yields_true_and_releases_on_success():
     with patch("prisma.services.resource_lock.acquire", return_value=(True, "default", "req-1")) as mock_acquire, \
          patch("prisma.services.resource_lock.release") as mock_release:

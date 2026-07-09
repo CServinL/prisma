@@ -121,6 +121,21 @@ def process_status(host: str, port: int, timeout: float = 3.0) -> dict:
         return {}
 
 
+def restart_worker(host: str, port: int, name: str, timeout: float = 10.0) -> dict:
+    """Restarts one supervisor-managed worker process (api/web/chroma/kg) —
+    for surfacing on the api process's UI-facing reload control without the
+    UI needing direct access to the supervisor's loopback-only control port.
+    Same fail-open-ish spirit as status()/process_status(): returns
+    {"error": ...} rather than raising if the supervisor isn't reachable or
+    the worker name is unknown."""
+    try:
+        resp = requests.post(f"http://{host}:{port}/supervisor/restart/{name}", timeout=timeout)
+        return resp.json()
+    except requests.RequestException as exc:
+        _log.warning("supervisor unreachable at %s:%d — could not restart %r: %s", host, port, name, exc)
+        return {"error": str(exc)}
+
+
 def release(host: str, port: int, resource: str | None, request_id: str | None, timeout: float = 3.0) -> None:
     if resource is None or request_id is None:
         return

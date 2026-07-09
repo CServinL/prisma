@@ -155,6 +155,7 @@
 
   const DEFAULT_API = "http://127.0.0.1:8765";
   const DEFAULT_API_PORT = 8765;
+  const DEFAULT_SUPERVISOR_PORT = 8760;
 
   // The Web process (serving this page at /app) and the API process are
   // independent processes/ports (see ADR-012) — the page's own origin is no
@@ -698,25 +699,47 @@
 
   // ── Reload ──────────────────────────────────────────────────────────────────
 
-  type ReloadScope = "all" | "ui" | "config" | "indexers";
+  // Matches the supervisor's own worker set (prisma/server/supervisor.py's
+  // `workers` dict) — see GET /supervisor/status, proxied to the UI as
+  // serverStatus.processes.
+  const WORKER_NAMES = ["api", "web", "chroma", "kg"] as const;
+  type WorkerName = (typeof WORKER_NAMES)[number];
+  type ReloadScope = "all" | WorkerName;
   let reloading = $state(false);
   let reloadScope = $state<ReloadScope>("all");
 
-  const RELOAD_ENDPOINTS: Record<ReloadScope, string> = {
-    all:      "/reload",
-    ui:       "/reload/ui",
-    config:   "/reload/vault",
-    indexers: "/reload/indexer",
-  };
+  function supervisorBase(): string {
+    try {
+      const url = new URL(apiBase);
+      url.port = String(DEFAULT_SUPERVISOR_PORT);
+      return url.origin;
+    } catch {
+      return `http://127.0.0.1:${DEFAULT_SUPERVISOR_PORT}`;
+    }
+  }
+
+  async function restartWorker(name: WorkerName): Promise<void> {
+    // Restarting "api" by proxying through the api process itself would
+    // kill the very process handling this request before it can respond —
+    // hit the supervisor's own loopback control port directly instead
+    // (same reasoning the old code hit webBase directly for UI reloads
+    // rather than proxying those through the api process either).
+    if (name === "api") {
+      await fetch(`${supervisorBase()}/supervisor/restart/api`, { method: "POST" });
+    } else {
+      await fetch(`${apiBase}/supervisor/restart/${name}`, { method: "POST" });
+    }
+  }
 
   async function reloadServer() {
     reloading = true;
     try {
-      // /reload/ui lives on the Web process (it owns UI serving — see ADR-012);
-      // every other scope is an API-process concern.
-      const base = reloadScope === "ui" ? webBase : apiBase;
-      await fetch(`${base}${RELOAD_ENDPOINTS[reloadScope]}`, { method: "POST" });
-      if (reloadScope === "ui") {
+      if (reloadScope === "all") {
+        for (const name of WORKER_NAMES) await restartWorker(name);
+      } else {
+        await restartWorker(reloadScope);
+      }
+      if (reloadScope === "all" || reloadScope === "web") {
         window.location.reload();
       } else {
         await Promise.all([loadTree(), loadStreams(), loadChats(), loadZoteroStatus()]);
@@ -2095,10 +2118,11 @@
     <div class="settings-danger-zone">
       <div class="reload-scope">
         {#each [
-          { value: "all",      label: "All" },
-          { value: "ui",       label: "UI only" },
-          { value: "config",   label: "Config" },
-          { value: "indexers", label: "Indexers" },
+          { value: "all",    label: "All" },
+          { value: "api",    label: "API" },
+          { value: "web",    label: "Web (UI)" },
+          { value: "chroma", label: "Chroma" },
+          { value: "kg",     label: "Knowledge Graph" },
         ] as opt (opt.value)}
           <label class="reload-option">
             <input type="radio" name="reload-scope" value={opt.value} bind:group={reloadScope} />

@@ -1010,7 +1010,7 @@ class KnowledgeGraphService:
         changed = 0
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
             next_index = 0
-            in_flight: dict[concurrent.futures.Future, None] = {}
+            in_flight: dict[concurrent.futures.Future, Path] = {}
 
             def _submit_next() -> None:
                 nonlocal next_index
@@ -1019,7 +1019,8 @@ class KnowledgeGraphService:
                 if next_index >= len(paths):
                     return
                 path = paths[next_index]
-                in_flight[pool.submit(self._extract_file, path, self._trust_tier_for(path), generation)] = None
+                future = pool.submit(self._extract_file, path, self._trust_tier_for(path), generation)
+                in_flight[future] = path
                 next_index += 1
 
             for _ in range(max_workers):
@@ -1027,11 +1028,11 @@ class KnowledgeGraphService:
             while in_flight:
                 done, _ = concurrent.futures.wait(list(in_flight), return_when=concurrent.futures.FIRST_COMPLETED)
                 for future in done:
-                    del in_flight[future]
+                    path = in_flight.pop(future)
                     if future.result():
                         changed += 1
                     if on_file_done:
-                        on_file_done()
+                        on_file_done(path)
                     _submit_next()
         return changed
 
@@ -1066,14 +1067,42 @@ class KnowledgeGraphService:
         try:
             all_files = [p for p in self._vault._all_md_files() if p.suffix in self.index_extensions]
             _log.info("knowledge graph full index start: %d files total", len(all_files))
-            self._set_activity(f"scanning {len(all_files)} file(s), up to {self._extraction_concurrency} concurrent")
+
+            # A fresh restart's full index still walks every file (a changed
+            # or brand-new file must never be missed), but most vault files
+            # already succeeded last time and are unchanged — an instant
+            # hash-check skip, no real work. Counting those toward "sync_total"
+            # made the progress page's "X of Y" wildly misleading: a full
+            # restart always starts back at "0 of 102," even though maybe 4
+            # files actually need real (slow, possibly failing) extraction —
+            # the other 98 are free. Pre-scanning by content hash up front
+            # lets the displayed total reflect only files that actually need
+            # work, matching what a restart will actually spend time on.
+            needs_processing: set[str] = set()
+            for path in all_files:
+                try:
+                    rel = str(path.relative_to(self._vault.root))
+                    text = path.read_text(encoding="utf-8", errors="replace")
+                except (OSError, ValueError):
+                    continue
+                content_hash = hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()
+                with self._lock:
+                    if self._indexed_hash(rel) != content_hash:
+                        needs_processing.add(rel)
+
+            self._set_activity(
+                f"scanning {len(all_files)} file(s), {len(needs_processing)} need reprocessing, "
+                f"up to {self._extraction_concurrency} concurrent"
+            )
             with self._lock:
-                self._sync_total = len(all_files)
+                self._sync_total = len(needs_processing)
                 self._sync_done = 0
 
-            def _on_file_done() -> None:
+            def _on_file_done(path: Path) -> None:
+                rel = str(path.relative_to(self._vault.root))
                 with self._lock:
-                    self._sync_done += 1
+                    if rel in needs_processing:
+                        self._sync_done += 1
 
             changed = self._extract_files_concurrently(all_files, on_file_done=_on_file_done, generation=generation)
             with self._lock:

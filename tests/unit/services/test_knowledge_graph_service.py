@@ -2,6 +2,7 @@
 graph module that replaces the third-party `graphify` pip dependency.
 See TODO.md and docs/wiki/adr/ADR-012-process-supervision.md.
 """
+import hashlib
 from pathlib import Path
 from unittest.mock import patch
 
@@ -660,7 +661,7 @@ def test_full_index_tracks_progress_while_running(kg, vault):
     def fake_extract_files_concurrently(paths, on_file_done=None, generation=None):
         seen_total["sync_total"] = kg.status()["sync_total"]
         if on_file_done:
-            on_file_done()
+            on_file_done(paths[0])
             seen_total["sync_done_after_one"] = kg.status()["sync_done"]
         return 0
 
@@ -669,6 +670,36 @@ def test_full_index_tracks_progress_while_running(kg, vault):
 
     assert seen_total["sync_total"] == 2
     assert seen_total["sync_done_after_one"] == 1
+
+
+def test_full_index_sync_total_excludes_already_indexed_files(kg, vault):
+    # Real bug this guards against: a fresh restart always walks every vault
+    # file (a changed/new file must never be missed), but most files already
+    # succeeded last time and are an instant hash-check skip — no real work.
+    # Counting those toward sync_total made "X of Y" wildly misleading (e.g.
+    # "0 of 102" on every restart even when only a couple of files actually
+    # need real extraction). sync_total must reflect only files whose
+    # content hash doesn't match what's already indexed.
+    already_indexed = vault.root / "notes" / "already.md"
+    already_indexed.write_text("---\ntype: note\n---\nUnchanged content.", encoding="utf-8")
+    needs_work = vault.root / "notes" / "new.md"
+    needs_work.write_text("---\ntype: note\n---\nBrand new content.", encoding="utf-8")
+
+    rel = str(already_indexed.relative_to(vault.root))
+    content_hash = hashlib.sha256(already_indexed.read_text(encoding="utf-8").encode("utf-8")).hexdigest()
+    with kg._lock:
+        kg._set_indexed_hash(rel, content_hash)
+
+    seen_total = {}
+
+    def fake_extract_files_concurrently(paths, on_file_done=None, generation=None):
+        seen_total["sync_total"] = kg.status()["sync_total"]
+        return 0
+
+    with patch.object(kg, "_extract_files_concurrently", side_effect=fake_extract_files_concurrently):
+        kg._full_index()
+
+    assert seen_total["sync_total"] == 1
 
 
 def test_extract_file_tracks_current_file_chunk_progress(kg, vault):

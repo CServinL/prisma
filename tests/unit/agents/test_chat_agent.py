@@ -158,13 +158,13 @@ def _note(title: str, body: str) -> Note:
     return Note(slug=title.lower().replace(" ", "-"), title=title, body=body, path=Path(f"/tmp/{title}.md"))
 
 
-def test_respond_injects_promoted_notes_into_system_prompt():
+def test_respond_injects_excerpt_notes_into_system_prompt():
     llm = MagicMock()
     llm.complete.return_value = "ok"
     agent = _agent(llm=llm)
-    promoted = [_note("Key Decision", "We agreed to use Kùzu, not Neo4j.")]
+    excerpt = [_note("Key Decision", "We agreed to use Kùzu, not Neo4j.")]
 
-    agent.respond(history=[], user_text="what did we decide?", promoted_notes=promoted)
+    agent.respond(history=[], user_text="what did we decide?", excerpt_notes=excerpt)
 
     sent_messages = llm.complete.call_args[0][0]
     system_content = sent_messages[0]["content"]
@@ -173,29 +173,29 @@ def test_respond_injects_promoted_notes_into_system_prompt():
     assert "don't re-litigate" in system_content
 
 
-def test_respond_with_no_promoted_notes_has_no_established_block():
+def test_respond_with_no_excerpt_notes_has_no_established_block():
     llm = MagicMock()
     llm.complete.return_value = "ok"
     agent = _agent(llm=llm)
 
-    agent.respond(history=[], user_text="hello", promoted_notes=None)
+    agent.respond(history=[], user_text="hello", excerpt_notes=None)
 
     sent_messages = llm.complete.call_args[0][0]
     system_content = sent_messages[0]["content"]
     assert "Already established" not in system_content
 
 
-def test_respond_promoted_notes_survive_history_truncation():
-    # Regression guard for the whole point of this feature: promoted notes
+def test_respond_excerpt_notes_survive_history_truncation():
+    # Regression guard for the whole point of this feature: excerpt notes
     # must stay in context even when max_history_tokens forces the raw
     # turns that produced them to be dropped.
     llm = MagicMock()
     llm.complete.return_value = "ok"
     agent = _agent(llm=llm, max_history_tokens=1)  # drops virtually all raw history
-    promoted = [_note("Settled Point", "The answer was 42.")]
+    excerpt = [_note("Settled Point", "The answer was 42.")]
     history = [ChatMessage(role=ChatRole.user, content="x" * 400)]
 
-    agent.respond(history=history, user_text="remind me", promoted_notes=promoted)
+    agent.respond(history=history, user_text="remind me", excerpt_notes=excerpt)
 
     sent_messages = llm.complete.call_args[0][0]
     system_content = sent_messages[0]["content"]
@@ -291,12 +291,12 @@ def test_context_usage_counts_system_prompt_and_bounded_history():
     assert used > baseline
 
 
-def test_context_usage_includes_promoted_notes_in_the_count():
+def test_context_usage_includes_excerpt_notes_in_the_count():
     llm = MagicMock()
     agent = _agent(llm=llm, max_history_tokens=16000)
-    promoted = [_note("Excerpt", "x" * 4000)]
+    excerpt = [_note("Excerpt", "x" * 4000)]
 
-    with_excerpt, _ = agent.context_usage(history=[], promoted_notes=promoted)
+    with_excerpt, _ = agent.context_usage(history=[], excerpt_notes=excerpt)
     without_excerpt, _ = agent.context_usage(history=[])
 
     assert with_excerpt > without_excerpt

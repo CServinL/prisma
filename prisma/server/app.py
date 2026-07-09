@@ -596,15 +596,15 @@ def _with_context_usage(chat_node: Chat) -> Chat:
     """Attaches response-only fields (ADR-015) — not persisted, computed
     fresh on every response since they depend on the live-configured
     ChatAgent / in-memory regeneration state, not stored chat data."""
-    promoted_notes = []
+    excerpt_notes = []
     if chat_node.excerpt_slug:
         try:
             note = _vault.get_note(chat_node.excerpt_slug)
-            promoted_notes.append(note)
+            excerpt_notes.append(note)
             chat_node.excerpt_summary_html = _excerpt_summary_html(note.body)
         except FileNotFoundError:
             pass
-    used, maximum = _chat_agent.context_usage(chat_node.messages, promoted_notes=promoted_notes)
+    used, maximum = _chat_agent.context_usage(chat_node.messages, excerpt_notes=excerpt_notes)
     chat_node.context_tokens_used = used
     chat_node.context_tokens_max = maximum
     with _excerpt_regenerating_lock:
@@ -630,14 +630,14 @@ def chat(req: ChatRequest):
     # The chat's single Excerpt (ADR-015) is durable context — always
     # included, independent of the (bounded, rolling) raw history, so the
     # model doesn't re-litigate what's already been settled.
-    promoted_notes = []
+    excerpt_notes = []
     if chat_node.excerpt_slug:
         try:
-            promoted_notes.append(_vault.get_note(chat_node.excerpt_slug))
+            excerpt_notes.append(_vault.get_note(chat_node.excerpt_slug))
         except FileNotFoundError:
             _log.warning("chat %r: excerpt note %r no longer exists", chat_node.slug, chat_node.excerpt_slug)
     user_msg = ChatMessage(role=ChatRole.user, content=req.message)
-    assistant_msg = _chat_agent.respond(history, req.message, promoted_notes=promoted_notes)
+    assistant_msg = _chat_agent.respond(history, req.message, excerpt_notes=excerpt_notes)
     # append_messages (not save_chat with the pre-call `history` snapshot)
     # re-reads the chat's *current* messages atomically right before
     # writing — closes the race where a DELETE /chats/{slug}/messages/{index}

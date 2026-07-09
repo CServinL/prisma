@@ -11,6 +11,13 @@ const config = {
   kit: {
     adapter: adapter({
       fallback: "index.html",
+      // Built into a staging directory, then atomically swapped into place by
+      // scripts/swap-build.mjs — building straight into "build" would leave
+      // prisma serve's web process (which mounts "build" live via
+      // CleanUrlStaticFiles) serving 404s for the several seconds the old
+      // output is deleted before the new one finishes writing.
+      pages: "build-next",
+      assets: "build-next",
     }),
     paths: {
       base: "/app",

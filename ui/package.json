@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite dev",
-    "build": "rimraf .svelte-kit build && svelte-kit sync && vite build",
+    "build": "rimraf .svelte-kit build-next && svelte-kit sync && vite build && node scripts/swap-build.mjs",
     "preview": "vite preview",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json"
   },

@@ -520,6 +520,26 @@ class KnowledgeGraphService:
             self._current_file_chunks_done = 0
         threading.Thread(target=self._full_index, daemon=True, name="knowledge-graph-reindex").start()
 
+    def clear_dead_letters(self) -> int:
+        """Delete every dead-letter file on disk and reset the in-memory
+        drop counters/recent list. Does not touch `_dropped_chunks_total`'s
+        history for files already re-extracted successfully — those chunks
+        aren't dropped anymore, so nothing to preserve. Returns how many
+        files were deleted."""
+        dead_letter_dir = self._kg_dir / "dead_letters"
+        removed = 0
+        if dead_letter_dir.is_dir():
+            for path in dead_letter_dir.glob("*.txt"):
+                try:
+                    path.unlink()
+                    removed += 1
+                except OSError as exc:
+                    _log.warning("failed to remove dead-letter file %s: %s", path, exc)
+        with self._lock:
+            self._dropped_chunks.clear()
+            self._dropped_chunks_total = 0
+        return removed
+
     def _ollama_ready(self) -> bool:
         import socket
         try:

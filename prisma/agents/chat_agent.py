@@ -120,9 +120,9 @@ class ChatAgent:
         return self._llm.complete(messages)
 
     def respond(
-        self, history: list[ChatMessage], user_text: str, promoted_notes: list[Note] | None = None,
+        self, history: list[ChatMessage], user_text: str, excerpt_notes: list[Note] | None = None,
     ) -> ChatMessage:
-        messages = [{"role": "system", "content": self._full_system_prompt(promoted_notes or [])}]
+        messages = [{"role": "system", "content": self._full_system_prompt(excerpt_notes or [])}]
         for m in self._bounded_history(history):
             messages.append({"role": m.role.value, "content": m.content})
         messages.append({"role": "user", "content": user_text})
@@ -158,25 +158,25 @@ class ChatAgent:
             tool_calls=tool_calls,
         )
 
-    def context_usage(self, history: list[ChatMessage], promoted_notes: list[Note] | None = None) -> tuple[int, int]:
+    def context_usage(self, history: list[ChatMessage], excerpt_notes: list[Note] | None = None) -> tuple[int, int]:
         """(tokens_used, max_tokens) for the UI's context label — the same
         assembly `respond()` sends (system prompt + tool section + Excerpt +
         bounded history), estimated with the same len(s)//4 heuristic used
         throughout this codebase. max_tokens is `max_history_tokens` (the
         session's configured budget), not the backend's raw context ceiling
         — see ADR-015's "Resolved" section for why."""
-        system_prompt = self._full_system_prompt(promoted_notes or [])
+        system_prompt = self._full_system_prompt(excerpt_notes or [])
         bounded = self._bounded_history(history)
         used = _estimate_tokens(system_prompt) + sum(_estimate_tokens(m.content) for m in bounded)
         return used, self._max_history_tokens
 
-    def _full_system_prompt(self, promoted_notes: list[Note]) -> str:
+    def _full_system_prompt(self, excerpt_notes: list[Note]) -> str:
         parts = [self._system_prompt, system_prompt_tool_section()]
-        if promoted_notes:
-            parts.append(self._promoted_context_block(promoted_notes))
+        if excerpt_notes:
+            parts.append(self._excerpt_context_block(excerpt_notes))
         return "\n\n".join(parts)
 
-    def _promoted_context_block(self, promoted_notes: list[Note]) -> str:
+    def _excerpt_context_block(self, excerpt_notes: list[Note]) -> str:
         # Deliberately NOT subject to _bounded_history's rolling truncation —
         # this is durable, user-curated ground truth for this conversation
         # (see TODO.md: "meeting notes," not the raw "meeting" transcript),
@@ -185,7 +185,7 @@ class ChatAgent:
             "Already established in this conversation (curated by the user "
             "— treat as settled, don't re-litigate or re-ask about these):",
         ]
-        for note in promoted_notes:
+        for note in excerpt_notes:
             lines.append(f"\n### {note.title}\n{note.body}")
         return "\n".join(lines)
 

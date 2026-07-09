@@ -137,15 +137,15 @@ def test_get_any_dispatches_chat_type_to_get_chat(vault):
 
 # ── Excerpt: one Excerpt note per chat, Summary + pinned turns (ADR-015) ──────
 
-def test_save_excerpt_creates_note_with_promoted_from_chat(vault):
+def test_save_excerpt_creates_note_with_excerpt_of_chat(vault):
     chat = vault.create_chat("Research Session")
     turns = [ChatMessage(role=ChatRole.user, content="We agreed to use Kùzu, not Neo4j.")]
 
     note = vault.save_excerpt(chat.slug, "We chose Kùzu over Neo4j.", turns)
 
-    assert note.promoted_from_chat == chat.slug
+    assert note.excerpt_of_chat == chat.slug
     raw = (vault.root / "notes" / f"{note.slug}.md").read_text(encoding="utf-8")
-    assert f"promoted_from_chat: {chat.slug}" in raw
+    assert f"excerpt_of_chat: {chat.slug}" in raw
     assert "We chose Kùzu over Neo4j." in raw
 
 
@@ -236,3 +236,25 @@ def test_set_pinned_turns_records_indices_on_chat(vault):
 def test_set_pinned_turns_raises_for_missing_chat(vault):
     with pytest.raises(FileNotFoundError):
         vault.set_pinned_turns("does-not-exist", [0])
+
+
+# ── Tree: chats and Excerpts already shown in dedicated sidebar sections ──────
+
+def test_get_tree_excludes_chats_dir(vault):
+    vault.create_chat("Research Session")
+
+    names = [n.name for n in vault.get_tree()]
+
+    assert "chats" not in names
+
+
+def test_get_tree_excludes_excerpt_notes(vault):
+    chat = vault.create_chat("Research Session")
+    vault.save_excerpt(chat.slug, "Settled.", [])
+    vault.create_note("A Real Note", body="Some content.")
+
+    notes_dir = next(n for n in vault.get_tree() if n.name == "notes")
+    file_names = [c.name for c in notes_dir.children]
+
+    assert not any(name.startswith("excerpt-") for name in file_names)
+    assert any("a-real-note" in name for name in file_names)

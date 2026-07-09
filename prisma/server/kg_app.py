@@ -145,6 +145,12 @@ def taint_file(rel: str = Query(...)):
     return {"tainted": tainted}
 
 
+@app.post("/clear_dead_letters")
+def clear_dead_letters():
+    removed = _kg.clear_dead_letters()
+    return {"removed": removed}
+
+
 @app.get("/entities_for_file")
 def entities_for_file(rel: str = Query(...)):
     return _kg.entities_for_file(rel)

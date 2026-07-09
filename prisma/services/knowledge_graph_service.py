@@ -205,6 +205,42 @@ def _strip_reference_list_paragraphs(text: str) -> str:
     return "\n\n".join(p for p in paragraphs if not _looks_like_reference_list(p))
 
 
+_FEATURE_ID_RE = re.compile(r"^[A-Za-z]{1,2}/\d{1,3}/\d{1,6}$")
+_ZOOM_LINK_RE = re.compile(r"Zoom to .*View details.*\(<?https?://")
+
+
+def _is_feature_catalog_marker(paragraph: str) -> bool:
+    p = paragraph.strip()
+    return bool(_FEATURE_ID_RE.match(p)) or bool(_ZOOM_LINK_RE.search(p))
+
+
+def _strip_feature_catalog_paragraphs(text: str) -> str:
+    """Drop an interactive feature-catalog appendix (e.g. Bricken 2023's
+    "Towards Monosemanticity" per-neuron browser: hundreds of repeating
+    `<feature ID>` / <one-line description> / "Zoom to [View details](...)"
+    triples). Unlike the data-table and reference-list cases, no single
+    paragraph here looks dense or enumeration-shaped by itself — each is a
+    short, ordinary-looking line — so the pattern only shows up across a
+    *run* of paragraphs, not within any one of them.
+
+    The ID line (e.g. "A/1/1538") and the "Zoom to ... View details" link
+    line are both unambiguous structural markers unlikely to appear in real
+    prose; a plain short paragraph sandwiched directly between two such
+    markers is that entry's one-line description — drop it too, since it
+    describes one specific neuron/feature (an instance), not a general
+    concept. Confirmed live 2026-07-08: this is ~84% of Bricken 2023's total
+    file content, none of it holding conceptual value the KG rules already
+    want (see `_EXTRACTION_SYSTEM`'s "instances and evidence" exclusion) —
+    it just wasn't being caught before chunking."""
+    paragraphs = text.split("\n\n")
+    is_marker = [_is_feature_catalog_marker(p) for p in paragraphs]
+    drop = list(is_marker)
+    for i in range(1, len(paragraphs) - 1):
+        if not is_marker[i] and is_marker[i - 1] and is_marker[i + 1]:
+            drop[i] = True
+    return "\n\n".join(p for p, d in zip(paragraphs, drop) if not d)
+
+
 def _summarize_error(error: str, max_len: int = 300) -> str:
     """A short, single-line summary of an extraction failure, for the
     dead-letter file's header and the in-memory/status() record shown on
@@ -789,7 +825,9 @@ class KnowledgeGraphService:
                 return False
 
         chunker = semchunk.chunkerify(lambda s: len(s) // 4, chunk_size=self._token_budget)
-        chunkable_text = _strip_reference_list_paragraphs(_strip_dense_data_paragraphs(text))
+        chunkable_text = _strip_feature_catalog_paragraphs(
+            _strip_reference_list_paragraphs(_strip_dense_data_paragraphs(text))
+        )
         sections = chunker(chunkable_text) if chunkable_text.strip() else []
 
         any_upserted = False

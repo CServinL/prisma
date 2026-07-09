@@ -14,6 +14,8 @@ from prisma.services.knowledge_graph_service import (
     Node,
     _sanitize_escape_sequences,
     _strip_dense_data_paragraphs,
+    _strip_feature_catalog_paragraphs,
+    _strip_reference_list_paragraphs,
 )
 
 
@@ -128,6 +130,114 @@ def test_extract_file_strips_dense_data_table_before_chunking(kg, vault):
 
     sent_prompt = mock_create.call_args.kwargs["messages"][1]["content"]
     assert "task_0" not in sent_prompt
+    assert "Intro prose." in sent_prompt or "Outro prose." in sent_prompt
+
+
+# ── Reference-list stripping ───────────────────────────────────────────────────
+# Confirmed live 2026-07-08: two real survey papers (Huang 2024 hallucination
+# survey, Liang 2022 multimodal ML survey) kept dead-lettering on max_tokens
+# after the dense-data-table fix alone — their failing chunks were flattened
+# bibliography entries ("[42] Author. Year. Title..."), not tables. PyMuPDF's
+# PDF-to-text extraction has no blank-line separation between consecutive
+# reference entries, so a paper's whole References section collapses into a
+# few huge paragraphs each packed with many "[NN]"-style markers back to back.
+# True bibliography paragraphs in both real papers had 13+ markers; ordinary
+# lit-review prose citing several works in one paragraph never exceeded 11 in
+# either paper — a clean, empirically-observed gap.
+
+def test_strip_reference_list_paragraphs_removes_flattened_bibliography():
+    refs = " ".join(f"[{i}] Some Author. 20{i:02d}. A Paper Title. Some Venue." for i in range(1, 15))
+    text = f"Intro prose about the method.\n\n{refs}\n\nMore prose after the references."
+    result = _strip_reference_list_paragraphs(text)
+    assert refs not in result
+    assert "Intro prose about the method." in result
+    assert "More prose after the references." in result
+
+
+def test_strip_reference_list_paragraphs_leaves_lit_review_prose_untouched():
+    # 11 markers — same shape as a real false-positive risk (a survey's
+    # literature-review paragraph citing several works in flowing prose),
+    # one below the empirically-observed threshold.
+    text = " ".join(f"Prior work [{i}] explores a related idea in this area." for i in range(1, 12))
+    assert _strip_reference_list_paragraphs(text) == text
+
+
+def test_strip_reference_list_paragraphs_leaves_normal_prose_untouched():
+    text = "MEMIT edits factual associations in GPT-J using a closed-form update."
+    assert _strip_reference_list_paragraphs(text) == text
+
+
+def test_extract_file_strips_reference_list_before_chunking(kg, vault):
+    refs = " ".join(f"[{i}] Some Author. 20{i:02d}. A Paper Title. Some Venue." for i in range(1, 15))
+    f = vault.root / "notes" / "test.md"
+    f.write_text(f"---\ntype: note\n---\nIntro prose.\n\n{refs}\n\nOutro prose.", encoding="utf-8")
+    result = _extraction(nodes=[{"id": "ok", "label": "OK"}])
+
+    with _patch_create(kg, return_value=result) as mock_create, \
+         patch("prisma.services.resource_lock.acquire", return_value=(True, "local-ollama", "req-1")):
+        kg._extract_file(f, "note")
+
+    sent_prompt = mock_create.call_args.kwargs["messages"][1]["content"]
+    assert "[1] Some Author" not in sent_prompt
+    assert "Intro prose." in sent_prompt or "Outro prose." in sent_prompt
+
+
+# ── Feature-catalog stripping ──────────────────────────────────────────────────
+# Confirmed live 2026-07-08: Bricken 2023's "Towards Monosemanticity" appendix
+# is an interactive per-neuron browser flattened to markdown as hundreds of
+# repeating <feature ID> / <one-line description> / "Zoom to [View details]"
+# triples. No single paragraph here looks dense or enumeration-shaped in
+# isolation (unlike the data-table/reference-list cases) — the pattern only
+# shows up across a run of paragraphs, so detection has to look at
+# neighboring paragraphs, not one at a time.
+
+def test_strip_feature_catalog_paragraphs_removes_entry_triples():
+    text = (
+        "Intro prose about the method.\n\n"
+        "A/1/1538\n\n"
+        "Citations in a [@author] or [@authoryear] format\n\n"
+        "Zoom to [↗ View details](<https://transformer-circuits.pub/2023/monosemantic-features/vis/a1.html#feature-1538>)\n\n"
+        "A/1/1875\n\n"
+        "Markdown citation predicting a year\n\n"
+        "Zoom to [↗ View details](<https://transformer-circuits.pub/2023/monosemantic-features/vis/a1.html#feature-1875>)\n\n"
+        "More prose after the catalog."
+    )
+    result = _strip_feature_catalog_paragraphs(text)
+    assert "A/1/1538" not in result
+    assert "Citations in a [@author]" not in result
+    assert "Zoom to" not in result
+    assert "Intro prose about the method." in result
+    assert "More prose after the catalog." in result
+
+
+def test_strip_feature_catalog_paragraphs_leaves_normal_prose_untouched():
+    text = "MEMIT edits factual associations in GPT-J using a closed-form update."
+    assert _strip_feature_catalog_paragraphs(text) == text
+
+
+def test_strip_feature_catalog_paragraphs_leaves_isolated_slash_text_untouched():
+    # A bare ID-shaped or link-shaped paragraph with no catalog neighbors on
+    # both sides isn't part of a triple — leave it (and its neighbors) alone.
+    text = "Intro.\n\nSee reference A/1/1538 in the appendix.\n\nOutro."
+    assert _strip_feature_catalog_paragraphs(text) == text
+
+
+def test_extract_file_strips_feature_catalog_before_chunking(kg, vault):
+    text = (
+        "A/1/1538\n\n"
+        "Citations in a [@author] or [@authoryear] format\n\n"
+        "Zoom to [↗ View details](<https://transformer-circuits.pub/2023/monosemantic-features/vis/a1.html#feature-1538>)"
+    )
+    f = vault.root / "notes" / "test.md"
+    f.write_text(f"---\ntype: note\n---\nIntro prose.\n\n{text}\n\nOutro prose.", encoding="utf-8")
+    result = _extraction(nodes=[{"id": "ok", "label": "OK"}])
+
+    with _patch_create(kg, return_value=result) as mock_create, \
+         patch("prisma.services.resource_lock.acquire", return_value=(True, "local-ollama", "req-1")):
+        kg._extract_file(f, "note")
+
+    sent_prompt = mock_create.call_args.kwargs["messages"][1]["content"]
+    assert "A/1/1538" not in sent_prompt
     assert "Intro prose." in sent_prompt or "Outro prose." in sent_prompt
 
 

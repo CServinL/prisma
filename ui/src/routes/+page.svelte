@@ -1,4 +1,8 @@
 <script lang="ts">
+  import { isTauri, DEFAULT_SCALE, applyScale, loadSettings as loadPlatformSettings, saveSettings as savePlatformSettings, shellOpen, winDrag, type AppSettings } from "$lib/platform";
+  import TauriResizeGrips from "$lib/components/TauriResizeGrips.svelte";
+  import TauriWindowControls from "$lib/components/TauriWindowControls.svelte";
+
   type NodeType = "note" | "source" | "chat" | "stream";
   type GState = "idle" | "indexing" | "stale";
 
@@ -150,7 +154,6 @@
     tags: string[];
   }
 
-  const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
   if (isTauri) document.documentElement.classList.add("tauri");
 
   const DEFAULT_API = "http://127.0.0.1:8765";
@@ -929,46 +932,9 @@
 
   // ── Settings ─────────────────────────────────────────────────────────────────
 
-  import { invoke } from "@tauri-apps/api/core";
   import { untrack } from "svelte";
 
   let isMaximized = $state(false);
-
-  if (isTauri) {
-    (async () => {
-      const { getCurrentWindow } = await import("@tauri-apps/api/window");
-      const win = getCurrentWindow();
-      isMaximized = await win.isMaximized();
-      win.onResized(async () => { isMaximized = await win.isMaximized(); });
-    })();
-  }
-
-  async function startResize(direction: string) {
-    if (!isTauri) return;
-    const { getCurrentWindow } = await import("@tauri-apps/api/window");
-    // @ts-ignore
-    getCurrentWindow().startResizeDragging(direction);
-  }
-
-  function winDrag() {
-    if (isTauri) invoke("window_start_drag");
-  }
-  function winMinimize(e: MouseEvent) {
-    e.stopPropagation();
-    if (isTauri) invoke("window_minimize");
-  }
-  function winMaximize(e: MouseEvent) {
-    e.stopPropagation();
-    if (isTauri) invoke("window_toggle_maximize");
-  }
-  function winClose(e: MouseEvent) {
-    e.stopPropagation();
-    if (isTauri) invoke("window_close");
-  }
-  function shellOpen(url: string) {
-    if (isTauri) return invoke("open_url", { url });
-    window.open(url, "_blank");
-  }
 
   function handleIframeMessage(e: MessageEvent) {
     if (e.data?.type === "open-url" && typeof e.data.url === "string") {
@@ -977,37 +943,33 @@
   }
   window.addEventListener("message", handleIframeMessage);
 
-  interface AppSettings { scale: number; server_url: string; }
-
   const SCALE_MIN = 1.0;
   const SCALE_MAX = 5.0;
   const SCALE_STEP = 0.5;
 
   let showSettings = $state(false);
-  let cfg = $state<AppSettings>({ scale: 1.0, server_url: untrack(() => apiBase) });
+  let cfg = $state<AppSettings>({ scale: DEFAULT_SCALE, server_url: untrack(() => apiBase) });
 
   async function loadSettings() {
     try {
-      if (isTauri) {
-        cfg = await invoke<AppSettings>("get_settings");
-      } else {
-        const stored = localStorage.getItem("prisma-settings");
-        if (stored) cfg = JSON.parse(stored);
-      }
+      cfg = await loadPlatformSettings();
       apiBase = cfg.server_url || apiBase;
+    } catch {}
+    // Apply on every load/restart, not just after clicking Save in
+    // Settings — previously the persisted scale was loaded into `cfg` but
+    // never actually applied until the user re-opened Settings and hit
+    // Save, so every fresh launch silently reset back to the platform's
+    // native 1x regardless of what was saved.
+    try {
+      await applyScale(cfg.scale);
     } catch {}
   }
 
   async function saveAndApply() {
     cfg.server_url = apiBase;
     try {
-      if (isTauri) {
-        await invoke("save_settings_cmd", { settings: cfg });
-        await invoke("apply_scale", { scale: cfg.scale });
-      } else {
-        localStorage.setItem("prisma-settings", JSON.stringify(cfg));
-        document.documentElement.style.fontSize = `${cfg.scale * 100}%`;
-      }
+      await savePlatformSettings(cfg);
+      await applyScale(cfg.scale);
     } catch {}
     showSettings = false;
     bootstrap();
@@ -1077,27 +1039,12 @@
   loadSettings().then(() => bootstrap());
 </script>
 
-<div class="shell" class:maximized={isMaximized}>
+{#if isTauri}
+  <!-- Sibling of .shell, not a descendant — see TauriResizeGrips.svelte. -->
+  <TauriResizeGrips bind:isMaximized />
+{/if}
 
-  {#if isTauri && !isMaximized}
-  <!-- Resize grips (CSD — no native decorations) -->
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div role="none" class="rg rg-n"  onmousedown={() => startResize("North")}></div>
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div role="none" class="rg rg-s"  onmousedown={() => startResize("South")}></div>
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div role="none" class="rg rg-w"  onmousedown={() => startResize("West")}></div>
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div role="none" class="rg rg-e"  onmousedown={() => startResize("East")}></div>
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div role="none" class="rg rg-nw" onmousedown={() => startResize("NorthWest")}></div>
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div role="none" class="rg rg-ne" onmousedown={() => startResize("NorthEast")}></div>
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div role="none" class="rg rg-sw" onmousedown={() => startResize("SouthWest")}></div>
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div role="none" class="rg rg-se" onmousedown={() => startResize("SouthEast")}></div>
-  {/if}
+<div class="shell" class:maximized={isMaximized}>
 
   <!-- Titlebar (CSD) -->
   <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -1265,11 +1212,7 @@
 
 
     {#if isTauri}
-    <div class="window-controls">
-      <button class="wc-btn" onmousedown={winMinimize} title="Minimize">&#x2212;</button>
-      <button class="wc-btn" onmousedown={winMaximize} title="Maximize">&#x25A1;</button>
-      <button class="wc-btn wc-close" onmousedown={winClose} title="Close">&#x2715;</button>
-    </div>
+      <TauriWindowControls />
     {/if}
   </div>
 
@@ -2154,22 +2097,22 @@
     </div>
 
     <div class="settings-body">
-      {#if isTauri}
-        <label class="setting-row">
-          <span class="setting-label">Display scale</span>
-          <div class="scale-slider-row">
-            <input
-              type="range"
-              min={SCALE_MIN}
-              max={SCALE_MAX}
-              step={SCALE_STEP}
-              bind:value={cfg.scale}
-            />
-            <span class="scale-slider-value">{cfg.scale === 1.0 ? "1× (default)" : `${cfg.scale}×`}</span>
-          </div>
-          <span class="setting-hint">Applied immediately — persisted across restarts.</span>
-        </label>
+      <label class="setting-row">
+        <span class="setting-label">Display scale</span>
+        <div class="scale-slider-row">
+          <input
+            type="range"
+            min={SCALE_MIN}
+            max={SCALE_MAX}
+            step={SCALE_STEP}
+            bind:value={cfg.scale}
+          />
+          <span class="scale-slider-value">{cfg.scale === DEFAULT_SCALE ? `${cfg.scale}× (default)` : `${cfg.scale}×`}</span>
+        </div>
+        <span class="setting-hint">Applied immediately — persisted across restarts.</span>
+      </label>
 
+      {#if isTauri}
         <label class="setting-row">
           <span class="setting-label">Server URL</span>
           <input bind:value={apiBase} placeholder="http://127.0.0.1:8765" />
@@ -2281,6 +2224,25 @@
     height: 100vh;
     box-sizing: border-box;
     background: #0a0e1a;
+    overflow: hidden;
+  }
+
+  /* Web-mode display scale (see applyWebScale) — deliberately scoped to
+     :not(.tauri) and never applied in Tauri, which uses its own native
+     window.set_zoom instead. .shell also contains this app's
+     position:fixed overlays (context menu, settings panel, resize grips,
+     status popover, etc.); a transform here makes it a new containing
+     block for all of them, resolving their fixed offsets against
+     .shell's own box instead of the true viewport — confirmed live
+     2026-07-09 to misplace the CSD resize grips in Tauri specifically,
+     where .shell also carries a 20px margin. Compensating width/height
+     keeps the scaled box's rendered footprint exactly matching its
+     unscaled parent instead of spilling past it. */
+  :global(html:not(.tauri)) .shell {
+    transform: scale(var(--ui-scale, 1));
+    transform-origin: top left;
+    width: calc(100% / var(--ui-scale, 1));
+    height: calc(100vh / var(--ui-scale, 1));
   }
 
   :global(.tauri) .shell {
@@ -2303,21 +2265,6 @@
     border-radius: 0;
     box-shadow: none;
   }
-
-  /* ── Resize grips (CSD) ────────────────────────────────────────────────── */
-  .rg {
-    position: fixed;
-    z-index: 9999;
-  }
-  /* Grips sit entirely within the 20px margin — never cross into shell content */
-  .rg-n  { top: 0;    left: 20px;  right: 20px; height: 20px; cursor: n-resize; }
-  .rg-s  { bottom: 0; left: 20px;  right: 20px; height: 20px; cursor: s-resize; }
-  .rg-w  { left: 0;   top: 20px;   bottom: 20px; width: 20px; cursor: w-resize; }
-  .rg-e  { right: 0;  top: 20px;   bottom: 20px; width: 20px; cursor: e-resize; }
-  .rg-nw { top: 0; left: 0;    width: 20px; height: 20px; cursor: nw-resize; }
-  .rg-ne { top: 0; right: 0;   width: 20px; height: 20px; cursor: ne-resize; }
-  .rg-sw { bottom: 0; left: 0;  width: 20px; height: 20px; cursor: sw-resize; }
-  .rg-se { bottom: 0; right: 0; width: 20px; height: 20px; cursor: se-resize; }
 
   /* ── Titlebar (CSD) ────────────────────────────────────────────────────── */
   .titlebar {
@@ -2362,33 +2309,6 @@
     pointer-events: none;
     user-select: none;
   }
-
-  .window-controls {
-    display: flex;
-    align-items: stretch;
-    margin-left: 4px;
-    height: 100%;
-    flex-shrink: 0;
-  }
-
-  .wc-btn {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 46px;
-    height: 100%;
-    background: none;
-    border: none;
-    color: #4a6a8a;
-    font-size: 14px;
-    cursor: pointer;
-    line-height: 1;
-    padding: 0;
-    border-radius: 0;
-    transition: background 0.1s, color 0.1s;
-  }
-  .wc-btn:hover { background: #1a2a3a; color: #c8ddf0; }
-  .wc-close:hover { background: #8b1a1a; color: #fff; }
 
   .search-wrap {
     flex: 1;
@@ -2441,6 +2361,12 @@
     flex-shrink: 0;
     display: flex;
     align-items: center;
+  }
+  /* In Tauri, .window-controls follows this and provides its own right-side
+     buffer against the window edge. In web mode nothing renders after it,
+     so without this the status dot sits flush against the browser edge. */
+  .status-anchor:last-child {
+    margin-right: 14px;
   }
 
   .gdot-btn {

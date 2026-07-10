@@ -238,6 +238,46 @@
   let collapsedDirs = $state<Set<string>>(new Set());
   let treeLoaded = $state(false);
   let sidebarEl = $state<HTMLElement | null>(null);
+  let sidebarAsideEl = $state<HTMLElement | null>(null);
+
+  // Sidebar width/collapse — persisted so the layout survives a reload.
+  const SIDEBAR_MIN_WIDTH = 160;
+  const SIDEBAR_MAX_WIDTH = 480;
+  const SIDEBAR_DEFAULT_WIDTH = 220;
+  let sidebarWidth = $state(
+    typeof window !== "undefined"
+      ? Number(localStorage.getItem("prisma.sidebarWidth")) || SIDEBAR_DEFAULT_WIDTH
+      : SIDEBAR_DEFAULT_WIDTH
+  );
+  let sidebarCollapsed = $state(
+    typeof window !== "undefined" && localStorage.getItem("prisma.sidebarCollapsed") === "1"
+  );
+  let sidebarResizing = $state(false);
+
+  function toggleSidebarCollapsed() {
+    sidebarCollapsed = !sidebarCollapsed;
+    localStorage.setItem("prisma.sidebarCollapsed", sidebarCollapsed ? "1" : "0");
+  }
+
+  function startSidebarResize(e: MouseEvent) {
+    e.preventDefault();
+    sidebarResizing = true;
+    // Measure from the sidebar's own left edge rather than assuming it sits
+    // at viewport x=0 — Tauri's .shell has a 20px margin around it (see
+    // :global(.tauri) .shell), so clientX alone would be off by that much.
+    const sidebarLeft = sidebarAsideEl?.getBoundingClientRect().left ?? 0;
+    const onMove = (ev: MouseEvent) => {
+      sidebarWidth = Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, ev.clientX - sidebarLeft));
+    };
+    const onUp = () => {
+      sidebarResizing = false;
+      localStorage.setItem("prisma.sidebarWidth", String(sidebarWidth));
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }
   // context menu
   let ctxMenu = $state<{ x: number; y: number; slug: string | null; title: string; dirKey: string | null; isChat?: boolean } | null>(null);
   let ctxMovePicker = $state(false);
@@ -1239,7 +1279,13 @@
   <div class="workspace">
 
     <!-- Sidebar -->
-    <aside class="sidebar">
+    <aside
+      class="sidebar"
+      class:collapsed={sidebarCollapsed}
+      bind:this={sidebarAsideEl}
+      style={sidebarCollapsed ? "" : `width: ${sidebarWidth}px`}
+    >
+      {#if !sidebarCollapsed}
       {#if !serverOnline}
         <div class="sidebar-offline">
           Server offline<br/>
@@ -1324,7 +1370,7 @@
           </button>
         </div>
         {#if sectionOpen.vault}
-          <div class="section-body section-body-scroll" role="list" bind:this={sidebarEl} ondragover={onSidebarDragOver}>
+          <div class="section-body" role="list" bind:this={sidebarEl} ondragover={onSidebarDragOver}>
             {#if tree.length > 0}
               {#each tree as node}
                 {@render treeNode(node, "")}
@@ -1401,7 +1447,7 @@
           </button>
         </div>
         {#if sectionOpen.zotero}
-          <div class="section-body section-body-scroll zotero-panel">
+          <div class="section-body zotero-panel">
             {#if zoteroLoading}
               <div class="zotero-busy">
                 <div class="zotero-busy-spinner"></div>
@@ -1492,13 +1538,35 @@
           </div>
         {/if}
       {/if}
+      {/if}
     </aside>
+    {#if !sidebarCollapsed}
+      <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+      <div
+        class="sidebar-resizer"
+        class:resizing={sidebarResizing}
+        onmousedown={startSidebarResize}
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize sidebar"
+      ></div>
+    {/if}
+    <button
+      class="sidebar-collapse-btn"
+      class:collapsed={sidebarCollapsed}
+      title={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+      onclick={toggleSidebarCollapsed}
+    >
+      <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style={sidebarCollapsed ? "transform: rotate(180deg)" : ""}>
+        <polyline points="15 6 9 12 15 18"/>
+      </svg>
+    </button>
 
     <!-- Main -->
     <main class="main">
       {#if !serverOnline}
         <div class="empty-state">
-          <p>Prisma server is not running.</p>
+          <p class="text-body">Prisma server is not running.</p>
           <code>prisma serve</code>
         </div>
       {:else if loadingNode}
@@ -1602,7 +1670,7 @@
             </div>
             <div class="chat-turns">
               {#if activeChat.messages.length === 0}
-                <div class="empty-state"><p>Ask anything about your vault.</p></div>
+                <div class="empty-state"><p class="text-body">Ask anything about your vault.</p></div>
               {/if}
               {#each activeChat.messages as msg, i (i)}
                 <div class="chat-turn chat-turn-{msg.role}" id="chat-turn-{i}">
@@ -1635,7 +1703,7 @@
                       {/each}
                     </div>
                   {/if}
-                  <div class="chat-turn-content">{msg.content}</div>
+                  <div class="chat-turn-content text-body">{msg.content}</div>
                 </div>
               {/each}
               {#if chatSending}
@@ -1673,7 +1741,7 @@
                 <div class="rendered" use:contentClickDelegate>{@html activeChat.excerpt_summary_html}</div>
               {:else}
                 <div class="empty-state chat-notes-empty">
-                  <p>Nothing pinned yet — pin a turn to start this chat's Excerpt, durable across this chat even after older turns roll off.</p>
+                  <p class="text-body">Nothing pinned yet — pin a turn to start this chat's Excerpt, durable across this chat even after older turns roll off.</p>
                 </div>
               {/if}
             </div>
@@ -1697,7 +1765,7 @@
           </div>
           <div class="resources-body">
             {#if !serverStatus?.resources}
-              <div class="empty-state"><p>Resource status unavailable.</p></div>
+              <div class="empty-state"><p class="text-body">Resource status unavailable.</p></div>
             {:else}
               {#each Object.entries(serverStatus.resources) as [name, pool]}
                 <div class="resource-card">
@@ -1854,7 +1922,7 @@
           </div>
           <div class="resources-body">
             {#if !serverStatus?.knowledge_graph}
-              <div class="empty-state"><p>Knowledge graph status unavailable.</p></div>
+              <div class="empty-state"><p class="text-body">Knowledge graph status unavailable.</p></div>
             {:else}
               {@const kg = serverStatus.knowledge_graph}
               <div class="resource-card">
@@ -1963,7 +2031,7 @@
         </div>
       {:else}
         <div class="empty-state">
-          <p>Select a note or source from the sidebar.</p>
+          <p class="text-body">Select a note or source from the sidebar.</p>
         </div>
       {/if}
     </main>
@@ -2188,6 +2256,11 @@
 
 <style>
   :global(*, *::before, *::after) { box-sizing: border-box; margin: 0; padding: 0; }
+  /* Type scale: subtitles/body +25% over their un-emphasized 13px base —
+     fine print (labels, hints, badges, buttons) and titles are untouched,
+     keeping their original sizes throughout this file. */
+  :global(.text-subtitle) { font-size: 16px; font-weight: 600; }
+  :global(.text-body)     { font-size: 16px; font-weight: 400; }
   :global(::-webkit-scrollbar) { width: 12px; height: 12px; }
   :global(::-webkit-scrollbar-track) { background: #0d1525; }
   :global(::-webkit-scrollbar-thumb) { background: #2a4a7a; border-radius: 6px; }
@@ -2505,14 +2578,38 @@
 
   /* ── Sidebar ────────────────────────────────────────────────────────────── */
   .sidebar {
-    width: 220px;
     flex-shrink: 0;
     background: #080c16;
     border-right: 1px solid #1a2d4a;
     display: flex;
     flex-direction: column;
-    overflow: hidden;
+    overflow-y: auto;
+    overflow-x: hidden;
   }
+  .sidebar.collapsed { width: 0 !important; border-right: none; overflow: hidden; }
+
+  .sidebar-resizer {
+    width: 4px;
+    flex-shrink: 0;
+    cursor: col-resize;
+    background: transparent;
+  }
+  .sidebar-resizer:hover, .sidebar-resizer.resizing { background: #2a5aaa; }
+
+  .sidebar-collapse-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    flex-shrink: 0;
+    background: #080c16;
+    border: none;
+    border-right: 1px solid #1a2d4a;
+    color: #3d5470;
+    cursor: pointer;
+  }
+  .sidebar-collapse-btn:hover { color: #6a9abb; background: #0d1829; }
+  .sidebar-collapse-btn.collapsed { border-right: 1px solid #1a2d4a; }
 
   .home-btn {
     display: flex;
@@ -2571,14 +2668,12 @@
     flex-shrink: 0;
   }
   .section-action:hover { color: #4a9eff; }
-  .section-body { padding-bottom: 4px; flex-shrink: 0; }
-  .section-body-scroll {
-    flex: 1 1 0;
-    min-height: 60px;
-    max-height: 40vh;
-    overflow-y: auto;
-    flex-shrink: 1;
-  }
+  /* The sidebar itself scrolls as one column (see .sidebar's overflow-y)
+     so individual sections don't need their own internal scroll area —
+     without this, sections other than the vault tree had no scroll at
+     all and just got silently clipped by the old .sidebar overflow:hidden
+     once they had enough items to overflow. */
+  .section-body { padding-bottom: 4px; }
 
   .zotero-panel {
     position: relative;
@@ -3013,9 +3108,9 @@
 
   /* Pass-through styles for docu-craft rendered HTML */
   .rendered :global(h1) { font-size: 22px; font-weight: 600; color: #e8edf8; margin-bottom: 16px; }
-  .rendered :global(h2) { font-size: 17px; font-weight: 600; color: #c8ddf0; margin: 24px 0 10px; }
-  .rendered :global(h3) { font-size: 14px; font-weight: 600; color: #a8c8e0; margin: 18px 0 8px; }
-  .rendered :global(p)  { color: #9ab4c8; line-height: 1.7; margin-bottom: 12px; }
+  .rendered :global(h2) { font-size: 21px; font-weight: 600; color: #c8ddf0; margin: 24px 0 10px; }
+  .rendered :global(h3) { font-size: 18px; font-weight: 600; color: #a8c8e0; margin: 18px 0 8px; }
+  .rendered :global(p)  { font-size: 16px; color: #9ab4c8; line-height: 1.7; margin-bottom: 12px; }
   .rendered :global(a)  { color: #4a9eff; text-decoration: none; }
   .rendered :global(a:hover) { text-decoration: underline; }
   .rendered :global(a.wikilink)   { color: #4a9eff; border-bottom: 1px dotted #2a5aaa; }
@@ -3129,7 +3224,7 @@
     min-height: 34px;
   }
   .chat-notes-title {
-    font-size: 12px;
+    font-size: 16px;
     font-weight: 600;
     color: #c8ddf0;
     flex: 1;
@@ -3416,7 +3511,6 @@
   .chat-turn-content {
     color: #c8ddf0;
     line-height: 1.6;
-    font-size: 13px;
     white-space: pre-wrap;
     overflow-wrap: anywhere;
   }

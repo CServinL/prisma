@@ -1,4 +1,8 @@
 <script lang="ts">
+  import { isTauri, DEFAULT_SCALE, applyScale, loadSettings as loadPlatformSettings, saveSettings as savePlatformSettings, shellOpen, winDrag, type AppSettings } from "$lib/platform";
+  import TauriResizeGrips from "$lib/components/TauriResizeGrips.svelte";
+  import TauriWindowControls from "$lib/components/TauriWindowControls.svelte";
+
   type NodeType = "note" | "source" | "chat" | "stream";
   type GState = "idle" | "indexing" | "stale";
 
@@ -150,7 +154,6 @@
     tags: string[];
   }
 
-  const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
   if (isTauri) document.documentElement.classList.add("tauri");
 
   const DEFAULT_API = "http://127.0.0.1:8765";
@@ -238,6 +241,46 @@
   let collapsedDirs = $state<Set<string>>(new Set());
   let treeLoaded = $state(false);
   let sidebarEl = $state<HTMLElement | null>(null);
+  let sidebarAsideEl = $state<HTMLElement | null>(null);
+
+  // Sidebar width/collapse — persisted so the layout survives a reload.
+  const SIDEBAR_MIN_WIDTH = 160;
+  const SIDEBAR_MAX_WIDTH = 480;
+  const SIDEBAR_DEFAULT_WIDTH = 220;
+  let sidebarWidth = $state(
+    typeof window !== "undefined"
+      ? Number(localStorage.getItem("prisma.sidebarWidth")) || SIDEBAR_DEFAULT_WIDTH
+      : SIDEBAR_DEFAULT_WIDTH
+  );
+  let sidebarCollapsed = $state(
+    typeof window !== "undefined" && localStorage.getItem("prisma.sidebarCollapsed") === "1"
+  );
+  let sidebarResizing = $state(false);
+
+  function toggleSidebarCollapsed() {
+    sidebarCollapsed = !sidebarCollapsed;
+    localStorage.setItem("prisma.sidebarCollapsed", sidebarCollapsed ? "1" : "0");
+  }
+
+  function startSidebarResize(e: MouseEvent) {
+    e.preventDefault();
+    sidebarResizing = true;
+    // Measure from the sidebar's own left edge rather than assuming it sits
+    // at viewport x=0 — Tauri's .shell has a 20px margin around it (see
+    // :global(.tauri) .shell), so clientX alone would be off by that much.
+    const sidebarLeft = sidebarAsideEl?.getBoundingClientRect().left ?? 0;
+    const onMove = (ev: MouseEvent) => {
+      sidebarWidth = Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, ev.clientX - sidebarLeft));
+    };
+    const onUp = () => {
+      sidebarResizing = false;
+      localStorage.setItem("prisma.sidebarWidth", String(sidebarWidth));
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }
   // context menu
   let ctxMenu = $state<{ x: number; y: number; slug: string | null; title: string; dirKey: string | null; isChat?: boolean } | null>(null);
   let ctxMovePicker = $state(false);
@@ -889,46 +932,9 @@
 
   // ── Settings ─────────────────────────────────────────────────────────────────
 
-  import { invoke } from "@tauri-apps/api/core";
   import { untrack } from "svelte";
 
   let isMaximized = $state(false);
-
-  if (isTauri) {
-    (async () => {
-      const { getCurrentWindow } = await import("@tauri-apps/api/window");
-      const win = getCurrentWindow();
-      isMaximized = await win.isMaximized();
-      win.onResized(async () => { isMaximized = await win.isMaximized(); });
-    })();
-  }
-
-  async function startResize(direction: string) {
-    if (!isTauri) return;
-    const { getCurrentWindow } = await import("@tauri-apps/api/window");
-    // @ts-ignore
-    getCurrentWindow().startResizeDragging(direction);
-  }
-
-  function winDrag() {
-    if (isTauri) invoke("window_start_drag");
-  }
-  function winMinimize(e: MouseEvent) {
-    e.stopPropagation();
-    if (isTauri) invoke("window_minimize");
-  }
-  function winMaximize(e: MouseEvent) {
-    e.stopPropagation();
-    if (isTauri) invoke("window_toggle_maximize");
-  }
-  function winClose(e: MouseEvent) {
-    e.stopPropagation();
-    if (isTauri) invoke("window_close");
-  }
-  function shellOpen(url: string) {
-    if (isTauri) return invoke("open_url", { url });
-    window.open(url, "_blank");
-  }
 
   function handleIframeMessage(e: MessageEvent) {
     if (e.data?.type === "open-url" && typeof e.data.url === "string") {
@@ -937,37 +943,33 @@
   }
   window.addEventListener("message", handleIframeMessage);
 
-  interface AppSettings { scale: number; server_url: string; }
-
   const SCALE_MIN = 1.0;
   const SCALE_MAX = 5.0;
   const SCALE_STEP = 0.5;
 
   let showSettings = $state(false);
-  let cfg = $state<AppSettings>({ scale: 1.0, server_url: untrack(() => apiBase) });
+  let cfg = $state<AppSettings>({ scale: DEFAULT_SCALE, server_url: untrack(() => apiBase) });
 
   async function loadSettings() {
     try {
-      if (isTauri) {
-        cfg = await invoke<AppSettings>("get_settings");
-      } else {
-        const stored = localStorage.getItem("prisma-settings");
-        if (stored) cfg = JSON.parse(stored);
-      }
+      cfg = await loadPlatformSettings();
       apiBase = cfg.server_url || apiBase;
+    } catch {}
+    // Apply on every load/restart, not just after clicking Save in
+    // Settings — previously the persisted scale was loaded into `cfg` but
+    // never actually applied until the user re-opened Settings and hit
+    // Save, so every fresh launch silently reset back to the platform's
+    // native 1x regardless of what was saved.
+    try {
+      await applyScale(cfg.scale);
     } catch {}
   }
 
   async function saveAndApply() {
     cfg.server_url = apiBase;
     try {
-      if (isTauri) {
-        await invoke("save_settings_cmd", { settings: cfg });
-        await invoke("apply_scale", { scale: cfg.scale });
-      } else {
-        localStorage.setItem("prisma-settings", JSON.stringify(cfg));
-        document.documentElement.style.fontSize = `${cfg.scale * 100}%`;
-      }
+      await savePlatformSettings(cfg);
+      await applyScale(cfg.scale);
     } catch {}
     showSettings = false;
     bootstrap();
@@ -1037,27 +1039,12 @@
   loadSettings().then(() => bootstrap());
 </script>
 
-<div class="shell" class:maximized={isMaximized}>
+{#if isTauri}
+  <!-- Sibling of .shell, not a descendant — see TauriResizeGrips.svelte. -->
+  <TauriResizeGrips bind:isMaximized />
+{/if}
 
-  {#if isTauri && !isMaximized}
-  <!-- Resize grips (CSD — no native decorations) -->
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div role="none" class="rg rg-n"  onmousedown={() => startResize("North")}></div>
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div role="none" class="rg rg-s"  onmousedown={() => startResize("South")}></div>
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div role="none" class="rg rg-w"  onmousedown={() => startResize("West")}></div>
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div role="none" class="rg rg-e"  onmousedown={() => startResize("East")}></div>
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div role="none" class="rg rg-nw" onmousedown={() => startResize("NorthWest")}></div>
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div role="none" class="rg rg-ne" onmousedown={() => startResize("NorthEast")}></div>
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div role="none" class="rg rg-sw" onmousedown={() => startResize("SouthWest")}></div>
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div role="none" class="rg rg-se" onmousedown={() => startResize("SouthEast")}></div>
-  {/if}
+<div class="shell" class:maximized={isMaximized}>
 
   <!-- Titlebar (CSD) -->
   <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -1225,11 +1212,7 @@
 
 
     {#if isTauri}
-    <div class="window-controls">
-      <button class="wc-btn" onmousedown={winMinimize} title="Minimize">&#x2212;</button>
-      <button class="wc-btn" onmousedown={winMaximize} title="Maximize">&#x25A1;</button>
-      <button class="wc-btn wc-close" onmousedown={winClose} title="Close">&#x2715;</button>
-    </div>
+      <TauriWindowControls />
     {/if}
   </div>
 
@@ -1239,7 +1222,13 @@
   <div class="workspace">
 
     <!-- Sidebar -->
-    <aside class="sidebar">
+    <aside
+      class="sidebar"
+      class:collapsed={sidebarCollapsed}
+      bind:this={sidebarAsideEl}
+      style={sidebarCollapsed ? "" : `width: ${sidebarWidth}px`}
+    >
+      {#if !sidebarCollapsed}
       {#if !serverOnline}
         <div class="sidebar-offline">
           Server offline<br/>
@@ -1324,7 +1313,7 @@
           </button>
         </div>
         {#if sectionOpen.vault}
-          <div class="section-body section-body-scroll" role="list" bind:this={sidebarEl} ondragover={onSidebarDragOver}>
+          <div class="section-body" role="list" bind:this={sidebarEl} ondragover={onSidebarDragOver}>
             {#if tree.length > 0}
               {#each tree as node}
                 {@render treeNode(node, "")}
@@ -1401,7 +1390,7 @@
           </button>
         </div>
         {#if sectionOpen.zotero}
-          <div class="section-body section-body-scroll zotero-panel">
+          <div class="section-body zotero-panel">
             {#if zoteroLoading}
               <div class="zotero-busy">
                 <div class="zotero-busy-spinner"></div>
@@ -1492,13 +1481,35 @@
           </div>
         {/if}
       {/if}
+      {/if}
     </aside>
+    {#if !sidebarCollapsed}
+      <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+      <div
+        class="sidebar-resizer"
+        class:resizing={sidebarResizing}
+        onmousedown={startSidebarResize}
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize sidebar"
+      ></div>
+    {/if}
+    <button
+      class="sidebar-collapse-btn"
+      class:collapsed={sidebarCollapsed}
+      title={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+      onclick={toggleSidebarCollapsed}
+    >
+      <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style={sidebarCollapsed ? "transform: rotate(180deg)" : ""}>
+        <polyline points="15 6 9 12 15 18"/>
+      </svg>
+    </button>
 
     <!-- Main -->
     <main class="main">
       {#if !serverOnline}
         <div class="empty-state">
-          <p>Prisma server is not running.</p>
+          <p class="text-body">Prisma server is not running.</p>
           <code>prisma serve</code>
         </div>
       {:else if loadingNode}
@@ -1602,7 +1613,7 @@
             </div>
             <div class="chat-turns">
               {#if activeChat.messages.length === 0}
-                <div class="empty-state"><p>Ask anything about your vault.</p></div>
+                <div class="empty-state"><p class="text-body">Ask anything about your vault.</p></div>
               {/if}
               {#each activeChat.messages as msg, i (i)}
                 <div class="chat-turn chat-turn-{msg.role}" id="chat-turn-{i}">
@@ -1635,7 +1646,7 @@
                       {/each}
                     </div>
                   {/if}
-                  <div class="chat-turn-content">{msg.content}</div>
+                  <div class="chat-turn-content text-body">{msg.content}</div>
                 </div>
               {/each}
               {#if chatSending}
@@ -1673,7 +1684,7 @@
                 <div class="rendered" use:contentClickDelegate>{@html activeChat.excerpt_summary_html}</div>
               {:else}
                 <div class="empty-state chat-notes-empty">
-                  <p>Nothing pinned yet — pin a turn to start this chat's Excerpt, durable across this chat even after older turns roll off.</p>
+                  <p class="text-body">Nothing pinned yet — pin a turn to start this chat's Excerpt, durable across this chat even after older turns roll off.</p>
                 </div>
               {/if}
             </div>
@@ -1697,7 +1708,7 @@
           </div>
           <div class="resources-body">
             {#if !serverStatus?.resources}
-              <div class="empty-state"><p>Resource status unavailable.</p></div>
+              <div class="empty-state"><p class="text-body">Resource status unavailable.</p></div>
             {:else}
               {#each Object.entries(serverStatus.resources) as [name, pool]}
                 <div class="resource-card">
@@ -1854,7 +1865,7 @@
           </div>
           <div class="resources-body">
             {#if !serverStatus?.knowledge_graph}
-              <div class="empty-state"><p>Knowledge graph status unavailable.</p></div>
+              <div class="empty-state"><p class="text-body">Knowledge graph status unavailable.</p></div>
             {:else}
               {@const kg = serverStatus.knowledge_graph}
               <div class="resource-card">
@@ -1963,7 +1974,7 @@
         </div>
       {:else}
         <div class="empty-state">
-          <p>Select a note or source from the sidebar.</p>
+          <p class="text-body">Select a note or source from the sidebar.</p>
         </div>
       {/if}
     </main>
@@ -2086,22 +2097,22 @@
     </div>
 
     <div class="settings-body">
-      {#if isTauri}
-        <label class="setting-row">
-          <span class="setting-label">Display scale</span>
-          <div class="scale-slider-row">
-            <input
-              type="range"
-              min={SCALE_MIN}
-              max={SCALE_MAX}
-              step={SCALE_STEP}
-              bind:value={cfg.scale}
-            />
-            <span class="scale-slider-value">{cfg.scale === 1.0 ? "1× (default)" : `${cfg.scale}×`}</span>
-          </div>
-          <span class="setting-hint">Applied immediately — persisted across restarts.</span>
-        </label>
+      <label class="setting-row">
+        <span class="setting-label">Display scale</span>
+        <div class="scale-slider-row">
+          <input
+            type="range"
+            min={SCALE_MIN}
+            max={SCALE_MAX}
+            step={SCALE_STEP}
+            bind:value={cfg.scale}
+          />
+          <span class="scale-slider-value">{cfg.scale === DEFAULT_SCALE ? `${cfg.scale}× (default)` : `${cfg.scale}×`}</span>
+        </div>
+        <span class="setting-hint">Applied immediately — persisted across restarts.</span>
+      </label>
 
+      {#if isTauri}
         <label class="setting-row">
           <span class="setting-label">Server URL</span>
           <input bind:value={apiBase} placeholder="http://127.0.0.1:8765" />
@@ -2188,6 +2199,11 @@
 
 <style>
   :global(*, *::before, *::after) { box-sizing: border-box; margin: 0; padding: 0; }
+  /* Type scale: subtitles/body +25% over their un-emphasized 13px base —
+     fine print (labels, hints, badges, buttons) and titles are untouched,
+     keeping their original sizes throughout this file. */
+  :global(.text-subtitle) { font-size: 16px; font-weight: 600; }
+  :global(.text-body)     { font-size: 16px; font-weight: 400; }
   :global(::-webkit-scrollbar) { width: 12px; height: 12px; }
   :global(::-webkit-scrollbar-track) { background: #0d1525; }
   :global(::-webkit-scrollbar-thumb) { background: #2a4a7a; border-radius: 6px; }
@@ -2208,6 +2224,25 @@
     height: 100vh;
     box-sizing: border-box;
     background: #0a0e1a;
+    overflow: hidden;
+  }
+
+  /* Web-mode display scale (see applyWebScale) — deliberately scoped to
+     :not(.tauri) and never applied in Tauri, which uses its own native
+     window.set_zoom instead. .shell also contains this app's
+     position:fixed overlays (context menu, settings panel, resize grips,
+     status popover, etc.); a transform here makes it a new containing
+     block for all of them, resolving their fixed offsets against
+     .shell's own box instead of the true viewport — confirmed live
+     2026-07-09 to misplace the CSD resize grips in Tauri specifically,
+     where .shell also carries a 20px margin. Compensating width/height
+     keeps the scaled box's rendered footprint exactly matching its
+     unscaled parent instead of spilling past it. */
+  :global(html:not(.tauri)) .shell {
+    transform: scale(var(--ui-scale, 1));
+    transform-origin: top left;
+    width: calc(100% / var(--ui-scale, 1));
+    height: calc(100vh / var(--ui-scale, 1));
   }
 
   :global(.tauri) .shell {
@@ -2230,21 +2265,6 @@
     border-radius: 0;
     box-shadow: none;
   }
-
-  /* ── Resize grips (CSD) ────────────────────────────────────────────────── */
-  .rg {
-    position: fixed;
-    z-index: 9999;
-  }
-  /* Grips sit entirely within the 20px margin — never cross into shell content */
-  .rg-n  { top: 0;    left: 20px;  right: 20px; height: 20px; cursor: n-resize; }
-  .rg-s  { bottom: 0; left: 20px;  right: 20px; height: 20px; cursor: s-resize; }
-  .rg-w  { left: 0;   top: 20px;   bottom: 20px; width: 20px; cursor: w-resize; }
-  .rg-e  { right: 0;  top: 20px;   bottom: 20px; width: 20px; cursor: e-resize; }
-  .rg-nw { top: 0; left: 0;    width: 20px; height: 20px; cursor: nw-resize; }
-  .rg-ne { top: 0; right: 0;   width: 20px; height: 20px; cursor: ne-resize; }
-  .rg-sw { bottom: 0; left: 0;  width: 20px; height: 20px; cursor: sw-resize; }
-  .rg-se { bottom: 0; right: 0; width: 20px; height: 20px; cursor: se-resize; }
 
   /* ── Titlebar (CSD) ────────────────────────────────────────────────────── */
   .titlebar {
@@ -2289,33 +2309,6 @@
     pointer-events: none;
     user-select: none;
   }
-
-  .window-controls {
-    display: flex;
-    align-items: stretch;
-    margin-left: 4px;
-    height: 100%;
-    flex-shrink: 0;
-  }
-
-  .wc-btn {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 46px;
-    height: 100%;
-    background: none;
-    border: none;
-    color: #4a6a8a;
-    font-size: 14px;
-    cursor: pointer;
-    line-height: 1;
-    padding: 0;
-    border-radius: 0;
-    transition: background 0.1s, color 0.1s;
-  }
-  .wc-btn:hover { background: #1a2a3a; color: #c8ddf0; }
-  .wc-close:hover { background: #8b1a1a; color: #fff; }
 
   .search-wrap {
     flex: 1;
@@ -2368,6 +2361,12 @@
     flex-shrink: 0;
     display: flex;
     align-items: center;
+  }
+  /* In Tauri, .window-controls follows this and provides its own right-side
+     buffer against the window edge. In web mode nothing renders after it,
+     so without this the status dot sits flush against the browser edge. */
+  .status-anchor:last-child {
+    margin-right: 14px;
   }
 
   .gdot-btn {
@@ -2505,14 +2504,38 @@
 
   /* ── Sidebar ────────────────────────────────────────────────────────────── */
   .sidebar {
-    width: 220px;
     flex-shrink: 0;
     background: #080c16;
     border-right: 1px solid #1a2d4a;
     display: flex;
     flex-direction: column;
-    overflow: hidden;
+    overflow-y: auto;
+    overflow-x: hidden;
   }
+  .sidebar.collapsed { width: 0 !important; border-right: none; overflow: hidden; }
+
+  .sidebar-resizer {
+    width: 4px;
+    flex-shrink: 0;
+    cursor: col-resize;
+    background: transparent;
+  }
+  .sidebar-resizer:hover, .sidebar-resizer.resizing { background: #2a5aaa; }
+
+  .sidebar-collapse-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    flex-shrink: 0;
+    background: #080c16;
+    border: none;
+    border-right: 1px solid #1a2d4a;
+    color: #3d5470;
+    cursor: pointer;
+  }
+  .sidebar-collapse-btn:hover { color: #6a9abb; background: #0d1829; }
+  .sidebar-collapse-btn.collapsed { border-right: 1px solid #1a2d4a; }
 
   .home-btn {
     display: flex;
@@ -2571,14 +2594,12 @@
     flex-shrink: 0;
   }
   .section-action:hover { color: #4a9eff; }
-  .section-body { padding-bottom: 4px; flex-shrink: 0; }
-  .section-body-scroll {
-    flex: 1 1 0;
-    min-height: 60px;
-    max-height: 40vh;
-    overflow-y: auto;
-    flex-shrink: 1;
-  }
+  /* The sidebar itself scrolls as one column (see .sidebar's overflow-y)
+     so individual sections don't need their own internal scroll area —
+     without this, sections other than the vault tree had no scroll at
+     all and just got silently clipped by the old .sidebar overflow:hidden
+     once they had enough items to overflow. */
+  .section-body { padding-bottom: 4px; }
 
   .zotero-panel {
     position: relative;
@@ -3013,9 +3034,9 @@
 
   /* Pass-through styles for docu-craft rendered HTML */
   .rendered :global(h1) { font-size: 22px; font-weight: 600; color: #e8edf8; margin-bottom: 16px; }
-  .rendered :global(h2) { font-size: 17px; font-weight: 600; color: #c8ddf0; margin: 24px 0 10px; }
-  .rendered :global(h3) { font-size: 14px; font-weight: 600; color: #a8c8e0; margin: 18px 0 8px; }
-  .rendered :global(p)  { color: #9ab4c8; line-height: 1.7; margin-bottom: 12px; }
+  .rendered :global(h2) { font-size: 21px; font-weight: 600; color: #c8ddf0; margin: 24px 0 10px; }
+  .rendered :global(h3) { font-size: 18px; font-weight: 600; color: #a8c8e0; margin: 18px 0 8px; }
+  .rendered :global(p)  { font-size: 16px; color: #9ab4c8; line-height: 1.7; margin-bottom: 12px; }
   .rendered :global(a)  { color: #4a9eff; text-decoration: none; }
   .rendered :global(a:hover) { text-decoration: underline; }
   .rendered :global(a.wikilink)   { color: #4a9eff; border-bottom: 1px dotted #2a5aaa; }
@@ -3129,7 +3150,7 @@
     min-height: 34px;
   }
   .chat-notes-title {
-    font-size: 12px;
+    font-size: 16px;
     font-weight: 600;
     color: #c8ddf0;
     flex: 1;
@@ -3416,7 +3437,6 @@
   .chat-turn-content {
     color: #c8ddf0;
     line-height: 1.6;
-    font-size: 13px;
     white-space: pre-wrap;
     overflow-wrap: anywhere;
   }

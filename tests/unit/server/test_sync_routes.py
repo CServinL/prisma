@@ -3,6 +3,7 @@ FastAPI app wrapping just build_sync_router + a tmp_path VaultService), not
 the full prisma.server.app singleton, so these don't depend on auth/CORS/the
 real vault_root and stay independently testable per the vault-sync plan.
 """
+import math
 from pathlib import Path
 
 import pytest
@@ -112,6 +113,29 @@ def test_put_matching_expected_mtime_succeeds(client, vault):
     r = client.put("/sync/file", json={"path": "notes/a.md", "body": "v2", "expected_mtime": mtime})
     assert r.status_code == 200
     assert vault.read_by_path("notes/a.md")[0] == "v2"
+
+
+def test_put_one_ulp_off_expected_mtime_still_succeeds(client, vault):
+    # Regression test for a real 2026-07-25 bug: a Unix timestamp at today's
+    # magnitude (~1.78e9) leaves float64 only ~238ns of resolution, so a
+    # value round-tripped through JSON across languages (Python -> Rust ->
+    # Python) can land one ULP off from the server's freshly-read mtime.
+    # Exact equality treated this as a real conflict forever, with no way
+    # for the client to ever converge -- confirmed live: expected_mtime one
+    # ULP away from the true mtime 409'd endlessly, in an infinite loop the
+    # client could never resolve (see sync_routes.py's _MTIME_TOLERANCE_SECONDS).
+    mtime = vault.write_by_path("notes/a.md", "v1")
+    off_by_one_ulp = math.nextafter(mtime, math.inf)
+    assert off_by_one_ulp != mtime  # sanity check this is a real distinct float
+    r = client.put("/sync/file", json={"path": "notes/a.md", "body": "v2", "expected_mtime": off_by_one_ulp})
+    assert r.status_code == 200
+    assert vault.read_by_path("notes/a.md")[0] == "v2"
+
+
+def test_put_genuinely_stale_expected_mtime_still_conflicts(client, vault):
+    vault.write_by_path("notes/a.md", "v1")
+    r = client.put("/sync/file", json={"path": "notes/a.md", "body": "v2", "expected_mtime": 1.0})
+    assert r.status_code == 409
 
 
 def test_delete_file_removes_and_broadcasts(client, vault, recorder):

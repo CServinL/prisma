@@ -400,7 +400,7 @@ class KnowledgeGraphService:
         self._supervisor_host = supervisor_host
         self._supervisor_port = supervisor_port if supervisor_port is not None else resource_lock.default_port()
 
-        self._kg_dir = kg_dir or (vault.root / "kg-out")
+        self._kg_dir = kg_dir or (vault.root / ".vault-files" / "kg-out")
 
         self._db = None
         self._conn = None
@@ -1443,7 +1443,7 @@ class _VaultChangeHandler(FileSystemEventHandler):
         if event.is_directory:
             return
         path = Path(str(event.src_path))
-        if any(p in path.parts for p in ("kg-out", "graphify-out", "chromadb", "streams")) or path.name.startswith("."):
+        if any(p in path.parts for p in (".vault-files", "streams")) or path.name.startswith("."):
             return
         if path.suffix in self._service.index_extensions:
             with self._service._lock:

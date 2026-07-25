@@ -6,9 +6,29 @@ import { invoke } from "@tauri-apps/api/core";
 
 export const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
+export interface SavedServer {
+  name: string;
+  url: string;
+}
+
+// Same defaults as prisma-desktop's own Rust-side Settings::default() —
+// kept in sync manually since the two aren't generated from one schema.
+export const DEFAULT_SAVED_SERVERS: SavedServer[] = [
+  { name: "Local", url: "http://127.0.0.1:8765" },
+  // Generic label — "Forge" is this maintainer's own private server name,
+  // not a sensible default for other users of this software.
+  { name: "Remote", url: "https://prisma.forge.internal" },
+];
+
 export interface AppSettings {
   scale: number;
   server_url: string;
+  saved_servers: SavedServer[];
+  // Tauri-only — where the vault-sync engine's local .md mirror lives.
+  // null/empty means "use the default location" (see prisma-desktop's
+  // settings::resolve_vault_path). Not meaningful in browser/PWA mode,
+  // which has no local vault mirror at all.
+  vault_path: string | null;
 }
 
 // 1x reads as uncomfortably small on today's typical high-density
@@ -22,8 +42,16 @@ export async function loadSettings(): Promise<AppSettings> {
     return invoke<AppSettings>("get_settings");
   }
   const stored = localStorage.getItem("prisma-settings");
-  if (stored) return JSON.parse(stored);
-  return { scale: DEFAULT_SCALE, server_url: "" };
+  if (stored) {
+    const parsed = JSON.parse(stored);
+    // Isolated fallback, not a full merge: a browser/PWA install that
+    // saved settings before saved_servers existed shouldn't lose its
+    // other fields, but also shouldn't silently keep an empty/missing
+    // server list forever.
+    if (!parsed.saved_servers) parsed.saved_servers = DEFAULT_SAVED_SERVERS;
+    return parsed;
+  }
+  return { scale: DEFAULT_SCALE, server_url: "", saved_servers: DEFAULT_SAVED_SERVERS, vault_path: null };
 }
 
 export async function saveSettings(cfg: AppSettings): Promise<void> {
@@ -59,4 +87,12 @@ export function shellOpen(url: string): void | Promise<unknown> {
 
 export function winDrag(): void {
   if (isTauri) invoke("window_start_drag");
+}
+
+/// Opens a native folder picker for the vault-sync engine's local .md
+/// mirror location. Returns null if the user cancelled, or if not
+/// running under Tauri at all (no local vault mirror in browser/PWA mode).
+export async function pickVaultFolder(): Promise<string | null> {
+  if (!isTauri) return null;
+  try { return await invoke<string | null>("pick_vault_folder"); } catch { return null; }
 }

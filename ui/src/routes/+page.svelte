@@ -1,6 +1,7 @@
 <script lang="ts">
-  import { isTauri, DEFAULT_SCALE, applyScale, loadSettings as loadPlatformSettings, saveSettings as savePlatformSettings, shellOpen, winDrag, type AppSettings } from "$lib/platform";
+  import { isTauri, DEFAULT_SCALE, DEFAULT_SAVED_SERVERS, applyScale, loadSettings as loadPlatformSettings, saveSettings as savePlatformSettings, shellOpen, winDrag, pickVaultFolder, type AppSettings } from "$lib/platform";
   import { apiFetch, restoreSession, setAuthRequiredHandler, getToken } from "$lib/auth";
+  import { applySyncPolicy, syncEngineStatus, syncDiff, syncStart, syncStop, type SyncStatusInfo, type SyncDiffInfo } from "$lib/sync";
   import TauriResizeGrips from "$lib/components/TauriResizeGrips.svelte";
   import TauriWindowControls from "$lib/components/TauriWindowControls.svelte";
   import LoginScreen from "$lib/components/LoginScreen.svelte";
@@ -22,7 +23,7 @@
       dropped_chunks_total?: number;
       dropped_chunks_recent?: { source_file: string; error: string; retries: number; reason: string; time: string; dead_letter_path: string | null }[];
     };
-    chroma?: { chunks: number; files_indexed: number; model: string; current_activity?: string | null } | null;
+    chroma?: { chunks: number; files_indexed: number; model: string; provider?: string; current_activity?: string | null } | null;
     vault?: { root: string; notes: number; sources: number; chats: number; streams: number };
     zotero?: { mode: string; available: boolean } | null;
     ollama?: { reachable: boolean } | null;
@@ -200,6 +201,11 @@
   // whenever apiBase changes too (e.g. the user points Settings at a
   // different server) so that server's own stored session gets checked.
   $effect(() => { restoreSession(apiBase); });
+  // Vault-sync: auto-start unless apiBase is Local (syncing a local vault
+  // mirror against the same machine is pointless) — reruns on every
+  // apiBase change (initial load AND switching servers in Settings), so
+  // this one effect is the single place that policy lives.
+  $effect(() => { applySyncPolicy(apiBase); });
 
   // ── WebSocket — API-process push events (vault_change, stream_progress) ──────
   // Hot-reload is handled separately below, by polling the Web process directly —
@@ -566,6 +572,7 @@
     activeNode = null;
     showResourcesPage = false;
     showKgProgressPage = false;
+    showSettings = false;
     loadingNode = true;
     try {
       const r = await apiFetch(`${apiBase}/chats/${encodeURIComponent(slug)}`);
@@ -737,6 +744,7 @@
     activeChat = null;
     showResourcesPage = false;
     showKgProgressPage = false;
+    showSettings = false;
     loadingNode = true;
     try {
       const r = await apiFetch(`${apiBase}/home`);
@@ -843,6 +851,7 @@
     activeChat = null;
     showResourcesPage = false;
     showKgProgressPage = false;
+    showSettings = false;
     loadingNode = true;
     try {
       const f = fmt ?? viewFormat;
@@ -856,6 +865,7 @@
     activeChat = null;
     showResourcesPage = false;
     showKgProgressPage = false;
+    showSettings = false;
     loadingNode = true;
     try {
       const r = await apiFetch(`${apiBase}/streams/${slug}/view`);
@@ -992,10 +1002,38 @@
 
   const SCALE_MIN = 1.0;
   const SCALE_MAX = 5.0;
-  const SCALE_STEP = 0.5;
+  const SCALE_STEP = 0.05;
 
   let showSettings = $state(false);
-  let cfg = $state<AppSettings>({ scale: DEFAULT_SCALE, server_url: untrack(() => apiBase) });
+  let cfg = $state<AppSettings>({ scale: DEFAULT_SCALE, server_url: untrack(() => apiBase), saved_servers: DEFAULT_SAVED_SERVERS, vault_path: null });
+  let syncStatus = $state<SyncStatusInfo>({ running: false, server_url: null, vault_path: null, tracked_files: 0 });
+  let syncDiffInfo = $state<SyncDiffInfo | null>(null);
+  let syncDiffLoading = $state(false);
+
+  async function refreshSyncInfo() {
+    syncStatus = await syncEngineStatus();
+    syncDiffLoading = true;
+    syncDiffInfo = await syncDiff();
+    syncDiffLoading = false;
+  }
+
+  async function chooseVaultFolder() {
+    const folder = await pickVaultFolder();
+    if (!folder) return;
+    cfg.vault_path = folder;
+    try { await savePlatformSettings(cfg); } catch {}
+    // Restart (not just leave running) so the engine picks up the new
+    // vault_path immediately instead of on next app launch.
+    await syncStop();
+    await applySyncPolicy(apiBase);
+    await refreshSyncInfo();
+  }
+
+  // Refreshes whenever the Settings page is opened — not continuously
+  // polled, since this is a manual-refresh status view, not a live feed.
+  $effect(() => {
+    if (showSettings && isTauri) refreshSyncInfo();
+  });
 
   async function loadSettings() {
     try {
@@ -1020,6 +1058,23 @@
     } catch {}
     showSettings = false;
     bootstrap();
+  }
+
+  /// One-click switch between saved_servers entries — deliberately does
+  /// NOT call bootstrap()/loadHome() (which reset showSettings to false,
+  /// see their own bodies) so the user stays on the Settings page and can
+  /// see which server is now active, instead of being bounced to Home
+  /// right after switching.
+  async function switchServer(url: string) {
+    apiBase = url;
+    cfg.server_url = url;
+    try { await savePlatformSettings(cfg); } catch {}
+    serverOnline = await ping();
+    if (serverOnline) {
+      await Promise.all([loadTree(), loadStreams(), loadChats(), loadZoteroStatus()]);
+      pollStatus();
+    }
+    connectWS();
   }
 
   // ── Stream form ─────────────────────────────────────────────────────────────
@@ -1122,7 +1177,12 @@
       <button class="deep-btn" onclick={openDeepSearch} title="Deep search (graph + semantic)">⌕</button>
     </div>
 
-    <button class="icon-btn" onmousedown={e => e.stopPropagation()} onclick={() => showSettings = !showSettings} title="Settings">⚙</button>
+    <button
+      class="icon-btn"
+      onmousedown={e => e.stopPropagation()}
+      onclick={() => { activeNode = null; activeChat = null; showResourcesPage = false; showKgProgressPage = false; showSettings = !showSettings; }}
+      title="Settings"
+    >⚙</button>
 
     <!-- Status dot + popover -->
     <div class="status-anchor" onmousedown={e => e.stopPropagation()}>
@@ -1163,7 +1223,14 @@
               </span>
             </div>
 
-            {#if serverStatus.ollama != null}
+            {#if serverStatus.chat_config}
+              <div class="sp-section">
+                <span class="sp-label">Chat</span>
+                <span class="sp-val ok">{serverStatus.chat_config.provider} / {serverStatus.chat_config.model}</span>
+              </div>
+            {/if}
+
+            {#if serverStatus.ollama != null && serverStatus.chat_config?.provider === "ollama"}
               <div class="sp-section">
                 <span class="sp-label">Ollama</span>
                 <span class="sp-val" class:ok={serverStatus.ollama.reachable} class:bad={!serverStatus.ollama.reachable}>
@@ -1209,7 +1276,7 @@
                   {serverStatus.chroma.chunks} chunks · {serverStatus.chroma.files_indexed} files
                 </span>
               </div>
-              <div class="sp-vault-root">{serverStatus.chroma.model}</div>
+              <div class="sp-vault-root">{serverStatus.chroma.model}{serverStatus.chroma.provider ? ` (${serverStatus.chroma.provider})` : ""}</div>
               {#if serverStatus.chroma.current_activity}
                 <div class="sp-vault-root">{serverStatus.chroma.current_activity}</div>
               {/if}
@@ -1516,7 +1583,7 @@
             <button
               class="tree-file"
               class:active={showResourcesPage}
-              onclick={() => { clearInterval(excerptPollInterval); activeNode = null; activeChat = null; showResourcesPage = true; showKgProgressPage = false; }}
+              onclick={() => { clearInterval(excerptPollInterval); activeNode = null; activeChat = null; showResourcesPage = true; showKgProgressPage = false; showSettings = false; }}
             >
               <span class="tree-type-dot nt-stream"></span>
               <span class="tree-file-name">Compute pools</span>
@@ -1524,10 +1591,18 @@
             <button
               class="tree-file"
               class:active={showKgProgressPage}
-              onclick={() => { clearInterval(excerptPollInterval); activeNode = null; activeChat = null; showResourcesPage = false; showKgProgressPage = true; }}
+              onclick={() => { clearInterval(excerptPollInterval); activeNode = null; activeChat = null; showResourcesPage = false; showKgProgressPage = true; showSettings = false; }}
             >
               <span class="tree-type-dot nt-stream"></span>
               <span class="tree-file-name">Knowledge Graph</span>
+            </button>
+            <button
+              class="tree-file"
+              class:active={showSettings}
+              onclick={() => { clearInterval(excerptPollInterval); activeNode = null; activeChat = null; showResourcesPage = false; showKgProgressPage = false; showSettings = true; }}
+            >
+              <span class="tree-type-dot nt-stream"></span>
+              <span class="tree-file-name">Settings</span>
             </button>
           </div>
         {/if}
@@ -2025,6 +2100,137 @@
             {/if}
           </div>
         </div>
+      {:else if showSettings}
+        <div class="resources-page">
+          <div class="node-toolbar">
+            <span class="node-heading">Settings</span>
+          </div>
+          <div class="resources-body">
+            <div class="resource-card">
+              <div class="resource-card-header">
+                <span class="resource-pool-name">Display scale</span>
+              </div>
+              <div class="scale-slider-row">
+                <input type="range" min={SCALE_MIN} max={SCALE_MAX} step={SCALE_STEP} bind:value={cfg.scale} />
+                <span class="scale-slider-value">{cfg.scale === DEFAULT_SCALE ? `${cfg.scale}× (default)` : `${cfg.scale}×`}</span>
+              </div>
+              <span class="setting-hint">Applied immediately — persisted across restarts.</span>
+            </div>
+
+            {#if isTauri}
+              <div class="resource-card">
+                <div class="resource-card-header">
+                  <span class="resource-pool-name">Server</span>
+                </div>
+                <div class="server-switcher">
+                  {#each cfg.saved_servers as server (server.url)}
+                    <button
+                      class="server-switch-btn"
+                      class:active={apiBase === server.url}
+                      onclick={() => switchServer(server.url)}
+                    >
+                      <span class="server-switch-name">{server.name}</span>
+                      <span class="server-switch-url">{server.url}</span>
+                    </button>
+                  {/each}
+                </div>
+                <label class="setting-row">
+                  <span class="setting-label">Custom URL</span>
+                  <input bind:value={apiBase} placeholder="http://127.0.0.1:8765" />
+                  <span class="setting-hint">URL of the running <code>prisma serve</code> process — click Save to apply a custom value.</span>
+                </label>
+              </div>
+
+              <div class="resource-card">
+                <div class="resource-card-header">
+                  <span class="resource-pool-name">Vault sync</span>
+                  <span class="resource-pool-capacity" class:warn={!syncStatus.running}>
+                    {syncStatus.running ? "running" : "stopped"}
+                  </span>
+                </div>
+                {#if syncStatus.running}
+                  <div class="resource-facts">
+                    <div class="resource-fact">
+                      <span class="resource-fact-label">Local vault</span>
+                      <span class="resource-fact-val">{syncStatus.vault_path}</span>
+                    </div>
+                    <div class="resource-fact">
+                      <span class="resource-fact-label">Tracked files</span>
+                      <span class="resource-fact-val">{syncStatus.tracked_files}</span>
+                    </div>
+                  </div>
+                {:else}
+                  <div class="setting-hint">Only runs against a non-Local server (see above) — syncing against the same machine is a no-op.</div>
+                {/if}
+
+                <label class="setting-row">
+                  <span class="setting-label">Local vault folder</span>
+                  <div class="server-switcher" style="flex-direction:row; align-items:center; gap:8px;">
+                    <span class="server-switch-url">{cfg.vault_path ?? "(default location)"}</span>
+                    <button class="btn-secondary" onclick={chooseVaultFolder}>Choose folder…</button>
+                  </div>
+                  <span class="setting-hint">Point this at your real vault (e.g. the same folder `prisma serve` uses locally) so syncing actually pushes/pulls your real notes — a fresh default folder starts out empty.</span>
+                </label>
+
+                {#if syncDiffLoading}
+                  <div class="setting-hint">Comparing local vault vs. server…</div>
+                {:else if syncDiffInfo}
+                  {#if !syncDiffInfo.reachable}
+                    <div class="setting-hint">Server unreachable — can't compare right now.</div>
+                  {:else}
+                    {@const total = syncDiffInfo.push_new + syncDiffInfo.pull_new + syncDiffInfo.push_delete + syncDiffInfo.pull_delete + syncDiffInfo.pull_update + syncDiffInfo.push_recreate}
+                    {#if total === 0}
+                      <div class="setting-hint">Local vault and server are in sync.</div>
+                    {:else}
+                      <div class="resource-facts-stacked">
+                        {#if syncDiffInfo.push_new}<div class="resource-fact"><span class="resource-fact-label">New locally, not on server</span><span class="resource-fact-val">{syncDiffInfo.push_new}</span></div>{/if}
+                        {#if syncDiffInfo.pull_new}<div class="resource-fact"><span class="resource-fact-label">New on server, not local</span><span class="resource-fact-val">{syncDiffInfo.pull_new}</span></div>{/if}
+                        {#if syncDiffInfo.push_delete}<div class="resource-fact"><span class="resource-fact-label">Deleted locally, pending on server</span><span class="resource-fact-val">{syncDiffInfo.push_delete}</span></div>{/if}
+                        {#if syncDiffInfo.pull_delete}<div class="resource-fact"><span class="resource-fact-label">Deleted on server, pending locally</span><span class="resource-fact-val">{syncDiffInfo.pull_delete}</span></div>{/if}
+                        {#if syncDiffInfo.pull_update}<div class="resource-fact"><span class="resource-fact-label">Conflicting change (will pull newer)</span><span class="resource-fact-val">{syncDiffInfo.pull_update}</span></div>{/if}
+                        {#if syncDiffInfo.push_recreate}<div class="resource-fact"><span class="resource-fact-label">Conflicting change (will re-push)</span><span class="resource-fact-val">{syncDiffInfo.push_recreate}</span></div>{/if}
+                      </div>
+                    {/if}
+                  {/if}
+                {/if}
+
+                <div class="server-switcher" style="margin-top:8px">
+                  <button class="btn-secondary" onclick={refreshSyncInfo}>Refresh</button>
+                  {#if syncStatus.running}
+                    <button class="btn-secondary" onclick={async () => { await syncStop(); await refreshSyncInfo(); }}>Stop</button>
+                  {:else}
+                    <button class="btn-secondary" onclick={async () => { await syncStart(); await refreshSyncInfo(); }}>Start</button>
+                  {/if}
+                </div>
+              </div>
+            {/if}
+
+            <div class="resource-card">
+              <div class="resource-card-header">
+                <span class="resource-pool-name">Reload server</span>
+              </div>
+              <div class="reload-scope">
+                {#each [
+                  { value: "all",    label: "All" },
+                  { value: "api",    label: "API" },
+                  { value: "web",    label: "Web (UI)" },
+                  { value: "chroma", label: "Chroma" },
+                  { value: "kg",     label: "Knowledge Graph" },
+                ] as opt (opt.value)}
+                  <label class="reload-option">
+                    <input type="radio" name="reload-scope" value={opt.value} bind:group={reloadScope} />
+                    {opt.label}
+                  </label>
+                {/each}
+              </div>
+              <button class="btn-danger" onclick={reloadServer} disabled={reloading}>
+                {reloading ? "Reloading…" : "Reload"}
+              </button>
+            </div>
+
+            <button class="btn-primary" onclick={saveAndApply}>Save</button>
+          </div>
+        </div>
       {:else}
         <div class="empty-state">
           <p class="text-body">Select a note or source from the sidebar.</p>
@@ -2141,65 +2347,6 @@
   {/if}
 
   <!-- Settings panel -->
-  {#if showSettings}
-  <button class="settings-backdrop" aria-label="Close" onclick={() => showSettings = false}></button>
-  <div class="settings-panel">
-    <div class="settings-header">
-      <span>Settings</span>
-      <button class="icon-btn" onclick={() => showSettings = false}>✕</button>
-    </div>
-
-    <div class="settings-body">
-      <label class="setting-row">
-        <span class="setting-label">Display scale</span>
-        <div class="scale-slider-row">
-          <input
-            type="range"
-            min={SCALE_MIN}
-            max={SCALE_MAX}
-            step={SCALE_STEP}
-            bind:value={cfg.scale}
-          />
-          <span class="scale-slider-value">{cfg.scale === DEFAULT_SCALE ? `${cfg.scale}× (default)` : `${cfg.scale}×`}</span>
-        </div>
-        <span class="setting-hint">Applied immediately — persisted across restarts.</span>
-      </label>
-
-      {#if isTauri}
-        <label class="setting-row">
-          <span class="setting-label">Server URL</span>
-          <input bind:value={apiBase} placeholder="http://127.0.0.1:8765" />
-          <span class="setting-hint">URL of the running <code>prisma serve</code> process.</span>
-        </label>
-      {/if}
-
-    </div>
-
-    <div class="settings-footer">
-      <button class="btn-primary" onclick={saveAndApply}>Save</button>
-      <button class="btn-secondary" onclick={() => showSettings = false}>Cancel</button>
-    </div>
-    <div class="settings-danger-zone">
-      <div class="reload-scope">
-        {#each [
-          { value: "all",    label: "All" },
-          { value: "api",    label: "API" },
-          { value: "web",    label: "Web (UI)" },
-          { value: "chroma", label: "Chroma" },
-          { value: "kg",     label: "Knowledge Graph" },
-        ] as opt (opt.value)}
-          <label class="reload-option">
-            <input type="radio" name="reload-scope" value={opt.value} bind:group={reloadScope} />
-            {opt.label}
-          </label>
-        {/each}
-      </div>
-      <button class="btn-danger" onclick={reloadServer} disabled={reloading}>
-        {reloading ? "Reloading…" : "Reload"}
-      </button>
-    </div>
-  </div>
-  {/if}
 
   <!-- Context menu -->
   {#if ctxMenu}
@@ -3819,6 +3966,30 @@
   }
   .setting-row select:focus,
   .setting-row input:focus { border-color: #4a9eff; }
+
+  .server-switcher {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-bottom: 10px;
+  }
+  .server-switch-btn {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 2px;
+    padding: 8px 10px;
+    background: #0d1320;
+    border: 1px solid #1c2b40;
+    border-radius: 6px;
+    color: #e8edf8;
+    cursor: pointer;
+    text-align: left;
+  }
+  .server-switch-btn:hover { border-color: #2a4060; }
+  .server-switch-btn.active { border-color: #4a9eff; background: #10233a; }
+  .server-switch-name { font-size: 13px; font-weight: 600; }
+  .server-switch-url { font-size: 11px; color: #6a8aa8; }
 
   .scale-slider-row {
     display: flex;

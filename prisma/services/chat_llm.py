@@ -104,4 +104,19 @@ class ChatLLM:
             except Exception as exc:
                 _log.warning("chat completion failed: %s", exc)
                 return None
+        # Cloud providers (openrouter) bill per-token — a real, per-call
+        # usage record here is what actually lets "how much are we
+        # spending" be answered from logs, rather than only from
+        # OpenRouter's own dashboard after the fact (found live 2026-07-25:
+        # a misconfigured deployment had already granted leases and hit
+        # OpenRouter for several calls before anyone noticed nothing was
+        # actually working — a per-call log line would have made that
+        # obvious immediately instead of needing to check OpenRouter's own
+        # /api/v1/key usage counter to even suspect it).
+        if resp.usage is not None:
+            _log.info(
+                "chat completion: provider=%s model=%s prompt_tokens=%d completion_tokens=%d total_tokens=%d",
+                self._config.provider, self._config.model,
+                resp.usage.prompt_tokens, resp.usage.completion_tokens, resp.usage.total_tokens,
+            )
         return resp.choices[0].message.content

@@ -917,3 +917,306 @@ Replaced with a narrower, more useful **Knowledge Graph progress page**
       and again at the end of `_profile_missing_models()`'s probing pass so
       newly-learned profiles can surface a conflict that was previously
       "unknown, can't tell." Tests in `tests/unit/server/test_supervisor_resources.py`.
+
+# Code quality assessment (2026-07-18) — pre-demo cleanup
+
+First-pass senior-level audit of `prisma/` (core package, ~18K LOC), done ahead of
+showing the project publicly to research-niche audiences. Goal: decide rewrite vs.
+targeted cleanup. Findings are evidence-based (grep/diff counts below), ranked most
+demo-blocking first.
+
+## 1. Duplicated Zotero client hierarchy (real refactor)
+
+Four classes reimplement overlapping CRUD (`get_collections`, `create_collection`,
+`delete_item`, `delete_collection`, `search_items`, `save_items*`, `get_item`,
+`add_item_to_collection`) with inconsistent return types:
+
+- `integrations/zotero/client.py` (`ZoteroClient`, aliased `ZoteroWebAPIClient` in
+  `unified_client.py`) — returns raw `Dict[str, Any]` / `List[Dict]`. **Violates the
+  CLAUDE.md rule that all structured data is Pydantic v2** — this is the one client
+  that doesn't follow it.
+- `integrations/zotero/hybrid_client.py` (`ZoteroHybridClient`) — returns typed
+  `ZoteroItem`/`ZoteroCollection`. Also has duplicate public/private pairs doing the
+  same check: `has_api_config()` / `_has_api_config()`, `has_local_server_config()` /
+  `_has_local_server_config()` — pick one, delete the other.
+- `integrations/zotero/local_api_client.py` (`ZoteroLocalAPIClient`) — typed, mostly
+  consistent with hybrid_client.
+- `integrations/zotero/desktop_client.py` (`ZoteroDesktopClient`) — smaller surface,
+  some overlap with the above three.
+- `integrations/zotero/unified_client.py` (`ZoteroClient` facade) — a `from_config`
+  factory wrapping the three above; doesn't hide the inconsistency, just routes to it.
+
+None of these are dead code — all four are actively imported and constructed via the
+`unified_client.py` factory. This is duplication carried across sessions, not
+leftover cruft.
+
+**Fix size:** real refactor. Define one typed interface (the architecture doc already
+calls this out implicitly — `unified_client.py` was clearly meant to be the seam),
+make `client.py`/`ZoteroWebAPIClient` return the same Pydantic models as the other
+two, delete the duplicate has_*/​_has_* pairs, and audit for other near-duplicate
+methods across the four files before assuming the facade fully hides the mess.
+
+## 2. Inconsistent exception handling (medium — needs a policy, then a sweep)
+
+`prisma/` (core package only) has **220** `except Exception` blocks, of which **27**
+are bare `except Exception: pass` with no logging at all — e.g.
+`server/app.py:125`, `:174`, `:179`, `:496`. Others in the same file log properly with
+context (`server/app.py:239`, `:257`, `:714` — `_log.warning("...: %s", exc)`). No
+visible policy for which failures are safe to swallow silently vs. which need at
+least a log line; this looks like different sessions handling errors differently
+rather than a deliberate design.
+
+**Fix size:** medium. Needs a decision first (e.g. "swallow only for known-optional
+best-effort paths, and even then log at debug level") then a mechanical sweep — not
+a redesign, but touches most files in the package.
+
+## 3. Duplicated test suites — abandoned migration (quick fix, high value)
+
+`tests-sets/README.md` documents a deliberate reorganization ("Tests are organized by
+what they need to run, not by layer") with its own rule ("Only our code is tested").
+But the **old** `tests/unit/` + `tests/integration/` tree was never deleted after
+`tests-sets/` was created:
+
+- 9 of 14 sampled `tests-sets/mocked/**/test_*.py` files are **byte-identical**
+  (`diff -q` confirmed) to a same-named file still sitting in `tests/unit/`, e.g.
+  `test_models.py` (303 lines), `test_debug_output.py` (277 lines),
+  `test_zotero_integration.py` (271 lines).
+- Net effect: whole test files are maintained (or silently drift) in two places at
+  once, and `tests/` has no README explaining why it still exists alongside
+  `tests-sets/`.
+
+**Fix size:** quick, high-value. Confirm `tests-sets/` + `tests/integration/`
+(the real-API suite, not mocked) already covers everything `tests/unit` covers, point
+CI at `tests-sets/run-all.sh` only, then delete the old `tests/` tree. This alone
+meaningfully shrinks the "is this project well-maintained" first impression for a
+demo audience poking at the repo.
+
+## 4. `server/app.py` is oversized for what the architecture doc describes (real refactor, lower priority)
+
+1,692 lines, ~48 routes. The architecture doc describes `app.py` as "API process —
+REST + WebSocket, no UI mount," implying a thin routing layer, but route handlers
+appear to carry business logic inline rather than delegating to `services/`
+(spot-checked; not exhaustively verified line-by-line — worth a follow-up pass
+specifically diffing route-handler bodies against what `services/` already exposes).
+Also contains a startup-timing helper using a mutable-default-arg static-variable
+trick (`_t(label, _t0=[0.0])`, line 30) — works, but is the kind of clever-but-obscure
+pattern a future contributor will trip over.
+
+**Fix size:** real refactor, but lower priority than #1–#3 — it's a maintainability
+smell, not something a demo audience will see directly.
+
+## Overall verdict
+
+**Not a rewrite.** The architecture itself (supervised multi-process design, flat-MD
+vault, typed Pydantic responses as the stated convention, offline-first Zotero
+handling) is sound and mostly followed — the problems found are consistent with
+**several different sessions solving the same problem without consolidating**, not
+with the design being wrong. No `@dataclass` violations were found (the one convention
+check that came back clean), and the two large services (`knowledge_graph_service.py`,
+`supervisor.py`, both >1000 lines) were not deep-audited in this pass — worth a
+follow-up if a full cleanup effort is scoped.
+
+Recommended order (each is independently shippable):
+1. Delete the duplicated old `tests/` tree (#3) — cheapest, immediate demo-facing win.
+2. Consolidate the Zotero client hierarchy (#1) — highest risk of actually confusing
+   or breaking behavior for a new contributor, and the CLAUDE.md violation in
+   `client.py` is a concrete, fixable target.
+3. Establish and sweep an exception-handling policy (#2) — mechanical once decided.
+4. `app.py` route/service-boundary cleanup (#4) — do last, lower external visibility.
+
+This does **not** require "a good programmer to come in and rewrite it" — it needs 3-4
+focused cleanup passes in the order above. A single competent contributor (human or
+AI, working file-by-file with tests as a guardrail) could realistically clear #1 and
+#3 in short order, with #1/#2 (Zotero) being the one item worth extra care since it
+touches active, working code paths.
+
+## Deferred feature: vault unlock over LAN instead of an at-rest key (2026-07-22)
+
+Follows up on the "Encryption at rest ... deferred" line in `docs/ontologia.md`.
+Context: the vault is planned to live on a Longhorn-backed volume (Forge/k3s), with
+an app-level encrypted overlay (gocryptfs, chosen for portability — the encrypted
+directory doesn't care what storage backend sits under it, same reasoning as the
+existing rclone-crypt setup used elsewhere) instead of Longhorn's native
+volume-encryption (which ties the key to a Kubernetes Secret sitting on the same
+disk as the data — protects against disk reuse/resale, not against "someone took
+the whole machine").
+
+**Design discussed:** Prisma starts with the vault *locked* — gocryptfs not
+mounted, vault-dependent features (chat, search, KG, streams touching vault
+content) unavailable. An API endpoint, reachable only on the local
+network/WireGuard (never public-facing), accepts the vault passphrase and
+triggers the gocryptfs mount; only then does the rest of the app become fully
+operational.
+
+**Why this over just storing the key in a Secret:** avoids the passphrase sitting
+at rest on the same physical disk as the encrypted data (the same caveat already
+accepted for Longhorn's own encryption key). This is a middle ground between
+"fully automatic" (zero friction, same exposure as a plain Secret) and "fully
+manual" (requires physical presence at the console, which conflicts with Prisma
+needing to run background jobs unattended on an always-on server) — unlock is a
+network call, so the user can script it for convenience (call it right after
+every restart) or do it by hand for extra caution, same automatic-vs-manual
+choice already made consciously for the root disk (no LUKS, so the server
+reboots unattended) and for gdrive-crypt (key saved, not re-typed).
+
+**Not yet designed:**
+- Where the "locked" state actually gates each subsystem (supervisor level?
+  per-route dependency check?) — needs a look at `supervisor.py` before
+  committing to an approach.
+- Auth on the unlock endpoint itself (network-restricted isn't the same as
+  unauthenticated).
+- Behavior on pod restart: locked again every time, by design — needs the
+  supervisor's crash-recoverable process model (ADR-012) to cleanly re-enter
+  the locked state rather than assuming vault access persists.
+
+## Deferred: package prisma-desktop as a Flatpak (2026-07-25)
+
+Raised, not started — user has higher-priority work right now. `flatpak` +
+`org.gnome.Platform//50` (matching webkit2gtk-4.1, same as the host) are
+already installed on Anvil; `flatpak-builder` is not. Two approaches
+discussed, decision not yet made:
+1. **Pragmatic**: `cargo build --release` outside the sandbox, manifest just
+   packages the binary + assets + `.desktop` file. Fast, fine for personal
+   use on Anvil, not Flathub-submittable as-is (Flathub requires sandboxed,
+   network-free builds).
+2. **Flathub-correct**: build the Rust binary *inside* the sandbox with no
+   network access, which needs `flatpak-cargo-generator` to vendor every
+   crate's sources offline first. More work, needed only if `prisma-desktop`
+   is meant to eventually publish on Flathub.
+
+## Desktop↔server sync via prisma-api, not OS-level file sync (2026-07-22, revised 2026-07-24, implemented 2026-07-25)
+
+Corrects an assumption made earlier in the same planning session: prisma-desktop
+(local, anvil) and a server-side Prisma instance (Forge/k3s) do **not** share one
+vault folder at the OS/filesystem level. Options considered and rejected for the
+desktop↔server link specifically: NFS (not practical/safe to expose to the
+internet — no real auth story for that), Syncthing, rclone (crypt + `bisync`).
+All of these treat the vault as "just files to sync" and know nothing about
+Prisma's own side effects on vault state (KG re-index triggers, Zotero
+collection writes, embedding generation) — a blind file-level sync can't
+coordinate any of that, and reintroduces exactly the dual-writer/corruption risk
+that the whole compute-pool/active-passive discussion in this session was
+trying to avoid.
+
+**Revised design (2026-07-24), supersedes the "each instance owns its own KG"
+call below:** prisma-desktop never runs its own KG or Chroma at all — those
+stay exclusively server-side, full stop, not "independently duplicated per
+instance." Two reasons: (1) re-running extraction/embedding generation on
+every instance is wasted, duplicated compute over the same content, and (2) it
+avoids two independently-evolving knowledge graphs that could disagree with
+each other — a problem the original "each instance owns its own KG
+independently" design created but never actually solved (see its own
+"not yet designed" list below, which never answered *how* two independent KGs
+reconcile). There's also a hardware argument: a desktop/laptop may have a
+weak or no GPU, and KG extraction + embedding generation are long-running,
+resource-heavy jobs you don't want competing with whatever you're actively
+doing on that machine — the server, already dedicated to this, is the right
+place for it regardless of "local-first" as a general philosophy. Local-first
+applies to the *vault* (your own notes, yours, editable offline) — it doesn't
+have to extend to the heavy derived processing on top of it.
+
+**What desktop actually owns:** a local copy of the vault's `.md` files only —
+plain files on disk, edited with whatever external editor the user prefers
+(prisma-desktop is not a text editor). A filesystem watcher
+(`watchdog` — prisma's server side already depends on this, reuse the same
+library rather than a new one) detects local create/modify/delete and pushes
+each change to the server over the API. Sync unit is the **whole file**, not a
+diff — vault notes are small enough that this isn't worth the complexity yet.
+Server-side changes to the vault (auto-saved papers, stream discovery writes)
+push a **WebSocket** notification to connected desktop instances, which then
+pull just the changed file(s) — this is the other half of "not OS-level
+sync": both directions go through Prisma's own API/WS, never a shared mount.
+
+**Why an API over a file-sync tool:** an HTTPS API is the standard,
+well-understood way to expose functionality across the open internet safely
+(proper auth, already need TLS regardless per the ClusterIssuer/Ingress work
+done alongside this). It also means prisma-desktop can reach the server from
+**any** network, not just when on the same LAN/WireGuard as Forge — file-sync-
+based approaches were implicitly LAN-bound.
+
+**Where this lives:** inside `prisma-desktop` itself (extending it well beyond
+its current "thin Tauri shell, zero local storage" state — see its own
+README/CLAUDE.md), not a separate background daemon. `prisma-desktop` already
+has tray/background OS-integration via Tauri, which this can build on.
+
+**Implemented (2026-07-25):**
+- Server: `GET /sync/manifest`, `GET/PUT/DELETE /sync/file` (`prisma/server/sync_routes.py`,
+  path-based, not slug-based — new `VaultService.read_by_path`/`write_by_path`/
+  `delete_by_path`/`list_md_manifest` in `services/vault.py`). Reuses the existing
+  `vault_change` WS event (two new `action` values: `sync_write`/`sync_delete`)
+  rather than a dedicated sync-specific surface.
+- Echo-loop prevention: `broadcast()` gained `exclude_client_id` — desktop
+  identifies its WS connection via `?client_id=<uuid>` and its own pushes via
+  an `X-Sync-Client-Id` header, so its own writes don't echo back to it as an
+  incoming change.
+- Conflict resolution: last-write-wins by mtime (`PUT /sync/file`'s
+  `expected_mtime` 409s on mismatch), with the losing version preserved as a
+  `<path>.conflict-<ts>.md` sibling on the desktop side rather than silently
+  discarded — real, documented data-loss potential for a genuinely-simultaneous
+  edit, accepted given this is a single-user tool.
+- Initial reconciliation: desktop diffs its local walk + `sync_state.json`
+  (per-path last-synced mtime) against the server's manifest at startup —
+  see `prisma-desktop/src-tauri/src/sync/manifest.rs`'s `reconcile()` for the
+  exact tracked/untracked lifecycle table (new-local, new-remote, and the two
+  ambiguous delete-vs-edit cases, each resolved in favor of not losing data).
+- **A prerequisite this surfaced, also implemented**: the server had *no
+  authentication at all* despite ADR-011 already specifying password-mode
+  auth for exactly this LAN scenario. Implemented the password-mode tier only
+  (`prisma/server/auth.py`: zone-classifying ASGI middleware, `POST
+  /auth/login`, JWT signed by `sha256(password_hash)` so a password rotation
+  invalidates all sessions with no separate secret to manage, WS auth via the
+  `Sec-WebSocket-Protocol` subprotocol since browsers can't set custom
+  handshake headers). OIDC/WAN tier remains unimplemented and is explicitly
+  rejected at config-load time if configured (`server.auth.mode: oidc` fails
+  validation) — out of scope for a LAN-only feature. `prisma auth
+  hash-password` CLI added to generate `server.auth.password_hash`.
+- Desktop-side Rust: `src-tauri/src/auth/` (login/session, `auth.json` store)
+  and `src-tauri/src/sync/` (fs-watcher push, WS pull, reconciliation) — see
+  `prisma-desktop`'s own README "Vault Sync & Auth" section. New direct deps:
+  `reqwest`, `tokio` (time only), `tokio-tungstenite`, `notify` +
+  `notify-debouncer-full`, `tauri-plugin-dialog`, `uuid`.
+- `prisma/ui`: `src/lib/auth.ts` + `LoginScreen.svelte`, shown on any 401.
+  Under Tauri, login goes through the `sync_login` command so one password
+  prompt covers both the Rust sync engine's session and the UI's own
+  `apiFetch` calls; pure browser/PWA calls `POST /auth/login` directly.
+  `tauri.conf.json`'s CSP was widened (`connect-src`/`img-src`/`frame-src`
+  from loopback-only to `http:`/`https:`/`ws:`/`wss:`) since it silently
+  blocked any non-loopback `server_url` before this.
+
+**Known limitations, not fixed (scope calls, not oversights):**
+- This only applies to the Tauri-wrapped desktop build. A pure browser/PWA
+  client (Android, iOS, desktop browser tab) has no persistent local
+  filesystem to sync into and keeps talking to the server directly — it only
+  picks up the auth/login-screen half of this work, not the sync engine.
+  **Explicitly discussed and deferred (2026-07-25), not ruled out:** the only
+  real path to local-disk sync from a browser is the **File System Access
+  API** (`showDirectoryPicker()`), which would need its own implementation in
+  `prisma/ui` (JS/TS, not Rust) — this is a different technology, not an
+  extension of `prisma-desktop`'s sync engine, with real platform limits to
+  weigh before starting: Chromium-only (no Firefox, no Safari/iOS — a real
+  gap given "mobile PWA" is one of this project's stated deployment models),
+  no native fs-watch equivalent to the `notify` crate (would need polling,
+  with the latency/battery cost that implies), and less durable permission
+  grants than a native app's unrestricted disk access (the browser can
+  require re-prompting for the directory after a browser restart or period
+  of inactivity). Revisit as its own scoped session if browser/PWA local-edit
+  parity becomes a priority.
+- `web_app.py` (the static UI-asset process, port 8766) and `kg_app.py` (the
+  internal KG worker, only ever reached loopback-to-loopback by `app.py`
+  itself) are **not** gated by `AuthMiddleware` — only the main API process
+  (`server/app.py`, port 8765) is. Static assets are low-sensitivity and the
+  KG worker is never LAN-reachable directly, so this was a deliberate choice,
+  not an oversight — worth revisiting if that assumption changes.
+- Two call sites can't carry an `Authorization` header at all: the note
+  HTML-source `<iframe>` preview (fixed by loading it as a blob URL via
+  `apiFetch` instead of a direct `src=`) and the "open in external browser"
+  action for the same view (`shellOpen`, a full OS-level navigation — left
+  unfixed; would need a short-lived signed URL token to close properly, real
+  scope creep beyond this feature).
+- Diagrams in both repos' `docs/diagrams/` were not regenerated (`sysatlas`
+  isn't installed in either repo's current environment) — do `bash
+  docs/diagrams/gen.sh` in both repos once it is, per each repo's own
+  CLAUDE.md checklist.
+- How this interacts with the vault-unlock-over-LAN feature above — encryption-
+  at-rest is still deferred to a future session (as of 2026-07-24), so a
+  locked/encrypted vault's interaction with sync is still unresolved.

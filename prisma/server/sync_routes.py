@@ -25,6 +25,16 @@ from prisma.services.vault import VaultService
 
 _CLIENT_ID_HEADER = "x-sync-client-id"
 
+# mtime equality tolerance for the optimistic-concurrency check below. Unix
+# timestamps at today's magnitude (~1.78e9) leave float64 only ~238ns of
+# resolution (confirmed live 2026-07-25: two mtimes one ULP apart --
+# 1785018422.3829463 vs .3829465 -- compared unequal forever after a round
+# trip through JSON serialization, Python -> Rust -> Python, causing an
+# eternal single-file 409 loop that never resolved on its own). Exact `==`
+# is fundamentally unsafe here; 1ms is orders of magnitude looser than the
+# ULP-scale noise while still far tighter than any real edit-timing window.
+_MTIME_TOLERANCE_SECONDS = 1e-3
+
 
 class SyncManifestEntry(BaseModel):
     path: str
@@ -83,7 +93,7 @@ def build_sync_router(
             # this path was brand new (expected_mtime is None) but the
             # server already has a file there — same ambiguity either way,
             # resolved identically client-side (compare mtimes, keep newer).
-            if req.expected_mtime is None or mtime != req.expected_mtime:
+            if req.expected_mtime is None or abs(mtime - req.expected_mtime) > _MTIME_TOLERANCE_SECONDS:
                 raise HTTPException(
                     status_code=409,
                     detail={"path": req.path, "body": body, "mtime": mtime},

@@ -1,10 +1,10 @@
 """Backend-agnostic LLM interface for the chat module (ADR-014: openai SDK,
 multi-base_url — not litellm, not hand-rolled requests).
 
-Ollama and OpenRouter are both OpenAI-API-compatible, so the same `openai`
-client works for either with just a base_url/api_key change. Anthropic
-would need its own adapter when that backend is actually built (see
-ADR-014) — not needed yet, chat is Ollama-only today.
+Ollama, llama.cpp (llama-server/llama-swap), and OpenRouter are all
+OpenAI-API-compatible, so the same `openai` client works for any of them with
+just a base_url/api_key change. Anthropic would need its own adapter when that
+backend is actually built (see ADR-014).
 
 Every call goes through resource_lock.lease(), same as the knowledge
 graph's and ChromaDB's Ollama calls — one shared arbitration point for
@@ -63,7 +63,9 @@ class ChatLLM:
     def _resolve_base_url(self) -> str:
         if self._config.base_url:
             return self._config.base_url
-        if self._config.provider == "ollama":
+        if self._config.provider in ("ollama", "llama_cpp"):
+            # Both are OpenAI-API-compatible on their /v1 path — same client,
+            # just a different local backend host:port (llm.host in config).
             return f"http://{self._ollama_host}/v1"
         if self._config.provider == "openrouter":
             return "https://openrouter.ai/api/v1"
@@ -79,7 +81,7 @@ class ChatLLM:
                     f"chat.api_key_env={self._config.api_key_env!r} is set but not present in the environment"
                 )
             return key
-        return "ollama"  # Ollama's OpenAI-compat endpoint ignores the key but the SDK requires a non-empty string
+        return "ollama"  # placeholder — Ollama/llama.cpp's OpenAI-compat endpoints ignore the key, but the SDK requires a non-empty string
 
     def complete(self, messages: list[dict], temperature: float = 0.1) -> str | None:
         """One resource_lock-gated chat completion call. Returns None if the

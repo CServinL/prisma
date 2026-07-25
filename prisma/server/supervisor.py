@@ -224,6 +224,7 @@ def _profile_missing_models(
     affinity: set[str],
     model_vram: dict[str, dict[str, int]],
     base_url: str,
+    pool_provider: dict[str, str] | None = None,
 ) -> None:
     """Run once at supervisor startup, in its own daemon thread — for any
     model in a VRAM-budget-aware pool with neither a config.yaml `vram_mb`
@@ -243,11 +244,21 @@ def _profile_missing_models(
     the end of this function) can sum a pool's models against
     vram_budget_mb and flag "these don't fit together" before a config
     change ships, not just react to it after the fact.
+
+    Skips `provider: llama_cpp` pools entirely — `_probe_model_vram` forces a
+    load via Ollama's native /api/generate, which llama-server/llama-swap
+    don't implement. Those pools must have `vram_mb` set explicitly in
+    config for every model (no auto-profiling fallback) — see
+    docs/llamacpp-vulkan-forge-vs-anvil-benchmark.md in this repo for real
+    measured numbers to use as a starting point.
     """
     saved_profiles = _load_vram_profiles()
+    pool_provider = pool_provider or {}
     for pool_name in affinity:
         if pool_vram_budget.get(pool_name) is None:
             continue  # not vram-budget-aware — nothing here to inform
+        if pool_provider.get(pool_name, "ollama") == "llama_cpp":
+            continue
         configured = model_vram.get(pool_name, {})
         for model in pool_models.get(pool_name, set()):
             if model in configured or model in saved_profiles:
@@ -269,13 +280,14 @@ def _profile_missing_models(
 def _load_compute_pools() -> tuple[
     dict[str, int], set[str], dict[str, set[str]], dict[str, dict[str, int]],
     dict[str, int | None], dict[str, dict[str, int]], dict[str, dict[str, int]],
+    dict[str, str],
 ]:
     """Named compute pools and their concurrency limits, e.g.:
 
         compute_pools:
           - name: local-ollama       # a single GPU / single Ollama instance
             type: gpu                # models here can genuinely coexist in VRAM
-            provider: ollama          # informational — for humans reading this file
+            provider: ollama          # ollama | llama_cpp — see note below
             max_concurrent: 3         # fallback for any model below with no override
             vram_budget_mb: 14000     # total VRAM this pool may commit across ALL resident models
             models:
@@ -311,6 +323,18 @@ def _load_compute_pools() -> tuple[
     with no `type` falls back to the legacy `model_affinity` key (default
     true) for configs written before `type` existed — `type` wins when
     both are present.
+
+    `provider: llama_cpp` (e.g. a llama-swap-backed pool) skips the live
+    Ollama `/api/ps` query entirely — llama-swap has no equivalent live
+    resident-VRAM introspection endpoint, and doesn't need one here: its own
+    `swap: false` groups are configured to never evict each other, so
+    "what's really resident right now" is just whatever this pool's active
+    leases already say. `ResourceManager.acquire()` sums active leases'
+    configured `vram_mb` directly for these pools instead of asking an
+    external API — the same arithmetic the Ollama path falls back to when
+    `/api/ps` is unreachable, just as the *normal* path here rather than a
+    degraded fallback. `provider: ollama` (the default) keeps the live
+    `/api/ps` behavior described above.
 
     Each `models` entry is either a plain string (uses the pool's own
     `max_concurrent`, no `vram_mb`/`background_max_concurrent`) or a
@@ -353,6 +377,7 @@ def _load_compute_pools() -> tuple[
             pool_vram_budget: dict[str, int | None] = {}
             model_vram: dict[str, dict[str, int]] = {}
             model_background_limit: dict[str, dict[str, int]] = {}
+            pool_provider: dict[str, str] = {p["name"]: p.get("provider", "ollama") for p in pools}
             for p in pools:
                 names: set[str] = set()
                 overrides: dict[str, int] = {}
@@ -374,10 +399,16 @@ def _load_compute_pools() -> tuple[
                 pool_vram_budget[p["name"]] = int(p["vram_budget_mb"]) if "vram_budget_mb" in p else None
                 model_vram[p["name"]] = vram
                 model_background_limit[p["name"]] = background
-            return capacity, affinity, pool_models, model_concurrency, pool_vram_budget, model_vram, model_background_limit
+            return (
+                capacity, affinity, pool_models, model_concurrency, pool_vram_budget, model_vram,
+                model_background_limit, pool_provider,
+            )
     except Exception:
         pass
-    return {"default": 1}, {"default"}, {"default": set()}, {"default": {}}, {"default": None}, {"default": {}}, {"default": {}}
+    return (
+        {"default": 1}, {"default"}, {"default": set()}, {"default": {}}, {"default": None}, {"default": {}},
+        {"default": {}}, {"default": "ollama"},
+    )
 
 
 def _die_with_parent() -> None:
@@ -558,6 +589,7 @@ class ResourceManager:
         model_vram: dict[str, dict[str, int]] | None = None,
         model_background_limit: dict[str, dict[str, int]] | None = None,
         ollama_base_url: str = "http://localhost:11434",
+        pool_provider: dict[str, str] | None = None,
     ) -> None:
         self._lock = threading.Lock()
         self._capacity = dict(pools)
@@ -585,6 +617,10 @@ class ResourceManager:
         # has at least one free slot rather than queueing behind bulk work.
         self._model_background_limit = {name: dict(m) for name, m in (model_background_limit or {}).items()}
         self._ollama_base_url = ollama_base_url
+        # pool -> "ollama" | "llama_cpp" — see acquire()'s vram_aware branch.
+        # Pools not in this dict (e.g. reload_config called from an older
+        # config shape) default to "ollama", the historical-only behavior.
+        self._pool_provider = dict(pool_provider or {})
         # pool -> {request_id: {holder, pid, model, acquired_at, timeout, priority}}
         self._leases: dict[str, dict[str, dict]] = {name: {} for name in pools}
         self._active_model: dict[str, str | None] = {name: None for name in pools}
@@ -671,21 +707,32 @@ class ResourceManager:
                         )
                         continue  # busy with a different model — must drain first
                 elif vram_aware and model is not None:
-                    resident = _query_ollama_resident_mb(self._ollama_base_url)
+                    # llama_cpp pools (e.g. llama-swap) have no live
+                    # /api/ps-equivalent to query — and don't need one, since
+                    # their groups are configured (swap: false) to never evict
+                    # each other. Skip straight to deriving "what's resident"
+                    # from this pool's own active leases, the same computation
+                    # the ollama path only falls back to when /api/ps itself
+                    # is unreachable.
+                    is_llama_cpp = self._pool_provider.get(name, "ollama") == "llama_cpp"
+                    resident = None if is_llama_cpp else _query_ollama_resident_mb(self._ollama_base_url)
                     if resident is None:
-                        # Can't verify Ollama's real state — fail safe to the
-                        # strict single-resident-model rule rather than guess.
-                        # vram-aware pools don't maintain _active_model (it'd
-                        # be ambiguous with several models resident at once),
-                        # so derive "busy with a different model" from actual
-                        # lease data instead.
+                        # Can't verify live resident state (llama_cpp: by
+                        # design; ollama: /api/ps unreachable) — fail safe to
+                        # the strict single-resident-model rule rather than
+                        # guess. vram-aware pools don't maintain _active_model
+                        # (it'd be ambiguous with several models resident at
+                        # once), so derive "busy with a different model" from
+                        # actual lease data instead.
                         other_models = {l["model"] for l in self._leases[name].values() if l["model"] != model}
                         if other_models:
                             self._stats[name]["denied_model_busy"] += 1
                             log.info(
                                 "acquire denied: pool=%s holder=%s pid=%d model=%s priority=%s "
-                                "reason=model_busy (ollama unreachable, other resident models=%s)",
-                                name, holder, pid, model, priority, sorted(other_models),
+                                "reason=model_busy (%s, other resident models=%s)",
+                                name, holder, pid, model, priority,
+                                "leases-derived" if is_llama_cpp else "ollama unreachable",
+                                sorted(other_models),
                             )
                             continue
                     elif model not in resident:
@@ -833,6 +880,7 @@ class ResourceManager:
         vram_budget: dict[str, int | None] | None = None,
         model_vram: dict[str, dict[str, int]] | None = None,
         model_background_limit: dict[str, dict[str, int]] | None = None,
+        pool_provider: dict[str, str] | None = None,
     ) -> None:
         """Re-read compute_pools from config.yaml into a *running*
         ResourceManager, without restarting the supervisor or touching
@@ -855,6 +903,7 @@ class ResourceManager:
             self._vram_budget = dict(vram_budget or {})
             self._model_vram = {name: dict(m) for name, m in (model_vram or {}).items()}
             self._model_background_limit = {name: dict(m) for name, m in (model_background_limit or {}).items()}
+            self._pool_provider = dict(pool_provider or {})
             for name in pools:
                 self._leases.setdefault(name, {})
                 self._active_model.setdefault(name, None)
@@ -1026,10 +1075,10 @@ def _make_handler(supervisor: Supervisor):
                 self._json(200, {"status": "released"})
             elif self.path == "/supervisor/resources/reload":
                 (capacity, affinity, pool_models, model_concurrency,
-                 vram_budget, model_vram, model_background_limit) = _load_compute_pools()
+                 vram_budget, model_vram, model_background_limit, pool_provider) = _load_compute_pools()
                 supervisor.resources.reload_config(
                     capacity, affinity, pool_models, model_concurrency,
-                    vram_budget, model_vram, model_background_limit,
+                    vram_budget, model_vram, model_background_limit, pool_provider,
                 )
                 self._json(200, {"status": "reloaded", "pools": list(capacity)})
             else:
@@ -1082,12 +1131,11 @@ def main(
         "kg": Worker("kg", [_venv_bin("uvicorn"), "prisma.server.kg_app:app", "--host", host, "--port", str(kg_port)],
                      stop_timeout=15.0, env={"PRISMA_SUPERVISOR_PORT": str(supervisor_port)}),
     }
-    capacity, affinity, pool_models, model_concurrency, pool_vram_budget, model_vram, model_background_limit = (
-        _load_compute_pools()
-    )
+    (capacity, affinity, pool_models, model_concurrency, pool_vram_budget, model_vram,
+     model_background_limit, pool_provider) = _load_compute_pools()
     resources = ResourceManager(
         capacity, affinity, pool_models, model_concurrency, pool_vram_budget, model_vram,
-        model_background_limit, ollama_base_url=_ollama_base_url(),
+        model_background_limit, ollama_base_url=_ollama_base_url(), pool_provider=pool_provider,
     )
     # Best-effort check with whatever's already known (config + previously
     # saved profiles) — don't wait for the profiling thread below, which can
@@ -1096,7 +1144,7 @@ def main(
     _check_pool_vram_fit(pool_models, pool_vram_budget, affinity, model_vram)
     threading.Thread(
         target=_profile_missing_models,
-        args=(resources, pool_models, pool_vram_budget, affinity, model_vram, _ollama_base_url()),
+        args=(resources, pool_models, pool_vram_budget, affinity, model_vram, _ollama_base_url(), pool_provider),
         daemon=True, name="vram-profiler",
     ).start()
 

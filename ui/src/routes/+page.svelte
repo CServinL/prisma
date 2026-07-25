@@ -1,7 +1,9 @@
 <script lang="ts">
   import { isTauri, DEFAULT_SCALE, applyScale, loadSettings as loadPlatformSettings, saveSettings as savePlatformSettings, shellOpen, winDrag, type AppSettings } from "$lib/platform";
+  import { apiFetch, restoreSession, setAuthRequiredHandler, getToken } from "$lib/auth";
   import TauriResizeGrips from "$lib/components/TauriResizeGrips.svelte";
   import TauriWindowControls from "$lib/components/TauriWindowControls.svelte";
+  import LoginScreen from "$lib/components/LoginScreen.svelte";
 
   type NodeType = "note" | "source" | "chat" | "stream";
   type GState = "idle" | "indexing" | "stale";
@@ -187,6 +189,18 @@
       : (localStorage.getItem("prisma.server") ?? _defaultApiBase())
   );
 
+  // ── Auth (ADR-011 password mode) ──────────────────────────────────────────
+  // Shown whenever apiFetch (or the /ws connection below) hits a 401 —
+  // i.e. this server is in the LAN zone with server.auth.mode: password
+  // and we don't hold a valid session yet.
+  let showLoginScreen = $state(false);
+  setAuthRequiredHandler(() => { showLoginScreen = true; });
+  // Tauri only: picks up a session already stored in auth.json from a
+  // previous run so a restart doesn't force a re-login every time. Reruns
+  // whenever apiBase changes too (e.g. the user points Settings at a
+  // different server) so that server's own stored session gets checked.
+  $effect(() => { restoreSession(apiBase); });
+
   // ── WebSocket — API-process push events (vault_change, stream_progress) ──────
   // Hot-reload is handled separately below, by polling the Web process directly —
   // it's a dev-only, self-contained concern local to that process (see ADR-012),
@@ -195,7 +209,13 @@
 
   function connectWS() {
     const wsBase = apiBase.replace(/^http/, "ws");
-    const ws = new WebSocket(`${wsBase}/ws`);
+    // Same subprotocol scheme as prisma-desktop's own pull.rs — the
+    // browser WebSocket API can't set an Authorization header, only
+    // subprotocols. Connecting with no token when auth is required just
+    // fails and falls into the existing reconnect-with-backoff below,
+    // which naturally retries once a token exists post-login.
+    const token = getToken();
+    const ws = token ? new WebSocket(`${wsBase}/ws`, ["bearer", token]) : new WebSocket(`${wsBase}/ws`);
 
     ws.onopen = () => { _wsConnected = true; };
 
@@ -290,6 +310,33 @@
   let dragOverKey = $state<string | null>(null);
   let hoverExpandTimer: ReturnType<typeof setTimeout> | null = null;
   let activeNode = $state<RenderedNode | null>(null);
+  // <iframe src="..."> can't carry an Authorization header, so once
+  // server.auth.mode is "password" a direct apiBase URL there would just
+  // 401 — loaded as a blob URL via apiFetch instead. See the vault-sync
+  // plan's note on this being the one real gap authFetch alone can't close.
+  let htmlFrameSrc = $state<string | null>(null);
+  $effect(() => {
+    const node = activeNode;
+    if (!node || node.original_ext !== ".html") {
+      htmlFrameSrc = null;
+      return;
+    }
+    let cancelled = false;
+    let objectUrl: string | null = null;
+    (async () => {
+      try {
+        const r = await apiFetch(`${apiBase}/notes/${node.slug}/view`);
+        if (!r.ok || cancelled) return;
+        const blob = await r.blob();
+        objectUrl = URL.createObjectURL(blob);
+        if (!cancelled) htmlFrameSrc = objectUrl;
+      } catch {}
+    })();
+    return () => {
+      cancelled = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  });
   let activeChat = $state<ChatDetail | null>(null);
   let excerptPollInterval: ReturnType<typeof setInterval> | undefined;
   let chatInput = $state("");
@@ -363,7 +410,7 @@
 
   async function ping(): Promise<boolean> {
     try {
-      const r = await fetch(`${apiBase}/health`, { signal: AbortSignal.timeout(2000) });
+      const r = await apiFetch(`${apiBase}/health`, { signal: AbortSignal.timeout(2000) });
       return r.ok;
     } catch { return false; }
   }
@@ -393,7 +440,7 @@
 
   async function loadTree() {
     try {
-      const r = await fetch(`${apiBase}/tree`);
+      const r = await apiFetch(`${apiBase}/tree`);
       if (r.ok) {
         tree = await r.json();
         if (!treeLoaded) { collapsedDirs = initCollapsed(tree); treeLoaded = true; }
@@ -403,7 +450,7 @@
 
   async function moveNode(slug: string, destDir: string) {
     ctxMenu = null; ctxMovePicker = false;
-    const r = await fetch(`${apiBase}/nodes/${encodeURIComponent(slug)}/move`, {
+    const r = await apiFetch(`${apiBase}/nodes/${encodeURIComponent(slug)}/move`, {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ dest_dir: destDir }),
     });
@@ -418,7 +465,7 @@
     if (!renameTarget) return;
     const { slug, value } = renameTarget;
     renameTarget = null;
-    const r = await fetch(`${apiBase}/nodes/${encodeURIComponent(slug)}/rename`, {
+    const r = await apiFetch(`${apiBase}/nodes/${encodeURIComponent(slug)}/rename`, {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ title: value }),
     });
@@ -438,7 +485,7 @@
   async function doDelete(slug: string) {
     ctxMenu = null;
     if (!confirm("Delete this item permanently?")) return;
-    await fetch(`${apiBase}/nodes/${encodeURIComponent(slug)}`, { method: "DELETE" });
+    await apiFetch(`${apiBase}/nodes/${encodeURIComponent(slug)}`, { method: "DELETE" });
     await loadTree();
     await loadChats();
     if (activeNode?.slug === slug) activeNode = null;
@@ -450,7 +497,7 @@
     const name = prompt("New folder name:");
     if (!name?.trim()) return;
     const rel = (parentKey.startsWith("/") ? parentKey.slice(1) : parentKey) + "/" + name.trim();
-    await fetch(`${apiBase}/dirs`, {
+    await apiFetch(`${apiBase}/dirs`, {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ path: rel }),
     });
@@ -499,14 +546,14 @@
 
   async function loadStreams() {
     try {
-      const r = await fetch(`${apiBase}/streams`);
+      const r = await apiFetch(`${apiBase}/streams`);
       if (r.ok) streams = await r.json();
     } catch {}
   }
 
   async function loadChats() {
     try {
-      const r = await fetch(`${apiBase}/notes?node_type=chat`);
+      const r = await apiFetch(`${apiBase}/notes?node_type=chat`);
       if (r.ok) {
         const listing = await r.json();
         chats = listing.chats ?? [];
@@ -521,7 +568,7 @@
     showKgProgressPage = false;
     loadingNode = true;
     try {
-      const r = await fetch(`${apiBase}/chats/${encodeURIComponent(slug)}`);
+      const r = await apiFetch(`${apiBase}/chats/${encodeURIComponent(slug)}`);
       if (r.ok) activeChat = await r.json();
     } finally {
       loadingNode = false;
@@ -529,7 +576,7 @@
   }
 
   async function createChat() {
-    const r = await fetch(`${apiBase}/chats`, {
+    const r = await apiFetch(`${apiBase}/chats`, {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}),
     });
     if (r.ok) {
@@ -550,7 +597,7 @@
       { role: "user", content: text, timestamp: new Date().toISOString(), sources_cited: [], tool_calls: [] },
     ];
     try {
-      const r = await fetch(`${apiBase}/chat`, {
+      const r = await apiFetch(`${apiBase}/chat`, {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ message: text, chat_slug: slug }),
       });
@@ -569,7 +616,7 @@
   async function deleteChatMessage(index: number) {
     if (!activeChat) return;
     if (!confirm("Remove this turn from the conversation?")) return;
-    const r = await fetch(`${apiBase}/chats/${encodeURIComponent(activeChat.slug)}/messages/${index}`, { method: "DELETE" });
+    const r = await apiFetch(`${apiBase}/chats/${encodeURIComponent(activeChat.slug)}/messages/${index}`, { method: "DELETE" });
     if (r.ok) activeChat = await r.json();
   }
 
@@ -577,7 +624,7 @@
     if (!activeChat) return;
     const slug = activeChat.slug;
     const pinned = !activeChat.pinned_turns.includes(index);
-    const r = await fetch(`${apiBase}/chats/${encodeURIComponent(slug)}/turns/${index}/pin`, {
+    const r = await apiFetch(`${apiBase}/chats/${encodeURIComponent(slug)}/turns/${index}/pin`, {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ pinned }),
     });
@@ -600,7 +647,7 @@
     clearInterval(excerptPollInterval);
     excerptPollInterval = setInterval(async () => {
       if (!activeChat || activeChat.slug !== slug) { clearInterval(excerptPollInterval); return; }
-      const r = await fetch(`${apiBase}/chats/${encodeURIComponent(slug)}`);
+      const r = await apiFetch(`${apiBase}/chats/${encodeURIComponent(slug)}`);
       if (!r.ok) { clearInterval(excerptPollInterval); return; }
       const fresh = await r.json();
       // Merge only the Excerpt-related fields — never replace the whole
@@ -639,7 +686,7 @@
 
   async function loadZoteroStatus() {
     try {
-      const r = await fetch(`${apiBase}/zotero/status`);
+      const r = await apiFetch(`${apiBase}/zotero/status`);
       if (r.ok) zoteroStatus = await r.json();
     } catch {}
   }
@@ -647,7 +694,7 @@
   async function loadZoteroCollections() {
     zoteroLoading = true;
     try {
-      const r = await fetch(`${apiBase}/zotero/collections`);
+      const r = await apiFetch(`${apiBase}/zotero/collections`);
       if (r.ok) {
         zoteroCollections = await r.json();
         if (zoteroCollection && !zoteroCollections.find(c => c.key === zoteroCollection)) {
@@ -664,7 +711,7 @@
     if (coll) params.set("collection", coll);
     if (zoteroQ.trim()) params.set("q", zoteroQ.trim());
     try {
-      const r = await fetch(`${apiBase}/zotero/items?${params}`);
+      const r = await apiFetch(`${apiBase}/zotero/items?${params}`);
       if (r.ok) zoteroItems = await r.json();
     } catch {} finally { zoteroLoading = false; }
   }
@@ -677,7 +724,7 @@
   async function importZoteroItem(key: string) {
     importingKey = key;
     try {
-      const r = await fetch(`${apiBase}/zotero/import/${key}`, { method: "POST" });
+      const r = await apiFetch(`${apiBase}/zotero/import/${key}`, { method: "POST" });
       if (r.ok) {
         const node = await r.json();
         activeNode = node;
@@ -692,7 +739,7 @@
     showKgProgressPage = false;
     loadingNode = true;
     try {
-      const r = await fetch(`${apiBase}/home`);
+      const r = await apiFetch(`${apiBase}/home`);
       if (r.ok) activeNode = await r.json();
     } catch {} finally { loadingNode = false; }
   }
@@ -707,7 +754,7 @@
   async function fetchStatus() {
     const wasOnline = serverOnline;
     try {
-      const r = await fetch(`${apiBase}/status`, { signal: AbortSignal.timeout(3000) });
+      const r = await apiFetch(`${apiBase}/status`, { signal: AbortSignal.timeout(3000) });
       if (!r.ok) { serverOnline = false; serverStatus = null; return; }
       const s: ServerStatus = await r.json();
       serverOnline = true;
@@ -770,7 +817,7 @@
     if (name === "api") {
       await fetch(`${supervisorBase()}/supervisor/restart/api`, { method: "POST" });
     } else {
-      await fetch(`${apiBase}/supervisor/restart/${name}`, { method: "POST" });
+      await apiFetch(`${apiBase}/supervisor/restart/${name}`, { method: "POST" });
     }
   }
 
@@ -800,7 +847,7 @@
     try {
       const f = fmt ?? viewFormat;
       const url = f === "md" ? `${apiBase}/notes/${slug}?format=md` : `${apiBase}/notes/${slug}`;
-      const r = await fetch(url);
+      const r = await apiFetch(url);
       if (r.ok) activeNode = await r.json();
     } catch {} finally { loadingNode = false; }
   }
@@ -811,7 +858,7 @@
     showKgProgressPage = false;
     loadingNode = true;
     try {
-      const r = await fetch(`${apiBase}/streams/${slug}/view`);
+      const r = await apiFetch(`${apiBase}/streams/${slug}/view`);
       if (r.ok) {
         activeNode = await r.json();
         if (activeNode?.collection_key) {
@@ -820,11 +867,11 @@
             zoteroLoading = true;
             try {
               if (zoteroCollections.length === 0) {
-                const rc = await fetch(`${apiBase}/zotero/collections`);
+                const rc = await apiFetch(`${apiBase}/zotero/collections`);
                 if (rc.ok) zoteroCollections = await rc.json();
               }
               const params = new URLSearchParams({ collection: activeNode.collection_key });
-              const ri = await fetch(`${apiBase}/zotero/items?${params}`);
+              const ri = await apiFetch(`${apiBase}/zotero/items?${params}`);
               if (ri.ok) zoteroItems = await ri.json();
             } finally { zoteroLoading = false; }
             sectionOpen = { ...sectionOpen, zotero: true };
@@ -841,7 +888,7 @@
     if (next === "md" && activeNode?.original_ext === ".html" && !activeNode.has_md) {
       generatingMd = true;
       try {
-        await fetch(`${apiBase}/notes/${activeNode.slug}/md`, { method: "POST" });
+        await apiFetch(`${apiBase}/notes/${activeNode.slug}/md`, { method: "POST" });
       } finally {
         generatingMd = false;
       }
@@ -892,7 +939,7 @@
   async function runSearch() {
     searching = true;
     try {
-      const r = await fetch(`${apiBase}/search?q=${encodeURIComponent(searchQuery)}`);
+      const r = await apiFetch(`${apiBase}/search?q=${encodeURIComponent(searchQuery)}`);
       if (r.ok) searchResults = await r.json();
     } catch {} finally { searching = false; }
   }
@@ -915,7 +962,7 @@
       deepPhase = (deepPhase + 1) % DEEP_PHASES.length;
     }, 3500);
     try {
-      const r = await fetch(`${apiBase}/search/deep?q=${encodeURIComponent(deepQuery)}`);
+      const r = await apiFetch(`${apiBase}/search/deep?q=${encodeURIComponent(deepQuery)}`);
       if (r.ok) deepResults = await r.json();
     } catch {} finally {
       deepSearching = false;
@@ -998,7 +1045,7 @@
     streamFormSaving = true;
     streamFormError = "";
     try {
-      const r = await fetch(`${apiBase}/streams`, {
+      const r = await apiFetch(`${apiBase}/streams`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(streamForm),
@@ -1019,13 +1066,13 @@
 
   async function deleteStream(slug: string) {
     if (!confirm(`Delete stream "${slug}"?`)) return;
-    await fetch(`${apiBase}/streams/${slug}`, { method: "DELETE" });
+    await apiFetch(`${apiBase}/streams/${slug}`, { method: "DELETE" });
     if (activeNode?.slug === slug) activeNode = null;
     await Promise.all([loadTree(), loadStreams()]);
   }
 
   async function patchStreamStatus(slug: string, status: string) {
-    await fetch(`${apiBase}/streams/${slug}`, {
+    await apiFetch(`${apiBase}/streams/${slug}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ status }),
@@ -1038,6 +1085,10 @@
 
   loadSettings().then(() => bootstrap());
 </script>
+
+{#if showLoginScreen}
+  <LoginScreen serverUrl={apiBase} onLoggedIn={() => { showLoginScreen = false; loadTree(); connectWS(); }} />
+{/if}
 
 {#if isTauri}
   <!-- Sibling of .shell, not a descendant — see TauriResizeGrips.svelte. -->
@@ -1522,7 +1573,7 @@
             onclick={async () => {
               if (!activeNode || activeNode.node_type === "stream" || activeNode.node_type === "chat") return;
               const next = activeNode.node_type === "note" ? "source" : "note";
-              const r = await fetch(`${apiBase}/notes/${activeNode.slug}/type`, {
+              const r = await apiFetch(`${apiBase}/notes/${activeNode.slug}/type`, {
                 method: "PATCH",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ node_type: next }),
@@ -1592,11 +1643,13 @@
         {/if}
         {#if activeNode.original_ext === ".html"}
           {#key activeNode.slug}
+          {#if htmlFrameSrc}
           <iframe
             class="html-frame"
-            src="{apiBase}/notes/{activeNode.slug}/view"
+            src={htmlFrameSrc}
             title={activeNode.title}
           ></iframe>
+          {/if}
           {/key}
         {:else}
         <div class="rendered" use:contentClickDelegate>

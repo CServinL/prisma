@@ -182,6 +182,8 @@ class VaultService:
         # change. Chat writes are low-frequency; one process-wide lock is
         # simple and sufficient — no need for per-slug lock management.
         self._chat_write_lock = threading.Lock()
+        # Same rationale as _chat_write_lock, for /sync/file's writes.
+        self._path_write_lock = threading.Lock()
 
     def ensure_dirs(self) -> None:
         for d in self.default_dirs.values():
@@ -901,6 +903,50 @@ class VaultService:
         if ".." in Path(rel_path).parts:
             raise ValueError("path outside vault")
         (self.root / rel_path).mkdir(parents=True, exist_ok=True)
+
+    # ── Path-based access (sync) ─────────────────────────────────────────────
+    # Used by /sync/* — unlike the rest of this class, the desktop client
+    # addresses files by their vault-relative path directly (it mirrors the
+    # vault's on-disk layout 1:1), not by slug. Kept narrow (.md only,
+    # explicit path) rather than extending the slug-resolution machinery.
+
+    def _safe_sync_path(self, rel_path: str) -> Path:
+        if not rel_path.endswith(".md"):
+            raise ValueError("sync only supports .md files")
+        p = Path(rel_path)
+        if p.is_absolute() or ".." in p.parts:
+            raise ValueError("path outside vault")
+        if any(part in _SKIP_DIRS or part.startswith(".") for part in p.parts[:-1]):
+            raise ValueError("path inside a reserved or hidden directory")
+        return self.root / p
+
+    def read_by_path(self, rel_path: str) -> tuple[str, float] | None:
+        path = self._safe_sync_path(rel_path)
+        if not path.is_file():
+            return None
+        return path.read_text(encoding="utf-8"), path.stat().st_mtime
+
+    def write_by_path(self, rel_path: str, body: str) -> float:
+        """Create-or-overwrite. Returns the new mtime."""
+        path = self._safe_sync_path(rel_path)
+        with self._path_write_lock:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(body, encoding="utf-8")
+            return path.stat().st_mtime
+
+    def delete_by_path(self, rel_path: str) -> None:
+        path = self._safe_sync_path(rel_path)
+        with self._path_write_lock:
+            path.unlink(missing_ok=True)
+
+    def list_md_manifest(self) -> list[tuple[str, float, int]]:
+        """(rel_path, mtime, size) for every .md file — the desktop
+        client's input for initial-reconciliation diffing."""
+        manifest = []
+        for path in self._all_md_files():
+            stat = path.stat()
+            manifest.append((path.relative_to(self.root).as_posix(), stat.st_mtime, stat.st_size))
+        return manifest
 
     def delete_stream(self, slug: str) -> None:
         path = self._find_stream_path(slug)

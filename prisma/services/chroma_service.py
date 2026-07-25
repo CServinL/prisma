@@ -15,8 +15,26 @@ _log = logging.getLogger("prisma.chroma")
 _RESOURCE_HOLDER = "api"  # must match the worker name supervisor.py restarts, so a crash releases our leases
 
 
-def _embed_texts(texts: list[str], model: str, base_url: str = "http://localhost:11434") -> list[list[float]] | None:
+def _embed_texts(
+    texts: list[str], model: str, base_url: str = "http://localhost:11434", provider: str = "ollama",
+) -> list[list[float]] | None:
+    """provider="ollama" uses Ollama's native /api/embed (its own request/
+    response shape). provider="llama_cpp" uses the OpenAI-compatible
+    /v1/embeddings endpoint that llama-server/llama-swap expose (e.g. served
+    from a bge-m3-style embedding model) — same idea, different wire format,
+    so this is a real branch, not just a base_url swap like chat_llm.py's."""
     try:
+        if provider == "llama_cpp":
+            resp = requests.post(
+                f"{base_url}/v1/embeddings",
+                json={"model": model, "input": texts},
+                timeout=60,
+            )
+            if resp.status_code != 200:
+                _log.warning("embed failed: status=%d", resp.status_code)
+                return None
+            data = sorted(resp.json().get("data", []), key=lambda item: item.get("index", 0))
+            return [item["embedding"] for item in data]
         resp = requests.post(
             f"{base_url}/api/embed",
             json={"model": model, "input": texts},
@@ -45,6 +63,7 @@ class ChromaIndexer:
         vault: VaultService,
         embedding_model: str = "nomic-embed-text",
         ollama_base_url: str = "http://localhost:11434",
+        provider: str = "ollama",
         chroma_host: str = "127.0.0.1",
         chroma_port: int = 8767,
         supervisor_host: str = "127.0.0.1",
@@ -53,6 +72,7 @@ class ChromaIndexer:
         self._vault = vault
         self._model = embedding_model
         self._base_url = ollama_base_url
+        self._provider = provider
         # ChromaDB runs as its own supervised server process (ADR-012), not
         # embedded — a crash there no longer takes down this process's threads.
         self._chroma_host = chroma_host
@@ -162,7 +182,7 @@ class ChromaIndexer:
         except Exception:
             return []
         with resource_lock.lease(self._supervisor_host, self._supervisor_port, holder=_RESOURCE_HOLDER, model=self._model) as granted:
-            embeddings = _embed_texts([question], self._model, self._base_url) if granted else None
+            embeddings = _embed_texts([question], self._model, self._base_url, self._provider) if granted else None
         if not embeddings:
             _log.warning("chroma query: embedding failed for question, skipping")
             return []
@@ -271,12 +291,10 @@ class ChromaIndexer:
 
     def _probe_model(self) -> bool:
         """Return False and log an actionable warning if the embedding model is not available."""
-        result = _embed_texts(["test"], self._model, self._base_url)
+        result = _embed_texts(["test"], self._model, self._base_url, self._provider)
         if result is None:
-            _log.error(
-                "chroma: embedding model %r not available — run: ollama pull %s",
-                self._model, self._model,
-            )
+            hint = f"ollama pull {self._model}" if self._provider == "ollama" else f"check {self._model!r} is loaded in llama-swap"
+            _log.error("chroma: embedding model %r not available — %s", self._model, hint)
             return False
         return True
 
@@ -329,7 +347,7 @@ class ChromaIndexer:
         except OSError:
             return False
         chunks = _chunk_markdown(text)
-        embeddings = _embed_texts(chunks, self._model, self._base_url)
+        embeddings = _embed_texts(chunks, self._model, self._base_url, self._provider)
         if embeddings is None or len(embeddings) != len(chunks):
             _log.warning("chroma: embedding failed for %s — skipping", rel)
             return False

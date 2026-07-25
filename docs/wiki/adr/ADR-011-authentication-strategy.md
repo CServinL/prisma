@@ -2,7 +2,10 @@
 
 **Date:** 2026-06-30
 **Author:** CServinL
-**Status:** Accepted
+**Status:** Accepted — password mode implemented 2026-07-25 (`server/auth.py`,
+driven by the desktop vault-sync feature needing it as a prerequisite; see
+TODO.md). OIDC/WAN mode remains unimplemented and is rejected at config-load
+time if `server.auth.mode: oidc` is set.
 
 ## Context
 

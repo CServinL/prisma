@@ -12,6 +12,7 @@ place `KnowledgeGraphService` may run.
 from __future__ import annotations
 
 import logging
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -44,12 +45,72 @@ def _resolve_vault_root() -> Path:
 
 def _ollama_model() -> str:
     try:
+        from prisma.utils.config import ConfigLoader
+        return ConfigLoader().get_llm_config().model
+    except Exception:
+        return "qwen2.5:7b-32k"
+
+
+def _llm_base_url() -> str:
+    # Delegates to LLMConfig.base_url (utils/config.py) rather than
+    # re-deriving the per-provider URL shape here — that property already
+    # knows ollama/llama_cpp are OpenAI-compatible on {host}/v1 while
+    # openrouter's is the fixed https://openrouter.ai/api/v1, so this stays
+    # correct as providers are added instead of drifting from it.
+    try:
+        from prisma.utils.config import ConfigLoader
+        return ConfigLoader().get_llm_config().base_url
+    except Exception:
+        return "http://localhost:11434"
+
+
+def _llm_provider() -> str:
+    try:
+        from prisma.utils.config import ConfigLoader
+        return ConfigLoader().get_llm_config().provider
+    except Exception:
+        return "ollama"
+
+
+def _llm_api_key() -> str:
+    # Only meaningful for provider=openrouter — ollama/llama_cpp's local
+    # OpenAI-compat servers don't check the key at all (dummy value kept for
+    # API compatibility with the openai SDK, which requires a non-empty
+    # string). Mirrors ChatLLM._resolve_api_key's same env-var-by-name
+    # pattern (ADR-014) — the real key never lives in config.yaml itself.
+    try:
+        from prisma.utils.config import ConfigLoader
+        cfg = ConfigLoader().get_llm_config()
+        if cfg.provider == "openrouter":
+            if not cfg.api_key_env:
+                raise RuntimeError("llm.provider is 'openrouter' but llm.api_key_env is not set")
+            key = os.environ.get(cfg.api_key_env)
+            if not key:
+                raise RuntimeError(f"llm.api_key_env={cfg.api_key_env!r} is not set in the environment")
+            return key
+    except Exception:
+        _log.warning("could not resolve openrouter API key for KG extraction", exc_info=True)
+    return "ollama"
+
+
+def _llm_context_window() -> int | None:
+    # Static override for providers with no live-queryable endpoint
+    # (openrouter) — see LLMConfig.context_window's own docstring.
+    try:
+        from prisma.utils.config import ConfigLoader
+        return ConfigLoader().get_llm_config().context_window
+    except Exception:
+        return None
+
+
+def _max_output_fraction() -> float:
+    try:
         import yaml
         cfg_path = Path.home() / ".config" / "prisma" / "config.yaml"
         cfg = yaml.safe_load(cfg_path.read_text()) or {}
-        return cfg.get("llm", {}).get("model", "qwen2.5:7b-32k")
+        return float(cfg.get("kg", {}).get("max_output_fraction", 0.25))
     except Exception:
-        return "qwen2.5:7b-32k"
+        return 0.25
 
 
 def _index_extensions() -> tuple[str, ...]:
@@ -99,6 +160,11 @@ _vault = VaultService(vault_root=_resolve_vault_root())
 _kg = KnowledgeGraphService(
     _vault,
     ollama_model=_ollama_model(),
+    ollama_base_url=_llm_base_url(),
+    provider=_llm_provider(),
+    api_key=_llm_api_key(),
+    context_window_override=_llm_context_window(),
+    max_output_fraction=_max_output_fraction(),
     index_extensions=_index_extensions(),
     extraction_concurrency=_extraction_concurrency(),
     token_budget=_token_budget(),

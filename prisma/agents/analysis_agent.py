@@ -18,6 +18,22 @@ from ..services import resource_lock
 
 _ollama_log = logging.getLogger("prisma.ollama")
 
+
+class _NormalizedResponse:
+    """Duck-types the slice of requests.Response this module's callers
+    actually use (.status_code, .json()) — lets _call_ollama_generate return
+    a uniform Ollama-native-shaped payload ({"response": ...}, parseable by
+    OllamaGenerateResponse) regardless of which backend actually served the
+    call, so no downstream call site needs to know or care which provider
+    answered."""
+
+    def __init__(self, status_code: int, payload: dict) -> None:
+        self.status_code = status_code
+        self._payload = payload
+
+    def json(self) -> dict:
+        return self._payload
+
 _RESOURCE_HOLDER = "api"  # must match the worker name supervisor.py restarts, so a crash releases our leases
 
 
@@ -32,14 +48,21 @@ class AnalysisAgent:
         self._supervisor_host = supervisor_host
         self._supervisor_port = supervisor_port if supervisor_port is not None else resource_lock.default_port()
 
-    def _call_ollama_generate(self, prompt: str, options: dict, timeout: float) -> requests.Response | None:
-        """Single choke point for every Ollama /api/generate call in this agent.
+    def _call_ollama_generate(
+        self, prompt: str, options: dict, timeout: float
+    ) -> "requests.Response | _NormalizedResponse | None":
+        """Single choke point for every LLM completion call in this agent
+        (Ollama's native /api/generate, or llama.cpp's OpenAI-compatible
+        /v1/chat/completions — provider from llm.provider in config).
 
         Wraps the supervisor's compute-pool lease (ADR-012) around the existing
         process-local concurrency semaphore, so this agent can't run concurrently
         against the same GPU/LLM backend as Graphify or ChromaDB indexing.
         Returns None if no compute pool is free right now — callers should
-        treat that the same as any other LLM failure.
+        treat that the same as any other LLM failure. Always returns
+        something exposing .status_code/.json() shaped like Ollama's
+        {"response": ...} payload (see _NormalizedResponse) — callers don't
+        need their own provider branch.
         """
         with resource_lock.lease(
             self._supervisor_host, self._supervisor_port, holder=_RESOURCE_HOLDER, model=self.model,
@@ -47,6 +70,30 @@ class AnalysisAgent:
             if not granted:
                 return None
             with self._inference_sem:
+                if self.llm_config.provider == "llama_cpp":
+                    resp = requests.post(
+                        f"{self.base_url}/v1/chat/completions",
+                        json={
+                            "model": self.model,
+                            "messages": [{"role": "user", "content": prompt}],
+                            "temperature": options.get("temperature", 0.7),
+                            "max_tokens": options.get("num_predict"),
+                        },
+                        timeout=timeout,
+                    )
+                    if resp.status_code != 200:
+                        return _NormalizedResponse(resp.status_code, {})
+                    content = resp.json()["choices"][0]["message"]["content"]
+                    # OllamaGenerateResponse requires model/created_at/done —
+                    # synthesize them; llama.cpp's OpenAI-compatible response
+                    # has no equivalents (Ollama-specific fields, not part of
+                    # the shape being translated from).
+                    return _NormalizedResponse(resp.status_code, {
+                        "model": self.model,
+                        "created_at": datetime.utcnow().isoformat() + "Z",
+                        "response": content,
+                        "done": True,
+                    })
                 return requests.post(
                     f"{self.base_url}/api/generate",
                     json={"model": self.model, "prompt": prompt, "stream": False, "options": options},

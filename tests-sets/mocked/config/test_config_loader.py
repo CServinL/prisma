@@ -32,10 +32,16 @@ sources:
 
 
 def test_defaults_when_no_config_file(tmp_path, monkeypatch):
+    # Also isolate from whatever real ~/.config/prisma/config.yaml exists on
+    # the machine running this test — PRISMA_CONFIG pointing at a nonexistent
+    # path isn't enough on its own, since _get_config_path() falls back to
+    # checking default_locations (including the real one) when the env var's
+    # path doesn't exist.
+    monkeypatch.setattr("prisma.utils.config.Path.exists", lambda self: False)
     monkeypatch.setenv("PRISMA_CONFIG", str(tmp_path / "nonexistent.yaml"))
     loader = ConfigLoader()
     assert loader.config.llm.provider == "ollama"
-    assert loader.config.llm.model == "llama3.1:8b"
+    assert loader.config.llm.model == "qwen2.5:7b-32k"
     assert loader.config.search.default_limit == 10
 
 
@@ -53,12 +59,15 @@ def test_yaml_merged_into_config(tmp_path, monkeypatch):
 
 
 def test_get_dot_notation_existing_key(tmp_path, monkeypatch):
+    # See test_defaults_when_no_config_file for why this patch is needed too.
+    monkeypatch.setattr("prisma.utils.config.Path.exists", lambda self: False)
     monkeypatch.setenv("PRISMA_CONFIG", str(tmp_path / "nonexistent.yaml"))
     loader = ConfigLoader()
     assert loader.get("llm.provider") == "ollama"
 
 
 def test_get_dot_notation_missing_key_returns_default(tmp_path, monkeypatch):
+    monkeypatch.setattr("prisma.utils.config.Path.exists", lambda self: False)
     monkeypatch.setenv("PRISMA_CONFIG", str(tmp_path / "nonexistent.yaml"))
     loader = ConfigLoader()
     assert loader.get("nonexistent.key", "fallback") == "fallback"

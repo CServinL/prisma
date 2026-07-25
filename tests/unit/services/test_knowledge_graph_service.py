@@ -48,6 +48,45 @@ def _patch_create(kg, **kwargs):
     return patch.object(kg._instructor_client.chat.completions, "create", **kwargs)
 
 
+# ── openrouter provider support ───────────────────────────────────────────────
+
+def test_openrouter_base_url_not_double_suffixed(vault, tmp_path):
+    # kg_app.py's _llm_base_url() delegates to LLMConfig.base_url, which for
+    # openrouter already returns the complete ".../api/v1" — the client
+    # construction must not append /v1 a second time (unlike the
+    # ollama/llama_cpp case, where ollama_base_url is host-only).
+    service = KnowledgeGraphService(
+        vault, kg_dir=tmp_path / "kg-out",
+        provider="openrouter", ollama_base_url="https://openrouter.ai/api/v1",
+        api_key="sk-or-test",
+    )
+    assert str(service._instructor_client.client.base_url) == "https://openrouter.ai/api/v1/"
+
+
+def test_ollama_base_url_still_gets_v1_appended(vault, tmp_path):
+    service = KnowledgeGraphService(
+        vault, kg_dir=tmp_path / "kg-out",
+        provider="ollama", ollama_base_url="http://localhost:11434",
+    )
+    assert str(service._instructor_client.client.base_url) == "http://localhost:11434/v1/"
+
+
+def test_context_window_override_skips_live_resolution(vault, tmp_path):
+    service = KnowledgeGraphService(
+        vault, kg_dir=tmp_path / "kg-out",
+        provider="openrouter", ollama_base_url="https://openrouter.ai/api/v1",
+        api_key="sk-or-test", context_window_override=128000,
+    )
+    # No network call should happen — already marked resolved at construction.
+    assert service._context_window_resolved is True
+    assert service._resolve_context_window() == 128000
+
+
+def test_no_context_window_override_defaults_to_unresolved(vault, tmp_path):
+    service = KnowledgeGraphService(vault, kg_dir=tmp_path / "kg-out")
+    assert service._context_window_resolved is False
+
+
 # ── Escape-sequence sanitization ──────────────────────────────────────────────
 # Confirmed live 2026-07-07 (docs/kg-dead-letter-triage-2026-07-07.md): a real
 # paper's appendix of raw byte-sequence descriptions (e.g. `Hebrew: "\xd6"?`)

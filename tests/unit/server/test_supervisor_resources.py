@@ -189,7 +189,7 @@ def test_load_compute_pools_reads_model_affinity_flag(tmp_path, monkeypatch):
         "    model_affinity: false\n"
     )
 
-    capacity, affinity, pool_models, model_concurrency, vram_budget, model_vram, model_background_limit = _load_compute_pools()
+    capacity, affinity, pool_models, model_concurrency, vram_budget, model_vram, model_background_limit, pool_provider = _load_compute_pools()
 
     assert capacity == {"local-ollama": 3, "cloud_api": 4}
     assert affinity == {"local-ollama"}
@@ -199,7 +199,7 @@ def test_load_compute_pools_reads_model_affinity_flag(tmp_path, monkeypatch):
 def test_load_compute_pools_defaults_when_config_missing(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
-    capacity, affinity, pool_models, model_concurrency, vram_budget, model_vram, model_background_limit = _load_compute_pools()
+    capacity, affinity, pool_models, model_concurrency, vram_budget, model_vram, model_background_limit, pool_provider = _load_compute_pools()
 
     assert capacity == {"default": 1}
     assert affinity == {"default"}  # zero-config default assumes one local GPU
@@ -219,7 +219,7 @@ def test_load_compute_pools_model_affinity_defaults_true_unless_disabled(tmp_pat
         "    model_affinity: false\n"   # explicitly opted out — auto-scaled/auto-routed
     )
 
-    capacity, affinity, pool_models, model_concurrency, vram_budget, model_vram, model_background_limit = _load_compute_pools()
+    capacity, affinity, pool_models, model_concurrency, vram_budget, model_vram, model_background_limit, pool_provider = _load_compute_pools()
 
     assert affinity == {"local-ollama"}
 
@@ -242,7 +242,7 @@ def test_load_compute_pools_type_field_is_authoritative_over_model_affinity(tmp_
         "    max_concurrent: 8\n"
     )
 
-    capacity, affinity, pool_models, model_concurrency, vram_budget, model_vram, model_background_limit = _load_compute_pools()
+    capacity, affinity, pool_models, model_concurrency, vram_budget, model_vram, model_background_limit, pool_provider = _load_compute_pools()
 
     assert capacity == {"local-ollama": 3, "cloud_api": 8}
     assert affinity == {"local-ollama"}
@@ -461,7 +461,7 @@ def test_load_compute_pools_parses_per_model_concurrency_overrides(tmp_path, mon
         "      - nomic-embed-text\n"  # plain string form
     )
 
-    capacity, affinity, pool_models, model_concurrency, vram_budget, model_vram, model_background_limit = _load_compute_pools()
+    capacity, affinity, pool_models, model_concurrency, vram_budget, model_vram, model_background_limit, pool_provider = _load_compute_pools()
 
     assert pool_models["local-ollama"] == {"prisma-kg:7b", "prisma-chat:7b", "nomic-embed-text"}
     assert model_concurrency["local-ollama"] == {"prisma-kg:7b": 1, "prisma-chat:7b": 3}
@@ -487,7 +487,7 @@ def test_load_compute_pools_parses_vram_budget_and_model_vram(tmp_path, monkeypa
         "    max_concurrent: 8\n"
     )
 
-    capacity, affinity, pool_models, model_concurrency, vram_budget, model_vram, model_background_limit = _load_compute_pools()
+    capacity, affinity, pool_models, model_concurrency, vram_budget, model_vram, model_background_limit, pool_provider = _load_compute_pools()
 
     assert vram_budget == {"local-ollama": 14000, "cloud_api": None}
     assert model_vram["local-ollama"] == {"qwen2.5:7b-32k": 7500, "nomic-embed-text": 1000}

@@ -48,15 +48,43 @@ class ZoteroConfig(BaseModel):
 
 
 class LLMConfig(BaseModel):
-    """LLM configuration"""
-    provider: str = Field("ollama", description="LLM provider")
+    """LLM configuration — used for KG extraction (see kg_app.py). Cloud
+    routing (openrouter) mirrors ChatConfig's own pattern (ADR-014): api_key
+    comes from an env var, never this file, and there's no local endpoint to
+    live-query for context window, so it's an explicit config value instead."""
+    provider: str = Field("ollama", description="ollama | llama_cpp | openrouter")
     model: str = Field("qwen2.5:7b-32k", description="Model name")
-    host: str = Field("localhost:11434", description="Host and port")
-    max_concurrent_inferences: int = Field(1, ge=1, le=16, description="Max simultaneous Ollama requests")
+    host: str = Field("localhost:11434", description="Host and port — ignored for openrouter")
+    max_concurrent_inferences: int = Field(1, ge=1, le=16, description="Max simultaneous requests")
+    api_key_env: Optional[str] = Field(
+        None, description="Env var holding the API key — only used/required when provider=openrouter"
+    )
+    base_url_override: Optional[str] = Field(
+        None, description="Override the provider's default base_url; None derives it from provider"
+    )
+    context_window: Optional[int] = Field(
+        None,
+        description=(
+            "Static context window for providers with no live-queryable endpoint "
+            "(openrouter) — ollama/llama_cpp instead resolve this live per-call "
+            "(see KnowledgeGraphService._resolve_context_window) and ignore this field."
+        ),
+    )
+
+    @field_validator('provider')
+    @classmethod
+    def validate_provider(cls, v):
+        if v not in ('ollama', 'llama_cpp', 'openrouter'):
+            raise ValueError('provider must be "ollama", "llama_cpp", or "openrouter"')
+        return v
 
     @property
     def base_url(self) -> str:
         """Generate base URL for API calls"""
+        if self.base_url_override:
+            return self.base_url_override
+        if self.provider == "openrouter":
+            return "https://openrouter.ai/api/v1"
         return f"http://{self.host}"
 
 
@@ -97,8 +125,8 @@ class ChatConfig(BaseModel):
     @field_validator('provider')
     @classmethod
     def validate_provider(cls, v):
-        if v not in ('ollama', 'openrouter', 'anthropic'):
-            raise ValueError('provider must be "ollama", "openrouter", or "anthropic"')
+        if v not in ('ollama', 'llama_cpp', 'openrouter', 'anthropic'):
+            raise ValueError('provider must be "ollama", "llama_cpp", "openrouter", or "anthropic"')
         return v
 
 
@@ -187,9 +215,48 @@ class SourcesConfig(BaseModel):
 
 
 class RetrievalConfig(BaseModel):
-    embedding_model: str = Field("nomic-embed-text", description="Ollama embedding model for ChromaDB semantic search")
-    ollama_base_url: str = Field("http://localhost:11434", description="Ollama base URL for embeddings")
+    provider: str = Field("ollama", description="ollama | llama_cpp — embedding backend for ChromaDB")
+    embedding_model: str = Field("nomic-embed-text", description="Embedding model name for ChromaDB semantic search")
+    ollama_base_url: str = Field(
+        "http://localhost:11434",
+        description="Embedding backend base URL — name kept for backward compat, used regardless of provider",
+    )
     chroma_port: int = Field(8767, description="Port of the supervised ChromaDB server process (see ADR-012)")
+
+    @field_validator('provider')
+    @classmethod
+    def validate_provider(cls, v):
+        if v not in ('ollama', 'llama_cpp'):
+            raise ValueError('provider must be "ollama" or "llama_cpp"')
+        return v
+
+
+class AuthConfig(BaseModel):
+    """Server auth (ADR-011) — password mode only; oidc is reserved for a
+    future WAN-facing implementation and rejected at load time if set."""
+    mode: str = Field("none", description="none | password | oidc")
+    password_hash: str = Field("", description="bcrypt hash — generate with: prisma auth hash-password")
+    session_ttl_hours: int = Field(720, description="JWT session lifetime (default 30 days)")
+
+    @field_validator('mode')
+    @classmethod
+    def validate_mode(cls, v):
+        if v not in ('none', 'password', 'oidc'):
+            raise ValueError('mode must be "none", "password", or "oidc"')
+        return v
+
+
+class ServerConfig(BaseModel):
+    """Zone-based auth gating (ADR-011 / deployment-models.md). host/port
+    here are for schema parity with the documented YAML — the actual bind
+    address/port are still CLI flags on `prisma serve`, unrelated to auth."""
+    host: str = Field("127.0.0.1", description="Documented for parity; --host on `prisma serve` is authoritative")
+    port: int = Field(8765, description="Documented for parity; --port on `prisma serve` is authoritative")
+    trusted_proxies: List[str] = Field(
+        default_factory=lambda: ["127.0.0.1", "::1"],
+        description="IPs allowed to set X-Forwarded-For — trusted only when the direct connection is loopback",
+    )
+    auth: AuthConfig = Field(default_factory=lambda: AuthConfig())
 
 
 class PrismaConfig(BaseModel):
@@ -204,6 +271,17 @@ class PrismaConfig(BaseModel):
     analysis: AnalysisConfig = Field(default_factory=lambda: AnalysisConfig())
     logging: LoggingConfig = Field(default_factory=lambda: LoggingConfig())
     retrieval: RetrievalConfig = Field(default_factory=lambda: RetrievalConfig())
+    server: ServerConfig = Field(default_factory=lambda: ServerConfig())
+
+    @field_validator('server')
+    @classmethod
+    def validate_server_auth_mode(cls, v):
+        if v.auth.mode == 'oidc':
+            raise ValueError(
+                'server.auth.mode "oidc" is not implemented yet (ADR-011 WAN tier) — '
+                'use "none" or "password"'
+            )
+        return v
 
 
 class ConfigLoader:
@@ -301,6 +379,9 @@ class ConfigLoader:
 
     def get_chat_config(self) -> ChatConfig:
         return self.config.chat
+
+    def get_server_config(self) -> ServerConfig:
+        return self.config.server
 
     def has_zotero_credentials(self) -> bool:
         """Check if Zotero API credentials are configured."""

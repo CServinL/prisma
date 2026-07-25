@@ -856,6 +856,19 @@ class KnowledgeGraphService:
                     _log.warning("extraction call failed for %s: %s", rel_path, exc)
                     self._record_dropped_chunk(rel_path, section_text, str(exc), retry_count, reason)
                     return [], [], False
+                # Same rationale as ChatLLM.complete()'s own usage log —
+                # a real per-call token record for cloud providers
+                # (openrouter), directly from logs rather than only
+                # discoverable after the fact via OpenRouter's own
+                # /api/v1/key usage counter.
+                raw = getattr(extraction, "_raw_response", None)
+                usage = getattr(raw, "usage", None) if raw is not None else None
+                if usage is not None:
+                    _log.info(
+                        "kg extraction call: provider=%s model=%s prompt_tokens=%d completion_tokens=%d total_tokens=%d",
+                        self._provider, self._ollama_model,
+                        usage.prompt_tokens, usage.completion_tokens, usage.total_tokens,
+                    )
         with self._lock:
             self._chunk_durations.append((time.monotonic() - t0) * 1000)
             self._chunk_retries.append(retry_count)

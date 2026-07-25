@@ -13,6 +13,7 @@ from prisma.services.knowledge_graph_service import (
     Extraction,
     KnowledgeGraphService,
     Node,
+    _extraction_system_prompt,
     _sanitize_escape_sequences,
     _strip_dense_data_paragraphs,
     _strip_feature_catalog_paragraphs,
@@ -46,6 +47,38 @@ def _extraction(nodes=None, edges=None) -> Extraction:
 
 def _patch_create(kg, **kwargs):
     return patch.object(kg._instructor_client.chat.completions, "create", **kwargs)
+
+
+# ── configurable entity/relationship caps ─────────────────────────────────────
+# Per-deployment, not a shared constant: a cloud-routed model (cheap per-token
+# cost, no local-hardware speed concern) can afford a much higher cap than a
+# local model — see _extraction_system_prompt's own docstring.
+
+def test_extraction_system_prompt_default_caps():
+    prompt = _extraction_system_prompt()
+    assert "at most 15 of the most important entities" in prompt
+    assert "at most 20 of the most important relationships" in prompt
+
+
+def test_extraction_system_prompt_custom_caps():
+    prompt = _extraction_system_prompt(max_entities=50, max_relationships=80)
+    assert "at most 50 of the most important entities" in prompt
+    assert "at most 80 of the most important relationships" in prompt
+
+
+def test_extraction_system_prompt_preserves_literal_node_id_braces():
+    # {stem}_{entity} in the "Node ID format" section is literal instruction
+    # text for the model, not an f-string interpolation — must survive
+    # parameterizing the entity/relationship caps without becoming a
+    # NameError or getting silently swallowed.
+    prompt = _extraction_system_prompt()
+    assert "{stem}_{entity}" in prompt
+
+
+def test_service_uses_configured_caps_in_its_system_prompt(vault, tmp_path):
+    service = KnowledgeGraphService(vault, kg_dir=tmp_path / "kg-out", max_entities=3, max_relationships=5)
+    assert "at most 3 of the most important entities" in service._extraction_system
+    assert "at most 5 of the most important relationships" in service._extraction_system
 
 
 # ── openrouter provider support ───────────────────────────────────────────────

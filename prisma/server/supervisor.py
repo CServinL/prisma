@@ -1099,7 +1099,7 @@ def main(
     _configure_logging()
 
     vault_root = _resolve_vault_root()
-    chroma_dir = vault_root / "chromadb"
+    chroma_dir = vault_root / ".vault-files" / "chromadb"
     chroma_dir.mkdir(parents=True, exist_ok=True)
 
     api_cmd = [_venv_bin("uvicorn"), "prisma.server.app:app", "--host", host, "--port", str(api_port)]

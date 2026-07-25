@@ -16,8 +16,11 @@ from prisma.storage.models.vault_models import (
 # Recognised companion file extensions stored alongside a .md source node.
 COMPANION_EXTS = (".pdf", ".html", ".htm", ".svg", ".epub", ".docx")
 
-# Directories that are never part of the vault (graph indexer output, VCS, hidden).
-_SKIP_DIRS = {"graphify-out", "kg-out", ".git", ".svn", "__pycache__", "node_modules", ".venv", "venv", "dist", "build"}
+# Directories that are never part of the vault (VCS, build artifacts, hidden).
+# Internal app state (chromadb/, kg-out/) lives under .vault-files/ instead of
+# being listed here by name — the leading-dot rule below already excludes it,
+# the same way .git is excluded, so a new internal dir never needs a new entry.
+_SKIP_DIRS = {".git", ".svn", "__pycache__", "node_modules", ".venv", "venv", "dist", "build"}
 
 
 def _slugify(name: str) -> str:
@@ -907,17 +910,25 @@ class VaultService:
     # ── Path-based access (sync) ─────────────────────────────────────────────
     # Used by /sync/* — unlike the rest of this class, the desktop client
     # addresses files by their vault-relative path directly (it mirrors the
-    # vault's on-disk layout 1:1), not by slug. Kept narrow (.md only,
-    # explicit path) rather than extending the slug-resolution machinery.
+    # vault's on-disk layout 1:1), not by slug. Kept narrow (explicit
+    # per-directory content types) rather than extending the slug-resolution
+    # machinery or accepting any extension anywhere in the vault.
+    #
+    # streams/ is the one other directory with real, user-created vault
+    # content that isn't .md (see create_stream/save_stream above — stored
+    # as .yaml). It's the opposite case from .vault-files/ (internal app
+    # state, excluded entirely via the leading-dot rule): this is a content
+    # dir with its own known type, not something to hide from sync.
 
     def _safe_sync_path(self, rel_path: str) -> Path:
-        if not rel_path.endswith(".md"):
-            raise ValueError("sync only supports .md files")
         p = Path(rel_path)
         if p.is_absolute() or ".." in p.parts:
             raise ValueError("path outside vault")
         if any(part in _SKIP_DIRS or part.startswith(".") for part in p.parts[:-1]):
             raise ValueError("path inside a reserved or hidden directory")
+        is_stream_yaml = p.parts[0] == "streams" and rel_path.endswith(".yaml")
+        if not (rel_path.endswith(".md") or is_stream_yaml):
+            raise ValueError("sync only supports .md files, or .yaml files under streams/")
         return self.root / p
 
     def read_by_path(self, rel_path: str) -> tuple[str, float] | None:
@@ -940,12 +951,19 @@ class VaultService:
             path.unlink(missing_ok=True)
 
     def list_md_manifest(self) -> list[tuple[str, float, int]]:
-        """(rel_path, mtime, size) for every .md file — the desktop
-        client's input for initial-reconciliation diffing."""
+        """(rel_path, mtime, size) for every synced file — every .md file
+        plus every streams/*.yaml — the desktop client's input for
+        initial-reconciliation diffing. See _safe_sync_path for why streams/
+        gets this one exception."""
         manifest = []
         for path in self._all_md_files():
             stat = path.stat()
             manifest.append((path.relative_to(self.root).as_posix(), stat.st_mtime, stat.st_size))
+        streams_dir = self.default_dirs[NodeType.stream]
+        if streams_dir.exists():
+            for path in streams_dir.glob("*.yaml"):
+                stat = path.stat()
+                manifest.append((path.relative_to(self.root).as_posix(), stat.st_mtime, stat.st_size))
         return manifest
 
     def delete_stream(self, slug: str) -> None:

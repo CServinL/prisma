@@ -107,7 +107,7 @@ class ChromaIndexer:
                 if event.is_directory:
                     return
                 path = Path(str(event.src_path))
-                if any(p in path.parts for p in ("chromadb", "kg-out", "graphify-out", "streams", "chats")):
+                if any(p in path.parts for p in (".vault-files", "streams", "chats")):
                     return
                 if path.name.startswith("."):
                     return
@@ -150,7 +150,10 @@ class ChromaIndexer:
         with self._lock:
             files = len(self._manifest)
             activity = self._current_activity
-        return {"chunks": chunks, "files_indexed": files, "model": self._model, "current_activity": activity}
+        return {
+            "chunks": chunks, "files_indexed": files, "model": self._model,
+            "provider": self._provider, "current_activity": activity,
+        }
 
     def _set_activity(self, activity: str | None) -> None:
         with self._lock:

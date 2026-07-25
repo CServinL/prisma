@@ -113,6 +113,29 @@ def _max_output_fraction() -> float:
         return 0.25
 
 
+def _max_entities() -> int:
+    # Per-deployment, not a shared constant — a cloud-routed extraction
+    # model (cheap per-token cost, no local-hardware speed concern) can
+    # afford a much higher cap than a local model (cservinl, 2026-07-25).
+    try:
+        import yaml
+        cfg_path = Path.home() / ".config" / "prisma" / "config.yaml"
+        cfg = yaml.safe_load(cfg_path.read_text()) or {}
+        return int(cfg.get("kg", {}).get("max_entities", 15))
+    except Exception:
+        return 15
+
+
+def _max_relationships() -> int:
+    try:
+        import yaml
+        cfg_path = Path.home() / ".config" / "prisma" / "config.yaml"
+        cfg = yaml.safe_load(cfg_path.read_text()) or {}
+        return int(cfg.get("kg", {}).get("max_relationships", 20))
+    except Exception:
+        return 20
+
+
 def _index_extensions() -> tuple[str, ...]:
     from prisma.services.knowledge_graph_service import DEFAULT_INDEX_EXTENSIONS
     try:
@@ -168,6 +191,8 @@ _kg = KnowledgeGraphService(
     index_extensions=_index_extensions(),
     extraction_concurrency=_extraction_concurrency(),
     token_budget=_token_budget(),
+    max_entities=_max_entities(),
+    max_relationships=_max_relationships(),
 )
 
 

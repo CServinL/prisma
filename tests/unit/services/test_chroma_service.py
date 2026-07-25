@@ -108,6 +108,7 @@ def test_status_returns_zero_on_empty_collection(indexer):
     assert status["chunks"] == 0
     assert status["files_indexed"] == 0
     assert status["model"] == "nomic-embed-text"
+    assert status["provider"] == "ollama"
     assert status["current_activity"] is None
 
 

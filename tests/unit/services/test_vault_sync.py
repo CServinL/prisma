@@ -58,6 +58,33 @@ def test_list_md_manifest_reflects_written_files(vault):
     assert manifest["notes/b.md"][1] == 2
 
 
+def test_write_by_path_accepts_stream_yaml(vault):
+    mtime = vault.write_by_path("streams/my-topic.yaml", "title: My Topic\n")
+    assert isinstance(mtime, float)
+    body, read_mtime = vault.read_by_path("streams/my-topic.yaml")
+    assert body == "title: My Topic\n"
+    assert read_mtime == mtime
+
+
+def test_yaml_outside_streams_dir_rejected(vault):
+    with pytest.raises(ValueError):
+        vault.write_by_path("notes/foo.yaml", "x")
+    with pytest.raises(ValueError):
+        vault.write_by_path("config.yaml", "x")
+
+
+def test_non_yaml_inside_streams_dir_rejected(vault):
+    with pytest.raises(ValueError):
+        vault.write_by_path("streams/notes.txt", "x")
+
+
+def test_list_md_manifest_includes_stream_yaml(vault):
+    vault.write_by_path("notes/a.md", "a")
+    vault.write_by_path("streams/my-topic.yaml", "title: My Topic\n")
+    manifest = {path for path, _, _ in vault.list_md_manifest()}
+    assert manifest == {"notes/a.md", "streams/my-topic.yaml"}
+
+
 @pytest.mark.parametrize("bad_path", [
     "../outside.md",
     "notes/../../outside.md",

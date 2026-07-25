@@ -21,6 +21,13 @@ class TestAnalysisAgent(unittest.TestCase):
     def setUp(self):
         """Set up test fixtures."""
         self.analysis_agent = AnalysisAgent()
+        # AnalysisAgent() reads prisma.utils.config's module-level `config`
+        # singleton (built once, at first import of that module) — these
+        # tests assume the Ollama-native code path regardless of whatever
+        # real ~/.config/prisma/config.yaml the machine running this test
+        # happens to have, so force it directly (see the sibling copy of
+        # this file in tests/unit/agents/ for the same fix).
+        self.analysis_agent.llm_config.provider = 'ollama'
         self.sample_paper = PaperMetadata(
             title='Test Paper Title',
             authors=['Author One', 'Author Two'],

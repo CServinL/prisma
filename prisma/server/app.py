@@ -38,6 +38,9 @@ from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from prisma.server.access_log import AccessLogMiddleware
+from prisma.server.auth import (
+    AuthMiddleware, LoginRequest, LoginResponse, classify_zone, issue_token, verify_password,
+)
 _t("fastapi ok")
 
 _t("importing coordinator")
@@ -86,30 +89,38 @@ _t("chat ok")
 
 # ── WebSocket connection manager ──────────────────────────────────────────────
 
-_ws_clients: set[WebSocket] = set()
+_ws_clients: dict[WebSocket, str | None] = {}
 _ws_clients_lock = threading.Lock()
 _ws_loop: asyncio.AbstractEventLoop | None = None
 
 
-async def _ws_broadcast(event: dict) -> None:
+async def _ws_broadcast(event: dict, exclude_client_id: str | None = None) -> None:
     msg = json.dumps(event)
     dead: set[WebSocket] = set()
     with _ws_clients_lock:
-        clients = set(_ws_clients)
-    for ws in clients:
+        clients = dict(_ws_clients)
+    for ws, client_id in clients.items():
+        if exclude_client_id is not None and client_id == exclude_client_id:
+            continue
         try:
             await ws.send_text(msg)
         except Exception:
             dead.add(ws)
     if dead:
         with _ws_clients_lock:
-            _ws_clients.difference_update(dead)
+            for ws in dead:
+                _ws_clients.pop(ws, None)
 
 
-def broadcast(event: dict) -> None:
-    """Thread-safe fire-and-forget broadcast to all connected WS clients."""
+def broadcast(event: dict, exclude_client_id: str | None = None) -> None:
+    """Thread-safe fire-and-forget broadcast to all connected WS clients.
+
+    `exclude_client_id` skips the connection that identified itself with
+    that same id on connect (`/ws?client_id=...`) — used by /sync/file
+    writes so a client's own push doesn't echo straight back to it as an
+    incoming server-side change."""
     if _ws_loop is not None and _ws_loop.is_running():
-        asyncio.run_coroutine_threadsafe(_ws_broadcast(event), _ws_loop)
+        asyncio.run_coroutine_threadsafe(_ws_broadcast(event, exclude_client_id), _ws_loop)
 
 
 # ── Vault root / config helpers ───────────────────────────────────────────────
@@ -157,7 +168,8 @@ def _build_chroma(vault: "VaultService") -> ChromaIndexer:
     try:
         rcfg = ConfigLoader().get_retrieval_config()
         return ChromaIndexer(vault, embedding_model=rcfg.embedding_model,
-                              ollama_base_url=rcfg.ollama_base_url, chroma_port=rcfg.chroma_port)
+                              ollama_base_url=rcfg.ollama_base_url, provider=rcfg.provider,
+                              chroma_port=rcfg.chroma_port)
     except Exception:
         return ChromaIndexer(vault)
 
@@ -278,6 +290,14 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Prisma", version="0.1.0", lifespan=lifespan)
 
+# Registered before CORSMiddleware so it ends up as the *innermost* layer —
+# Starlette applies middlewares in reverse-of-registration order, so CORS
+# (added next) wraps this and answers browser preflight (OPTIONS, no
+# Authorization header) before it ever reaches auth gating. Getting this
+# order backwards silently breaks all browser/PWA access once
+# server.auth.mode is "password" (see ADR-011).
+app.add_middleware(AuthMiddleware)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["tauri://localhost"],
@@ -291,6 +311,18 @@ app.add_middleware(
 )
 
 app.add_middleware(AccessLogMiddleware)
+
+# Getter callables, not the objects themselves — /reload-style endpoints
+# below rebind the _vault/_indexer module globals at runtime (`global
+# _vault; _vault = VaultService(...)`), and a router that captured them by
+# value at include_router() time would keep talking to a stale, replaced
+# instance after a reload.
+from prisma.server.sync_routes import build_sync_router  # noqa: E402
+app.include_router(build_sync_router(
+    get_vault=lambda: _vault,
+    broadcast_fn=broadcast,
+    mark_stale_fn=lambda: _indexer.mark_stale(),
+))
 
 _executor = ThreadPoolExecutor(max_workers=2)
 _jobs: dict[str, dict] = {}
@@ -451,11 +483,49 @@ def health():
     return {"status": "ok", "online": connectivity.is_online}
 
 
+@app.post("/auth/login", response_model=LoginResponse)
+def auth_login(req: LoginRequest, request: Request):
+    """Exempt from AuthMiddleware's own zone gating (chicken-and-egg — you
+    need to reach this before you have a token), so the wan/mode checks are
+    repeated here directly rather than relying on the middleware."""
+    from datetime import datetime, timezone
+
+    from prisma.utils.config import ConfigLoader
+    server_cfg = ConfigLoader().get_server_config()
+    auth_cfg = server_cfg.auth
+    if auth_cfg.mode != "password":
+        raise HTTPException(status_code=404, detail="password auth is not enabled")
+
+    client_host = request.client.host if request.client else "127.0.0.1"
+    forwarded_for = request.headers.get("x-forwarded-for")
+    zone = classify_zone(client_host, forwarded_for, server_cfg.trusted_proxies)
+    if zone == "wan":
+        raise HTTPException(status_code=403, detail="wan access is not permitted")
+
+    if not verify_password(req.password, auth_cfg.password_hash):
+        raise HTTPException(status_code=401, detail="invalid password")
+
+    token, expires_at = issue_token(auth_cfg.password_hash, auth_cfg.session_ttl_hours)
+    return LoginResponse(
+        token=token,
+        expires_at=datetime.fromtimestamp(expires_at, tz=timezone.utc).isoformat(),
+    )
+
+
 @app.websocket("/ws")
-async def websocket_endpoint(ws: WebSocket):
-    await ws.accept()
+async def websocket_endpoint(ws: WebSocket, client_id: str | None = Query(None)):
+    # Echo the "bearer" subprotocol back when the client offered one (see
+    # AuthMiddleware/_bearer_from_ws) — strict browser WebSocket clients
+    # reject a handshake response that doesn't confirm one of the
+    # subprotocols they offered. `client_id` (desktop sends a persisted
+    # UUID) lets broadcast() skip echoing a sync push back to its own
+    # sender — see _ws_broadcast/exclude_client_id.
+    if "bearer" in ws.scope.get("subprotocols", []):
+        await ws.accept(subprotocol="bearer")
+    else:
+        await ws.accept()
     with _ws_clients_lock:
-        _ws_clients.add(ws)
+        _ws_clients[ws] = client_id
     try:
         while True:
             await ws.receive_text()  # keeps connection alive; client sends nothing
@@ -463,7 +533,7 @@ async def websocket_endpoint(ws: WebSocket):
         pass
     finally:
         with _ws_clients_lock:
-            _ws_clients.discard(ws)
+            _ws_clients.pop(ws, None)
 
 
 @app.get("/status")

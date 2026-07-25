@@ -1,0 +1,84 @@
+"""Unit tests for VaultService's path-based access methods (read_by_path /
+write_by_path / delete_by_path / list_md_manifest) — used by /sync/*.
+Uses a real tmp_path, no mocks (same convention as test_vault_streams.py).
+"""
+from pathlib import Path
+
+import pytest
+
+from prisma.services.vault import VaultService
+
+
+@pytest.fixture
+def vault(tmp_path: Path) -> VaultService:
+    v = VaultService(tmp_path)
+    v.ensure_dirs()
+    return v
+
+
+def test_write_then_read_by_path_roundtrip(vault):
+    mtime = vault.write_by_path("notes/foo.md", "# Foo\nhello")
+    assert isinstance(mtime, float)
+    body, read_mtime = vault.read_by_path("notes/foo.md")
+    assert body == "# Foo\nhello"
+    assert read_mtime == mtime
+
+
+def test_write_by_path_creates_parent_dirs(vault):
+    vault.write_by_path("deeply/nested/dir/note.md", "content")
+    assert (vault.root / "deeply" / "nested" / "dir" / "note.md").is_file()
+
+
+def test_write_by_path_overwrites_existing(vault):
+    vault.write_by_path("notes/foo.md", "v1")
+    vault.write_by_path("notes/foo.md", "v2")
+    body, _ = vault.read_by_path("notes/foo.md")
+    assert body == "v2"
+
+
+def test_read_by_path_missing_file_returns_none(vault):
+    assert vault.read_by_path("notes/does-not-exist.md") is None
+
+
+def test_delete_by_path_removes_file(vault):
+    vault.write_by_path("notes/foo.md", "content")
+    vault.delete_by_path("notes/foo.md")
+    assert vault.read_by_path("notes/foo.md") is None
+
+
+def test_delete_by_path_missing_file_is_noop(vault):
+    vault.delete_by_path("notes/never-existed.md")  # must not raise
+
+
+def test_list_md_manifest_reflects_written_files(vault):
+    vault.write_by_path("notes/a.md", "a")
+    vault.write_by_path("notes/b.md", "bb")
+    manifest = {path: (mtime, size) for path, mtime, size in vault.list_md_manifest()}
+    assert set(manifest) == {"notes/a.md", "notes/b.md"}
+    assert manifest["notes/b.md"][1] == 2
+
+
+@pytest.mark.parametrize("bad_path", [
+    "../outside.md",
+    "notes/../../outside.md",
+    "/etc/passwd.md",
+])
+def test_path_traversal_rejected(vault, bad_path):
+    with pytest.raises(ValueError):
+        vault.write_by_path(bad_path, "x")
+    with pytest.raises(ValueError):
+        vault.read_by_path(bad_path)
+    with pytest.raises(ValueError):
+        vault.delete_by_path(bad_path)
+
+
+def test_non_md_extension_rejected(vault):
+    with pytest.raises(ValueError):
+        vault.write_by_path("notes/foo.txt", "x")
+
+
+def test_reserved_dir_rejected(vault):
+    with pytest.raises(ValueError):
+        vault.write_by_path(".git/foo.md", "x")
+    with pytest.raises(ValueError):
+        vault.write_by_path("node_modules/foo.md", "x")

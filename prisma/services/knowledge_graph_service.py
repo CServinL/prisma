@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import Literal
 
 import instructor
+import requests
 from instructor.core.exceptions import IncompleteOutputException, InstructorRetryException
 from instructor.core.hooks import Hooks
 from openai import OpenAI
@@ -297,6 +298,10 @@ class KnowledgeGraphService:
         interval_minutes: int = 10,
         ollama_model: str = "qwen2.5:7b-32k",
         ollama_base_url: str = "http://localhost:11434",
+        provider: str = "ollama",
+        api_key: str = "ollama",
+        context_window_override: int | None = None,
+        max_output_fraction: float = 0.25,
         token_budget: int = 1000,
         index_extensions: tuple[str, ...] = DEFAULT_INDEX_EXTENSIONS,
         supervisor_host: str = "127.0.0.1",
@@ -308,6 +313,29 @@ class KnowledgeGraphService:
         self._interval = interval_minutes * 60
         self._ollama_model = ollama_model
         self._base_url = ollama_base_url
+        self._provider = provider
+        # Fraction of the model's real context window max_tokens may use,
+        # even when more technically fits — quality degrades well before
+        # the context ceiling (docs/kg-extraction-context-length.md), and
+        # different models degrade at different rates, so this is a
+        # per-deployment config knob (kg.max_output_fraction), not a single
+        # hardcoded global constant.
+        self._max_output_fraction = max_output_fraction
+        # Resolved lazily (first extraction call) rather than at construction
+        # time — the model may not be loaded yet (llama-swap loads on
+        # demand), and querying too early would just get "not found". None
+        # until resolved; a resolution failure permanently falls back to a
+        # conservative hardcoded assumption rather than retrying every call.
+        # A static override (openrouter — no local endpoint to query at all)
+        # counts as already-resolved, skipping the live-query attempt.
+        self._context_window: int | None = context_window_override
+        self._context_window_resolved = context_window_override is not None
+        # ollama/llama_cpp's local OpenAI-compat servers live at {host}/v1;
+        # openrouter's base_url (from LLMConfig.base_url, via kg_app.py's
+        # _llm_base_url()) is already the complete
+        # "https://openrouter.ai/api/v1" — appending /v1 again would be
+        # wrong, so only the local providers get it appended here.
+        resolved_base_url = ollama_base_url if provider == "openrouter" else f"{ollama_base_url}/v1"
         # Instructor validates the extraction response against `Extraction`
         # and retries on validation failure, replacing the old markdown-fence
         # regex + manual dict parsing. Mode.JSON (not the default Mode.TOOLS)
@@ -316,7 +344,7 @@ class KnowledgeGraphService:
         # unreliable for this local model (qwen2.5:7b class), so JSON mode is
         # the consistent choice here too.
         self._instructor_client = instructor.from_openai(
-            OpenAI(base_url=f"{ollama_base_url}/v1", api_key="ollama", timeout=300.0),
+            OpenAI(base_url=resolved_base_url, api_key=api_key, timeout=300.0),
             mode=instructor.Mode.JSON,
         )
         # Per-section token budget, not per-file — this is the actual fix for
@@ -375,6 +403,13 @@ class KnowledgeGraphService:
         # Kùzu query or get told "busy," which a partial/lazy cache would
         # need to handle.
         self._indexed_cache: dict[str, str] = {}
+        # Parallel to _indexed_cache — which model actually produced this
+        # file's current graph entries. Not used for the re-extract-or-not
+        # decision (content_hash alone still drives that); this is purely
+        # provenance, for comparing extraction quality across models on the
+        # same content (e.g. NuExtract vs qwen2.5 vs a future cloud model)
+        # without losing track of which model produced what.
+        self._indexed_model_cache: dict[str, str | None] = {}
 
         self._state: IndexState = "stale"
         self._last_indexed: datetime | None = None
@@ -471,6 +506,7 @@ class KnowledgeGraphService:
                         "MATCH (f:IndexedFile {source_file: $rel}) DETACH DELETE f", {"rel": rel_path},
                     )
                     self._indexed_cache.pop(rel_path, None)
+                    self._indexed_model_cache.pop(rel_path, None)
                 except Exception as exc:
                     _log.warning("taint_file: failed to clear tracking node for %s: %s", rel_path, exc)
             self._pending.add(path)
@@ -508,6 +544,7 @@ class KnowledgeGraphService:
                     self._conn.execute("MATCH (e:Entity) DETACH DELETE e")
                     self._conn.execute("MATCH (f:IndexedFile) DETACH DELETE f")
                     self._indexed_cache.clear()
+                    self._indexed_model_cache.clear()
                 except Exception as exc:
                     _log.warning("drop_index failed: %s", exc)
             self._state = "stale"
@@ -547,6 +584,76 @@ class KnowledgeGraphService:
                 return True
         except OSError:
             return False
+
+    def _resolve_context_window(self) -> int | None:
+        """The model's real *loaded* context window (not a claimed/configured
+        value — see ADR-013's follow-up section on why that distinction
+        matters, and docs/kg-extraction-context-length.md Round 3 for a
+        concrete case of it mattering). Queried once and cached — a
+        resolution failure (model not loaded yet, backend unreachable) is
+        remembered as "give up," not retried every call, so a persistently
+        unreachable backend doesn't add a query's worth of latency to every
+        single extraction."""
+        if self._context_window_resolved:
+            return self._context_window
+        self._context_window_resolved = True
+        try:
+            if self._provider == "openrouter":
+                # No live-queryable endpoint — this path is only reached
+                # when llm.context_window wasn't set for an openrouter
+                # deployment. Falls through to the except/None below,
+                # which _compute_max_tokens treats as "use the hardcoded
+                # 4000 ceiling only" — degraded, not broken, but
+                # llm.context_window should really be set for this provider.
+                _log.warning(
+                    "provider=openrouter but llm.context_window is unset — "
+                    "max_output_fraction won't apply, only the hardcoded ceiling will"
+                )
+            elif self._provider == "llama_cpp":
+                resp = requests.get(f"{self._base_url}/v1/models", timeout=5)
+                resp.raise_for_status()
+                for entry in resp.json().get("data", []):
+                    if entry.get("id") == self._ollama_model:
+                        n_ctx = entry.get("meta", {}).get("n_ctx")
+                        if n_ctx:
+                            self._context_window = int(n_ctx)
+                            return self._context_window
+            else:  # ollama
+                resp = requests.get(f"{self._base_url}/api/ps", timeout=5)
+                resp.raise_for_status()
+                for entry in resp.json().get("models", []):
+                    if entry.get("name") == self._ollama_model:
+                        n_ctx = entry.get("context_length")
+                        if n_ctx:
+                            self._context_window = int(n_ctx)
+                            return self._context_window
+        except Exception as exc:
+            _log.warning("could not resolve %s's real context window: %s", self._ollama_model, exc)
+        return self._context_window
+
+    def _compute_max_tokens(self, prompt_tokens_estimate: int) -> int:
+        """How many output tokens to actually allow for one extraction call.
+        Three independent ceilings, take the smallest:
+        1. A hardcoded sane ceiling (4000 — see the call site's own history:
+           raised from 2000 after a real entity-dense paper needed more).
+        2. `max_output_fraction` (config.yaml's kg.max_output_fraction,
+           default 0.25) of the model's real context window — even if more
+           technically fits, quality degrades well before the context limit
+           (see kg-extraction-context-length.md), and this fraction is
+           deliberately per-model-tunable in config rather than a single
+           global constant, since different models degrade at different
+           rates (cservinl, 2026-07-24).
+        3. Whatever headroom is actually left in the context window after
+           the prompt itself (system prompt + section content) — a hard
+           technical ceiling, not a quality one.
+        Floors at 500 regardless (a lower cap than that risks truncating
+        even a well-behaved extraction on real content)."""
+        ceilings = [4000]
+        context_window = self._resolve_context_window()
+        if context_window:
+            ceilings.append(int(context_window * self._max_output_fraction))
+            ceilings.append(max(0, context_window - prompt_tokens_estimate - 200))
+        return max(500, min(ceilings))
 
     def status(self) -> dict:
         with self._lock:
@@ -609,12 +716,27 @@ class KnowledgeGraphService:
         # restarting kg lost track of files it had already durably graphed).
         self._conn.execute(
             "CREATE NODE TABLE IF NOT EXISTS IndexedFile("
-            "source_file STRING, content_hash STRING, PRIMARY KEY(source_file))"
+            "source_file STRING, content_hash STRING, extracted_by STRING, "
+            "PRIMARY KEY(source_file))"
         )
-        result = self._conn.execute("MATCH (f:IndexedFile) RETURN f.source_file, f.content_hash")
+        # Migration: CREATE TABLE IF NOT EXISTS is a no-op against a Kùzu DB
+        # that already has an IndexedFile table from before extracted_by
+        # existed (true for any pre-2026-07-24 database, including whatever
+        # ends up on forge) — the column never gets added for those without
+        # this explicit ALTER. Kùzu has no "ADD COLUMN IF NOT EXISTS", so
+        # just swallow the one error it raises when the column is already
+        # there (a fresh DB created by the statement above already has it).
+        try:
+            self._conn.execute("ALTER TABLE IndexedFile ADD extracted_by STRING")
+        except RuntimeError:
+            pass
+        result = self._conn.execute(
+            "MATCH (f:IndexedFile) RETURN f.source_file, f.content_hash, f.extracted_by"
+        )
         while result.has_next():
-            source_file, content_hash = result.get_next()
+            source_file, content_hash, extracted_by = result.get_next()
             self._indexed_cache[source_file] = content_hash
+            self._indexed_model_cache[source_file] = extracted_by
 
     # ── Extraction ────────────────────────────────────────────────────────────
 
@@ -675,6 +797,11 @@ class KnowledgeGraphService:
 
                 hooks = Hooks()
                 hooks.on("parse:error", _on_parse_error)
+                # Rough token estimate (chars // 4, same heuristic
+                # _chunk_markdown's own chunker uses) of system prompt +
+                # section content — just enough to compute real remaining
+                # headroom in _compute_max_tokens, not meant to be exact.
+                prompt_tokens_estimate = (len(_EXTRACTION_SYSTEM) + len(prompt)) // 4
                 try:
                     extraction = self._instructor_client.chat.completions.create(
                         model=self._ollama_model,
@@ -694,21 +821,14 @@ class KnowledgeGraphService:
                         # compute/GPU-bound (single-stream decode is
                         # memory-bound, so low GPU% during a long
                         # generation is normal, not a sign of throttling).
-                        # Originally set to 2000 (== token_budget) on the
-                        # assumption that a structured JSON extraction
-                        # shouldn't need to be longer than the section it's
-                        # summarizing — wrong in practice: a dense paper's
-                        # entity/relationship list can legitimately exceed
-                        # its own input length as JSON, and Instructor
+                        # Originally a flat 4000 (raised from 2000 after a
+                        # real entity-dense paper needed more — Instructor
                         # treats a length-truncated response as immediately
-                        # fatal (IncompleteOutputException, not retryable —
-                        # retrying would just truncate at the same cap
-                        # again). Confirmed live: a Chinchilla-scaling-laws
-                        # chunk was dropped for exactly this reason. 4000
-                        # gives real headroom while still bounding the
-                        # runaway-generation failure mode this cap exists
-                        # for in the first place.
-                        max_tokens=4000,
+                        # fatal, not retryable at the same cap). Now computed
+                        # per-call/per-model instead of hardcoded — see
+                        # _compute_max_tokens's own docstring for the three
+                        # ceilings it takes the smallest of.
+                        max_tokens=self._compute_max_tokens(prompt_tokens_estimate),
                         # Instructor re-prompts on validation failure — each
                         # retry is a real Ollama call, so it must happen
                         # inside this lease, not after releasing it.
@@ -922,16 +1042,28 @@ class KnowledgeGraphService:
         IndexedFile table, kept in sync on every write."""
         return self._indexed_cache.get(rel)
 
+    def indexed_model(self, rel: str) -> str | None:
+        """Which model produced this file's current graph entries, or None
+        if never indexed. Public (no leading underscore, no lock required)
+        — pure provenance lookup for comparing extraction quality across
+        models on the same content, safe to call from the API layer."""
+        return self._indexed_model_cache.get(rel)
+
     def _set_indexed_hash(self, rel: str, content_hash: str) -> None:
         """Caller must hold self._lock. Write-through: Kùzu first (the
         durable store), then the cache — if the Kùzu write fails, the
-        cache must not silently disagree with what's actually persisted."""
+        cache must not silently disagree with what's actually persisted.
+        Also stamps which model produced this file's current graph entries
+        (self._ollama_model) — pure provenance, doesn't affect the
+        re-extract-or-not decision (content_hash alone still drives that)."""
         try:
             self._conn.execute(
-                "MERGE (f:IndexedFile {source_file: $rel}) SET f.content_hash = $hash",
-                {"rel": rel, "hash": content_hash},
+                "MERGE (f:IndexedFile {source_file: $rel}) "
+                "SET f.content_hash = $hash, f.extracted_by = $model",
+                {"rel": rel, "hash": content_hash, "model": self._ollama_model},
             )
             self._indexed_cache[rel] = content_hash
+            self._indexed_model_cache[rel] = self._ollama_model
         except Exception as exc:
             _log.warning("failed to record indexed hash for %s: %s", rel, exc)
 
@@ -983,6 +1115,7 @@ class KnowledgeGraphService:
                 self._conn.execute("MATCH (e:Entity {source_file: $rel}) DETACH DELETE e", {"rel": rel})
                 self._conn.execute("MATCH (f:IndexedFile {source_file: $rel}) DETACH DELETE f", {"rel": rel})
                 self._indexed_cache.pop(rel, None)
+                self._indexed_model_cache.pop(rel, None)
             return True
         except Exception as exc:
             _log.warning("delete failed for %s: %s", rel, exc)
@@ -1198,7 +1331,7 @@ class KnowledgeGraphService:
                 })
         except Exception as exc:
             _log.warning("entities_for_file edges failed for %s: %s", rel_path, exc)
-        return {"entities": entities, "edges": edges}
+        return {"entities": entities, "edges": edges, "extracted_by": self.indexed_model(rel_path)}
 
     def search(self, question: str, top_k: int = 20) -> list[dict]:
         terms = [t.lower() for t in re.findall(r"[a-zA-Z0-9_]+", question) if len(t) > 2]

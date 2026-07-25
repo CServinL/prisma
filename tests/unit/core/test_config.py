@@ -39,20 +39,27 @@ sources:
     
     def test_default_config_loading(self):
         """Test that default configuration loads when no config file exists."""
-        # Create ConfigLoader without any config file
-        with tempfile.TemporaryDirectory() as temp_dir:
+        # Create ConfigLoader without any config file. Also patches Path.exists
+        # to False (not just PRISMA_CONFIG to a nonexistent path) — otherwise
+        # _get_config_path()'s fallback to default_locations (which includes
+        # the real ~/.config/prisma/config.yaml) would pick up whatever real
+        # config the machine running this test happens to have, defeating the
+        # "no config file" isolation this test is actually after. Same
+        # pattern as test_zotero_credentials_check below.
+        with tempfile.TemporaryDirectory() as temp_dir, \
+                patch('prisma.utils.config.Path.exists', return_value=False):
             old_env = os.environ.get('PRISMA_CONFIG')
             os.environ['PRISMA_CONFIG'] = str(Path(temp_dir) / 'nonexistent.yaml')
-            
+
             config_loader = ConfigLoader()
-            
+
             # Should have defaults and be Pydantic model
             self.assertIsInstance(config_loader.config, PrismaConfig)
             self.assertEqual(config_loader.config.llm.provider, 'ollama')
             self.assertIsInstance(config_loader.config.llm.model, str)
             self.assertTrue(len(config_loader.config.llm.model) > 0)
             self.assertEqual(config_loader.config.search.default_limit, 10)
-            
+
             # Restore environment
             if old_env:
                 os.environ['PRISMA_CONFIG'] = old_env
@@ -93,27 +100,53 @@ sources:
     
     def test_get_method_with_dot_notation(self):
         """Test the get method with dot notation for backward compatibility."""
-        config_loader = ConfigLoader()
-        
-        # Test existing key
-        result = config_loader.get('llm.provider')
-        self.assertEqual(result, 'ollama')
-        
-        # Test non-existing key with default
-        result = config_loader.get('nonexistent.key', 'default_value')
-        self.assertEqual(result, 'default_value')
-    
+        # Isolated from whatever real ~/.config/prisma/config.yaml exists on
+        # the machine running this test — see test_default_config_loading.
+        with patch('prisma.utils.config.Path.exists', return_value=False):
+            config_loader = ConfigLoader()
+
+            # Test existing key
+            result = config_loader.get('llm.provider')
+            self.assertEqual(result, 'ollama')
+
+            # Test non-existing key with default
+            result = config_loader.get('nonexistent.key', 'default_value')
+            self.assertEqual(result, 'default_value')
+
     def test_llm_config_helper(self):
         """Test LLM configuration helper method."""
-        config_loader = ConfigLoader()
-        llm_config = config_loader.get_llm_config()
-        
-        # Test that we get a Pydantic model with proper attributes
-        self.assertTrue(hasattr(llm_config, 'provider'))
-        self.assertTrue(hasattr(llm_config, 'model'))
-        self.assertTrue(hasattr(llm_config, 'host'))
-        self.assertEqual(llm_config.provider, 'ollama')
+        # Isolated from whatever real ~/.config/prisma/config.yaml exists on
+        # the machine running this test — see test_default_config_loading.
+        with patch('prisma.utils.config.Path.exists', return_value=False):
+            config_loader = ConfigLoader()
+            llm_config = config_loader.get_llm_config()
+
+            # Test that we get a Pydantic model with proper attributes
+            self.assertTrue(hasattr(llm_config, 'provider'))
+            self.assertTrue(hasattr(llm_config, 'model'))
+            self.assertTrue(hasattr(llm_config, 'host'))
+            self.assertEqual(llm_config.provider, 'ollama')
     
+    def test_llm_config_openrouter_provider_accepted(self):
+        cfg = LLMConfig(provider='openrouter', model='openai/gpt-4o-mini', api_key_env='OPENROUTER_API_KEY')
+        self.assertEqual(cfg.provider, 'openrouter')
+
+    def test_llm_config_openrouter_base_url(self):
+        cfg = LLMConfig(provider='openrouter')
+        self.assertEqual(cfg.base_url, 'https://openrouter.ai/api/v1')
+
+    def test_llm_config_base_url_override_wins(self):
+        cfg = LLMConfig(provider='openrouter', base_url_override='https://custom.example/v1')
+        self.assertEqual(cfg.base_url, 'https://custom.example/v1')
+
+    def test_llm_config_ollama_base_url_unchanged(self):
+        cfg = LLMConfig(provider='ollama', host='localhost:11434')
+        self.assertEqual(cfg.base_url, 'http://localhost:11434')
+
+    def test_llm_config_invalid_provider_still_rejected(self):
+        with self.assertRaises(ValidationError):
+            LLMConfig(provider='anthropic')
+
     def test_validation_errors(self):
         """Test that Pydantic validation catches invalid configurations."""
         # Test invalid output format

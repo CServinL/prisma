@@ -12,6 +12,7 @@ import click
 
 from .commands.streams import streams_group
 from .commands.zotero import zotero_group
+from .commands.auth import auth_group
 
 
 @click.group()
@@ -380,6 +381,7 @@ def reload_resources(supervisor_port: int):
 
 cli.add_command(streams_group)
 cli.add_command(zotero_group)
+cli.add_command(auth_group)
 
 
 if __name__ == '__main__':

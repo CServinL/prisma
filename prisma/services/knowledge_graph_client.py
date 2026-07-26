@@ -37,8 +37,8 @@ class KnowledgeGraphClient:
     def stop(self) -> None:
         pass
 
-    def mark_stale(self) -> None:
-        self._post("/mark_stale")
+    def mark_stale(self, path: str | None = None) -> None:
+        self._post("/mark_stale", params={"path": path} if path is not None else None)
 
     def drop_index(self) -> None:
         self._post("/drop_index")

@@ -15,12 +15,14 @@ from prisma.services.vault import VaultService
 
 
 class _Recorder:
-    """Fake broadcast_fn/mark_stale_fn that just records calls."""
+    """Fake broadcast_fn/mark_stale_fn/baseline callbacks that just record calls."""
 
     def __init__(self):
         self.broadcasts = []
         self.mark_stale_calls = 0
         self.mark_stale_paths = []
+        self.baseline_updates = []  # (client_id, path, hash, mtime)
+        self.baseline_clears = []  # (client_id, path)
 
     def broadcast(self, event, exclude_client_id=None):
         self.broadcasts.append((event, exclude_client_id))
@@ -28,6 +30,12 @@ class _Recorder:
     def mark_stale(self, path):
         self.mark_stale_calls += 1
         self.mark_stale_paths.append(path)
+
+    def update_baseline(self, client_id, path, content_hash, mtime):
+        self.baseline_updates.append((client_id, path, content_hash, mtime))
+
+    def clear_baseline(self, client_id, path):
+        self.baseline_clears.append((client_id, path))
 
 
 @pytest.fixture
@@ -49,6 +57,8 @@ def client(vault, recorder) -> TestClient:
         get_vault=lambda: vault,
         broadcast_fn=recorder.broadcast,
         mark_stale_fn=recorder.mark_stale,
+        update_baseline_fn=recorder.update_baseline,
+        clear_baseline_fn=recorder.clear_baseline,
     ))
     return TestClient(app)
 
@@ -81,6 +91,30 @@ def test_put_echoes_exclude_client_id_from_header(client, recorder):
     assert r.status_code == 200
     _, exclude = recorder.broadcasts[0]
     assert exclude == "desktop-123"
+
+
+def test_put_with_client_id_updates_baseline(client, recorder):
+    r = client.put(
+        "/sync/file",
+        json={"path": "notes/a.md", "body": "hello", "expected_mtime": None},
+        headers={"X-Sync-Client-Id": "desktop-123"},
+    )
+    mtime = r.json()["mtime"]
+    import hashlib
+    assert recorder.baseline_updates == [
+        ("desktop-123", "notes/a.md", hashlib.sha256(b"hello").hexdigest(), mtime)
+    ]
+
+
+def test_put_without_client_id_does_not_touch_baseline(client, recorder):
+    client.put("/sync/file", json={"path": "notes/a.md", "body": "hello", "expected_mtime": None})
+    assert recorder.baseline_updates == []
+
+
+def test_delete_with_client_id_clears_baseline(client, recorder, vault):
+    vault.write_by_path("notes/a.md", "content")
+    client.delete("/sync/file", params={"path": "notes/a.md"}, headers={"X-Sync-Client-Id": "desktop-123"})
+    assert recorder.baseline_clears == [("desktop-123", "notes/a.md")]
 
 
 def test_get_file_roundtrip(client, vault):

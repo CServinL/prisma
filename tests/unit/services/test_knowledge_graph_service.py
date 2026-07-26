@@ -641,6 +641,32 @@ def test_mark_stale_does_not_override_indexing_state(kg):
     assert kg.status()["state"] == "indexing"
 
 
+def test_mark_stale_ignores_stream_paths(kg, vault):
+    # Regression test for a real 2026-07-25 bug: streams/*.yaml is excluded
+    # from the KG's own file watcher (_VaultChangeHandler never adds it to
+    # _pending), so calling mark_stale() for a stream write set "stale" with
+    # nothing ever able to clear it -- stuck forever. Confirmed live on
+    # Forge right after the vault-sync engine pushed a stream file.
+    with kg._lock:
+        kg._state = "idle"
+    kg.mark_stale(vault.root / "streams" / "my-topic.yaml")
+    assert kg.status()["state"] == "idle"
+
+
+def test_mark_stale_still_applies_to_md_paths(kg, vault):
+    with kg._lock:
+        kg._state = "idle"
+    kg.mark_stale(vault.root / "notes" / "a.md")
+    assert kg.status()["state"] == "stale"
+
+
+def test_is_relevant_path_matches_watcher_exclusions(kg, vault):
+    assert kg.is_relevant_path(vault.root / "notes" / "a.md") is True
+    assert kg.is_relevant_path(vault.root / "streams" / "my-topic.yaml") is False
+    assert kg.is_relevant_path(vault.root / ".vault-files" / "chromadb" / "x.json") is False
+    assert kg.is_relevant_path(vault.root / ".hidden.md") is False
+
+
 def test_process_pending_clears_stale_even_with_no_real_change(kg, vault):
     # Regression test for a real 2026-07-25 bug: mark_stale() is called
     # optimistically from many API call sites ahead of this watcher-driven

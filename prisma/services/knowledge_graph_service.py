@@ -497,7 +497,29 @@ class KnowledgeGraphService:
                 _log.warning("knowledge graph indexer thread did not exit within 5s — likely mid-extraction")
         _log.info("knowledge graph stopped")
 
-    def mark_stale(self) -> None:
+    def is_relevant_path(self, path: Path) -> bool:
+        """Whether `path` is something this service would ever actually
+        index — the single source of truth for both the fs watcher
+        (_VaultChangeHandler) and mark_stale()'s optional path check, so the
+        two can never drift apart the way they did before (a stream write
+        could set "stale" via mark_stale() while the watcher categorically
+        never adds streams/ to _pending, leaving "stale" stuck forever with
+        nothing left to process — confirmed live 2026-07-25)."""
+        if any(p in path.parts for p in (".vault-files", "streams")) or path.name.startswith("."):
+            return False
+        return path.suffix in self.index_extensions
+
+    def mark_stale(self, path: Path | str | None = None) -> None:
+        """Optimistically flags the index stale ahead of the watcher-driven
+        pass that actually decides whether re-extraction is needed — lets
+        /status reflect a change immediately rather than waiting up to 60s.
+        `path`, when known, is checked against is_relevant_path() first: a
+        write to something the watcher would never pick up (streams/*.yaml)
+        must not set "stale", since nothing would ever clear it. Callers
+        that don't know/care about a specific path (e.g. /knowledge-graph/taint)
+        keep the old unconditional behavior."""
+        if path is not None and not self.is_relevant_path(Path(path)):
+            return
         with self._lock:
             if self._state != "indexing":
                 self._state = "stale"

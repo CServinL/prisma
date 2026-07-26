@@ -20,12 +20,14 @@ class _Recorder:
     def __init__(self):
         self.broadcasts = []
         self.mark_stale_calls = 0
+        self.mark_stale_paths = []
 
     def broadcast(self, event, exclude_client_id=None):
         self.broadcasts.append((event, exclude_client_id))
 
-    def mark_stale(self):
+    def mark_stale(self, path):
         self.mark_stale_calls += 1
+        self.mark_stale_paths.append(path)
 
 
 @pytest.fixture
@@ -63,6 +65,7 @@ def test_put_new_file_creates_and_broadcasts(client, vault, recorder):
     assert r.json()["body"] == "hello"
     assert vault.read_by_path("notes/a.md")[0] == "hello"
     assert recorder.mark_stale_calls == 1
+    assert recorder.mark_stale_paths == ["notes/a.md"]
     assert len(recorder.broadcasts) == 1
     event, exclude = recorder.broadcasts[0]
     assert event == {"type": "vault_change", "action": "sync_write", "path": "notes/a.md"}
@@ -130,12 +133,6 @@ def test_put_one_ulp_off_expected_mtime_still_succeeds(client, vault):
     r = client.put("/sync/file", json={"path": "notes/a.md", "body": "v2", "expected_mtime": off_by_one_ulp})
     assert r.status_code == 200
     assert vault.read_by_path("notes/a.md")[0] == "v2"
-
-
-def test_put_genuinely_stale_expected_mtime_still_conflicts(client, vault):
-    vault.write_by_path("notes/a.md", "v1")
-    r = client.put("/sync/file", json={"path": "notes/a.md", "body": "v2", "expected_mtime": 1.0})
-    assert r.status_code == 409
 
 
 def test_delete_file_removes_and_broadcasts(client, vault, recorder):

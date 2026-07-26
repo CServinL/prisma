@@ -57,7 +57,7 @@ class SyncFileWriteRequest(BaseModel):
 def build_sync_router(
     get_vault: Callable[[], VaultService],
     broadcast_fn: Callable[..., None],
-    mark_stale_fn: Callable[[], None],
+    mark_stale_fn: Callable[[str], None],
 ) -> APIRouter:
     router = APIRouter(prefix="/sync", tags=["sync"])
 
@@ -104,7 +104,13 @@ def build_sync_router(
         except ValueError as exc:
             raise HTTPException(status_code=403, detail=str(exc))
 
-        mark_stale_fn()
+        # mark_stale_fn checks the path itself (KnowledgeGraphService.
+        # is_relevant_path) -- streams/*.yaml (the one other synced type,
+        # see _safe_sync_path) is excluded from the KG's own file watcher,
+        # so a bare unconditional mark_stale() here would set "stale" with
+        # nothing ever able to clear it (confirmed live 2026-07-25 on Forge,
+        # right after the vault-sync engine pushed a stream file).
+        mark_stale_fn(req.path)
         broadcast_fn(
             {"type": "vault_change", "action": "sync_write", "path": req.path},
             exclude_client_id=request.headers.get(_CLIENT_ID_HEADER),
@@ -118,7 +124,7 @@ def build_sync_router(
         except ValueError as exc:
             raise HTTPException(status_code=403, detail=str(exc))
 
-        mark_stale_fn()
+        mark_stale_fn(path)
         broadcast_fn(
             {"type": "vault_change", "action": "sync_delete", "path": path},
             exclude_client_id=request.headers.get(_CLIENT_ID_HEADER),

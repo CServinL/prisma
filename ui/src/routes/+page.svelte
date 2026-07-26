@@ -181,14 +181,16 @@
     return url.origin;
   }
 
-  // In Tauri the server can be at any address, so respect the stored/configured
-  // value. In browser/PWA mode, default to the same host on the API's port,
-  // but still allow an explicit override for reverse-proxied deployments.
-  let apiBase = $state(
-    isTauri
-      ? (localStorage.getItem("prisma.server") ?? DEFAULT_API)
-      : (localStorage.getItem("prisma.server") ?? _defaultApiBase())
-  );
+  // Real persisted value arrives async via loadSettings() -> cfg.server_url
+  // (platform.ts's own loadSettings: Tauri reads settings.json via the Rust
+  // side, browser/PWA reads a "prisma-settings" localStorage key) -- this
+  // is just the synchronous placeholder $state needs at declaration time.
+  // Previously read a "prisma.server" localStorage key directly here, but
+  // nothing ever wrote that specific key in either mode (dead code left
+  // over from before the Settings/saved_servers redesign) -- removed
+  // rather than fixed, since loadSettings() below is the real source of
+  // truth for both modes.
+  let apiBase = $state(isTauri ? DEFAULT_API : _defaultApiBase());
 
   // ── Auth (ADR-011 password mode) ──────────────────────────────────────────
   // Shown whenever apiFetch (or the /ws connection below) hits a 401 —
@@ -1036,10 +1038,23 @@
   });
 
   async function loadSettings() {
-    try {
-      cfg = await loadPlatformSettings();
-      apiBase = cfg.server_url || apiBase;
-    } catch {}
+    // Retries rather than silently keeping apiBase's Local placeholder on a
+    // single failed attempt -- confirmed live 2026-07-26: a transient
+    // invoke("get_settings") failure this early in Tauri startup left
+    // apiBase stuck at Local for the entire session (sync correctly never
+    // started, since Local means "don't sync" by design, but the user was
+    // actually configured for a remote server the whole time with no
+    // visible indication anything was wrong).
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        cfg = await loadPlatformSettings();
+        apiBase = cfg.server_url || apiBase;
+        break;
+      } catch (err) {
+        console.error(`loadSettings: attempt ${attempt}/3 failed`, err);
+        if (attempt < 3) await new Promise((resolve) => setTimeout(resolve, 200));
+      }
+    }
     // Apply on every load/restart, not just after clicking Save in
     // Settings — previously the persisted scale was loaded into `cfg` but
     // never actually applied until the user re-opened Settings and hit

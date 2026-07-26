@@ -10,6 +10,7 @@ def _ep_safe(**kw):
 _imeta.entry_points = _ep_safe
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -72,6 +73,10 @@ _t("importing zotero")
 from prisma.services.zotero import ZoteroMode, ZoteroService
 _t("zotero ok")
 
+_t("importing sync_orchestrator")
+from prisma.services.sync_orchestrator import SyncDecision, diff_manifest
+_t("sync_orchestrator ok")
+
 _t("importing vault_models")
 from prisma.storage.models.vault_models import (
     Chat, ChatMessage, ChatRole, NodeType, RenderedNode, StreamRunResult, ToolCallRecord,
@@ -121,6 +126,123 @@ def broadcast(event: dict, exclude_client_id: str | None = None) -> None:
     incoming server-side change."""
     if _ws_loop is not None and _ws_loop.is_running():
         asyncio.run_coroutine_threadsafe(_ws_broadcast(event, exclude_client_id), _ws_loop)
+
+
+# ── Sync orchestration (2026-07-26 redesign) ──────────────────────────────────
+# The server is the sole authority deciding push/pull/conflict for the
+# desktop's local vault mirror — see prisma-desktop's sync/pull.rs and
+# services/sync_orchestrator.py's own module doc comments for the full
+# rationale. _client_baseline is the server-side equivalent of the
+# desktop's sync_state.json: the last-known-agreed (hash, mtime) per path,
+# per client_id — rebuilt from scratch each connection via a full
+# request_manifest/manifest_response exchange rather than persisted, since
+# a fresh full diff on every connect is cheap for a personal vault and
+# means there's nothing to get out of sync across a restart.
+
+_client_baseline: dict[str, dict[str, tuple[str, float]]] = {}
+_client_baseline_lock = threading.Lock()
+
+
+def _hash_body(body: str) -> str:
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+
+def _server_manifest() -> dict[str, tuple[str, float]]:
+    """Every synced file's (content_hash, mtime), read fresh from the vault."""
+    manifest: dict[str, tuple[str, float]] = {}
+    for path, mtime, _size in _vault.list_md_manifest():
+        result = _vault.read_by_path(path)
+        if result is None:
+            continue
+        body, _mtime = result
+        manifest[path] = (_hash_body(body), mtime)
+    return manifest
+
+
+def _server_file_entry(path: str) -> tuple[str, float] | None:
+    """Single-path version of _server_manifest — used for the live
+    file_changed/file_deleted notifications, where re-hashing the entire
+    vault on every keystroke-adjacent edit would be wasteful."""
+    try:
+        result = _vault.read_by_path(path)
+    except ValueError:
+        return None
+    if result is None:
+        return None
+    body, mtime = result
+    return (_hash_body(body), mtime)
+
+
+async def _dispatch_sync_decisions(ws: WebSocket, client_id: str, decisions: dict[str, "SyncDecision"]) -> None:
+    for path, decision in decisions.items():
+        if decision == SyncDecision.ASK_CLIENT_TO_PUSH:
+            await ws.send_text(json.dumps({"type": "request_file", "path": path}))
+        elif decision == SyncDecision.PUSH_TO_CLIENT:
+            await ws.send_text(json.dumps({"type": "vault_change", "action": "sync_write", "path": path}))
+        elif decision == SyncDecision.TELL_CLIENT_TO_DELETE:
+            await ws.send_text(json.dumps({"type": "vault_change", "action": "sync_delete", "path": path}))
+            with _client_baseline_lock:
+                _client_baseline.setdefault(client_id, {}).pop(path, None)
+        elif decision == SyncDecision.DELETE_ON_SERVER:
+            try:
+                _vault.delete_by_path(path)
+            except ValueError:
+                continue
+            _indexer.mark_stale(path)
+            broadcast({"type": "vault_change", "action": "sync_delete", "path": path}, exclude_client_id=client_id)
+            with _client_baseline_lock:
+                _client_baseline.setdefault(client_id, {}).pop(path, None)
+
+
+async def _handle_sync_message(ws: WebSocket, client_id: str, msg: dict) -> None:
+    kind = msg.get("type")
+    with _client_baseline_lock:
+        baseline = dict(_client_baseline.get(client_id, {}))
+
+    if kind == "manifest_response":
+        client_files = {
+            f["path"]: (f["hash"], f["mtime"]) for f in msg.get("files", []) if "path" in f and "hash" in f
+        }
+        server_files = _server_manifest()
+        decisions = diff_manifest(server_files, client_files, baseline)
+        await _dispatch_sync_decisions(ws, client_id, decisions)
+        # Confirm the baseline for everything that's already in sync (not
+        # flagged above) — self-heals cases the ack-based updates below
+        # can't see directly, e.g. a client-side conflict resolution that
+        # overwrote its own copy to match the server without any PUT.
+        with _client_baseline_lock:
+            bl = _client_baseline.setdefault(client_id, {})
+            for path, entry in client_files.items():
+                if path not in decisions and server_files.get(path) == entry:
+                    bl[path] = entry
+
+    elif kind in ("file_changed", "file_deleted"):
+        path = msg.get("path")
+        if not path:
+            return
+        client_entry = None if kind == "file_deleted" else (msg.get("hash", ""), msg.get("mtime", 0.0))
+        server_entry = _server_file_entry(path)
+        decisions = diff_manifest(
+            {path: server_entry} if server_entry else {},
+            {path: client_entry} if client_entry else {},
+            {path: baseline[path]} if path in baseline else {},
+        )
+        if path in decisions:
+            await _dispatch_sync_decisions(ws, client_id, decisions)
+        else:
+            with _client_baseline_lock:
+                bl = _client_baseline.setdefault(client_id, {})
+                if client_entry:
+                    bl[path] = client_entry
+                else:
+                    bl.pop(path, None)
+            await ws.send_text(json.dumps({"type": "ack", "path": path}))
+
+    elif kind == "file_synced":
+        path = msg.get("path")
+        if path:
+            with _client_baseline_lock:
+                _client_baseline.setdefault(client_id, {})[path] = (msg.get("hash", ""), msg.get("mtime", 0.0))
 
 
 # ── Vault root / config helpers ───────────────────────────────────────────────
@@ -318,10 +440,22 @@ app.add_middleware(AccessLogMiddleware)
 # value at include_router() time would keep talking to a stale, replaced
 # instance after a reload.
 from prisma.server.sync_routes import build_sync_router  # noqa: E402
+def _update_client_baseline(client_id: str, path: str, content_hash: str, mtime: float) -> None:
+    with _client_baseline_lock:
+        _client_baseline.setdefault(client_id, {})[path] = (content_hash, mtime)
+
+
+def _clear_client_baseline(client_id: str, path: str) -> None:
+    with _client_baseline_lock:
+        _client_baseline.setdefault(client_id, {}).pop(path, None)
+
+
 app.include_router(build_sync_router(
     get_vault=lambda: _vault,
     broadcast_fn=broadcast,
     mark_stale_fn=lambda path: _indexer.mark_stale(path),
+    update_baseline_fn=_update_client_baseline,
+    clear_baseline_fn=_clear_client_baseline,
 ))
 
 _executor = ThreadPoolExecutor(max_workers=2)
@@ -519,16 +653,39 @@ async def websocket_endpoint(ws: WebSocket, client_id: str | None = Query(None))
     # reject a handshake response that doesn't confirm one of the
     # subprotocols they offered. `client_id` (desktop sends a persisted
     # UUID) lets broadcast() skip echoing a sync push back to its own
-    # sender — see _ws_broadcast/exclude_client_id.
+    # sender — see _ws_broadcast/exclude_client_id — and is what makes
+    # this connection a sync-orchestration participant at all (see
+    # _handle_sync_message): a browser/PWA tab connects with no client_id
+    # and just receives ordinary vault_change broadcasts as before.
     if "bearer" in ws.scope.get("subprotocols", []):
         await ws.accept(subprotocol="bearer")
     else:
         await ws.accept()
     with _ws_clients_lock:
         _ws_clients[ws] = client_id
+
+    if client_id:
+        # Kick off a full sync as soon as this client connects — see
+        # sync_orchestrator's module doc comment for why the server (not
+        # the client) now always initiates this.
+        try:
+            await ws.send_text(json.dumps({"type": "request_manifest"}))
+        except Exception:
+            pass
+
     try:
         while True:
-            await ws.receive_text()  # keeps connection alive; client sends nothing
+            text = await ws.receive_text()
+            if not client_id:
+                continue  # not a sync participant — nothing to parse/act on
+            try:
+                msg = json.loads(text)
+            except ValueError:
+                continue
+            try:
+                await _handle_sync_message(ws, client_id, msg)
+            except Exception:
+                _log.exception("error handling sync message from client_id=%s: %r", client_id, msg)
     except WebSocketDisconnect:
         pass
     finally:

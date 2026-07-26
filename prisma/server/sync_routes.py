@@ -16,6 +16,7 @@ already does implicitly by referencing the module-level name directly.
 """
 from __future__ import annotations
 
+import hashlib
 from typing import Callable, Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -58,7 +59,17 @@ def build_sync_router(
     get_vault: Callable[[], VaultService],
     broadcast_fn: Callable[..., None],
     mark_stale_fn: Callable[[str], None],
+    update_baseline_fn: Callable[[str, str, str, float], None],
+    clear_baseline_fn: Callable[[str, str], None],
 ) -> APIRouter:
+    """`update_baseline_fn(client_id, path, hash, mtime)` / `clear_baseline_fn(client_id, path)`
+    keep app.py's server-side sync_orchestrator baseline (the per-client
+    "last known agreed state") in sync with what actually landed here — a
+    successful PUT/DELETE is itself the ACK for an ASK_CLIENT_TO_PUSH
+    decision (the HTTP response already proves it completed), unlike a
+    PUSH_TO_CLIENT decision, which needs an explicit `file_synced` message
+    back over the WS since there's no request/response round trip for that
+    direction. See sync_orchestrator.py's own module doc comment."""
     router = APIRouter(prefix="/sync", tags=["sync"])
 
     @router.get("/manifest", response_model=list[SyncManifestEntry])
@@ -111,9 +122,16 @@ def build_sync_router(
         # nothing ever able to clear it (confirmed live 2026-07-25 on Forge,
         # right after the vault-sync engine pushed a stream file).
         mark_stale_fn(req.path)
+        client_id = request.headers.get(_CLIENT_ID_HEADER)
+        if client_id:
+            # This PUT succeeding is itself the ACK for an
+            # ASK_CLIENT_TO_PUSH decision -- see build_sync_router's own
+            # docstring for why this direction doesn't need a separate
+            # WS message the way a server-initiated push-down does.
+            update_baseline_fn(client_id, req.path, hashlib.sha256(req.body.encode("utf-8")).hexdigest(), new_mtime)
         broadcast_fn(
             {"type": "vault_change", "action": "sync_write", "path": req.path},
-            exclude_client_id=request.headers.get(_CLIENT_ID_HEADER),
+            exclude_client_id=client_id,
         )
         return SyncFileResponse(path=req.path, body=req.body, mtime=new_mtime)
 
@@ -125,9 +143,12 @@ def build_sync_router(
             raise HTTPException(status_code=403, detail=str(exc))
 
         mark_stale_fn(path)
+        client_id = request.headers.get(_CLIENT_ID_HEADER)
+        if client_id:
+            clear_baseline_fn(client_id, path)
         broadcast_fn(
             {"type": "vault_change", "action": "sync_delete", "path": path},
-            exclude_client_id=request.headers.get(_CLIENT_ID_HEADER),
+            exclude_client_id=client_id,
         )
         return {"status": "deleted", "path": path}
 

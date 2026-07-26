@@ -321,7 +321,7 @@ from prisma.server.sync_routes import build_sync_router  # noqa: E402
 app.include_router(build_sync_router(
     get_vault=lambda: _vault,
     broadcast_fn=broadcast,
-    mark_stale_fn=lambda: _indexer.mark_stale(),
+    mark_stale_fn=lambda path: _indexer.mark_stale(path),
 ))
 
 _executor = ThreadPoolExecutor(max_workers=2)
@@ -1453,7 +1453,9 @@ def create_stream(req: StreamCreateRequest):
         refresh_frequency=req.refresh_frequency,
         tags=req.tags,
     )
-    _indexer.mark_stale()
+    # No mark_stale() -- streams/*.yaml is never KG-indexable content (see
+    # KnowledgeGraphService.is_relevant_path), so it would just set "stale"
+    # with nothing ever able to clear it.
     _activity.info("action=create_stream slug=%s query=%r freq=%s", s.slug, req.query, req.refresh_frequency)
     return _stream_meta(s)
 
@@ -1483,7 +1485,7 @@ def delete_stream(slug: str):
         _vault.delete_stream(slug)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail=f"stream not found: {slug!r}")
-    _indexer.mark_stale()
+    # No mark_stale() -- see create_stream's comment above.
     _activity.info("action=delete_stream slug=%s", slug)
 
 

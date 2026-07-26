@@ -1224,20 +1224,32 @@ class KnowledgeGraphService:
                 pending = self._pending.copy()
                 self._pending.clear()
             if pending:
-                _log.info("knowledge graph incremental update: %d files flagged by watcher", len(pending))
-                existing = [path for path in pending if path.exists()]
-                for path in pending:
-                    if not path.exists():
-                        self._delete_file(path)
-                changed = self._extract_files_concurrently(existing)
-                if changed:
-                    with self._lock:
-                        self._last_indexed = datetime.now()
-                        self._state = "idle"
-                elif existing:
-                    _log.info("knowledge graph incremental update: no real content change — watcher false-positive")
-                self._set_activity(None)
+                self._process_pending(pending)
             self._stop_event.wait(timeout=60)
+
+    def _process_pending(self, pending: set[Path]) -> None:
+        _log.info("knowledge graph incremental update: %d files flagged by watcher", len(pending))
+        existing = [path for path in pending if path.exists()]
+        for path in pending:
+            if not path.exists():
+                self._delete_file(path)
+        changed = self._extract_files_concurrently(existing)
+        # mark_stale() is called optimistically from many API call sites
+        # (any vault write) before this watcher-driven pass ever runs, so
+        # /status reflects a change immediately rather than waiting up to
+        # 60s for this loop to catch up. But that means "stale" must always
+        # get resolved here once pending is actually processed -- even when
+        # the content hash didn't really change (confirmed live 2026-07-25:
+        # sync-engine conflict retries rewriting identical content left
+        # "stale" permanently stuck with nothing left to do, since only the
+        # `changed` branch used to clear it).
+        with self._lock:
+            if changed:
+                self._last_indexed = datetime.now()
+            self._state = "idle"
+        if not changed and existing:
+            _log.info("knowledge graph incremental update: no real content change — watcher false-positive")
+        self._set_activity(None)
 
     def _full_index(self) -> None:
         with self._lock:

@@ -641,6 +641,27 @@ def test_mark_stale_does_not_override_indexing_state(kg):
     assert kg.status()["state"] == "indexing"
 
 
+def test_process_pending_clears_stale_even_with_no_real_change(kg, vault):
+    # Regression test for a real 2026-07-25 bug: mark_stale() is called
+    # optimistically from many API call sites ahead of this watcher-driven
+    # pass, so if the flagged file's content hash turns out unchanged (e.g.
+    # a rewrite with identical content -- exactly what the vault-sync
+    # engine's conflict-retry path does), "stale" stayed stuck forever with
+    # nothing left to process, since only the real-change branch used to
+    # clear it.
+    f = vault.root / "notes" / "a.md"
+    content = "---\ntype: note\n---\ncontent"
+    f.write_text(content, encoding="utf-8")
+    with kg._lock:
+        kg._state = "stale"
+        rel = str(f.relative_to(vault.root))
+        kg._set_indexed_hash(rel, hashlib.sha256(content.encode("utf-8")).hexdigest())
+
+    kg._process_pending({f})
+
+    assert kg.status()["state"] == "idle"
+
+
 def test_full_index_sets_idle_and_last_indexed(kg, vault):
     f = vault.root / "notes" / "a.md"
     f.write_text("---\ntype: note\n---\ncontent", encoding="utf-8")

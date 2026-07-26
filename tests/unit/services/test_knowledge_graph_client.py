@@ -50,6 +50,18 @@ def test_mark_stale_posts_to_kg():
     with patch("prisma.services.knowledge_graph_client.requests.post") as mock_post:
         client.mark_stale()
     assert mock_post.call_args[0][0].endswith("/mark_stale")
+    assert mock_post.call_args.kwargs["params"] is None
+
+
+def test_mark_stale_forwards_path_to_kg():
+    # The kg process runs in its own worker (see this module's docstring),
+    # so KnowledgeGraphService.mark_stale()'s path-relevance check (added
+    # alongside prisma#42) needs the path to actually cross the HTTP
+    # boundary, not just be accepted client-side and dropped.
+    client = KnowledgeGraphClient()
+    with patch("prisma.services.knowledge_graph_client.requests.post") as mock_post:
+        client.mark_stale("streams/my-topic.yaml")
+    assert mock_post.call_args.kwargs["params"] == {"path": "streams/my-topic.yaml"}
 
 
 def test_mark_stale_does_not_raise_when_unreachable():

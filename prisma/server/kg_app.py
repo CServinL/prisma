@@ -219,9 +219,9 @@ def status():
 
 
 @app.post("/mark_stale")
-def mark_stale():
-    _kg.mark_stale()
-    return {"status": "stale"}
+def mark_stale(path: str | None = None):
+    _kg.mark_stale(path)
+    return {"status": _kg.status()["state"]}
 
 
 @app.post("/drop_index")

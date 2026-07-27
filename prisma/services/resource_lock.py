@@ -121,6 +121,23 @@ def process_status(host: str, port: int, timeout: float = 3.0) -> dict:
         return {}
 
 
+def reload_resources(host: str, port: int, timeout: float = 10.0) -> dict:
+    """Re-reads compute_pools from config into the supervisor's running
+    ResourceManager — idempotent, no lease loss (see ResourceManager.reload_config's
+    own docstring). Proxied from api's smart `POST /reload` (see
+    prisma.services.config_reload) so the UI/CLI don't need direct access to
+    the supervisor's loopback-only control port. Same fail-open-ish spirit as
+    the other functions here: returns {"error": ...} rather than raising if
+    the supervisor isn't reachable."""
+    try:
+        resp = requests.post(f"http://{host}:{port}/supervisor/resources/reload", timeout=timeout)
+        resp.raise_for_status()
+        return resp.json()
+    except requests.RequestException as exc:
+        _log.warning("supervisor unreachable at %s:%d — could not reload resources: %s", host, port, exc)
+        return {"error": str(exc)}
+
+
 def restart_worker(host: str, port: int, name: str, timeout: float = 10.0) -> dict:
     """Restarts one supervisor-managed worker process (api/web/chroma/kg) —
     for surfacing on the api process's UI-facing reload control without the

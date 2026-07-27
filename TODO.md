@@ -1045,7 +1045,8 @@ zotero` (all 3 subcommands), and `cli/commands/cleanup.py` wholesale (639
 lines — see below, this was a bonus find, not just a CLI wrapper).
 
 **Kept** (structurally can't be API calls): `prisma serve`, `prisma status`,
-`prisma auth hash-password`, `prisma reload-resources`.
+`prisma auth hash-password`, `prisma reload-config` (see below — generalized
+same day from the originally-kept `reload-resources`).
 
 **Bonus finding:** `cli/commands/cleanup.py`'s `DuplicateDetector` was a
 second, fully independent duplicate-detection implementation for Zotero
@@ -1055,18 +1056,31 @@ its own separate logic, never referenced by anything except the
 now-deleted `zotero duplicates` command. Deleting the CLI command deleted the
 whole duplicate implementation with it, not just its UI.
 
-**In progress (2026-07-27, later same day):** `prisma reload-resources` is
-being generalized into `prisma reload-config` — diff the currently-loaded
-config against what's on disk, determine which subsystems the changed keys
-affect, reload only those (extending the existing per-subsystem `/reload/*`
-routes and `/supervisor/resources/reload` rather than replacing them), and
-report what was actually restarted. Also under discussion: migrating
-`config.yaml` → TOML with per-major-module sections (`[core]`,
-`[supervisor]`, etc.) — see this file's own note once that's scoped, not
-written yet as of this entry.
+**Follow-up (2026-07-27, later same day): `reload-resources` generalized into
+`reload-config`.** Investigated which of `PrismaConfig`'s sections are
+actually cached in a long-lived object (needing an explicit reload) vs. read
+fresh per call (needing nothing at all) — found the existing `/reload/*`
+routes were inconsistent: `/reload/vault`, `/reload/zotero`, `/reload/chroma`
+were real; `/reload/indexer` was a harmless no-op (`kg_app.py` already
+re-reads its own config fresh per call, so nothing needed reloading there in
+the first place); `chat.*`/`llm.host` (cached in `_chat_agent`) had **no
+reload path at all** until now. Added `POST /reload/chat` to close that gap.
+New `prisma/services/config_reload.py::diff_config_sections()` compares the
+currently-active config against a fresh disk read (4 tracked sections:
+`vault_root`, `sources.zotero`, `retrieval`, `chat`) — no generic diff engine
+needed, Pydantic's own field-wise `__eq__` is enough. The old unconditional
+"rebuild everything, every call, silently defaults on a bad file" `POST
+/reload` is now: reject an invalid config outright (422, nothing touched)
+rather than the previous silent-fallback-to-defaults behavior, diff, reload
+only what changed, and always proxy to the supervisor's already-idempotent
+`/supervisor/resources/reload`. `prisma reload-config` now hits this route
+(main API port) instead of the supervisor port directly, and reports what
+changed/reloaded. TOML migration (`config.yaml` → `config.toml`) folded into
+this same effort — see its own entry below.
 
-See `docs/wiki/cli.md`'s "Moved to the API" table for the full command→route
-mapping, and ADR-004's follow-up section for the fuller narrative.
+See `docs/wiki/cli.md`'s "Moved to the API" table and `reload-config` entry
+for the full command→route mapping, and ADR-004's follow-up section for the
+fuller narrative.
 
 ## Overall verdict
 

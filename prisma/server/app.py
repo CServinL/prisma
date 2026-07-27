@@ -380,6 +380,15 @@ _t("building zotero")
 _zotero = _build_zotero()
 _t("module-level init done")
 
+from prisma.utils.config import ConfigLoader as _ConfigLoader
+
+_active_config = _ConfigLoader().config
+"""Snapshot of the config sections that were actually applied to the
+running singletons below (_vault/_zotero/_chroma/_chat_agent) — the
+baseline `POST /reload`'s smart diff compares a fresh disk-read against.
+Kept in sync by every reload path (targeted or smart), not just the smart
+one, so a mix of `/reload/zotero` then `/reload` still diffs correctly."""
+
 
 class _StreamScheduler:
     """Background thread that runs streams when their next_update is past."""
@@ -590,19 +599,54 @@ def _run_review(job_id: str, req: ReviewRequest) -> None:
         _jobs[job_id].update(status="error", errors=[str(exc)])
 
 
+# ── Reload helpers ────────────────────────────────────────────────────────────
+# Each helper rebuilds its subsystem's global AND updates the matching slice
+# of _active_config, so the smart POST /reload's diff (below) stays accurate
+# regardless of whether a targeted /reload/* route or the smart one ran last.
+
+def _reload_vault(new_config: "PrismaConfig | None" = None) -> None:
+    global _vault, _active_config
+    _vault = VaultService(vault_root=_resolve_vault_root())
+    if new_config is not None:
+        _active_config = _active_config.model_copy(update={"vault_root": new_config.vault_root})
+
+
+def _reload_zotero(new_config: "PrismaConfig | None" = None) -> None:
+    global _zotero, _active_config
+    _zotero = _build_zotero()
+    if new_config is not None:
+        new_sources = _active_config.sources.model_copy(update={"zotero": new_config.sources.zotero})
+        _active_config = _active_config.model_copy(update={"sources": new_sources})
+
+
+def _reload_chroma(new_config: "PrismaConfig | None" = None) -> None:
+    global _chroma, _active_config
+    _chroma.stop()
+    _chroma = _build_chroma(_vault)
+    _chroma.start()
+    if new_config is not None:
+        _active_config = _active_config.model_copy(update={"retrieval": new_config.retrieval})
+
+
+def _reload_chat(new_config: "PrismaConfig | None" = None) -> None:
+    global _chat_agent, _active_config
+    _chat_agent = _build_chat_agent(_vault, _chroma, _indexer)
+    if new_config is not None:
+        new_llm = _active_config.llm.model_copy(update={"host": new_config.llm.host})
+        _active_config = _active_config.model_copy(update={"chat": new_config.chat, "llm": new_llm})
+
+
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 @app.post("/reload/vault")
 def reload_vault():
-    global _vault
-    _vault = VaultService(vault_root=_resolve_vault_root())
+    _reload_vault()
     return {"status": "reloaded", "vault_root": str(_vault.root)}
 
 
 @app.post("/reload/zotero")
 def reload_zotero():
-    global _zotero
-    _zotero = _build_zotero()
+    _reload_zotero()
     return {"status": "reloaded", "zotero_mode": _zotero.mode}
 
 
@@ -617,10 +661,17 @@ def reload_indexer():
 
 @app.post("/reload/chroma")
 def reload_chroma():
-    global _chroma
-    _chroma.stop()
-    _chroma = _build_chroma(_vault)
-    _chroma.start()
+    _reload_chroma()
+    return {"status": "reloaded"}
+
+
+@app.post("/reload/chat")
+def reload_chat():
+    """Rebuilds _chat_agent from the current config — closes the one gap
+    found when auditing which config sections actually need an explicit
+    reload path: chat.* / llm.host are cached in _chat_agent at startup
+    with no prior way to pick up a change short of a full process restart."""
+    _reload_chat()
     return {"status": "reloaded"}
 
 
@@ -636,18 +687,53 @@ def restart_worker(name: str):
     )
 
 
-@app.post("/reload")
+class ReloadConfigResponse(BaseModel):
+    changed: list[str]
+    reloaded: list[str]
+    compute_pools_reloaded: bool
+
+
+_RELOAD_FNS = {
+    "vault_root": _reload_vault,
+    "sources.zotero": _reload_zotero,
+    "retrieval": _reload_chroma,
+    "chat": _reload_chat,
+}
+
+
+@app.post("/reload", response_model=ReloadConfigResponse)
 def reload_server():
-    global _vault, _indexer, _chroma, _zotero
-    _indexer.stop()
-    _chroma.stop()
-    _vault = VaultService(vault_root=_resolve_vault_root())
-    _zotero = _build_zotero()
-    _indexer = KnowledgeGraphClient(port=_kg_port())
-    _chroma = _build_chroma(_vault)
-    _indexer.start()
-    _chroma.start()
-    return {"status": "reloaded", "vault_root": str(_vault.root), "zotero_mode": _zotero.mode}
+    """Smart config reload (backs `prisma reload-config`): diffs the
+    currently-active config against a fresh read from disk, rebuilds only
+    the subsystems whose section actually changed (see
+    prisma.services.config_reload for which sections those are and why),
+    and always proxies to the supervisor's own idempotent
+    /supervisor/resources/reload for compute_pools. Unlike the old
+    unconditional "rebuild everything" behavior, a config file that fails
+    to parse/validate is rejected outright rather than silently falling
+    back to defaults — ConfigLoader's own fallback-to-defaults behavior is
+    correct for startup but would be a dangerous silent full reset here."""
+    global _active_config
+    from prisma.utils.config import ConfigLoader
+    from prisma.services.config_reload import diff_config_sections
+
+    try:
+        new_config = ConfigLoader().config
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=f"invalid config: {exc}")
+
+    changed = diff_config_sections(_active_config, new_config)
+    reloaded: list[str] = []
+    for section in changed:
+        _RELOAD_FNS[section](new_config)
+        reloaded.append(section)
+
+    result = resource_lock.reload_resources("127.0.0.1", resource_lock.default_port())
+    compute_pools_reloaded = "error" not in result
+
+    return ReloadConfigResponse(
+        changed=changed, reloaded=reloaded, compute_pools_reloaded=compute_pools_reloaded,
+    )
 
 
 @app.get("/health")

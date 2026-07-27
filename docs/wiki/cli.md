@@ -47,15 +47,22 @@ Web API credentials + reachability, dependencies, Ollama/LLM reachable.
 
 ---
 
-## `prisma reload-resources`
+## `prisma reload-config`
 
-Re-read `compute_pools` from `config.yaml` into an already-running
-supervisor — no restart, no lost in-flight leases. A thin convenience
-wrapper over the supervisor's own `POST /supervisor/resources/reload`.
+Diffs the config currently loaded by the server against what's now on disk,
+and reloads only the subsystems whose section actually changed — vault,
+Zotero, retrieval/Chroma, chat — plus the supervisor's `compute_pools`
+(always, since that reload is already cheap/idempotent). No restart, no
+lost in-flight leases or connections for anything that didn't change.
 
 ```bash
-prisma reload-resources [--supervisor-port PORT]
+prisma reload-config [--port PORT]
 ```
+
+Backed by `POST /reload` (see `prisma/services/config_reload.py` for which
+sections are tracked and why — most config is read fresh per request
+already and needs no reload at all). Prints which sections changed and
+which subsystems got reloaded.
 
 ---
 

@@ -4,9 +4,10 @@ Prisma CLI — minimal, local-machine-only surface.
 
 Only commands that inherently can't be an HTTP API call live here: `serve`
 (starts the API this CLI can't yet call), `status` (pre-flight diagnostic —
-runs before/without a live server), `reload-resources` (a thin convenience
-wrapper over the supervisor's own control port), and `auth hash-password`
-(bootstraps server.auth.password_hash before any server/password exists).
+runs before/without a live server), `reload-config` (diffs config on disk
+against what's loaded and reloads only the affected subsystems), and `auth
+hash-password` (bootstraps server.auth.password_hash before any server/
+password exists).
 Everything else — literature review, research streams, Zotero duplicates/
 stats/status, syncing the offline pending-write queue — is API-only now
 (see docs/wiki/cli.md's "Moved to the API" section for the exact routes).
@@ -222,20 +223,31 @@ def serve(host: str, port: int, web_port: int, chroma_port: int, kg_port: int, s
     )
 
 
-@cli.command("reload-resources")
-@click.option("--supervisor-port", default=8760, show_default=True, help="Supervisor control port")
-def reload_resources(supervisor_port: int):
-    """Re-read compute_pools from config.yaml into an already-running
-    supervisor — no restart, no lost in-flight leases. For tuning
-    max_concurrent/per-model overrides against observed GPU utilization
-    without killing every worker just to pick up one changed number."""
+@cli.command("reload-config")
+@click.option("--port", default=8765, show_default=True, help="API port")
+def reload_config(port: int):
+    """Diff the config on disk against what's currently loaded, and reload
+    only the subsystems that actually changed (vault, Zotero, retrieval/
+    Chroma, chat) plus the supervisor's compute_pools — no restart, no lost
+    in-flight leases or connections for anything that didn't change."""
     import requests as _req
     try:
-        r = _req.post(f"http://127.0.0.1:{supervisor_port}/supervisor/resources/reload", timeout=5)
+        r = _req.post(f"http://127.0.0.1:{port}/reload", timeout=15)
         r.raise_for_status()
-        click.echo(f"Reloaded pools: {', '.join(r.json().get('pools', []))}")
     except _req.RequestException as exc:
-        raise click.ClickException(f"could not reach supervisor at port {supervisor_port}: {exc}")
+        raise click.ClickException(f"could not reach the API at port {port}: {exc}")
+
+    body = r.json()
+    changed = body.get("changed", [])
+    reloaded = body.get("reloaded", [])
+    pools_reloaded = body.get("compute_pools_reloaded", False)
+
+    if changed:
+        click.echo(f"Changed: {', '.join(changed)}")
+        click.echo(f"Reloaded: {', '.join(reloaded)}")
+    else:
+        click.echo("No config sections changed.")
+    click.echo(f"Compute pools: {'reloaded' if pools_reloaded else 'supervisor unreachable — not reloaded'}")
 
 
 cli.add_command(auth_group)

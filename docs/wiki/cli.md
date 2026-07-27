@@ -71,8 +71,8 @@ which subsystems got reloaded.
 ### `prisma auth hash-password`
 
 Prompts for a password (hidden, confirmed twice) and prints its bcrypt
-hash. Paste the output into `~/.config/prisma/config.yaml` under
-`server.auth.password_hash`, and set `server.auth.mode: password` (ADR-011).
+hash. Paste the output into `~/.config/prisma/config.toml` under
+`server.auth.password_hash`, and set `server.auth.mode = "password"` (ADR-011).
 This can't be an API call — the server has no password configured yet when
 you run it, and you wouldn't want to send a plaintext password over the
 network just to get its hash locally.

@@ -6,7 +6,7 @@ Everything else is the production stack unchanged.
 
 Prerequisites:
   - internet (arxiv reachable)
-  - api_key + library_id in ~/.config/prisma/config.yaml (sources.zotero)
+  - api_key + library_id in ~/.config/prisma/config.toml (sources.zotero)
 
 Cleanup: Zotero collection created during the run is deleted at teardown.
 
@@ -34,11 +34,10 @@ def _arxiv_reachable() -> bool:
 
 def _zotero_web_api_configured() -> bool:
     try:
-        import yaml
+        import tomllib
         from pathlib import Path
-        cfg = yaml.safe_load(
-            (Path.home() / ".config" / "prisma" / "config.yaml").read_text()
-        ) or {}
+        with open(Path.home() / ".config" / "prisma" / "config.toml", "rb") as f:
+            cfg = tomllib.load(f) or {}
         return bool(cfg.get("sources", {}).get("zotero", {}).get("api_key"))
     except Exception:
         return False
@@ -46,7 +45,7 @@ def _zotero_web_api_configured() -> bool:
 
 pytestmark = pytest.mark.skipif(
     not _arxiv_reachable() or not _zotero_web_api_configured(),
-    reason="stream e2e requires internet + Zotero Web API configured in config.yaml",
+    reason="stream e2e requires internet + Zotero Web API configured in config.toml",
 )
 
 
@@ -69,7 +68,7 @@ def zotero():
     import prisma.server.app as app_mod
     z = app_mod._zotero
     if z.mode != ZoteroMode.web_api:
-        pytest.skip("Zotero not in web_api mode — check config.yaml api_key")
+        pytest.skip("Zotero not in web_api mode — check config.toml api_key")
     return z
 
 

@@ -163,7 +163,7 @@ isolation — arbitrating a small set of **named, capacity-limited compute
 pools** (`ResourceManager` in `supervisor.py`). A pool models whatever "the
 LLM" actually is for a given deployment — a single local GPU, a beefier
 remote multi-GPU box, a rate-limited cloud API — each with its own
-concurrency ceiling, configured via `compute_pools` in `config.yaml`
+concurrency ceiling, configured via `compute_pools` in `config.toml`
 (defaults to one pool, `"default"`, concurrency 1, if unconfigured). Any
 code about to do LLM/embedding/AI work follows the same protocol: **look for
 a free pool, acquire a lease, do the work, release it.** The supervisor

@@ -6,8 +6,13 @@ Run with: bash tests-sets/run-web-api.sh
 
 import os
 import tempfile
+from pathlib import Path
+
 import pytest
-import yaml
+
+from toml_write import dict_to_toml
+
+_THIS_DIR = Path(__file__).parent
 
 
 def _creds_present() -> bool:
@@ -15,12 +20,18 @@ def _creds_present() -> bool:
 
 
 def pytest_collection_modifyitems(items):
+    # pytest_collection_modifyitems receives the FULL session-wide item list,
+    # not just items under this directory -- must filter explicitly, or a
+    # bare `pytest` invocation (testpaths includes tests-sets/) would skip
+    # every test in the entire suite whenever these creds are absent, not
+    # just this set's own tests.
     if not _creds_present():
         skip = pytest.mark.skip(
             reason="ZOTERO_API_KEY and ZOTERO_LIBRARY_ID env vars required"
         )
         for item in items:
-            item.add_marker(skip)
+            if _THIS_DIR in Path(item.fspath).parents:
+                item.add_marker(skip)
 
 
 @pytest.fixture(scope="session")
@@ -39,6 +50,6 @@ def web_api_config_file(tmp_path_factory):
         "search": {"default_limit": 10, "sources": ["arxiv"]},
         "output": {"directory": "./outputs", "format": "markdown"},
     }
-    cfg = tmp_path_factory.mktemp("web_api") / "config.yaml"
-    cfg.write_text(yaml.dump(data))
+    cfg = tmp_path_factory.mktemp("web_api") / "config.toml"
+    cfg.write_text(dict_to_toml(data))
     return str(cfg)

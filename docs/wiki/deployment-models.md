@@ -120,24 +120,23 @@ Install: `apt install caddy` or `brew install caddy`.
 
 ## Configuration
 
-`~/.config/prisma/config.yaml`:
+`~/.config/prisma/config.toml`:
 
-```yaml
-server:
-  host: "0.0.0.0"   # "127.0.0.1" for local-only (Model 1)
-  port: 8765
-  trusted_proxies:   # IPs allowed to set X-Forwarded-For (default: loopback only)
-    - "127.0.0.1"
-    - "::1"
-  auth:
-    # LAN zone — password
-    password_hash: ""   # bcrypt hash — generate: prisma auth hash-password
+```toml
+[server]
+host = "0.0.0.0"   # "127.0.0.1" for local-only (Model 1)
+port = 8765
+trusted_proxies = ["127.0.0.1", "::1"]   # IPs allowed to set X-Forwarded-For (default: loopback only)
 
-    # WAN zone — OIDC (any compliant provider)
-    oidc_issuer: ""     # e.g. https://accounts.google.com
-    client_id: ""       #      or https://your-org.zitadel.cloud
-    client_secret: ""   #      or https://auth.yourdomain.com/application/o/prisma/
-    allowed_emails: []  # restrict to specific accounts (required for Google)
+[server.auth]
+# LAN zone — password
+password_hash = ""   # bcrypt hash — generate: prisma auth hash-password
+
+# WAN zone — OIDC (any compliant provider) — not implemented yet, see ADR-011
+oidc_issuer = ""     # e.g. https://accounts.google.com
+client_id = ""       #      or https://your-org.zitadel.cloud
+client_secret = ""   #      or https://auth.yourdomain.com/application/o/prisma/
+allowed_emails = []  # restrict to specific accounts (required for Google)
 ```
 
 Generate a bcrypt password hash:

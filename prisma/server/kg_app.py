@@ -75,7 +75,7 @@ def _llm_api_key() -> str:
     # OpenAI-compat servers don't check the key at all (dummy value kept for
     # API compatibility with the openai SDK, which requires a non-empty
     # string). Mirrors ChatLLM._resolve_api_key's same env-var-by-name
-    # pattern (ADR-014) — the real key never lives in config.yaml itself.
+    # pattern (ADR-014) — the real key never lives in config.toml itself.
     try:
         from prisma.utils.config import ConfigLoader
         cfg = ConfigLoader().get_llm_config()

@@ -1082,6 +1082,51 @@ See `docs/wiki/cli.md`'s "Moved to the API" table and `reload-config` entry
 for the full command→route mapping, and ADR-004's follow-up section for the
 fuller narrative.
 
+## 6. config.yaml → config.toml migration (2026-07-27)
+
+Direct request, folded into the `reload-config` work above. Clean cutover,
+no dual-format support, no auto-migration script: only two call sites ever
+read this file at all (`ConfigLoader._load_config()`,
+`supervisor.py`'s 3 `cfg_path` reads for `compute_pools`), and nothing
+writes it programmatically — it's hand-edited, and the one real instance of
+it (the user's own forge deployment) gets converted by hand once this
+ships. `ConfigLoader`/`supervisor.py` now use stdlib `tomllib` (Python 3.11+,
+already this project's floor) — `supervisor.py` in particular drops its only
+third-party import (`yaml`) as a result, going one step further into the
+"zero dependencies beyond stdlib" design its own module docstring already
+claimed but didn't quite achieve.
+
+**Real schema wrinkle, not just syntax:** TOML arrays must be homogeneous,
+so `compute_pools[].models`' old YAML shorthand (mixing bare strings and
+override mappings in the same list) isn't valid TOML. Resolved by requiring
+the full table form uniformly (`[[compute_pools.models]]`, only `name`
+required) — a deliberate, documented behavior change, not an oversight.
+
+**Also found while rewriting `config.example.yaml` → `.toml`:** the example
+(and `docs/wiki/configuration.md`'s "Full Reference") documented several
+`sources.zotero.*`/`search.validation.*` fields (`auto_save_papers`,
+`auto_save_collection`, `min_confidence_for_save`, the whole `validation:`
+sub-block) that don't exist on `ZoteroConfig`/`SearchConfig` at all —
+pre-existing doc drift, unrelated to this migration. Dropped from the new
+`config.example.toml` rather than carried forward in new syntax (rewriting
+a fictional YAML key as a fictional TOML key helps no one), but **not**
+otherwise audited/fixed here — worth a dedicated docs-accuracy pass at some
+point, independent of this migration.
+
+**Also found and fixed while updating test fixtures for this migration:** a
+real, unrelated, pre-existing bug in `tests-sets/web-api/conftest.py` and
+`tests-sets/e2e/conftest.py` — both `pytest_collection_modifyitems(items)`
+hooks iterated over the full session-wide `items` list without checking
+whether an item actually belonged to their own directory, so a bare `pytest`
+invocation (the documented default, per `testpaths = ["tests-sets", "tests"]`)
+skipped the **entire test suite** — all 677 tests — whenever
+`ZOTERO_API_KEY`/Ollama weren't reachable on the machine running it, not
+just the web-api/e2e sets that actually need them. Confirmed via `git log`
+this predates the current session's work entirely (from the original RC2
+commit). Fixed by filtering each hook's loop to items under
+`Path(__file__).parent`. Bare `pytest` now correctly runs 640 and skips only
+the 37 that genuinely need external creds/services.
+
 ## Overall verdict
 
 **Not a rewrite.** The architecture itself (supervised multi-process design, flat-MD

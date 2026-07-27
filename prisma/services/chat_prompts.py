@@ -1,9 +1,9 @@
-"""Chat system prompt — user-editable, not baked into code or config.yaml.
+"""Chat system prompt — user-editable, not baked into code or config.toml.
 
 Lives at ~/.config/prisma/chat_system_prompt.md as plain text (no YAML
 frontmatter — it's a config artifact, not a vault node). Materialized with
 the default on first use so the file always exists and is discoverable for
-editing, same bootstrap pattern as config.yaml itself.
+editing, same bootstrap pattern as config.toml itself.
 """
 from __future__ import annotations
 

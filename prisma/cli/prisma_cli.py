@@ -86,7 +86,7 @@ def status(verbose: bool):
     config_path = None
     click.echo("\n📋 Configuration:")
 
-    default_config = Path.home() / '.config' / 'prisma' / 'config.yaml'
+    default_config = Path.home() / '.config' / 'prisma' / 'config.toml'
     env_config = os.getenv('PRISMA_CONFIG')
 
     if env_config:
@@ -100,7 +100,7 @@ def status(verbose: bool):
         click.echo(f"     Expected: {default_config}")
         click.echo("     Create it:")
         click.echo("       mkdir -p ~/.config/prisma")
-        click.echo("       cp /path/to/repo/config.example.yaml ~/.config/prisma/config.yaml")
+        click.echo("       cp /path/to/repo/config.example.toml ~/.config/prisma/config.toml")
         all_good = False
     else:
         try:

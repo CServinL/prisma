@@ -7,10 +7,11 @@ Config controlled per-case via temp files set through PRISMA_CONFIG env var.
 """
 
 import pytest
-import yaml
 from unittest.mock import patch, MagicMock
 from click.testing import CliRunner
 from prisma.cli.prisma_cli import cli
+
+from toml_write import dict_to_toml
 
 MINIMAL_CONFIG = {
     "sources": {
@@ -33,8 +34,8 @@ def _run_status(tmp_path, config_data=None, wsl=False, windows_ip="10.0.0.1",
 
     invoke_env = {}
     if config_data is not None:
-        cfg = tmp_path / "config.yaml"
-        cfg.write_text(yaml.dump(config_data))
+        cfg = tmp_path / "config.toml"
+        cfg.write_text(dict_to_toml(config_data))
         invoke_env["PRISMA_CONFIG"] = str(cfg)
     if env:
         invoke_env.update(env)

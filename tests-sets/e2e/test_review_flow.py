@@ -1,44 +1,39 @@
 """
-e2e: prisma review — full flow from search through analysis to output file.
+e2e: literature review via the API — full flow from search through analysis
+to output file. `prisma review` (CLI) was removed 2026-07-27 in favor of
+POST /review; this test moved with it, matching test_stream_flow.py's
+already-established pattern of exercising the real app directly via
+TestClient against the host's real ~/.config/prisma/config.toml, rather
+than invoking the CLI or building an isolated fixture config.
 """
 
 import os
+import time
+
 import pytest
-import yaml
-from pathlib import Path
-from click.testing import CliRunner
-from prisma.cli.prisma_cli import cli
+from fastapi.testclient import TestClient
 
 
 @pytest.fixture(scope="module")
-def e2e_config(tmp_path_factory):
-    data = {
-        "sources": {
-            "zotero": {
-                "enabled": True,
-                "api_key": os.environ.get("ZOTERO_API_KEY", ""),
-                "library_id": os.environ.get("ZOTERO_LIBRARY_ID", ""),
-                "library_type": "user",
-            }
-        },
-        "llm": {"provider": "ollama", "model": "llama3.1:8b", "host": "localhost:11434"},
-        "search": {"default_limit": 5, "sources": ["arxiv"]},
-        "output": {"directory": str(tmp_path_factory.mktemp("outputs")), "format": "markdown"},
-    }
-    cfg = tmp_path_factory.mktemp("e2e") / "config.yaml"
-    cfg.write_text(yaml.dump(data))
-    return str(cfg)
+def client():
+    from prisma.server.app import app
+    with TestClient(app, raise_server_exceptions=True) as tc:
+        yield tc
 
 
 @pytest.mark.e2e
-def test_review_produces_output_file(e2e_config, tmp_path):
-    runner = CliRunner(mix_stderr=False)
-    out = str(tmp_path / "review.md")
-    result = runner.invoke(
-        cli,
-        ["review", "mechanistic interpretability", "--output", out, "--limit", "3"],
-        env={"PRISMA_CONFIG": e2e_config},
-        catch_exceptions=False,
-    )
-    assert result.exit_code == 0, result.output
-    assert Path(out).exists()
+def test_review_produces_output_file(client):
+    resp = client.post("/review", json={"topic": "mechanistic interpretability", "limit": 3})
+    assert resp.status_code == 202, resp.text
+    job_id = resp.json()["job_id"]
+
+    for _ in range(60):
+        status = client.get(f"/review/{job_id}").json()
+        if status["status"] in ("done", "error"):
+            break
+        time.sleep(2)
+    else:
+        pytest.fail(f"review job {job_id} did not finish in time")
+
+    assert status["status"] == "done", status.get("errors")
+    assert os.path.exists(status["output_file"])

@@ -1,10 +1,10 @@
 """
 Configuration utilities for Prisma using Pydantic.
-Load and validate YAML configuration files with robust type validation.
+Load and validate TOML configuration files with robust type validation.
 """
 
 import os
-import yaml
+import tomllib
 import logging
 from pathlib import Path
 from typing import Any, Optional, List
@@ -256,7 +256,7 @@ class ServerConfig(BaseModel):
 
 
 class KGConfig(BaseModel):
-    """Knowledge graph indexer tuning (`kg:` in config.yaml), read only by
+    """Knowledge graph indexer tuning (`[kg]` in config.toml), read only by
     the kg worker process (kg_app.py). Per-deployment, not shared constants —
     a cloud-routed extraction model (cheap per-token cost, no local-hardware
     speed concern) can afford a much higher cap than a local model
@@ -307,7 +307,7 @@ class PrismaConfig(BaseModel):
 
 
 class ConfigLoader:
-    """Load and validate configuration from YAML files and environment variables."""
+    """Load and validate configuration from TOML files and environment variables."""
 
     def __init__(self, config_path: str | Path | None = None):
         # Explicit param takes priority over PRISMA_CONFIG/default-location
@@ -337,9 +337,9 @@ class ConfigLoader:
         
         # Check default locations
         default_locations = [
-            Path.home() / '.config' / 'prisma' / 'config.yaml',
-            Path('./config.yaml'),
-            Path('./prisma-config.yaml')
+            Path.home() / '.config' / 'prisma' / 'config.toml',
+            Path('./config.toml'),
+            Path('./prisma-config.toml')
         ]
         
         for path in default_locations:
@@ -349,13 +349,13 @@ class ConfigLoader:
         return None
     
     def _load_config(self) -> PrismaConfig:
-        """Load configuration from YAML file with defaults and validation."""
+        """Load configuration from TOML file with defaults and validation."""
         user_data = {}
-        
+
         if self.config_path:
             try:
-                with open(self.config_path, 'r', encoding='utf-8') as f:
-                    user_data = yaml.safe_load(f) or {}
+                with open(self.config_path, 'rb') as f:
+                    user_data = tomllib.load(f) or {}
                 logger.debug(f"Loaded config from {self.config_path}")
             except Exception as e:
                 logger.error(f"Failed to load config from {self.config_path}: {e}")

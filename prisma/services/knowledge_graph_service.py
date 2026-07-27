@@ -392,7 +392,7 @@ class KnowledgeGraphService:
         # semaphore is the actual single gate on total concurrent Ollama
         # calls across both pools, so demand never overshoots what's meant
         # to be granted — set it equal to the model's
-        # background_max_concurrent in config.yaml so kg's real demand
+        # background_max_concurrent in config.toml so kg's real demand
         # matches its real supply instead of hammering acquire() with
         # doomed requests.
         self._extraction_concurrency = max(1, extraction_concurrency)
@@ -703,7 +703,7 @@ class KnowledgeGraphService:
         Three independent ceilings, take the smallest:
         1. A hardcoded sane ceiling (4000 — see the call site's own history:
            raised from 2000 after a real entity-dense paper needed more).
-        2. `max_output_fraction` (config.yaml's kg.max_output_fraction,
+        2. `max_output_fraction` (config.toml's kg.max_output_fraction,
            default 0.25) of the model's real context window — even if more
            technically fits, quality degrades well before the context limit
            (see kg-extraction-context-length.md), and this fraction is

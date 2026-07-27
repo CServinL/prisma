@@ -243,26 +243,19 @@ async def _handle_sync_message(ws: WebSocket, client_id: str, msg: dict) -> None
 # ── Vault root / config helpers ───────────────────────────────────────────────
 
 def _resolve_vault_root() -> Path:
+    from prisma.utils.config import ConfigLoader
     try:
-        import yaml
-        cfg_path = Path.home() / ".config" / "prisma" / "config.yaml"
-        cfg = yaml.safe_load(cfg_path.read_text()) or {}
-        root = cfg.get("vault_root", "").strip()
-        if root:
-            return Path(root).expanduser().resolve()
+        return ConfigLoader().get_vault_root()
     except Exception:
-        pass
-    return Path.home() / "prisma-vault"
+        return Path.home() / "prisma-vault"
 
 
 def _build_zotero() -> ZoteroService:
+    from prisma.utils.config import ConfigLoader
     try:
-        import yaml
-        cfg_path = Path.home() / ".config" / "prisma" / "config.yaml"
-        cfg = yaml.safe_load(cfg_path.read_text()) or {}
-        zconf = cfg.get("sources", {}).get("zotero", {})
-        api_key = zconf.get("api_key") or None
-        user_id = zconf.get("library_id") or None
+        zconf = ConfigLoader().get_zotero_config()
+        api_key = zconf.api_key or None
+        user_id = zconf.library_id or None
         mode = ZoteroMode.web_api if api_key else ZoteroMode.offline
         return ZoteroService(mode=mode, api_key=api_key, user_id=user_id)
     except Exception:

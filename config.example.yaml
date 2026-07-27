@@ -2,6 +2,18 @@
 #
 # Copy this file to ~/.config/prisma/config.yaml and customize for your setup
 
+# Vault directory — empty/omitted defaults to ~/prisma-vault
+vault_root: ""
+
+# Knowledge graph indexer tuning (native KnowledgeGraphService, Kùzu-backed)
+kg:
+  index_extensions: [".md", ".txt"]   # file types included in the graph index (with or without leading dot, both work)
+  token_budget: 1000                  # per-section chunk size sent to the LLM (smaller = better extraction quality)
+  extraction_concurrency: 3           # max concurrent extraction calls
+  max_entities: 15                    # max entities extracted per chunk
+  max_relationships: 20               # max relationships extracted per chunk
+  max_output_fraction: 0.25           # fraction of the model's context window reserved for output tokens
+
 # Data Sources Configuration
 sources:
   zotero:

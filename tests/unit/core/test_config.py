@@ -97,7 +97,72 @@ sources:
                 os.environ['PRISMA_CONFIG'] = old_env
             elif 'PRISMA_CONFIG' in os.environ:
                 del os.environ['PRISMA_CONFIG']
-    
+
+    def test_get_vault_root_defaults_to_home_prisma_vault(self):
+        with tempfile.TemporaryDirectory() as temp_dir, \
+             patch('prisma.utils.config.Path.exists', return_value=False):
+            old_env = os.environ.get('PRISMA_CONFIG')
+            os.environ['PRISMA_CONFIG'] = str(Path(temp_dir) / 'nonexistent.yaml')
+            try:
+                loader = ConfigLoader()
+                self.assertEqual(loader.get_vault_root(), Path.home() / "prisma-vault")
+            finally:
+                if old_env:
+                    os.environ['PRISMA_CONFIG'] = old_env
+                elif 'PRISMA_CONFIG' in os.environ:
+                    del os.environ['PRISMA_CONFIG']
+
+    def test_get_vault_root_and_kg_config_from_yaml(self):
+        # vault_root and kg: previously had no Pydantic model at all --
+        # every call site (app.py, kg_app.py, cli/commands/streams.py)
+        # independently re-parsed raw YAML for these two values. This test
+        # pins the consolidated ConfigLoader.get_vault_root()/get_kg_config()
+        # behavior those call sites now share.
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False) as f:
+            f.write("""
+vault_root: "~/custom-vault"
+kg:
+  max_entities: 42
+  token_budget: 750
+  index_extensions: ["md", ".yaml"]
+""")
+            config_path = f.name
+        try:
+            old_env = os.environ.get('PRISMA_CONFIG')
+            os.environ['PRISMA_CONFIG'] = config_path
+            loader = ConfigLoader()
+            self.assertEqual(loader.get_vault_root(), (Path.home() / "custom-vault").resolve())
+            kg = loader.get_kg_config()
+            self.assertEqual(kg.max_entities, 42)
+            self.assertEqual(kg.token_budget, 750)
+            self.assertEqual(kg.index_extensions, ["md", ".yaml"])
+            # untouched settings still default
+            self.assertEqual(kg.max_relationships, 20)
+        finally:
+            os.unlink(config_path)
+            if old_env:
+                os.environ['PRISMA_CONFIG'] = old_env
+            elif 'PRISMA_CONFIG' in os.environ:
+                del os.environ['PRISMA_CONFIG']
+
+    def test_config_path_constructor_arg_overrides_env_var(self):
+        # The CLI's --config flag needs to point ConfigLoader at a specific
+        # file without the side effect of mutating PRISMA_CONFIG globally.
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False) as f:
+            f.write("vault_root: \"/explicit-path-vault\"\n")
+            explicit_path = f.name
+        try:
+            old_env = os.environ.get('PRISMA_CONFIG')
+            os.environ['PRISMA_CONFIG'] = "/should-be-ignored.yaml"
+            loader = ConfigLoader(config_path=explicit_path)
+            self.assertEqual(loader.get_vault_root(), Path("/explicit-path-vault"))
+        finally:
+            os.unlink(explicit_path)
+            if old_env:
+                os.environ['PRISMA_CONFIG'] = old_env
+            elif 'PRISMA_CONFIG' in os.environ:
+                del os.environ['PRISMA_CONFIG']
+
     def test_get_method_with_dot_notation(self):
         """Test the get method with dot notation for backward compatibility."""
         # Isolated from whatever real ~/.config/prisma/config.yaml exists on

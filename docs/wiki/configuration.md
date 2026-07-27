@@ -12,6 +12,9 @@ cp /path/to/repo/config.example.yaml ~/.config/prisma/config.yaml
 ## Full Reference
 
 ```yaml
+# ── Vault ─────────────────────────────────────────────────────────────────────
+vault_root: "~/prisma-vault"          # empty/omitted = ~/prisma-vault
+
 # ── Zotero ──────────────────────────────────────────────────────────────────
 sources:
   zotero:
@@ -113,9 +116,12 @@ retrieval:
 
 # ── Knowledge graph — native KnowledgeGraphService (Kùzu-backed) ─────────────
 kg:
-  index_extensions: [".md", ".txt"]   # file types included in the graph index
+  index_extensions: [".md", ".txt"]   # file types included in the graph index (with or without leading dot, both work)
   token_budget: 1000                  # per-section chunk size sent to the LLM (smaller = better extraction quality, see docs/kg-extraction-context-length.md)
   extraction_concurrency: 3           # max concurrent extraction calls (cross-file + within-file combined)
+  max_entities: 15                    # max entities extracted per chunk — a cloud-routed model can afford a much higher cap than a local one
+  max_relationships: 20               # max relationships extracted per chunk
+  max_output_fraction: 0.25           # fraction of the model's context window reserved for output tokens
 ```
 
 ---

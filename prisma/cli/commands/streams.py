@@ -12,25 +12,20 @@ logger = logging.getLogger(__name__)
 
 
 def _make_vault(config: Optional[str]) -> VaultService:
-    import yaml
-    cfg_path = Path(config).expanduser() if config else Path.home() / ".config" / "prisma" / "config.yaml"
+    from prisma.utils.config import ConfigLoader
     try:
-        cfg = yaml.safe_load(cfg_path.read_text()) or {}
-        root = cfg.get("vault_root", "").strip()
-        vault_root = Path(root).expanduser().resolve() if root else Path.home() / "prisma-vault"
+        vault_root = ConfigLoader(config_path=config).get_vault_root()
     except Exception:
         vault_root = Path.home() / "prisma-vault"
     return VaultService(vault_root=vault_root)
 
 
 def _make_zotero(config: Optional[str]) -> ZoteroService:
-    import yaml
-    cfg_path = Path(config).expanduser() if config else Path.home() / ".config" / "prisma" / "config.yaml"
+    from prisma.utils.config import ConfigLoader
     try:
-        cfg = yaml.safe_load(cfg_path.read_text()) or {}
-        zconf = cfg.get("sources", {}).get("zotero", {})
-        api_key = zconf.get("api_key") or None
-        user_id = zconf.get("library_id") or None
+        zconf = ConfigLoader(config_path=config).get_zotero_config()
+        api_key = zconf.api_key or None
+        user_id = zconf.library_id or None
         mode = ZoteroMode.web_api if api_key else ZoteroMode.offline
         return ZoteroService(mode=mode, api_key=api_key, user_id=user_id)
     except Exception:

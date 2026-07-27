@@ -26,21 +26,18 @@ _LOG_PATHS = _log_setup.configure()
 _log = logging.getLogger("prisma.knowledge_graph")
 
 
-# ── Vault root / config helpers — duplicated from app.py/supervisor.py's
-# small private resolvers rather than introducing a shared module for a
-# one-liner each; same existing pattern in this codebase. ────────────────────
+# ── Vault root / config helpers — vault_root and the kg: section both go
+# through ConfigLoader/KGConfig (utils/config.py) now; supervisor.py keeps
+# its own separate, deliberately stdlib-only resolver (see its module
+# docstring's "stdlib + yaml only" constraint) since it can't depend on
+# Pydantic. ───────────────────────────────────────────────────────────────
 
 def _resolve_vault_root() -> Path:
+    from prisma.utils.config import ConfigLoader
     try:
-        import yaml
-        cfg_path = Path.home() / ".config" / "prisma" / "config.yaml"
-        cfg = yaml.safe_load(cfg_path.read_text()) or {}
-        root = cfg.get("vault_root", "").strip()
-        if root:
-            return Path(root).expanduser().resolve()
+        return ConfigLoader().get_vault_root()
     except Exception:
-        pass
-    return Path.home() / "prisma-vault"
+        return Path.home() / "prisma-vault"
 
 
 def _ollama_model() -> str:
@@ -104,46 +101,35 @@ def _llm_context_window() -> int | None:
 
 
 def _max_output_fraction() -> float:
+    from prisma.utils.config import ConfigLoader
     try:
-        import yaml
-        cfg_path = Path.home() / ".config" / "prisma" / "config.yaml"
-        cfg = yaml.safe_load(cfg_path.read_text()) or {}
-        return float(cfg.get("kg", {}).get("max_output_fraction", 0.25))
+        return ConfigLoader().get_kg_config().max_output_fraction
     except Exception:
         return 0.25
 
 
 def _max_entities() -> int:
-    # Per-deployment, not a shared constant — a cloud-routed extraction
-    # model (cheap per-token cost, no local-hardware speed concern) can
-    # afford a much higher cap than a local model (cservinl, 2026-07-25).
+    from prisma.utils.config import ConfigLoader
     try:
-        import yaml
-        cfg_path = Path.home() / ".config" / "prisma" / "config.yaml"
-        cfg = yaml.safe_load(cfg_path.read_text()) or {}
-        return int(cfg.get("kg", {}).get("max_entities", 15))
+        return ConfigLoader().get_kg_config().max_entities
     except Exception:
         return 15
 
 
 def _max_relationships() -> int:
+    from prisma.utils.config import ConfigLoader
     try:
-        import yaml
-        cfg_path = Path.home() / ".config" / "prisma" / "config.yaml"
-        cfg = yaml.safe_load(cfg_path.read_text()) or {}
-        return int(cfg.get("kg", {}).get("max_relationships", 20))
+        return ConfigLoader().get_kg_config().max_relationships
     except Exception:
         return 20
 
 
 def _index_extensions() -> tuple[str, ...]:
     from prisma.services.knowledge_graph_service import DEFAULT_INDEX_EXTENSIONS
+    from prisma.utils.config import ConfigLoader
     try:
-        import yaml
-        cfg_path = Path.home() / ".config" / "prisma" / "config.yaml"
-        cfg = yaml.safe_load(cfg_path.read_text()) or {}
-        exts = cfg.get("kg", {}).get("index_extensions")
-        if exts and isinstance(exts, list):
+        exts = ConfigLoader().get_kg_config().index_extensions
+        if exts:
             return tuple(e if e.startswith(".") else f".{e}" for e in exts)
     except Exception:
         pass
@@ -151,30 +137,17 @@ def _index_extensions() -> tuple[str, ...]:
 
 
 def _extraction_concurrency() -> int:
+    from prisma.utils.config import ConfigLoader
     try:
-        import yaml
-        cfg_path = Path.home() / ".config" / "prisma" / "config.yaml"
-        cfg = yaml.safe_load(cfg_path.read_text()) or {}
-        return int(cfg.get("kg", {}).get("extraction_concurrency", 3))
+        return ConfigLoader().get_kg_config().extraction_concurrency
     except Exception:
         return 3
 
 
 def _token_budget() -> int:
-    # See docs/kg-extraction-context-length.md — a controlled test on real
-    # paper content found the old 8000 default produced ~10x fewer unique
-    # entities and ~4x fewer relationships than chunking the same content
-    # at ~2000 tokens per section, not just marginally worse. Lowered
-    # further to 1000 (2026-07-05, per cservinl) after live extraction hit
-    # a dense chunk whose JSON output exceeded max_tokens and got dropped —
-    # smaller input chunks mean proportionally smaller (and less likely to
-    # truncate) output, consistent with that doc's own "smaller is better"
-    # finding trend, though not yet re-verified with its own controlled test.
+    from prisma.utils.config import ConfigLoader
     try:
-        import yaml
-        cfg_path = Path.home() / ".config" / "prisma" / "config.yaml"
-        cfg = yaml.safe_load(cfg_path.read_text()) or {}
-        return int(cfg.get("kg", {}).get("token_budget", 1000))
+        return ConfigLoader().get_kg_config().token_budget
     except Exception:
         return 1000
 

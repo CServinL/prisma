@@ -22,6 +22,7 @@ enabled = true
 # Reads and writes: Zotero Web API only (no local Zotero Desktop
 # integration — see ADR-008's follow-up)
 api_key = ""                           # from zotero.org/settings/keys
+# api_key_env = "ZOTERO_API_KEY"       # or: env var holding it instead — takes priority over api_key, keeps the real key out of this file
 library_id = ""                        # your numeric user ID
 library_type = "user"                  # "user" | "group"
 

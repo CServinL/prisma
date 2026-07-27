@@ -250,8 +250,36 @@ index_extensions = ["md", ".yaml"]
         config_loader.config.sources.zotero.enabled = True
         config_loader.config.sources.zotero.api_key = 'test_key'
         config_loader.config.sources.zotero.library_id = '12345'
-        
+
         self.assertTrue(config_loader.has_zotero_credentials())
+
+    def test_zotero_resolve_api_key_falls_back_to_literal(self):
+        cfg = ZoteroConfig(api_key='literal-key')
+        self.assertEqual(cfg.resolve_api_key(), 'literal-key')
+
+    def test_zotero_resolve_api_key_env_takes_priority(self):
+        cfg = ZoteroConfig(api_key='literal-key', api_key_env='ZOTERO_TEST_KEY_VAR')
+        with patch.dict(os.environ, {'ZOTERO_TEST_KEY_VAR': 'from-env'}):
+            self.assertEqual(cfg.resolve_api_key(), 'from-env')
+
+    def test_zotero_resolve_api_key_env_missing_raises(self):
+        cfg = ZoteroConfig(api_key='literal-key', api_key_env='ZOTERO_TEST_KEY_VAR_UNSET')
+        os.environ.pop('ZOTERO_TEST_KEY_VAR_UNSET', None)
+        with self.assertRaises(RuntimeError):
+            cfg.resolve_api_key()
+
+    def test_has_zotero_credentials_false_when_api_key_env_missing(self):
+        # A misconfigured api_key_env must degrade to "no credentials",
+        # not crash the caller -- has_zotero_credentials() is a plain bool
+        # check used in several places with no exception handling of its own.
+        with patch('prisma.utils.config.Path.exists', return_value=False):
+            config_loader = ConfigLoader()
+        config_loader.config.sources.zotero.enabled = True
+        config_loader.config.sources.zotero.library_id = '12345'
+        config_loader.config.sources.zotero.api_key_env = 'ZOTERO_TEST_KEY_VAR_UNSET'
+        os.environ.pop('ZOTERO_TEST_KEY_VAR_UNSET', None)
+
+        self.assertFalse(config_loader.has_zotero_credentials())
 
 
 if __name__ == '__main__':

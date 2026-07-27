@@ -133,10 +133,18 @@ def status(verbose: bool):
     if config is None:
         click.echo("  ⚠️  Skipped — fix config first")
     else:
-        api_key = config.get('sources.zotero.api_key', '')
+        try:
+            api_key = config.config.sources.zotero.resolve_api_key() or ''
+            api_key_env_error = None
+        except RuntimeError as exc:
+            api_key = ''
+            api_key_env_error = str(exc)
         library_id = config.get('sources.zotero.library_id', '')
 
-        if api_key and library_id:
+        if api_key_env_error:
+            click.echo(f"  Web API: ❌ {api_key_env_error}")
+            all_good = False
+        elif api_key and library_id:
             click.echo(f"  Web API: library_id={library_id} ✅ credentials configured")
             from ..services.zotero import check_web_api_reachable
             if check_web_api_reachable(api_key, library_id):

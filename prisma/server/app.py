@@ -303,7 +303,7 @@ def _build_zotero() -> ZoteroService:
     from prisma.utils.config import ConfigLoader
     try:
         zconf = ConfigLoader().get_zotero_config()
-        api_key = zconf.api_key or None
+        api_key = zconf.resolve_api_key() or None
         user_id = zconf.library_id or None
         mode = ZoteroMode.web_api if api_key else ZoteroMode.offline
         return ZoteroService(mode=mode, api_key=api_key, user_id=user_id)

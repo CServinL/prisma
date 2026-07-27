@@ -16,6 +16,21 @@ library_id = "YOUR_USER_ID"     # https://www.zotero.org/settings/keys
 library_type = "user"           # "user" | "group"
 ```
 
+For a deployment where config.toml itself isn't a safe place for a real secret
+(e.g. rendered into a Kubernetes ConfigMap, which isn't encrypted at rest),
+use `api_key_env` instead — same pattern as `llm.api_key_env`/`chat.api_key_env`:
+
+```toml
+[sources.zotero]
+enabled = true
+api_key_env = "ZOTERO_API_KEY"  # takes priority over api_key when set
+library_id = "YOUR_USER_ID"
+library_type = "user"
+```
+
+The real key then only needs to exist as an environment variable — sourced
+from a K8s Secret, for example — and never touches the config file at all.
+
 ## Connectivity
 
 `services/zotero.py::check_web_api_reachable()` is the canonical live-reachability

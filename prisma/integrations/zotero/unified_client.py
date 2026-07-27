@@ -89,7 +89,7 @@ class ZoteroClient:
         zotero_config = self.config.sources.zotero
 
         web_config = ZoteroAPIConfig(
-            api_key=getattr(zotero_config, 'api_key', ''),
+            api_key=zotero_config.resolve_api_key() or '',
             library_id=getattr(zotero_config, 'library_id', ''),
             library_type=getattr(zotero_config, 'library_type', 'user')
         )

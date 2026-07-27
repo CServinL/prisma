@@ -18,7 +18,15 @@ class ZoteroConfig(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
     
     enabled: bool = Field(False, description="Whether Zotero integration is enabled")
-    api_key: Optional[str] = Field(None, description="Zotero API key")
+    api_key: Optional[str] = Field(None, description="Zotero API key — prefer api_key_env instead")
+    api_key_env: Optional[str] = Field(
+        None,
+        description=(
+            "Env var holding the API key — takes priority over api_key when set, "
+            "same pattern as LLMConfig/ChatConfig's api_key_env. Lets the real "
+            "secret live in an env var (e.g. a K8s Secret) instead of this file."
+        ),
+    )
     library_id: Optional[str] = Field(None, description="Zotero library ID")
     library_type: str = Field("user", description="Library type: 'user' or 'group'")
     default_collections: List[str] = Field(default_factory=list, description="Default collections to search")
@@ -34,13 +42,27 @@ class ZoteroConfig(BaseModel):
         default_factory=lambda: str(Path.home() / "Zotero"),
         description="Path to Zotero data directory"
     )
-    
+
     @field_validator('library_type')
     @classmethod
     def validate_library_type(cls, v):
         if v not in ('user', 'group'):
             raise ValueError('library_type must be "user" or "group"')
         return v
+
+    def resolve_api_key(self) -> Optional[str]:
+        """Effective API key: api_key_env (if set) takes priority over the
+        literal api_key field. Raises if api_key_env is set but the env var
+        isn't — fail loud on a misconfigured indirection rather than silently
+        falling back to a (possibly stale) literal value or None."""
+        if self.api_key_env:
+            key = os.environ.get(self.api_key_env)
+            if not key:
+                raise RuntimeError(
+                    f"sources.zotero.api_key_env={self.api_key_env!r} is set but not present in the environment"
+                )
+            return key
+        return self.api_key
 
 
 class LLMConfig(BaseModel):
@@ -421,9 +443,13 @@ class ConfigLoader:
     def has_zotero_credentials(self) -> bool:
         """Check if Zotero API credentials are configured."""
         zotero_config = self.config.sources.zotero
+        try:
+            api_key = zotero_config.resolve_api_key()
+        except RuntimeError:
+            return False
         return (
             zotero_config.enabled and
-            zotero_config.api_key is not None and
+            api_key is not None and
             zotero_config.library_id is not None
         )
 

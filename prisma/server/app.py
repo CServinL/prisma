@@ -1757,6 +1757,86 @@ def zotero_collections():
         raise HTTPException(status_code=503, detail=str(e))
 
 
+class ZoteroStatsResponse(BaseModel):
+    total_items: int
+    item_type_counts: dict[str, int]
+    items_without_doi: int
+    items_without_abstract: int
+    items_without_authors: int
+    quality_score: float
+
+
+@app.get("/zotero/stats", response_model=ZoteroStatsResponse)
+def zotero_stats():
+    """Library-wide item-type breakdown and metadata-quality score, computed
+    over the same ZoteroService.list_items() used by /zotero/items — not a
+    second, independent client (the old CLI's cleanup.py had its own)."""
+    try:
+        items = _zotero.list_items()
+    except NotImplementedError as e:
+        raise HTTPException(status_code=501, detail=str(e))
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+    if not items:
+        return ZoteroStatsResponse(
+            total_items=0, item_type_counts={}, items_without_doi=0,
+            items_without_abstract=0, items_without_authors=0, quality_score=100.0,
+        )
+
+    item_type_counts: dict[str, int] = {}
+    items_without_doi = 0
+    items_without_abstract = 0
+    items_without_authors = 0
+    for item in items:
+        item_type_counts[item.item_type] = item_type_counts.get(item.item_type, 0) + 1
+        if not item.doi:
+            items_without_doi += 1
+        if not item.abstract:
+            items_without_abstract += 1
+        if not item.authors:
+            items_without_authors += 1
+
+    total = len(items)
+    quality_score = 100 - (
+        (items_without_doi + items_without_abstract + items_without_authors) / (total * 3) * 100
+    )
+    return ZoteroStatsResponse(
+        total_items=total,
+        item_type_counts=item_type_counts,
+        items_without_doi=items_without_doi,
+        items_without_abstract=items_without_abstract,
+        items_without_authors=items_without_authors,
+        quality_score=quality_score,
+    )
+
+
+class SyncPendingResponse(BaseModel):
+    synced: int
+    failed: int
+    pending_before: int
+
+
+@app.post("/zotero/sync-pending", response_model=SyncPendingResponse)
+def zotero_sync_pending():
+    """Flush the offline pending-write queue (data/pending_writes.json) —
+    the API equivalent of the old `prisma sync` CLI command. Actions are
+    queued here by the review pipeline (coordinator.py) when a Zotero write
+    fails while offline; nothing else populates this queue today."""
+    from prisma.services.research_stream_manager import ResearchStreamManager
+    from prisma.storage.pending_queue import PendingWriteQueue
+
+    pending_before = PendingWriteQueue().pending_count
+    if pending_before == 0:
+        return SyncPendingResponse(synced=0, failed=0, pending_before=0)
+    if not connectivity.is_online:
+        raise HTTPException(status_code=503, detail="offline — cannot sync right now")
+
+    manager = ResearchStreamManager()
+    synced, failed = manager.sync_pending()
+    return SyncPendingResponse(synced=synced, failed=failed, pending_before=pending_before)
+
+
 @app.get("/zotero/items")
 def zotero_items(collection: Optional[str] = Query(None), q: Optional[str] = Query(None)):
     try:

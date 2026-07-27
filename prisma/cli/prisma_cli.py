@@ -1,17 +1,21 @@
 #!/usr/bin/env python3
 """
-Prisma CLI — Research Stream Management & Literature Review
+Prisma CLI — minimal, local-machine-only surface.
 
-Commands for managing research streams and generating literature reviews
-using Zotero integration and multi-source academic search.
+Only commands that inherently can't be an HTTP API call live here: `serve`
+(starts the API this CLI can't yet call), `status` (pre-flight diagnostic —
+runs before/without a live server), `reload-resources` (a thin convenience
+wrapper over the supervisor's own control port), and `auth hash-password`
+(bootstraps server.auth.password_hash before any server/password exists).
+Everything else — literature review, research streams, Zotero duplicates/
+stats/status, syncing the offline pending-write queue — is API-only now
+(see docs/wiki/cli.md's "Moved to the API" section for the exact routes).
 """
 
 import os
 import sys
 import click
 
-from .commands.streams import streams_group
-from .commands.zotero import zotero_group
 from .commands.auth import auth_group
 
 
@@ -21,87 +25,10 @@ def cli():
     """
     Prisma - Intelligent Literature Review Tool
 
-    Manage research streams and generate comprehensive literature reviews
-    using smart Zotero integration and multi-source search capabilities.
+    Local-machine management: start the server, check its readiness,
+    bootstrap auth. Content and research operations go through the API.
     """
     pass
-
-
-@cli.command()
-@click.argument('topic', required=True)
-@click.option('--output', '-o', help='Output file path')
-@click.option('--sources', '-s', help='Data sources (arxiv,semanticscholar,...)')
-@click.option('--limit', '-l', type=int, help='Maximum number of papers')
-@click.option('--zotero-only', is_flag=True, help='Use only Zotero library')
-@click.option('--include-authors', is_flag=True, help='Include author analysis')
-@click.option('--refresh-cache', '-r', is_flag=True, help='Refresh cached metadata')
-@click.option('--config', '-c', 'config_file', help='Path to configuration file')
-def review(topic: str, output: str, sources: str, limit: int,
-           zotero_only: bool, include_authors: bool, refresh_cache: bool, config_file: str):
-    """
-    Generate a literature review for a research topic.
-
-    TOPIC: Research topic to search for (e.g., "mechanistic interpretability")
-    """
-    try:
-        if config_file:
-            os.environ['PRISMA_CONFIG'] = config_file
-
-        from ..coordinator import PrismaCoordinator
-        from ..connectivity import monitor as connectivity
-        from ..utils.config import ConfigLoader
-        cfg = ConfigLoader()
-
-        if not zotero_only and not connectivity.is_online:
-            click.echo("⚠️  Offline — literature review requires internet access.", err=True)
-            raise click.ClickException("No internet connection")
-
-        click.echo(f"🔍 Generating literature review for: {topic}")
-
-        search_config = cfg.get_search_config()
-        output_config = cfg.get_output_config()
-
-        if not sources:
-            sources = ','.join(search_config.sources)
-        if not limit:
-            limit = search_config.default_limit
-        if not output:
-            topic_safe = topic.replace(' ', '_').replace('/', '_')
-            output = f"{output_config.directory}/literature_review_{topic_safe}.md"
-
-        if zotero_only:
-            sources = 'zotero'
-
-        coordinator = PrismaCoordinator(debug=True)
-
-        review_config = {
-            'topic': topic,
-            'sources': sources.split(','),
-            'limit': limit,
-            'output_file': output,
-            'stream_name': None,
-            'include_authors': include_authors,
-            'zotero_collections': None,
-            'zotero_recent_years': None,
-        }
-
-        click.echo("📝 Running literature review pipeline...")
-        result = coordinator.run_review(review_config)
-
-        if result.success:
-            click.echo(f"✅ Review generated: {result.output_file}")
-            click.echo(f"📊 Papers analyzed: {result.papers_analyzed}")
-            click.echo(f"👥 Authors identified: {result.authors_found}")
-        else:
-            error_msg = "; ".join(result.errors) if result.errors else "Unknown error"
-            click.echo(f"❌ Review failed: {error_msg}", err=True)
-            raise click.ClickException(error_msg)
-
-    except click.ClickException:
-        raise
-    except Exception as exc:
-        click.echo(f"❌ Error: {exc}", err=True)
-        raise click.ClickException(str(exc))
 
 
 def _is_wsl() -> bool:
@@ -272,42 +199,6 @@ def status(verbose: bool):
 
 
 @cli.command()
-def sync():
-    """
-    Flush the pending write queue to Zotero.
-
-    Prisma queues Zotero write actions (save paper, create collection) when
-    offline or when Zotero is unavailable.  Run this command once connectivity
-    is restored to push all queued actions.
-    """
-    from ..connectivity import monitor as connectivity
-    from ..storage.pending_queue import PendingWriteQueue
-
-    q = PendingWriteQueue()
-    if not q:
-        click.echo("✅ No pending actions to sync.")
-        return
-
-    click.echo(f"📬 {q.pending_count} action(s) pending.")
-
-    if not connectivity.is_online:
-        click.echo("⚠️  Offline — cannot sync right now. Try again when connected.", err=True)
-        raise click.ClickException("No internet connection")
-
-    click.echo("🔄 Syncing with Zotero...")
-    try:
-        from ..services.research_stream_manager import ResearchStreamManager
-        manager = ResearchStreamManager()
-        ok, fail = manager.sync_pending()
-        click.echo(f"✅ Synced: {ok} succeeded, {fail} failed")
-        if fail:
-            click.echo("⚠️  Failed actions remain in queue — check logs for details")
-    except Exception as exc:
-        click.echo(f"❌ Sync error: {exc}", err=True)
-        raise click.ClickException(str(exc))
-
-
-@cli.command()
 @click.option("--host", default="127.0.0.1", show_default=True, help="Bind address")
 @click.option("--port", default=8765, show_default=True, help="API port")
 @click.option("--web-port", default=8766, show_default=True, help="Web (UI) port")
@@ -347,8 +238,6 @@ def reload_resources(supervisor_port: int):
         raise click.ClickException(f"could not reach supervisor at port {supervisor_port}: {exc}")
 
 
-cli.add_command(streams_group)
-cli.add_command(zotero_group)
 cli.add_command(auth_group)
 
 

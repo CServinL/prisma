@@ -60,7 +60,7 @@ Daily workflow — no activation needed, the symlink handles it:
 ```bash
 # edit files, run prisma — changes are live
 prisma serve
-prisma streams list
+prisma status
 ```
 
 For running tests, use the project's own `.venv` instead:
@@ -230,5 +230,5 @@ Open `http://<server-host>:8765/app` in a browser. On Android and iOS, use "Add 
 
 ```bash
 prisma status --verbose
-prisma zotero test-connection
+curl http://127.0.0.1:8765/zotero/status
 ```

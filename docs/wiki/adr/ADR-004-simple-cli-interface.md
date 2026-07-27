@@ -1,7 +1,10 @@
 # ADR-004: Enhanced CLI Interface with Research Streams
 
-**Date:** 2025-09-14 (Updated: 2025-09-15)  
+**Date:** 2025-09-14 (Updated: 2025-09-15)
 **Author:** CServinL
+**Status:** Superseded (2026-07-27) — see "Follow-up" at the end. `prisma
+review`/`streams`/`zotero` (this ADR's core additions) were removed; the CLI
+is now API-only, HTTP-only surfaces excepted.
 
 ## Context
 
@@ -122,7 +125,37 @@ def create_stream(name: str, query: str, frequency: str):
 
 ## Related ADRs
 - ADR-001: Simple Pipeline Architecture (CLI integrates with pipeline)
-- ADR-007: Research Streams Architecture (CLI provides streams interface) 
+- ADR-007: Research Streams Architecture (CLI provides streams interface)
+
+## Follow-up (2026-07-27): CLI minimized to what can't be an API call
+
+Prompted by a direct request to reduce the CLI "to a minimum, only to manage
+the core." By the time this ADR's commands existed, the FastAPI server
+(`app.py`) had grown its own equivalent route for nearly everything they did:
+`POST /review`, `GET/POST/PATCH/DELETE /streams`, `POST /streams/{slug}/run`,
+`GET /zotero/status`, `POST /maintenance/deduplicate`. Two gaps were closed
+rather than left as excuses to keep the CLI: `GET /zotero/stats` (new route,
+replacing `prisma zotero stats`) and `POST /zotero/sync-pending` (new route,
+replacing `prisma sync` — flushes `data/pending_writes.json`, the queue
+`coordinator.py`'s review pipeline writes to when a Zotero write fails
+offline).
+
+**Removed:** `prisma review`, the entire `prisma streams` group, the entire
+`prisma zotero` group, and `cli/commands/cleanup.py` (639 lines) wholesale —
+it turned out to hold a second, independent, CLI-only duplicate-detection
+implementation (`DuplicateDetector`) that nothing but the deleted `zotero
+duplicates` command ever called; `services/dedup.py`'s `find_all_duplicates`
+(backing `/maintenance/deduplicate`) was already the live implementation.
+
+**Kept, because each is structurally incapable of being an API call:**
+`prisma serve` (starts the thing you'd otherwise call), `prisma status`
+(pre-flight check — runs before/without a live server), `prisma auth
+hash-password` (bootstraps the password before one exists), and `prisma
+reload-resources` (a thin wrapper over the supervisor's own control port —
+see the next follow-up entry in this file for where that one is headed).
+
+See TODO.md's "CLI minimization" entry and `docs/wiki/cli.md`'s "Moved to
+the API" table for the full command→route mapping.
 def status(job_id: str):
     """Check job status from database."""
     # Query SQLite for job status

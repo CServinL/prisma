@@ -1029,6 +1029,45 @@ pattern a future contributor will trip over.
 **Fix size:** real refactor, but lower priority than #1–#3 — it's a maintainability
 smell, not something a demo audience will see directly.
 
+## 5. CLI minimized to what can't be an API call — RESOLVED 2026-07-27
+
+Direct request: "reduce the prisma-server cli to a minimum, only to manage the
+core, the rest can be managed by api." Mapping the CLI's 12 subcommands against
+`app.py`'s ~50 routes found nearly everything already had a live HTTP
+equivalent: `prisma review` → `POST /review`, the whole `prisma streams` group
+→ `GET/POST/PATCH/DELETE /streams` + `/streams/{slug}/run`, `prisma zotero
+status`/`duplicates` → `GET /zotero/status` / `POST /maintenance/deduplicate`.
+Two routes didn't exist yet and were added rather than accepted as feature
+loss: `GET /zotero/stats`, `POST /zotero/sync-pending`.
+
+**Removed:** `prisma review`, `prisma streams` (all 5 subcommands), `prisma
+zotero` (all 3 subcommands), and `cli/commands/cleanup.py` wholesale (639
+lines — see below, this was a bonus find, not just a CLI wrapper).
+
+**Kept** (structurally can't be API calls): `prisma serve`, `prisma status`,
+`prisma auth hash-password`, `prisma reload-resources`.
+
+**Bonus finding:** `cli/commands/cleanup.py`'s `DuplicateDetector` was a
+second, fully independent duplicate-detection implementation for Zotero
+items — not a thin CLI wrapper around `services/dedup.py`'s
+`find_all_duplicates` (the one `/maintenance/deduplicate` actually uses), but
+its own separate logic, never referenced by anything except the
+now-deleted `zotero duplicates` command. Deleting the CLI command deleted the
+whole duplicate implementation with it, not just its UI.
+
+**In progress (2026-07-27, later same day):** `prisma reload-resources` is
+being generalized into `prisma reload-config` — diff the currently-loaded
+config against what's on disk, determine which subsystems the changed keys
+affect, reload only those (extending the existing per-subsystem `/reload/*`
+routes and `/supervisor/resources/reload` rather than replacing them), and
+report what was actually restarted. Also under discussion: migrating
+`config.yaml` → TOML with per-major-module sections (`[core]`,
+`[supervisor]`, etc.) — see this file's own note once that's scoped, not
+written yet as of this entry.
+
+See `docs/wiki/cli.md`'s "Moved to the API" table for the full command→route
+mapping, and ADR-004's follow-up section for the fuller narrative.
+
 ## Overall verdict
 
 **Not a rewrite.** The architecture itself (supervised multi-process design, flat-MD

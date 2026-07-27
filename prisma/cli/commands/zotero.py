@@ -79,97 +79,37 @@ def zotero_stats(ctx, collection: Optional[str]):
 def zotero_status():
     """
     Check Zotero integration status and connectivity
-    
+
     Verifies:
-    - Zotero desktop app connection
-    - Web API credentials and access
-    - Local HTTP server availability
-    - Network connectivity for hybrid mode
+    - Internet connectivity
+    - Web API credentials and access (the only backend prisma uses --
+      see services/zotero.py; there is no local Zotero Desktop integration)
     """
-    from ...integrations.zotero.hybrid_client import (
-        ZoteroHybridClient, ZoteroHybridConfig, 
-        check_internet_connectivity, check_zotero_web_api_access
-    )
+    from ...connectivity import monitor as connectivity
+    from ...services.zotero import check_web_api_reachable
     from ...utils.config import config
-    
+
     click.echo("🔍 Checking Zotero integration status...\n")
-    
-    try:
-        # Create hybrid config from settings
-        hybrid_config = ZoteroHybridConfig(
-            api_key=config.get('sources.zotero.api_key'),
-            library_id=config.get('sources.zotero.library_id'),
-            library_type=config.get('sources.zotero.library_type', 'user'),
-            local_server_url=config.get('sources.zotero.server_url', 'http://127.0.0.1:23119')
-        )
-        
-        # Initialize hybrid client
-        client = ZoteroHybridClient(hybrid_config)
-        
-        # Check network connectivity
-        click.echo("🌐 Network Connectivity:")
-        is_online = check_internet_connectivity()
-        click.echo(f"   Internet: {'✅ Online' if is_online else '❌ Offline'}")
-        
-        # Check Web API access
-        click.echo("\n🔗 Zotero Web API:")
-        if hybrid_config.api_key and hybrid_config.library_id:
-            try:
-                web_api_available = check_zotero_web_api_access(
-                    hybrid_config.api_key, 
-                    hybrid_config.library_id
-                )
-                click.echo(f"   Credentials: ✅ Configured")
-                click.echo(f"   Access: {'✅ Available' if web_api_available else '❌ Unavailable'}")
-            except Exception as e:
-                click.echo(f"   Access: ❌ Error - {e}")
-        else:
-            click.echo("   Credentials: ⚠️  Not configured")
-            click.echo("   Access: ❌ Unavailable")
-        
-        # Check Local HTTP server
-        click.echo("\n🖥️  Zotero Desktop App:")
+
+    api_key = config.get('sources.zotero.api_key')
+    library_id = config.get('sources.zotero.library_id')
+
+    click.echo("🌐 Network Connectivity:")
+    click.echo(f"   Internet: {'✅ Online' if connectivity.is_online else '❌ Offline'}")
+
+    click.echo("\n🔗 Zotero Web API:")
+    if api_key and library_id:
+        click.echo("   Credentials: ✅ Configured")
         try:
-            local_available = client.local_api_client is not None
-            if local_available:
-                # Try a simple search to test connectivity
-                try:
-                    test_result = client.local_api_client.search_items("")
-                    click.echo("   HTTP Server: ✅ Available")
-                    click.echo(f"   URL: {hybrid_config.local_server_url}")
-                except Exception:
-                    click.echo("   HTTP Server: ❌ Not responding")
-            else:
-                click.echo("   HTTP Server: ❌ Not available")
+            reachable = check_web_api_reachable(api_key, library_id)
+            click.echo(f"   Access: {'✅ Available' if reachable else '❌ Unavailable'}")
         except Exception as e:
-            click.echo(f"   HTTP Server: ❌ Error - {e}")
-        
-        # Check Desktop app for saving
-        click.echo("\n💾 Desktop Save Capability:")
-        if client.desktop_client:
-            try:
-                # This would check if desktop app is running
-                click.echo("   Desktop Client: ✅ Available")
-                click.echo("   Save Operations: ✅ Enabled")
-            except Exception as e:
-                click.echo(f"   Desktop Client: ❌ Error - {e}")
-        else:
-            click.echo("   Desktop Client: ❌ Not available")
-        
-        # Show current mode
-        click.echo("\n⚙️  Integration Mode:")
-        if is_online and client.api_client:
-            click.echo("   Current Mode: 🌐 Online (Web API preferred)")
-        elif client.local_api_client:
-            click.echo("   Current Mode: 🖥️  Offline (Local HTTP only)")
-        else:
-            click.echo("   Current Mode: ❌ No connectivity")
-            
-        click.echo(f"\n✅ Zotero integration status check complete")
-        
-    except Exception as e:
-        click.echo(f"❌ Error checking Zotero status: {e}", err=True)
-        raise click.ClickException(str(e))
+            click.echo(f"   Access: ❌ Error - {e}")
+    else:
+        click.echo("   Credentials: ⚠️  Not configured")
+        click.echo("   Access: ❌ Unavailable")
+
+    click.echo("\n✅ Zotero integration status check complete")
 
 
 if __name__ == '__main__':

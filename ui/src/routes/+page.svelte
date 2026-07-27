@@ -25,7 +25,7 @@
     };
     chroma?: { chunks: number; files_indexed: number; model: string; provider?: string; current_activity?: string | null } | null;
     vault?: { root: string; notes: number; sources: number; chats: number; streams: number };
-    zotero?: { mode: string; available: boolean } | null;
+    zotero?: { mode: string; available: boolean; reachable?: boolean } | null;
     ollama?: { reachable: boolean } | null;
     processes?: {
       [worker: string]: { pid: number | null; alive: boolean; restart_count: number; memory_mb: number | null };
@@ -1307,6 +1307,14 @@
                   {serverStatus.zotero.mode} · {serverStatus.zotero.available ? "available" : "unavailable"}
                 </span>
               </div>
+              {#if serverStatus.zotero.available && serverStatus.zotero.reachable !== undefined}
+                <div class="sp-vault-root">
+                  Web API:
+                  <span class:ok={serverStatus.zotero.reachable} class:warn={!serverStatus.zotero.reachable}>
+                    {serverStatus.zotero.reachable ? "reachable" : "unreachable"}
+                  </span>
+                </div>
+              {/if}
             {/if}
 
             {#if serverStatus.pending_jobs > 0}

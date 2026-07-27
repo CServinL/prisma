@@ -11,7 +11,6 @@ from typing import Dict, List, Optional
 from datetime import datetime
 import json
 
-from ...integrations.zotero.local_api_client import ZoteroLocalAPIClient, ZoteroLocalAPIConfig
 from ...integrations.zotero.client import ZoteroClient, ZoteroAPIConfig
 from ...storage.models.zotero_models import ZoteroItem
 from ...utils.config import config
@@ -21,8 +20,8 @@ logger = logging.getLogger(__name__)
 
 class DuplicateDetector:
     """Detects duplicate items in Zotero library using various matching strategies"""
-    
-    def __init__(self, client: ZoteroLocalAPIClient):
+
+    def __init__(self, client: ZoteroClient):
         self.client = client
         
     def _normalize_title(self, title: str) -> str:
@@ -251,24 +250,16 @@ def cleanup_duplicates(collection: Optional[str], dry_run: bool, auto_select: bo
     Use --dry-run to see what would be deleted without making changes.
     """
     try:
-        # Initialize Zotero clients
-        # Use local API for reading (faster, more reliable)
-        local_config = ZoteroLocalAPIConfig(
-            server_url=config.get('sources.zotero.server_url', 'http://127.0.0.1:23119'),
-            timeout=30.0,
-            user_id="0"
-        )
-        local_client = ZoteroLocalAPIClient(local_config)
-        
-        # Initialize web API client for deletion
+        # Zotero Web API is the only backend prisma talks to (confirmed
+        # 2026-07-27) -- reads and deletes both go through the same client
+        # now, unlike the old local-API-for-reads/web-API-for-deletes split.
         web_client = None
-        
-        try:
-            api_key = config.get('sources.zotero.api_key')
-            library_id = config.get('sources.zotero.library_id')
-            library_type = config.get('sources.zotero.library_type', 'user')
-            
-            if api_key and library_id:
+        api_key = config.get('sources.zotero.api_key')
+        library_id = config.get('sources.zotero.library_id')
+        library_type = config.get('sources.zotero.library_type', 'user')
+
+        if api_key and library_id:
+            try:
                 web_config = ZoteroAPIConfig(
                     api_key=api_key,
                     library_id=library_id,
@@ -276,38 +267,41 @@ def cleanup_duplicates(collection: Optional[str], dry_run: bool, auto_select: bo
                     api_version=3
                 )
                 web_client = ZoteroClient(web_config)
-                click.echo("✅ Web API available for deletion operations")
-            else:
-                click.echo("⚠️  Web API credentials not found - deletion will be disabled")
-        except Exception as e:
-            click.echo(f"⚠️  Web API not available: {e}")
-        
-        deletion_enabled = web_client is not None
-        if deletion_enabled:
-            click.echo("ℹ️  Duplicate detection and deletion enabled")
+                click.echo("✅ Web API available")
+            except Exception as e:
+                click.echo(f"⚠️  Web API not available: {e}")
         else:
-            click.echo("ℹ️  Duplicate detection enabled, automatic deletion disabled")
-        
+            click.echo("⚠️  Web API credentials not found in config.yaml")
+
+        if web_client is None:
+            raise click.ClickException(
+                "Zotero Web API credentials required (sources.zotero.api_key / library_id) "
+                "-- there is no other backend to read from."
+            )
+
+        click.echo("ℹ️  Duplicate detection and deletion enabled")
         click.echo("🧹 Starting duplicate cleanup process...")
-        
+
         # Get all items (or from specific collection)
         if collection:
             click.echo(f"📁 Analyzing collection: {collection}")
             # TODO: Add collection-specific search
-            search_result = local_client.search_items("")
+            items_data = web_client.get_all_items()
         else:
             click.echo("📚 Analyzing entire library...")
-            search_result = local_client.search_items("")
-        
-        if not search_result.items:
+            items_data = web_client.get_all_items()
+
+        items = [ZoteroItem.from_zotero_data(item) for item in items_data]
+
+        if not items:
             click.echo("ℹ️  No items found to analyze")
             return
-        
+
         # Initialize duplicate detector
-        detector = DuplicateDetector(local_client)
-        
+        detector = DuplicateDetector(web_client)
+
         # Find duplicates
-        duplicates = detector.find_duplicates(search_result.items)
+        duplicates = detector.find_duplicates(items)
         
         if not duplicates:
             click.echo("✅ No duplicates found! Your library is clean.")
@@ -472,24 +466,32 @@ def library_stats(collection: Optional[str]):
     - Potential quality issues
     """
     try:
-        # Initialize Zotero client
-        zotero_config = ZoteroLocalAPIConfig(
-            server_url=config.get('sources.zotero.server_url', 'http://127.0.0.1:23119'),
-            timeout=30.0,
-            user_id="0"
+        # Zotero Web API is the only backend prisma talks to (confirmed 2026-07-27).
+        api_key = config.get('sources.zotero.api_key')
+        library_id = config.get('sources.zotero.library_id')
+        library_type = config.get('sources.zotero.library_type', 'user')
+        if not (api_key and library_id):
+            raise click.ClickException(
+                "Zotero Web API credentials required (sources.zotero.api_key / library_id)."
+            )
+        zotero_config = ZoteroAPIConfig(
+            api_key=api_key,
+            library_id=library_id,
+            library_type=library_type,
+            api_version=3,
         )
-        client = ZoteroLocalAPIClient(zotero_config)
-        
+        client = ZoteroClient(zotero_config)
+
         click.echo("📊 Analyzing library statistics...")
-        
+
         # Get all items
-        search_result = client.search_items("")
-        
-        if not search_result.items:
+        items_data = client.get_all_items()
+        items = [ZoteroItem.from_zotero_data(item) for item in items_data]
+
+        if not items:
             click.echo("ℹ️  No items found in library")
             return
-        
-        items = search_result.items
+
         total_items = len(items)
         
         # Analyze by item type

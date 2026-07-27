@@ -30,8 +30,6 @@ def web_api_config_file(tmp_path_factory):
         "sources": {
             "zotero": {
                 "enabled": True,
-                "mode": "hybrid",
-                "local_api_url": "http://localhost:23119",
                 "api_key": os.environ.get("ZOTERO_API_KEY", ""),
                 "library_id": os.environ.get("ZOTERO_LIBRARY_ID", ""),
                 "library_type": "user",

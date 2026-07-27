@@ -17,31 +17,15 @@ kg:
 # Data Sources Configuration
 sources:
   zotero:
-    # Enable Network-Aware Hybrid Zotero integration (recommended)
+    # Enable Zotero integration. Prisma only talks to Zotero via its Web
+    # API — there is no local Zotero Desktop integration.
     enabled: true
-    mode: "hybrid"  # Network-aware mode: online/offline detection
-    
-    # Network behavior (new network-aware settings)
-    prefer_web_api_when_online: true      # Use Web API when internet available
-    disable_writes_when_offline: true     # Safety: no writes when offline  
-    auto_detect_network: true             # Automatically detect connectivity
-    network_timeout: 5                    # Network check timeout in seconds
-    
-    # Local HTTP API — used for offline reads and desktop save (connector/*)
-    # Default localhost works with WSL2 mirrored networking; if unreachable,
-    # run: ip route show | grep default   and use that IP instead.
-    local_api_url: "http://localhost:23119"
-    local_server_timeout: 5
 
-    # Web API (for online reads and all writes) - Optional but recommended
+    # Web API — required for both reads and writes
     api_key: ""        # Your Zotero API key (get from zotero.org/settings/keys)
     library_id: ""     # Your library ID (user ID or group ID)
     library_type: "user"  # "user" or "group"
 
-    # Desktop app integration (uses local_api_url above)
-    enable_desktop_save: true
-    collection_key: ""  # Default collection for saving items
-    
     # Optional: Default collections to search (leave empty to search all)
     default_collections: []
     

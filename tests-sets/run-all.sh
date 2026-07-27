@@ -7,10 +7,6 @@ cd "$REPO"
 echo "=== mocked ==="
 bash tests-sets/run-mocked.sh
 
-echo "=== local-zotero ==="
-PRISMA_CONFIG="$REPO/tests-sets/local-zotero.yaml" \
-  ~/prisma/bin/pytest tests-sets/local-zotero/ -v || true
-
 echo "=== web-api ==="
 if [[ -n "${ZOTERO_API_KEY:-}" && -n "${ZOTERO_LIBRARY_ID:-}" ]]; then
   ~/prisma/bin/pytest tests-sets/web-api/ -v || true

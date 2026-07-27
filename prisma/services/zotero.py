@@ -71,6 +71,34 @@ def _make_citekey(authors: list[str], year: int | None, title: str | None = None
     return f"{last}{year or ''}"
 
 
+def check_web_api_reachable(api_key: str | None, library_id: str | None, timeout: float = 2.0) -> bool:
+    """Live check: can we actually reach Zotero's Web API and does this
+    key/library combo work, not just "looks configured" -- mirrors the same
+    short-timeout reachable-or-not pattern already used for Ollama
+    (KnowledgeGraphService._ollama_ready). Checks the configured library's
+    own collections (not just /keys/<api_key>) since that's a more complete
+    signal: it validates the key *and* that it actually has access to the
+    specific library configured, not just that the key is well-formed.
+    The single canonical implementation of this check -- previously
+    duplicated as hybrid_client.py's now-removed check_zotero_web_api_access
+    (which used Authorization: Bearer; this uses the Zotero-API-Key header,
+    matching every other web-API call already made in this file)."""
+    if not api_key or not library_id:
+        return False
+    import urllib.error
+    import urllib.request
+
+    req = urllib.request.Request(
+        f"https://api.zotero.org/users/{library_id}/collections?limit=1",
+        headers={"Zotero-API-Key": api_key, "Zotero-API-Version": "3"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.status == 200
+    except Exception:
+        return False
+
+
 class ZoteroService:
     def __init__(self, mode: ZoteroMode, db_path: Path | None = None,
                  api_key: str | None = None, user_id: str | None = None) -> None:
@@ -87,8 +115,19 @@ class ZoteroService:
             ok = p is not None and p.exists()
             return {"mode": self.mode, "available": ok, "db_path": str(p) if p else None}
         if self.mode == ZoteroMode.web_api:
-            ok = bool(self._api_key and self._user_id)
-            return {"mode": self.mode, "available": ok}
+            configured = bool(self._api_key and self._user_id)
+            # "available" keeps its existing meaning (credentials configured)
+            # since other consumers (the UI's Zotero sidebar panel) already
+            # gate on it -- "reachable" is the new, separate live check ("can
+            # we actually reach Zotero's Web API and does the key work right
+            # now"), mirroring the same short-timeout reachable-or-not
+            # pattern already used for Ollama (KnowledgeGraphService's
+            # _ollama_ready, polled on every /status the same way).
+            return {
+                "mode": self.mode,
+                "available": configured,
+                "reachable": check_web_api_reachable(self._api_key, self._user_id) if configured else False,
+            }
         return {"mode": self.mode, "available": False}
 
     # ── Collections ───────────────────────────────────────────────────────────

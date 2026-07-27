@@ -3,8 +3,6 @@
 sources:
   zotero:
     enabled: true
-    mode: "hybrid"
-    local_api_url: "http://localhost:23119"
     api_key: ""
     library_id: ""
     library_type: "user"

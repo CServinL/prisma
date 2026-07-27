@@ -19,20 +19,12 @@ vault_root: "~/prisma-vault"          # empty/omitted = ~/prisma-vault
 sources:
   zotero:
     enabled: true
-    mode: "hybrid"                        # "hybrid" | "local_api"
 
-    # Reads: Zotero Desktop local HTTP (Windows host IP from WSL)
-    server_url: "http://172.x.x.x:23119"
-    local_server_timeout: 5
-
-    # Writes: Zotero Web API
+    # Reads and writes: Zotero Web API only (no local Zotero Desktop
+    # integration — see ADR-008's follow-up)
     api_key: ""                           # from zotero.org/settings/keys
     library_id: ""                        # your numeric user ID
     library_type: "user"                  # "user" | "group"
-    prefer_web_api_when_online: true
-    disable_writes_when_offline: true
-    auto_detect_network: true
-    network_timeout: 5
 
     # Search behavior
     default_collections: []              # empty = search all collections
@@ -144,14 +136,10 @@ search:
   sources: [semanticscholar, arxiv, openlibrary, googlebooks]
 ```
 
-### Offline / Zotero-only
+### Zotero-only search
 ```yaml
 search:
   sources: [zotero]
-sources:
-  zotero:
-    mode: "local_api"
-    server_url: "http://172.x.x.x:23119"
 ```
 
 ### WSL + Windows Ollama

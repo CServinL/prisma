@@ -89,9 +89,3 @@ def test_has_zotero_credentials_true_when_set(tmp_path, monkeypatch):
     loader.config.sources.zotero.api_key = "aabbccddeeff00112233445566"
     loader.config.sources.zotero.library_id = "12345"
     assert loader.has_zotero_credentials() is True
-
-
-def test_local_api_url_default(tmp_path, monkeypatch):
-    monkeypatch.setenv("PRISMA_CONFIG", str(tmp_path / "nonexistent.yaml"))
-    loader = ConfigLoader()
-    assert loader.config.sources.zotero.local_api_url == "http://localhost:23119"

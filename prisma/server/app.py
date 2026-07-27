@@ -757,7 +757,11 @@ def status():
     zotero_info = None
     try:
         zs = _zotero.status()
-        zotero_info = {"mode": zs.get("mode"), "available": zs.get("available", False)}
+        zotero_info = {
+            "mode": zs.get("mode"),
+            "available": zs.get("available", False),
+            "reachable": zs.get("reachable", False),
+        }
     except Exception:
         pass
 

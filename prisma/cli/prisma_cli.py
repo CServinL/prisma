@@ -182,7 +182,7 @@ def status(verbose: bool):
             if verbose:
                 click.echo(f"     LLM:    {config.get('llm.provider', 'ollama')} / {config.get('llm.model', 'qwen2.5:7b-32k')}")
                 click.echo(f"     Output: {config.get('output.directory', './outputs')}")
-                click.echo(f"     Zotero: mode={config.get('sources.zotero.mode', 'hybrid')}")
+                click.echo(f"     Zotero: enabled={config.get('sources.zotero.enabled', False)}")
         except Exception as exc:
             click.echo(f"  ❌ Config error: {exc}")
             all_good = False
@@ -199,65 +199,33 @@ def status(verbose: bool):
     except Exception as exc:
         click.echo(f"  ❌ Queue error: {exc}")
 
-    # 3. Zotero
+    # 3. Zotero — prisma only talks to Zotero via its Web API (confirmed
+    # 2026-07-27; there is no local Zotero Desktop integration anymore).
     click.echo("\n📚 Zotero Integration:")
     if config is None:
         click.echo("  ⚠️  Skipped — fix config first")
     else:
-        zotero_mode = config.get('sources.zotero.mode', 'hybrid')
-        local_api_url = config.get('sources.zotero.local_api_url', '')
         api_key = config.get('sources.zotero.api_key', '')
         library_id = config.get('sources.zotero.library_id', '')
 
-        click.echo(f"  Mode: {zotero_mode}")
-
-        # Local API reachability (needed in both hybrid and local_api modes)
-        if local_api_url:
-            click.echo(f"  Local API: {local_api_url}")
-            try:
-                resp = _req.get(f"{local_api_url}/connector/ping", timeout=2)
-                if resp.status_code == 200:
-                    click.echo("    ✅ Reachable — Zotero Desktop is running")
-                else:
-                    click.echo(f"    ❌ Responded with HTTP {resp.status_code}")
-                    all_good = False
-            except Exception:
-                click.echo("    ❌ Unreachable")
-                if wsl:
-                    windows_ip = _wsl_windows_ip()
-                    click.echo("    You are running in WSL. Zotero Desktop runs on Windows,")
-                    click.echo("    so 127.0.0.1 / localhost may not reach it depending on")
-                    click.echo("    your WSL networking mode.")
-                    click.echo("    Find your Windows host IP and test:")
-                    click.echo(f"      WINDOWS_IP=$(ip route show | grep default | awk '{{print $3}}')")
-                    click.echo(f"      curl http://${{WINDOWS_IP}}:23119/connector/ping")
-                    click.echo("    Then update local_api_url in ~/.config/prisma/config.yaml:")
-                    click.echo(f"      local_api_url: \"http://{windows_ip}:23119\"")
-                else:
-                    click.echo("    Make sure Zotero Desktop is open and")
-                    click.echo("    Edit → Preferences → Advanced → Allow other applications")
-                    click.echo("    to communicate with Zotero is checked.")
+        if api_key and library_id:
+            click.echo(f"  Web API: library_id={library_id} ✅ credentials configured")
+            from ..services.zotero import check_web_api_reachable
+            if check_web_api_reachable(api_key, library_id):
+                click.echo("    ✅ Reachable")
+            else:
+                click.echo("    ❌ Unreachable — check credentials and internet connectivity")
                 all_good = False
         else:
-            click.echo("  ⚠️  local_api_url not set in config")
-            if wsl:
-                windows_ip = _wsl_windows_ip()
-                click.echo(f"     Add to config: local_api_url: \"http://{windows_ip}:23119\"")
+            missing = []
+            if not api_key:
+                missing.append('api_key')
+            if not library_id:
+                missing.append('library_id')
+            click.echo(f"  Web API: ⚠️  missing {', '.join(missing)}")
+            click.echo("    Get your key at: https://www.zotero.org/settings/keys/new")
+            click.echo("    Get your user ID at: https://www.zotero.org/settings/keys")
             all_good = False
-
-        # Web API credentials (hybrid mode)
-        if zotero_mode == 'hybrid':
-            if api_key and library_id:
-                click.echo(f"  Web API: library_id={library_id} ✅")
-            else:
-                missing = []
-                if not api_key:
-                    missing.append('api_key')
-                if not library_id:
-                    missing.append('library_id')
-                click.echo(f"  Web API: ⚠️  missing {', '.join(missing)}")
-                click.echo("    Get your key at: https://www.zotero.org/settings/keys/new")
-                click.echo("    Get your user ID at: https://www.zotero.org/settings/keys")
 
     # 4. Dependencies
     click.echo("\n📦 Dependencies:")

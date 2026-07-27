@@ -11,7 +11,7 @@ Each ADR documents a significant design decision: what was decided, why, and wha
 | [ADR-005](ADR-005-sequential-processing.md) | Sequential Processing | Active |
 | [ADR-006](ADR-006-simple-folder-structure.md) | Simple Folder Structure | Active |
 | [ADR-007](ADR-007-research-streams-architecture.md) | Research Streams Architecture | Active |
-| [ADR-008](ADR-008-enhanced-zotero-integration.md) | Enhanced Zotero Integration | Active |
+| [ADR-008](ADR-008-enhanced-zotero-integration.md) | Enhanced Zotero Integration (Local-API-primary, since reversed — see follow-up) | Superseded |
 | [ADR-009](ADR-009-hybrid-retrieval-architecture.md) | Hybrid Retrieval — Graphify + ChromaDB (Graphify since replaced, see follow-up) | Evolved |
 | [ADR-010](ADR-010-transport-layer-strategy.md) | Transport Layer Strategy — REST + WebSocket | Accepted |
 | [ADR-011](ADR-011-authentication-strategy.md) | Authentication Strategy | Accepted |

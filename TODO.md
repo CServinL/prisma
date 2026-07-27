@@ -925,36 +925,38 @@ showing the project publicly to research-niche audiences. Goal: decide rewrite v
 targeted cleanup. Findings are evidence-based (grep/diff counts below), ranked most
 demo-blocking first.
 
-## 1. Duplicated Zotero client hierarchy (real refactor)
+## 1. Duplicated Zotero client hierarchy — RESOLVED 2026-07-27, by removal not refactor
 
-Four classes reimplement overlapping CRUD (`get_collections`, `create_collection`,
-`delete_item`, `delete_collection`, `search_items`, `save_items*`, `get_item`,
-`add_item_to_collection`) with inconsistent return types:
+This originally documented four classes reimplementing overlapping CRUD with
+inconsistent return types (`client.py`'s `ZoteroWebAPIClient` returning raw dicts;
+`hybrid_client.py`/`local_api_client.py`/`desktop_client.py` returning typed
+`ZoteroItem`/`ZoteroCollection`), routed through `unified_client.py`'s `from_config`
+factory.
 
-- `integrations/zotero/client.py` (`ZoteroClient`, aliased `ZoteroWebAPIClient` in
-  `unified_client.py`) — returns raw `Dict[str, Any]` / `List[Dict]`. **Violates the
-  CLAUDE.md rule that all structured data is Pydantic v2** — this is the one client
-  that doesn't follow it.
-- `integrations/zotero/hybrid_client.py` (`ZoteroHybridClient`) — returns typed
-  `ZoteroItem`/`ZoteroCollection`. Also has duplicate public/private pairs doing the
-  same check: `has_api_config()` / `_has_api_config()`, `has_local_server_config()` /
-  `_has_local_server_config()` — pick one, delete the other.
-- `integrations/zotero/local_api_client.py` (`ZoteroLocalAPIClient`) — typed, mostly
-  consistent with hybrid_client.
-- `integrations/zotero/desktop_client.py` (`ZoteroDesktopClient`) — smaller surface,
-  some overlap with the above three.
-- `integrations/zotero/unified_client.py` (`ZoteroClient` facade) — a `from_config`
-  factory wrapping the three above; doesn't hide the inconsistency, just routes to it.
+Decided (2026-07-27): prisma only ever talks to Zotero via its Web API now.
+`hybrid_client.py`, `local_api_client.py`, and `desktop_client.py` all existed to read
+from Zotero Desktop's local HTTP server (`localhost:23119`) -- a different machine's
+concern than the server (confirmed live: the server and the user's Zotero Desktop
+install aren't guaranteed to be on the same machine, which is exactly why
+`services/zotero.py`'s own `ZoteroMode.desktop` was already found to be dead code
+earlier this same session). Rather than the originally-planned refactor (one typed
+interface, same Pydantic models across all four), all three local-API-reading clients
+were deleted outright, and `unified_client.py` was reduced from a 4-way mode-selecting
+facade down to a thin wrapper over `client.py`'s Web API client alone -- there is no
+inconsistency left to reconcile since there's only one backend.
 
-None of these are dead code — all four are actively imported and constructed via the
-`unified_client.py` factory. This is duplication carried across sessions, not
-leftover cruft.
+Also removed as part of this: `tests-sets/local-zotero/` (tested the local-API client
+against a real running Zotero Desktop -- nothing left to test), and
+`cli/commands/cleanup.py`'s `cleanup_duplicates`/`library_stats` were rewritten to read
+via the Web API's `get_all_items()` (new, paginated via pyzotero's `everything()`)
+instead of the local API for reads + Web API for deletes split they used before.
 
-**Fix size:** real refactor. Define one typed interface (the architecture doc already
-calls this out implicitly — `unified_client.py` was clearly meant to be the seam),
-make `client.py`/`ZoteroWebAPIClient` return the same Pydantic models as the other
-two, delete the duplicate has_*/​_has_* pairs, and audit for other near-duplicate
-methods across the four files before assuming the facade fully hides the mess.
+**Lesson, matching the one already recorded for finding #3 above:** the original
+"real refactor" plan assumed all four classes needed to keep existing in some form.
+Re-examining *why* the duplication existed (four backends for what's now understood
+to be one legitimate use case) turned out to make the fix "delete three of them," not
+"reconcile four of them" -- worth checking whether apparent duplication is actually
+convergent-on-purpose before planning a refactor around keeping all of it.
 
 ## 2. Inconsistent exception handling (medium — needs a policy, then a sweep)
 
@@ -1023,18 +1025,16 @@ check that came back clean), and the two large services (`knowledge_graph_servic
 follow-up if a full cleanup effort is scoped.
 
 Recommended order (each is independently shippable):
-1. Delete the duplicated old `tests/` tree (#3) — cheapest, immediate demo-facing win.
-2. Consolidate the Zotero client hierarchy (#1) — highest risk of actually confusing
-   or breaking behavior for a new contributor, and the CLAUDE.md violation in
-   `client.py` is a concrete, fixable target.
+1. ~~Delete the duplicated old `tests/` tree (#3)~~ — **done 2026-07-26** (opposite
+   direction than originally planned — see #3's own resolved note above).
+2. ~~Consolidate the Zotero client hierarchy (#1)~~ — **done 2026-07-27**, by removal
+   rather than the originally-planned refactor — see #1's own resolved note above.
 3. Establish and sweep an exception-handling policy (#2) — mechanical once decided.
 4. `app.py` route/service-boundary cleanup (#4) — do last, lower external visibility.
 
 This does **not** require "a good programmer to come in and rewrite it" — it needs 3-4
-focused cleanup passes in the order above. A single competent contributor (human or
-AI, working file-by-file with tests as a guardrail) could realistically clear #1 and
-#3 in short order, with #1/#2 (Zotero) being the one item worth extra care since it
-touches active, working code paths.
+focused cleanup passes in the order above. #1 and #3 are now both done; #2 and #4
+remain.
 
 ## Deferred feature: vault unlock over LAN instead of an at-rest key (2026-07-22)
 

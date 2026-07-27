@@ -18,17 +18,13 @@ class ZoteroConfig(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
     
     enabled: bool = Field(False, description="Whether Zotero integration is enabled")
-    mode: str = Field("hybrid", description="Zotero client mode: 'hybrid', 'local_api', 'sqlite', 'web'")
     api_key: Optional[str] = Field(None, description="Zotero API key")
     library_id: Optional[str] = Field(None, description="Zotero library ID")
     library_type: str = Field("user", description="Library type: 'user' or 'group'")
     default_collections: List[str] = Field(default_factory=list, description="Default collections to search")
     include_notes: bool = Field(False, description="Include notes in results")
     include_attachments: bool = Field(False, description="Include attachments in results")
-    
-    # Local API configuration
-    local_api_url: str = Field("http://localhost:23119", description="Zotero Local HTTP API URL")
-    
+
     # Legacy local database support
     library_path: str = Field(
         default_factory=lambda: str(Path.home() / "Zotero" / "zotero.sqlite"),

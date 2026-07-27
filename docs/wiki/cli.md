@@ -111,7 +111,7 @@ Prisma queues Zotero write actions (save paper, create collection) when offline 
 
 ### `prisma zotero status`
 
-Check Zotero integration: internet connectivity, Web API credentials, local HTTP server, desktop app, current mode.
+Check Zotero integration: internet connectivity, Web API credentials, Web API reachability. (Prisma only talks to Zotero via its Web API — there is no local Zotero Desktop integration.)
 
 ```bash
 prisma zotero status

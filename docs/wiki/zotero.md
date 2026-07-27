@@ -17,19 +17,20 @@ library_type = "user"           # "user" | "group"
 ```
 
 For a deployment where config.toml itself isn't a safe place for a real secret
-(e.g. rendered into a Kubernetes ConfigMap, which isn't encrypted at rest),
-use `api_key_env` instead — same pattern as `llm.api_key_env`/`chat.api_key_env`:
+or identifying info (e.g. rendered into a Kubernetes ConfigMap, which isn't
+encrypted at rest), use `api_key_env`/`library_id_env` instead — same pattern
+as `llm.api_key_env`/`chat.api_key_env`:
 
 ```toml
 [sources.zotero]
 enabled = true
-api_key_env = "ZOTERO_API_KEY"  # takes priority over api_key when set
-library_id = "YOUR_USER_ID"
+api_key_env = "ZOTERO_API_KEY"        # takes priority over api_key when set
+library_id_env = "ZOTERO_LIBRARY_ID"  # takes priority over library_id when set
 library_type = "user"
 ```
 
-The real key then only needs to exist as an environment variable — sourced
-from a K8s Secret, for example — and never touches the config file at all.
+Both then only need to exist as environment variables — sourced from a K8s
+Secret, for example — and never touch the config file at all.
 
 ## Connectivity
 

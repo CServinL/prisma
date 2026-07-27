@@ -27,7 +27,15 @@ class ZoteroConfig(BaseModel):
             "secret live in an env var (e.g. a K8s Secret) instead of this file."
         ),
     )
-    library_id: Optional[str] = Field(None, description="Zotero library ID")
+    library_id: Optional[str] = Field(None, description="Zotero library ID — prefer library_id_env instead")
+    library_id_env: Optional[str] = Field(
+        None,
+        description=(
+            "Env var holding the library ID — takes priority over library_id "
+            "when set, same api_key_env pattern. Not a secret, but keeping it "
+            "alongside api_key_env avoids identifying info in a ConfigMap."
+        ),
+    )
     library_type: str = Field("user", description="Library type: 'user' or 'group'")
     default_collections: List[str] = Field(default_factory=list, description="Default collections to search")
     include_notes: bool = Field(False, description="Include notes in results")
@@ -63,6 +71,20 @@ class ZoteroConfig(BaseModel):
                 )
             return key
         return self.api_key
+
+    def resolve_library_id(self) -> Optional[str]:
+        """Effective library ID: library_id_env (if set) takes priority over
+        the literal library_id field. Same fail-loud contract as
+        resolve_api_key() — a misconfigured indirection should be obvious,
+        not silently fall through to None/offline mode."""
+        if self.library_id_env:
+            value = os.environ.get(self.library_id_env)
+            if not value:
+                raise RuntimeError(
+                    f"sources.zotero.library_id_env={self.library_id_env!r} is set but not present in the environment"
+                )
+            return value
+        return self.library_id
 
 
 class LLMConfig(BaseModel):
@@ -445,12 +467,13 @@ class ConfigLoader:
         zotero_config = self.config.sources.zotero
         try:
             api_key = zotero_config.resolve_api_key()
+            library_id = zotero_config.resolve_library_id()
         except RuntimeError:
             return False
         return (
             zotero_config.enabled and
             api_key is not None and
-            zotero_config.library_id is not None
+            library_id is not None
         )
 
 

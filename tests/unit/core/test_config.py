@@ -281,6 +281,31 @@ index_extensions = ["md", ".yaml"]
 
         self.assertFalse(config_loader.has_zotero_credentials())
 
+    def test_zotero_resolve_library_id_falls_back_to_literal(self):
+        cfg = ZoteroConfig(library_id='12345')
+        self.assertEqual(cfg.resolve_library_id(), '12345')
+
+    def test_zotero_resolve_library_id_env_takes_priority(self):
+        cfg = ZoteroConfig(library_id='12345', library_id_env='ZOTERO_TEST_LIBID_VAR')
+        with patch.dict(os.environ, {'ZOTERO_TEST_LIBID_VAR': '99999'}):
+            self.assertEqual(cfg.resolve_library_id(), '99999')
+
+    def test_zotero_resolve_library_id_env_missing_raises(self):
+        cfg = ZoteroConfig(library_id='12345', library_id_env='ZOTERO_TEST_LIBID_VAR_UNSET')
+        os.environ.pop('ZOTERO_TEST_LIBID_VAR_UNSET', None)
+        with self.assertRaises(RuntimeError):
+            cfg.resolve_library_id()
+
+    def test_has_zotero_credentials_false_when_library_id_env_missing(self):
+        with patch('prisma.utils.config.Path.exists', return_value=False):
+            config_loader = ConfigLoader()
+        config_loader.config.sources.zotero.enabled = True
+        config_loader.config.sources.zotero.api_key = 'test_key'
+        config_loader.config.sources.zotero.library_id_env = 'ZOTERO_TEST_LIBID_VAR_UNSET'
+        os.environ.pop('ZOTERO_TEST_LIBID_VAR_UNSET', None)
+
+        self.assertFalse(config_loader.has_zotero_credentials())
+
 
 if __name__ == '__main__':
     unittest.main()

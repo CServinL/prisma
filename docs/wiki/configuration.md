@@ -24,6 +24,7 @@ enabled = true
 api_key = ""                           # from zotero.org/settings/keys
 # api_key_env = "ZOTERO_API_KEY"       # or: env var holding it instead — takes priority over api_key, keeps the real key out of this file
 library_id = ""                        # your numeric user ID
+# library_id_env = "ZOTERO_LIBRARY_ID" # or: env var holding it instead — takes priority over library_id
 library_type = "user"                  # "user" | "group"
 
 # Search behavior

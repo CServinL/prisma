@@ -146,6 +146,57 @@ def test_ollama_deep_search_returns_empty_when_no_scores():
         assert client.ollama_deep_search("q") == []
 
 
+def test_drop_index_posts_to_kg():
+    client = KnowledgeGraphClient()
+    with patch("prisma.services.knowledge_graph_client.requests.post") as mock_post:
+        client.drop_index()
+    assert mock_post.call_args[0][0].endswith("/drop_index")
+
+
+def test_taint_file_forwards_rel_and_returns_tainted_flag():
+    client = KnowledgeGraphClient()
+    with patch("prisma.services.knowledge_graph_client.requests.post",
+               return_value=_mock_response({"tainted": True})) as mock_post:
+        assert client.taint_file("notes/a.md") is True
+    assert mock_post.call_args.kwargs["params"] == {"rel": "notes/a.md"}
+
+
+def test_taint_file_returns_false_when_unreachable():
+    client = KnowledgeGraphClient()
+    with patch("prisma.services.knowledge_graph_client.requests.post", side_effect=requests.ConnectionError("down")):
+        assert client.taint_file("notes/a.md") is False
+
+
+def test_ranked_nodes_passes_params_and_returns_results():
+    client = KnowledgeGraphClient()
+    with patch("prisma.services.knowledge_graph_client.requests.get",
+               return_value=_mock_response([{"source_file": "a.md", "score": 1.5, "label": "A"}])) as mock_get:
+        result = client.ranked_nodes("neural networks", top_k=5)
+    assert result == [{"source_file": "a.md", "score": 1.5, "label": "A"}]
+    assert mock_get.call_args.kwargs["params"] == {"q": "neural networks", "top_k": 5}
+
+
+def test_ranked_nodes_returns_empty_list_when_unreachable():
+    client = KnowledgeGraphClient()
+    with patch("prisma.services.knowledge_graph_client.requests.get", side_effect=requests.ConnectionError("down")):
+        assert client.ranked_nodes("q") == []
+
+
+def test_query_passes_params_and_returns_results():
+    client = KnowledgeGraphClient()
+    with patch("prisma.services.knowledge_graph_client.requests.get",
+               return_value=_mock_response([{"text": "some context"}])) as mock_get:
+        result = client.query("neural networks", budget=500)
+    assert result == [{"text": "some context"}]
+    assert mock_get.call_args.kwargs["params"] == {"q": "neural networks", "budget": 500}
+
+
+def test_query_returns_empty_list_when_unreachable():
+    client = KnowledgeGraphClient()
+    with patch("prisma.services.knowledge_graph_client.requests.get", side_effect=requests.ConnectionError("down")):
+        assert client.query("q") == []
+
+
 def test_start_stop_are_safe_no_ops():
     client = KnowledgeGraphClient()
     client.start()

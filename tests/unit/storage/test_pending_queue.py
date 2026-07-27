@@ -236,5 +236,30 @@ class TestQueueProperties(unittest.TestCase):
         self.assertEqual(self.q.pending_count, 2)
 
 
+class TestLoadCorruptFile(unittest.TestCase):
+    """_load()'s except-and-reset-to-empty path for a malformed pending_writes.json."""
+
+    def test_corrupt_json_resets_to_empty_queue_instead_of_raising(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            queue_file = Path(tmp) / "pending.json"
+            queue_file.write_text("{not valid json at all", encoding="utf-8")
+
+            q = PendingWriteQueue(queue_file=queue_file)
+
+            self.assertEqual(len(q), 0)
+            self.assertFalse(bool(q))
+
+    def test_json_missing_actions_key_resets_to_empty_queue(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            queue_file = Path(tmp) / "pending.json"
+            queue_file.write_text(json.dumps({"version": 1}), encoding="utf-8")
+
+            q = PendingWriteQueue(queue_file=queue_file)
+
+            self.assertEqual(len(q), 0)
+
+
 if __name__ == "__main__":
     unittest.main()

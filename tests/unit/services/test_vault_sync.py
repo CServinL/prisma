@@ -138,3 +138,17 @@ def test_resolve_within_root_rejects_reserved_dirs(vault):
         vault.resolve_within_root(".git/config.png")
     with pytest.raises(ValueError):
         vault.resolve_within_root(".vault-files/kg-out/leak.png")
+
+
+def test_resolve_within_root_rejects_symlink_escape(vault, tmp_path_factory):
+    # A directory *inside* the vault that is itself a symlink pointing
+    # outside it -- the string-based checks alone never call .resolve(),
+    # so this would previously sail straight through them. `vault.root` is
+    # `tmp_path` itself (see the `vault` fixture above), so "outside" must
+    # be a genuinely separate tmp dir, not a subdirectory of it.
+    outside = tmp_path_factory.mktemp("outside-the-vault")
+    (outside / "secret.md").write_text("should not be reachable", encoding="utf-8")
+    (vault.root / "escape").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(ValueError):
+        vault.resolve_within_root("escape/secret.md")

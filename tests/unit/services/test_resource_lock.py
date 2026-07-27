@@ -22,6 +22,28 @@ def test_default_port_falls_back_on_invalid_value(monkeypatch):
     assert resource_lock.default_port() == 8760
 
 
+def test_acquire_fails_open_when_supervisor_unreachable():
+    with patch("prisma.services.resource_lock.requests.post", side_effect=requests.ConnectionError("down")):
+        proceed, resource, request_id = resource_lock.acquire("127.0.0.1", 8760, "kg")
+    assert (proceed, resource, request_id) == (True, None, None)
+
+
+def test_acquire_returns_resource_and_request_id_on_grant():
+    mock_resp = MagicMock(status_code=200)
+    mock_resp.json.return_value = {"resource": "local_gpu0", "request_id": "req-1"}
+    with patch("prisma.services.resource_lock.requests.post", return_value=mock_resp) as mock_post:
+        proceed, resource, request_id = resource_lock.acquire("127.0.0.1", 8760, "kg", model="qwen2.5:7b")
+    assert (proceed, resource, request_id) == (True, "local_gpu0", "req-1")
+    assert mock_post.call_args.kwargs["json"]["model"] == "qwen2.5:7b"
+
+
+def test_acquire_denied_returns_no_resource_or_request_id():
+    mock_resp = MagicMock(status_code=409)
+    with patch("prisma.services.resource_lock.requests.post", return_value=mock_resp):
+        proceed, resource, request_id = resource_lock.acquire("127.0.0.1", 8760, "kg")
+    assert (proceed, resource, request_id) == (False, None, None)
+
+
 def test_status_returns_resources_field_on_success():
     mock_resp = MagicMock()
     mock_resp.raise_for_status.return_value = None

@@ -922,7 +922,17 @@ class VaultService:
             raise ValueError("path outside vault")
         if any(part in _SKIP_DIRS or part.startswith(".") for part in p.parts[:-1]):
             raise ValueError("path inside a reserved or hidden directory")
-        return self.root / p
+        candidate = self.root / p
+        # A directory *inside* the vault that is itself a symlink pointing
+        # outside it (e.g. vault/notes/escape -> /etc) would sail through
+        # the string-based checks above, which only look at the literal
+        # path components, not what a symlink in the middle of the path
+        # actually resolves to. .resolve() is safe to call even when
+        # `candidate` doesn't exist yet (new-file writes) -- it only
+        # resolves symlinks in the parts that do exist.
+        if not candidate.resolve().is_relative_to(self.root.resolve()):
+            raise ValueError("path escapes vault root via a symlink")
+        return candidate
 
     def _safe_sync_path(self, rel_path: str) -> Path:
         path = self.resolve_within_root(rel_path)

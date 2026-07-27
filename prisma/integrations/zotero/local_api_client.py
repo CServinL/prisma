@@ -6,12 +6,10 @@ both read and write operations with 100% compatibility.
 """
 
 import logging
-import json
 import time
 from typing import List, Dict, Any, Optional, Union
-from pathlib import Path
 import requests
-from pydantic import BaseModel, Field, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, field_validator
 
 from ...storage.models.zotero_models import ZoteroItem, ZoteroCollection, ZoteroSearchQuery, ZoteroSearchResult
 

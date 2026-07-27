@@ -16,13 +16,13 @@ already does implicitly by referencing the module-level name directly.
 """
 from __future__ import annotations
 
-import hashlib
 from typing import Callable, Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
 
 from prisma.services.vault import VaultService
+from prisma.utils.text import content_hash
 
 _CLIENT_ID_HEADER = "x-sync-client-id"
 
@@ -128,7 +128,7 @@ def build_sync_router(
             # ASK_CLIENT_TO_PUSH decision -- see build_sync_router's own
             # docstring for why this direction doesn't need a separate
             # WS message the way a server-initiated push-down does.
-            update_baseline_fn(client_id, req.path, hashlib.sha256(req.body.encode("utf-8")).hexdigest(), new_mtime)
+            update_baseline_fn(client_id, req.path, content_hash(req.body), new_mtime)
         broadcast_fn(
             {"type": "vault_change", "action": "sync_write", "path": req.path},
             exclude_client_id=client_id,

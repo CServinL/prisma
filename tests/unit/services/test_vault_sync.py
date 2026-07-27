@@ -109,3 +109,32 @@ def test_reserved_dir_rejected(vault):
         vault.write_by_path(".git/foo.md", "x")
     with pytest.raises(ValueError):
         vault.write_by_path("node_modules/foo.md", "x")
+
+
+# ── resolve_within_root — the shared containment check _safe_sync_path and
+# app.py's vault_asset route both go through (previously vault_asset had its
+# own, independently-implemented, laxer abspath+prefix check) ───────────────
+
+def test_resolve_within_root_accepts_nested_path(vault):
+    resolved = vault.resolve_within_root("assets/logo.png")
+    assert resolved == vault.root / "assets" / "logo.png"
+
+
+@pytest.mark.parametrize("bad_path", [
+    "../outside.png",
+    "assets/../../outside.png",
+    "/etc/passwd",
+])
+def test_resolve_within_root_rejects_traversal(vault, bad_path):
+    with pytest.raises(ValueError):
+        vault.resolve_within_root(bad_path)
+
+
+def test_resolve_within_root_rejects_reserved_dirs(vault):
+    # The exact gap the old vault_asset abspath-check had: a file under
+    # .git/ or .vault-files/ would sail through a bare prefix check as long
+    # as it stayed inside vault_root. This shared method rejects it outright.
+    with pytest.raises(ValueError):
+        vault.resolve_within_root(".git/config.png")
+    with pytest.raises(ValueError):
+        vault.resolve_within_root(".vault-files/kg-out/leak.png")

@@ -29,22 +29,6 @@ def test_status_fails_open_when_kg_unreachable():
     assert status["last_error"] is not None
 
 
-def test_search_returns_empty_list_when_unreachable():
-    client = KnowledgeGraphClient()
-    with patch("prisma.services.knowledge_graph_client.requests.get", side_effect=requests.ConnectionError("down")):
-        assert client.search("q") == []
-
-
-def test_search_passes_params_and_returns_results():
-    client = KnowledgeGraphClient()
-    with patch("prisma.services.knowledge_graph_client.requests.get",
-               return_value=_mock_response([{"source_file": "a.md", "score": 2.0}])) as mock_get:
-        result = client.search("neural networks", top_k=5)
-    assert result == [{"source_file": "a.md", "score": 2.0}]
-    _, kwargs = mock_get.call_args
-    assert kwargs["params"] == {"q": "neural networks", "top_k": 5}
-
-
 def test_mark_stale_posts_to_kg():
     client = KnowledgeGraphClient()
     with patch("prisma.services.knowledge_graph_client.requests.post") as mock_post:
@@ -68,6 +52,67 @@ def test_mark_stale_does_not_raise_when_unreachable():
     client = KnowledgeGraphClient()
     with patch("prisma.services.knowledge_graph_client.requests.post", side_effect=requests.ConnectionError("down")):
         client.mark_stale()  # must not raise
+
+
+def test_search_returns_empty_list_when_unreachable():
+    client = KnowledgeGraphClient()
+    with patch("prisma.services.knowledge_graph_client.requests.get", side_effect=requests.ConnectionError("down")):
+        assert client.search("q") == []
+
+
+def test_search_passes_params_and_returns_results():
+    client = KnowledgeGraphClient()
+    with patch("prisma.services.knowledge_graph_client.requests.get",
+               return_value=_mock_response([{"source_file": "a.md", "score": 2.0}])) as mock_get:
+        result = client.search("neural networks", top_k=5)
+    assert result == [{"source_file": "a.md", "score": 2.0}]
+    _, kwargs = mock_get.call_args
+    assert kwargs["params"] == {"q": "neural networks", "top_k": 5}
+
+
+def test_list_dead_letters_returns_data():
+    client = KnowledgeGraphClient()
+    payload = [{"file": "20260726T150000_a.md.txt", "source_file": "a.md", "error": "timeout"}]
+    with patch("prisma.services.knowledge_graph_client.requests.get",
+               return_value=_mock_response(payload)) as mock_get:
+        assert client.list_dead_letters() == payload
+    assert mock_get.call_args[0][0].endswith("/list_dead_letters")
+
+
+def test_list_dead_letters_returns_empty_when_unreachable():
+    client = KnowledgeGraphClient()
+    with patch("prisma.services.knowledge_graph_client.requests.get", side_effect=requests.ConnectionError("down")):
+        assert client.list_dead_letters() == []
+
+
+def test_clear_dead_letters_returns_removed_count():
+    client = KnowledgeGraphClient()
+    with patch("prisma.services.knowledge_graph_client.requests.post",
+               return_value=_mock_response({"removed": 3})) as mock_post:
+        assert client.clear_dead_letters() == 3
+    assert mock_post.call_args[0][0].endswith("/clear_dead_letters")
+
+
+def test_clear_dead_letters_returns_zero_when_unreachable():
+    client = KnowledgeGraphClient()
+    with patch("prisma.services.knowledge_graph_client.requests.post", side_effect=requests.ConnectionError("down")):
+        assert client.clear_dead_letters() == 0
+
+
+def test_entities_for_file_forwards_rel_path_and_returns_data():
+    client = KnowledgeGraphClient()
+    payload = {"entities": [{"id": "e1"}], "edges": [], "extracted_by": "qwen2.5:7b"}
+    with patch("prisma.services.knowledge_graph_client.requests.get",
+               return_value=_mock_response(payload)) as mock_get:
+        result = client.entities_for_file("notes/a.md")
+    assert result == payload
+    assert mock_get.call_args.kwargs["params"] == {"rel": "notes/a.md"}
+
+
+def test_entities_for_file_returns_empty_shape_when_unreachable():
+    client = KnowledgeGraphClient()
+    with patch("prisma.services.knowledge_graph_client.requests.get", side_effect=requests.ConnectionError("down")):
+        assert client.entities_for_file("notes/a.md") == {"entities": [], "edges": []}
 
 
 def test_ollama_ready_false_when_unreachable():

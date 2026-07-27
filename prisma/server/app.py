@@ -10,7 +10,6 @@ def _ep_safe(**kw):
 _imeta.entry_points = _ep_safe
 
 import asyncio
-import hashlib
 import json
 import logging
 import os
@@ -143,10 +142,6 @@ _client_baseline: dict[str, dict[str, tuple[str, float]]] = {}
 _client_baseline_lock = threading.Lock()
 
 
-def _hash_body(body: str) -> str:
-    return hashlib.sha256(body.encode("utf-8")).hexdigest()
-
-
 def _server_manifest() -> dict[str, tuple[str, float]]:
     """Every synced file's (content_hash, mtime), read fresh from the vault."""
     manifest: dict[str, tuple[str, float]] = {}
@@ -155,7 +150,7 @@ def _server_manifest() -> dict[str, tuple[str, float]]:
         if result is None:
             continue
         body, _mtime = result
-        manifest[path] = (_hash_body(body), mtime)
+        manifest[path] = (_content_hash(body), mtime)
     return manifest
 
 
@@ -170,7 +165,7 @@ def _server_file_entry(path: str) -> tuple[str, float] | None:
     if result is None:
         return None
     body, mtime = result
-    return (_hash_body(body), mtime)
+    return (_content_hash(body), mtime)
 
 
 async def _dispatch_sync_decisions(ws: WebSocket, client_id: str, decisions: dict[str, "SyncDecision"]) -> None:
@@ -326,6 +321,7 @@ def _build_chat_agent(vault: "VaultService", chroma: ChromaIndexer, kg: Knowledg
     )
 
 
+from prisma.utils.text import content_hash as _content_hash
 from prisma.utils.text import significant_words as _significant_words
 
 
@@ -775,18 +771,57 @@ def get_logs(
         return {"path": str(log_path), "lines": [], "total": 0}
 
 
-@app.post("/knowledge-graph/taint")
-def knowledge_graph_taint():
+# ── KG admin/instrumentation ──────────────────────────────────────────────
+# Namespaced under /admin/kg/ rather than /knowledge-graph/ so these read
+# unambiguously as ops/diagnostic tools, not user-facing features — the UI
+# never calls any of these (confirmed: it only ever reads status()'s
+# knowledge_graph fields), they're for direct/curl admin use.
+
+@app.post("/admin/kg/taint")
+def admin_kg_taint():
     """Mark the index stale so the next cycle re-indexes changed files."""
     _indexer.mark_stale()
     return {"status": "stale"}
 
 
-@app.post("/knowledge-graph/drop")
-def knowledge_graph_drop():
+@app.post("/admin/kg/drop")
+def admin_kg_drop():
     """Drop the entire Kùzu graph and tracked manifest, forcing a full reindex from scratch."""
     _indexer.drop_index()
     return {"status": "dropped"}
+
+
+@app.get("/admin/kg/dead-letters")
+def admin_kg_list_dead_letters():
+    """List failed-extraction ("dead letter") records without discarding
+    them — see what failed and why before deciding to clear it."""
+    return _indexer.list_dead_letters()
+
+
+@app.delete("/admin/kg/dead-letters")
+def admin_kg_clear_dead_letters():
+    """Discard recorded dead-letter records so the next incremental cycle
+    retries them fresh. Returns the number cleared."""
+    removed = _indexer.clear_dead_letters()
+    return {"removed": removed}
+
+
+@app.get("/admin/kg/entities")
+def admin_kg_entities(path: str = Query(...)):
+    """Raw entities and relationship edges the knowledge graph extracted
+    from one specific vault-relative file path — for inspecting extraction
+    quality directly (unlike /search or /search/deep, which only ever
+    return file-level scores, never the underlying nodes)."""
+    return _indexer.entities_for_file(path)
+
+
+@app.get("/admin/kg/search")
+def admin_kg_search(q: str = Query(..., min_length=1), top_k: int = Query(20)):
+    """Raw graph query — keyword match over Entity nodes only, bypassing
+    Ollama reasoning and ChromaDB entirely (unlike /search/deep). Isolates
+    the KG layer for diagnosis: a bad /search/deep result could be
+    extraction, ranking, or the LLM's fault — this narrows it down."""
+    return _indexer.search(q, top_k=top_k)
 
 
 @app.post("/render", response_model=RenderResponse)
@@ -1083,7 +1118,7 @@ def rename_node(slug: str, req: RenameRequest):
 def taint_node(slug: str):
     """Force one specific node to be re-extracted/re-embedded on the next
     cycle — without touching the rest of the index/graph. Unlike
-    /knowledge-graph/taint (which just marks the whole index stale), this
+    /admin/kg/taint (which just marks the whole index stale), this
     targets a single file via both ChromaIndexer.taint_file and
     KnowledgeGraphService.taint_file (see their docstrings — both work by
     dropping the file's manifest entry and enqueuing it directly)."""
@@ -1213,18 +1248,16 @@ _ALLOWED_ASSET_EXTS = {
 
 @app.get("/vault/assets/{asset_path:path}")
 def vault_asset(asset_path: str):
-    import os
     from fastapi.responses import FileResponse
-    vault_root = str(_vault.root)
-    candidate = os.path.abspath(os.path.join(vault_root, asset_path))
-    if not candidate.startswith(vault_root + os.sep) and candidate != vault_root:
+    try:
+        candidate_path = _vault.resolve_within_root(asset_path)
+    except ValueError:
         raise HTTPException(status_code=403, detail="access denied")
-    candidate_path = Path(candidate)
     if candidate_path.suffix.lower() not in _ALLOWED_ASSET_EXTS:
         raise HTTPException(status_code=403, detail="file type not allowed")
     if not candidate_path.is_file():
         raise HTTPException(status_code=404, detail="not found")
-    return FileResponse(candidate)
+    return FileResponse(candidate_path)
 
 
 @app.get("/notes/{slug}/view")
@@ -1311,7 +1344,6 @@ def view_html(slug: str, request: Request):
 
 @app.post("/notes/{slug}/md", status_code=202)
 def generate_md_format(slug: str):
-    from prisma.storage.models.vault_models import NodeType as NT
     try:
         node = _vault.get_any(slug)
     except FileNotFoundError:

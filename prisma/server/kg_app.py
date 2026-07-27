@@ -236,6 +236,11 @@ def taint_file(rel: str = Query(...)):
     return {"tainted": tainted}
 
 
+@app.get("/list_dead_letters")
+def list_dead_letters():
+    return _kg.list_dead_letters()
+
+
 @app.post("/clear_dead_letters")
 def clear_dead_letters():
     removed = _kg.clear_dead_letters()
@@ -249,6 +254,10 @@ def entities_for_file(rel: str = Query(...)):
 
 @app.get("/search")
 def search(q: str = Query(...), top_k: int = Query(20)):
+    """Raw graph query — keyword match over Entity nodes only, bypassing
+    Ollama reasoning and ChromaDB entirely. Diagnostic tool: isolates the KG
+    layer so a bad /search/deep result can be attributed to extraction vs.
+    ranking vs. the LLM, rather than treated as one opaque failure."""
     return _kg.search(q, top_k=top_k)
 
 

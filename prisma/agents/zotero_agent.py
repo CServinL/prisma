@@ -7,11 +7,11 @@ and retrieving papers from Zotero collections for analysis.
 """
 
 import logging
-from typing import List, Dict, Any, Optional, Set, Tuple
+from typing import List, Dict, Any, Optional, Tuple
 from pydantic import BaseModel, Field, field_validator
 
 from ..utils.config import ZoteroConfig
-from ..integrations.zotero import ZoteroClient, ZoteroClientError
+from ..integrations.zotero import ZoteroClientError
 from ..storage.models import ZoteroItem, ZoteroCollection, ZoteroItemType
 
 logger = logging.getLogger(__name__)

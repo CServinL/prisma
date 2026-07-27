@@ -4,15 +4,13 @@ Analysis Agent - Analyzes and summarizes academic papers using LLM.
 
 import logging
 import requests
-import json
 import threading
 from typing import Dict, List, Any
-from pathlib import Path
 from datetime import datetime
 import time
 
 from ..utils.config import config
-from ..storage.models.agent_models import PaperMetadata, PaperSummary, AnalysisResult, ReportMetadata, LiteratureReviewReport
+from ..storage.models.agent_models import PaperMetadata, PaperSummary, AnalysisResult
 from ..storage.models.api_response_models import OllamaGenerateResponse, LLMRelevanceResult, LLMIdentityResult
 from ..services import resource_lock
 

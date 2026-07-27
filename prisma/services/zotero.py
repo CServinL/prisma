@@ -4,14 +4,12 @@ import re
 import sqlite3
 from enum import Enum
 from pathlib import Path
-from typing import Iterator
 
 from pydantic import BaseModel
 
 
 class ZoteroMode(str, Enum):
     offline = "offline"
-    desktop = "desktop"
     web_api = "web-api"
 
 
@@ -88,9 +86,6 @@ class ZoteroService:
             p = self._db_path or _detect_db_path()
             ok = p is not None and p.exists()
             return {"mode": self.mode, "available": ok, "db_path": str(p) if p else None}
-        if self.mode == ZoteroMode.desktop:
-            ok = self._desktop_ping()
-            return {"mode": self.mode, "available": ok}
         if self.mode == ZoteroMode.web_api:
             ok = bool(self._api_key and self._user_id)
             return {"mode": self.mode, "available": ok}
@@ -101,8 +96,6 @@ class ZoteroService:
     def list_collections(self) -> list[ZoteroCollection]:
         if self.mode == ZoteroMode.offline:
             return self._sqlite_collections()
-        if self.mode == ZoteroMode.desktop:
-            return self._desktop_collections()
         if self.mode == ZoteroMode.web_api:
             return self._webapi_collections()
         return []
@@ -114,8 +107,6 @@ class ZoteroService:
                    limit: int | None = None) -> list[ZoteroItem]:
         if self.mode == ZoteroMode.offline:
             return self._sqlite_items(collection_key, q, limit)
-        if self.mode == ZoteroMode.desktop:
-            return self._desktop_items(collection_key, q)
         if self.mode == ZoteroMode.web_api:
             return self._webapi_items(collection_key, q, limit)
         return []
@@ -317,22 +308,6 @@ class ZoteroService:
         except Exception:
             return None
         return None
-
-    # ── Desktop API (port 23119) ──────────────────────────────────────────────
-
-    def _desktop_ping(self) -> bool:
-        import urllib.request
-        try:
-            urllib.request.urlopen("http://127.0.0.1:23119/connector/ping", timeout=2)
-            return True
-        except Exception:
-            return False
-
-    def _desktop_collections(self) -> list[ZoteroCollection]:
-        raise NotImplementedError("desktop mode not yet implemented")
-
-    def _desktop_items(self, collection_key: str | None, q: str | None) -> list[ZoteroItem]:
-        raise NotImplementedError("desktop mode not yet implemented")
 
     # ── Write operations (Web API only) ──────────────────────────────────────
 

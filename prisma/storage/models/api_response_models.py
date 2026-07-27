@@ -6,8 +6,7 @@ from services like OpenLibrary, Semantic Scholar, Google Books, etc.
 These models ensure type safety and validation for external data sources.
 """
 
-from typing import List, Dict, Any, Optional, Union
-from datetime import datetime
+from typing import List, Dict, Any, Optional
 from pydantic import BaseModel, Field, field_validator, ConfigDict
 
 

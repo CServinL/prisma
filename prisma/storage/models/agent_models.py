@@ -6,7 +6,7 @@ throughout the Prisma literature review pipeline. These models ensure
 type safety, validation, and consistent data structures between agents.
 """
 
-from typing import List, Dict, Any, Optional, Union
+from typing import List, Dict, Any, Optional
 from datetime import datetime
 from pydantic import BaseModel, Field, field_validator, ConfigDict
 

@@ -7,14 +7,12 @@ the local Zotero database through various maintenance operations.
 
 import logging
 import click
-from typing import Dict, List, Optional, Tuple, Set
+from typing import Dict, List, Optional
 from datetime import datetime
 import json
-from pathlib import Path
 
 from ...integrations.zotero.local_api_client import ZoteroLocalAPIClient, ZoteroLocalAPIConfig
-from ...integrations.zotero.client import ZoteroClient, ZoteroAPIConfig, ZoteroClientError
-# from ...integrations.zotero.sqlite_client import ZoteroSQLiteClient, ZoteroSQLiteConfig, ZoteroSQLiteError
+from ...integrations.zotero.client import ZoteroClient, ZoteroAPIConfig
 from ...storage.models.zotero_models import ZoteroItem
 from ...utils.config import config
 
@@ -233,13 +231,6 @@ class DuplicateDetector:
         return None
 
 
-@click.group(name='cleanup')
-def cleanup_group():
-    """Database cleanup and maintenance operations"""
-    pass
-
-
-@cleanup_group.command('duplicates')
 @click.option('--collection', '-c', help='Specific collection to clean (by name or key)')
 @click.option('--dry-run', '-n', is_flag=True, help='Show what would be deleted without deleting')
 @click.option('--auto-select', '-a', is_flag=True, help='Automatically select which duplicates to keep (keep oldest)')
@@ -469,7 +460,6 @@ def _export_duplicate_report(duplicates: Dict[str, List], export_file: str):
         json.dump(report_data, f, indent=2, ensure_ascii=False)
 
 
-@cleanup_group.command('stats')
 @click.option('--collection', '-c', help='Specific collection to analyze')
 def library_stats(collection: Optional[str]):
     """
@@ -646,7 +636,3 @@ def _extract_authors_string_safe(item) -> str:
         return ' | '.join(sorted(authors))
     except Exception:
         return ""
-
-
-if __name__ == '__main__':
-    cleanup_group()

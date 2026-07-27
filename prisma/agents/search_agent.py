@@ -4,24 +4,20 @@ Search Agent - Academic papers and books search with quality-based source manage
 
 import requests
 import xml.etree.ElementTree as ET
-import json
 import time
 import logging
-from typing import Dict, List, Any
-from urllib.parse import quote, urljoin
-from datetime import datetime, timezone
+from typing import Dict, List
+from urllib.parse import quote
+from datetime import datetime
 
 from ..utils.text import significant_words
 
 from ..storage.models.agent_models import SearchResult, PaperMetadata, BookMetadata
-from ..storage.models.api_response_models import (
-    OpenLibraryResponse, SemanticScholarResponse, GoogleBooksResponse,
-    ArXivEntry, LLMRelevanceResult
-)
+from ..storage.models.api_response_models import OpenLibraryResponse
 from ..storage.models.source_quality import (
-    SourceQuality, get_source_quality, requires_llm_extraction,
+    SourceQuality, get_source_quality,
     validate_academic_content, get_academic_confidence_score,
-    AcademicValidationCriteria, SOURCE_REGISTRY
+    AcademicValidationCriteria
 )
 
 logger = logging.getLogger(__name__)

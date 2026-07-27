@@ -7,7 +7,7 @@ import os
 import yaml
 import logging
 from pathlib import Path
-from typing import Dict, Any, Optional, List
+from typing import Any, Optional, List
 from pydantic import BaseModel, Field, field_validator, ConfigDict
 
 logger = logging.getLogger(__name__)

@@ -13,10 +13,9 @@ Key Features:
 - Data format standardization
 """
 
-from typing import List, Dict, Any, Optional, Union
+from typing import List, Dict, Any, Optional
 import logging
 from pydantic import BaseModel, Field, field_validator
-from datetime import datetime
 
 try:
     from pyzotero import zotero
@@ -24,7 +23,7 @@ except ImportError:
     zotero = None
 
 # Import Pydantic models
-from ...storage.models.zotero_models import ZoteroCollection, ZoteroItem, ZoteroAttachment
+from ...storage.models.zotero_models import ZoteroCollection
 
 logger = logging.getLogger(__name__)
 

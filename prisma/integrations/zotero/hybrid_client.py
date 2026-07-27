@@ -12,24 +12,19 @@ Core Principle: Smart network awareness with automatic client selection
 """
 
 import logging
-import json
 import time
 import requests
 import socket
 from typing import Optional, List, Dict, Any
-from pathlib import Path
 
-from pydantic import BaseModel, Field, ConfigDict, field_validator, HttpUrl
-from prisma.storage.models.zotero_models import ZoteroCollection
+from pydantic import BaseModel, ConfigDict, field_validator
 from ...storage.models.zotero_models import ZoteroItem, ZoteroCollection
-from ...utils.config import PrismaConfig
 
 from .client import (
     ZoteroClient, ZoteroAPIConfig, ZoteroClientError,
 )
 from .desktop_client import ZoteroDesktopClient, ZoteroDesktopConfig, ZoteroDesktopError
 from .local_api_client import ZoteroLocalAPIClient, ZoteroLocalAPIConfig, ZoteroLocalAPIError
-from ...storage.models.agent_models import SearchResult
 
 logger = logging.getLogger(__name__)
 

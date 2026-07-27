@@ -6,7 +6,7 @@ import click
 
 from prisma.services.vault import VaultService
 from prisma.services.zotero import ZoteroMode, ZoteroService
-from prisma.storage.models.vault_models import RefreshFrequency, StreamStatus
+from prisma.storage.models.vault_models import StreamStatus
 
 logger = logging.getLogger(__name__)
 

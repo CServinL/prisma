@@ -981,6 +981,32 @@ def test_dropped_chunks_total_is_zero_when_nothing_failed(kg):
     assert status["dropped_chunks_recent"] == []
 
 
+def test_list_dead_letters_returns_header_fields_without_clearing(kg, vault):
+    f = vault.root / "notes" / "test.md"
+    f.write_text("---\ntype: note\n---\nSome content that will fail extraction.", encoding="utf-8")
+
+    with _patch_create(kg, side_effect=ValueError("validation retries exhausted")), \
+         patch("prisma.services.resource_lock.acquire", return_value=(True, "local-ollama", "req-1")), \
+         patch("prisma.services.resource_lock.release"):
+        kg._extract_file(f, "note")
+
+    dead_letter = Path(kg.status()["dropped_chunks_recent"][0]["dead_letter_path"])
+
+    entries = kg.list_dead_letters()
+
+    assert len(entries) == 1
+    assert entries[0]["file"] == dead_letter.name
+    assert entries[0]["source_file"] == "notes/test.md"
+    assert "validation retries exhausted" in entries[0]["error"]
+    # read-only — the file and in-memory counters are untouched
+    assert dead_letter.exists()
+    assert kg.status()["dropped_chunks_total"] == 1
+
+
+def test_list_dead_letters_returns_empty_when_none_exist(kg):
+    assert kg.list_dead_letters() == []
+
+
 def test_clear_dead_letters_removes_files_and_resets_counters(kg, vault):
     f = vault.root / "notes" / "test.md"
     f.write_text("---\ntype: note\n---\nSome content that will fail extraction.", encoding="utf-8")

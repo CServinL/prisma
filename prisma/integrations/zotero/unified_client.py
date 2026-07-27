@@ -18,7 +18,7 @@ import logging
 from typing import List, Dict, Any, Optional
 from pathlib import Path
 
-from ...storage.models.zotero_models import ZoteroItem, ZoteroCollection, ZoteroTag
+from ...storage.models.zotero_models import ZoteroItem, ZoteroCollection
 from ...utils.config import PrismaConfig
 
 # Import the internal implementation clients (these should not be used directly)

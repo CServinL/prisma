@@ -9,8 +9,9 @@ stores the plaintext password itself.
 
 import getpass
 
-import bcrypt
 import click
+
+from prisma.server.auth import hash_password as _hash_password
 
 
 @click.group(name='auth')
@@ -32,5 +33,4 @@ def hash_password():
     confirm = getpass.getpass("Confirm password: ")
     if pw != confirm:
         raise click.ClickException("passwords did not match")
-    hashed = bcrypt.hashpw(pw.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
-    click.echo(hashed)
+    click.echo(_hash_password(pw))

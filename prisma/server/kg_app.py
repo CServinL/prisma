@@ -17,6 +17,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, Query
+from pydantic import BaseModel
 
 from prisma.server import log_setup as _log_setup
 from prisma.services.knowledge_graph_service import KnowledgeGraphService
@@ -178,54 +179,154 @@ async def _lifespan(app: FastAPI):
     _kg.stop()
 
 
+# ── Response models ───────────────────────────────────────────────────────
+# Every route below previously returned whatever KnowledgeGraphService's
+# dict-typed query methods handed back verbatim -- no response_model, no
+# OpenAPI schema, no validation that a shape change on the service side is
+# actually still what a route claims to return. Same underlying data, just
+# now declared and checked, mirroring the same dict keys these already had.
+
+class StatusResponse(BaseModel):
+    status: str
+
+
+class MarkStaleResponse(BaseModel):
+    status: str
+
+
+class TaintFileResponse(BaseModel):
+    tainted: bool
+
+
+class ClearDeadLettersResponse(BaseModel):
+    removed: int
+
+
+class DeadLetterEntry(BaseModel):
+    file: str
+    source_file: str | None = None
+    reason: str | None = None
+    error: str | None = None
+    retries: str | None = None
+    time: str | None = None
+
+
+class DroppedChunkInfo(BaseModel):
+    source_file: str
+    error: str
+    retries: int
+    reason: str
+    time: str
+    dead_letter_path: str | None = None
+
+
+class KGStatus(BaseModel):
+    state: str
+    last_indexed: str | None = None
+    last_error: str | None = None
+    current_activity: str | None = None
+    sync_total: int
+    sync_done: int
+    current_file: str | None = None
+    current_file_chunks_done: int
+    current_file_chunks_total: int
+    chunk_avg_duration_ms: float | None = None
+    chunk_duration_samples: int
+    chunk_avg_retries: float | None = None
+    chunk_avg_size_tokens: float | None = None
+    dropped_chunks_total: int
+    dropped_chunks_recent: list[DroppedChunkInfo]
+
+
+class EntityInfo(BaseModel):
+    id: str
+    label: str
+    file_type: str | None = None
+    trust_tier: str | None = None
+    source_location: str | None = None
+
+
+class EdgeInfo(BaseModel):
+    source: str
+    relation: str
+    target: str
+    confidence: str | None = None
+    confidence_score: float | None = None
+
+
+class EntitiesForFileResponse(BaseModel):
+    entities: list[EntityInfo]
+    edges: list[EdgeInfo]
+    extracted_by: str | None = None
+
+
+class GraphSearchResult(BaseModel):
+    source_file: str
+    score: float
+
+
+class RankedNode(BaseModel):
+    source_file: str
+    score: float
+    label: str = ""
+
+
+class GraphQueryResult(BaseModel):
+    text: str
+
+
+class OllamaReadyResponse(BaseModel):
+    reachable: bool
+
+
 app = FastAPI(title="Prisma Knowledge Graph", lifespan=_lifespan)
 
 
-@app.get("/health")
+@app.get("/health", response_model=StatusResponse)
 def health():
     return {"status": "ok"}
 
 
-@app.get("/status")
+@app.get("/status", response_model=KGStatus)
 def status():
     return _kg.status()
 
 
-@app.post("/mark_stale")
+@app.post("/mark_stale", response_model=MarkStaleResponse)
 def mark_stale(path: str | None = None):
     _kg.mark_stale(path)
     return {"status": _kg.status()["state"]}
 
 
-@app.post("/drop_index")
+@app.post("/drop_index", response_model=StatusResponse)
 def drop_index():
     _kg.drop_index()
     return {"status": "dropped"}
 
 
-@app.post("/taint_file")
+@app.post("/taint_file", response_model=TaintFileResponse)
 def taint_file(rel: str = Query(...)):
     tainted = _kg.taint_file(rel)
     return {"tainted": tainted}
 
 
-@app.get("/list_dead_letters")
+@app.get("/list_dead_letters", response_model=list[DeadLetterEntry])
 def list_dead_letters():
     return _kg.list_dead_letters()
 
 
-@app.post("/clear_dead_letters")
+@app.post("/clear_dead_letters", response_model=ClearDeadLettersResponse)
 def clear_dead_letters():
     removed = _kg.clear_dead_letters()
     return {"removed": removed}
 
 
-@app.get("/entities_for_file")
+@app.get("/entities_for_file", response_model=EntitiesForFileResponse)
 def entities_for_file(rel: str = Query(...)):
     return _kg.entities_for_file(rel)
 
 
-@app.get("/search")
+@app.get("/search", response_model=list[GraphSearchResult])
 def search(q: str = Query(...), top_k: int = Query(20)):
     """Raw graph query — keyword match over Entity nodes only, bypassing
     Ollama reasoning and ChromaDB entirely. Diagnostic tool: isolates the KG
@@ -234,16 +335,16 @@ def search(q: str = Query(...), top_k: int = Query(20)):
     return _kg.search(q, top_k=top_k)
 
 
-@app.get("/ranked_nodes")
+@app.get("/ranked_nodes", response_model=list[RankedNode])
 def ranked_nodes(q: str = Query(...), top_k: int = Query(20)):
     return _kg.ranked_nodes(q, top_k=top_k)
 
 
-@app.get("/query")
+@app.get("/query", response_model=list[GraphQueryResult])
 def query(q: str = Query(...), budget: int = Query(1500)):
     return _kg.query(q, budget=budget)
 
 
-@app.get("/ollama_ready")
+@app.get("/ollama_ready", response_model=OllamaReadyResponse)
 def ollama_ready():
     return {"reachable": _kg._ollama_ready()}

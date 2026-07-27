@@ -36,7 +36,7 @@ def _t(label: str, _t0=[0.0]):
 _t("importing fastapi")
 from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 from prisma.server.access_log import AccessLogMiddleware
 from prisma.server.auth import (
     AuthMiddleware, LoginRequest, LoginResponse, classify_zone, issue_token, verify_password,
@@ -168,6 +168,37 @@ def _server_file_entry(path: str) -> tuple[str, float] | None:
     return (_content_hash(body), mtime)
 
 
+# ── WS sync protocol message shapes ───────────────────────────────────────────
+# Previously parsed straight out of json.loads() as a raw dict with manual
+# .get()/"key" in dict checks -- unlike the HTTP /sync/* routes, which model
+# the exact same manifest-diff data with Pydantic. A malformed manifest_response
+# entry missing "mtime" used to raise an uncaught KeyError inside the dict
+# comprehension, dropping the *entire* message (caught by the broad except at
+# the WS receive loop, per-entry validation below is strictly better: one bad
+# entry is skipped, the rest of the manifest is still processed.
+
+class SyncManifestFileEntry(BaseModel):
+    path: str
+    hash: str
+    mtime: float
+
+
+class FileChangedMsg(BaseModel):
+    path: str
+    hash: str
+    mtime: float
+
+
+class FileDeletedMsg(BaseModel):
+    path: str
+
+
+class FileSyncedMsg(BaseModel):
+    path: str
+    hash: str = ""
+    mtime: float = 0.0
+
+
 async def _dispatch_sync_decisions(ws: WebSocket, client_id: str, decisions: dict[str, "SyncDecision"]) -> None:
     for path, decision in decisions.items():
         if decision == SyncDecision.ASK_CLIENT_TO_PUSH:
@@ -195,9 +226,18 @@ async def _handle_sync_message(ws: WebSocket, client_id: str, msg: dict) -> None
         baseline = dict(_client_baseline.get(client_id, {}))
 
     if kind == "manifest_response":
-        client_files = {
-            f["path"]: (f["hash"], f["mtime"]) for f in msg.get("files", []) if "path" in f and "hash" in f
-        }
+        # Validated per-entry, not as one list model: a single malformed
+        # entry should be skipped, not drop the entire manifest (which is
+        # what used to happen -- a missing "mtime" raised an uncaught
+        # KeyError inside the old dict comprehension, caught by the WS
+        # loop's broad except, discarding every other file's decision too).
+        client_files: dict[str, tuple[str, float]] = {}
+        for raw_entry in msg.get("files", []):
+            try:
+                entry = SyncManifestFileEntry.model_validate(raw_entry)
+            except ValidationError:
+                continue
+            client_files[entry.path] = (entry.hash, entry.mtime)
         server_files = _server_manifest()
         decisions = diff_manifest(server_files, client_files, baseline)
         await _dispatch_sync_decisions(ws, client_id, decisions)
@@ -212,10 +252,16 @@ async def _handle_sync_message(ws: WebSocket, client_id: str, msg: dict) -> None
                     bl[path] = entry
 
     elif kind in ("file_changed", "file_deleted"):
-        path = msg.get("path")
-        if not path:
+        try:
+            if kind == "file_deleted":
+                path = FileDeletedMsg.model_validate(msg).path
+                client_entry = None
+            else:
+                changed = FileChangedMsg.model_validate(msg)
+                path, client_entry = changed.path, (changed.hash, changed.mtime)
+        except ValidationError:
+            _log.warning("malformed %s message from client_id=%s", kind, client_id)
             return
-        client_entry = None if kind == "file_deleted" else (msg.get("hash", ""), msg.get("mtime", 0.0))
         server_entry = _server_file_entry(path)
         decisions = diff_manifest(
             {path: server_entry} if server_entry else {},
@@ -234,10 +280,13 @@ async def _handle_sync_message(ws: WebSocket, client_id: str, msg: dict) -> None
             await ws.send_text(json.dumps({"type": "ack", "path": path}))
 
     elif kind == "file_synced":
-        path = msg.get("path")
-        if path:
-            with _client_baseline_lock:
-                _client_baseline.setdefault(client_id, {})[path] = (msg.get("hash", ""), msg.get("mtime", 0.0))
+        try:
+            synced = FileSyncedMsg.model_validate(msg)
+        except ValidationError:
+            _log.warning("malformed file_synced message from client_id=%s", client_id)
+            return
+        with _client_baseline_lock:
+            _client_baseline.setdefault(client_id, {})[synced.path] = (synced.hash, synced.mtime)
 
 
 # ── Vault root / config helpers ───────────────────────────────────────────────
@@ -1144,9 +1193,8 @@ def create_dir(req: CreateDirRequest):
 
 
 @app.get("/notes", response_model=VaultListing)
-def list_notes(node_type: Optional[str] = Query(None)):
-    nt = NodeType(node_type) if node_type else None
-    return _vault.list_nodes(nt)
+def list_notes(node_type: Optional[NodeType] = Query(None)):
+    return _vault.list_nodes(node_type)
 
 
 @app.get("/notes/{slug}", response_model=RenderedNode)
@@ -1349,20 +1397,15 @@ def generate_md_format(slug: str):
 
 
 class SetTypeRequest(BaseModel):
-    node_type: str
+    node_type: NodeType
 
 @app.patch("/notes/{slug}/type")
 def set_note_type(slug: str, body: SetTypeRequest):
-    from prisma.storage.models.vault_models import NodeType as NT
     try:
-        nt = NT(body.node_type)
-    except ValueError:
-        raise HTTPException(status_code=400, detail=f"invalid node_type {body.node_type!r}")
-    try:
-        _vault.set_node_type(slug, nt)
+        _vault.set_node_type(slug, body.node_type)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail=f"node not found: {slug!r}")
-    return {"slug": slug, "node_type": nt.value}
+    return {"slug": slug, "node_type": body.node_type.value}
 
 
 @app.get("/notes/{slug}/original")

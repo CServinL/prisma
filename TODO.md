@@ -970,26 +970,32 @@ rather than a deliberate design.
 best-effort paths, and even then log at debug level") then a mechanical sweep — not
 a redesign, but touches most files in the package.
 
-## 3. Duplicated test suites — abandoned migration (quick fix, high value)
+## 3. Duplicated test suites — RESOLVED 2026-07-26, opposite direction than originally planned
 
-`tests-sets/README.md` documents a deliberate reorganization ("Tests are organized by
-what they need to run, not by layer") with its own rule ("Only our code is tested").
-But the **old** `tests/unit/` + `tests/integration/` tree was never deleted after
-`tests-sets/` was created:
+This section originally recommended deleting `tests/unit/` and keeping `tests-sets/mocked/`
+as canonical, on the assumption that `tests-sets/` was the newer, intended-to-stay tree and
+`tests/unit/` was the abandoned leftover. A follow-up audit (2026-07-26, prompted by a direct
+"some tests are duplicated" complaint) re-checked this assumption and found it had inverted
+since this note was written: `diff` across all 9 confirmed-identical pairs plus 3 more that had
+drifted showed **`tests/unit/`'s copies were the ones still receiving real updates**
+(resource-lock-integration tests added to `test_analysis_agent.py` that `tests-sets/mocked`'s
+copy never got) — i.e. active development had continued in `tests/unit/` after this note was
+written, not in `tests-sets/mocked/` as planned. `tests-sets/mocked/services/test_research_stream_manager.py`
+also had 6 tests (`TestUpdateStreamConnectivityOrder`) that `tests/unit/` never received, so
+before deleting anything those were ported into `tests/unit/services/test_research_stream_manager.py`
+first.
 
-- 9 of 14 sampled `tests-sets/mocked/**/test_*.py` files are **byte-identical**
-  (`diff -q` confirmed) to a same-named file still sitting in `tests/unit/`, e.g.
-  `test_models.py` (303 lines), `test_debug_output.py` (277 lines),
-  `test_zotero_integration.py` (271 lines).
-- Net effect: whole test files are maintained (or silently drift) in two places at
-  once, and `tests/` has no README explaining why it still exists alongside
-  `tests-sets/`.
+**What actually happened:** `tests/unit/` kept as canonical; the 9 duplicate files (plus the
+now-fully-superseded 3 drifted ones) deleted from `tests-sets/mocked/`.
+`tests-sets/mocked/{config,cli}/` — the two files with no `tests/unit` counterpart — were left
+untouched, they were never part of the duplication. `pyproject.toml`'s
+`testpaths = ["tests-sets", "tests"]` (which double-ran the duplicated files on every bare
+`pytest` invocation) needed no further change once the duplicates were gone.
 
-**Fix size:** quick, high-value. Confirm `tests-sets/` + `tests/integration/`
-(the real-API suite, not mocked) already covers everything `tests/unit` covers, point
-CI at `tests-sets/run-all.sh` only, then delete the old `tests/` tree. This alone
-meaningfully shrinks the "is this project well-maintained" first impression for a
-demo audience poking at the repo.
+**Lesson for future TODO entries:** "delete tree A, keep tree B" recommendations should be
+re-verified against actual recent `git log`/diff activity before executing, not assumed still
+true from when the note was written — the intended migration direction and the actual one can
+silently diverge.
 
 ## 4. `server/app.py` is oversized for what the architecture doc describes (real refactor, lower priority)
 
@@ -1220,3 +1226,35 @@ has tray/background OS-integration via Tauri, which this can build on.
 - How this interacts with the vault-unlock-over-LAN feature above — encryption-
   at-rest is still deferred to a future session (as of 2026-07-24), so a
   locked/encrypted vault's interaction with sync is still unresolved.
+
+## Chat claim attribution / footnotes (2026-07-26, see ADR-017)
+
+Design settled: distinguishing which claims in an assistant turn are traceable to a specific
+vault document vs. the model's own inference — mirroring academic citation practice ("what is
+self-made is not confused with what belongs to others"). Ontology done
+(`docs/ontologia.md` Axiom 16, `docs/concepts/footnote.md`); data model done
+(`FootnoteRelation`, `Footnote`, `ChatMessage.footnotes` in `storage/models/vault_models.py`,
+replacing the unused `sources_cited` field). Rendering convention: inline superscript marker
+in the turn's text (`word¹`), footnote list appended at the end of the turn.
+
+**Not yet built — remaining checklist:**
+
+- [ ] `ChatAgent` prompting: get the model to self-segment its own response into per-claim
+  spans and self-report `relation` (`citation` / `attribution` / `relational` / `ai-inference`)
+  and `sources` at generation time. No prompting strategy designed yet — this is the actual
+  hard part; ADR-014's tool-marker convention (`SEARCH_VAULT:`/`GRAPH_CONTEXT:` in
+  `chat_tools.py`) is the closest existing precedent for getting this model to reliably emit a
+  structured side-channel, worth evaluating as a starting point rather than inventing a new
+  mechanism.
+- [ ] Wire `relation = relational` footnotes to actually originate from
+  `ChatToolbox._graph_context`'s results specifically (currently no connection between tool
+  output and footnote generation exists — the tool returns `ToolResult.raw`, but nothing maps
+  that into a `Footnote`).
+- [ ] UI rendering: superscript markers in message content, footnote list at the end of each
+  assistant turn, each entry showing `relation` + linked `Note`/`Source` title (not yet
+  designed — no mockup, no component).
+- [ ] `faithfulness_checked` verification — checking a footnoted claim against what its
+  `sources` actually say. Explicitly deferred as a separate, harder problem in ADR-017; not
+  scoped yet (could be a background job, could be synchronous at generation time — undecided).
+- [ ] Depends on Chat API routes existing at all (`docs/ontologia.md`'s "Not yet implemented"
+  still lists these as unbuilt) — this can't be wired end-to-end until that lands.

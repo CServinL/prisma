@@ -71,6 +71,7 @@ The key separation:
 | [WikiLink](concepts/wiki-link.md) | `[[slug]]` DSL — navigate to a vault node | concepts/wiki-link.md |
 | [Transclusion](concepts/transclusion.md) | `![[slug]]` DSL — embed node content inline | concepts/transclusion.md |
 | [Citation](concepts/citation.md) | `[[@citekey]]` DSL — reference a Source | concepts/citation.md |
+| [Footnote](concepts/footnote.md) | Per-claim attribution marker on a Chat turn — what kind of sourcing backs this claim, and which document(s) | concepts/footnote.md |
 | [GraphNode](concepts/graph-node.md) | Vault node as a vertex in the knowledge graph | concepts/graph-node.md |
 | [Job](concepts/job.md) | Async literature review task (server-side) | concepts/job.md |
 
@@ -90,6 +91,7 @@ The key separation:
 | **Note promotion** | chat excerpt selected by user → new `Note` (back-linked via `promoted_from_chat`) |
 | **Stream scheduling** | `_StreamScheduler` daemon checks every 5 min; runs any `Stream` where `next_update ≤ now` and `status == active` and `refresh_frequency != manual` |
 | **docu-craft conversion** | companion file (PDF, HTML, …) → docu-craft → `.md` body for the knowledge graph indexer + HTML view for UI |
+| **Footnote rendering** | assistant turn generated → each claim needing attribution gets a sequential superscript marker (`word¹`) inline in `ChatMessage.content` → a footnote list is appended at the end of the turn, each entry showing `Footnote.relation` + the linked `Note`/`Source`(s) |
 
 ### Stream run — per-candidate pipeline (detailed)
 
@@ -162,6 +164,8 @@ Rules that are always true. Not preferences — invariants.
 
 15. **Collection membership is the acceptance record.** A `ZoteroItem` being in a stream's collection is the only record that the stream's LLM gate accepted it. Absence from a collection means either: the stream hasn't run yet, the paper wasn't found, or the LLM rejected it. These three cases are not distinguished — they are all "not accepted by this stream."
 
+16. **Claims are footnoted.** Distinct from Axiom 5 (`grounded` = the *chat's context is scoped to vault nodes*), every claim in an assistant turn that asserts something must carry a [Footnote](concepts/footnote.md) marking *what kind* of sourcing backs it — a direct citation, an attributed paraphrase, a cross-document synthesis, or the model's own inference with no vault source at all — and *which* `Note`/`Source` document(s), if any. Mirrors the academic-writing norm the ontology is named for: what is self-made is never left indistinguishable from what belongs to someone else. See ADR-017.
+
 ---
 
 ## Not yet implemented (in ontology, not in code)
@@ -171,7 +175,8 @@ Concepts that belong to the domain and are defined here, but whose code support 
 - **SmartTag** — defined in ontology; not yet applied during stream runs or import.
 - **PaperSummary per stream item** — produced during `prisma review`; not yet generated per-item during stream runs.
 - **Chat** — data model defined; chat API routes not yet implemented.
-- **ChromaDB / semantic search** — ADR-009 written; not yet integrated.
+- **Footnote / claim attribution** — data model defined (`Footnote`, `FootnoteRelation`), Axiom 16 and ADR-017 written; `ChatAgent` does not yet segment its own output into per-claim spans or self-report `relation`/`sources` at generation time. `faithfulness_checked` verification is unbuilt.
+- **ChromaDB / semantic search** — integrated (ADR-009); see `services/chroma_service.py`, wired into `/search/deep`.
 - **Async rewrite** — `PrismaCoordinator` and agents are synchronous; `ThreadPoolExecutor` offloads blocking I/O. Full async rewrite deferred.
 - **Encryption at rest** — vault files are plaintext. `fscrypt` / `gocryptfs` / `age` deferred.
 - **`AnalysisAgent` confidence persistence** — `confidence_score` is computed during search; not saved to `ZoteroItem` or `Source` frontmatter.

@@ -18,8 +18,24 @@ class ZoteroConfig(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
     
     enabled: bool = Field(False, description="Whether Zotero integration is enabled")
-    api_key: Optional[str] = Field(None, description="Zotero API key")
-    library_id: Optional[str] = Field(None, description="Zotero library ID")
+    api_key: Optional[str] = Field(None, description="Zotero API key — prefer api_key_env instead")
+    api_key_env: Optional[str] = Field(
+        None,
+        description=(
+            "Env var holding the API key — takes priority over api_key when set, "
+            "same pattern as LLMConfig/ChatConfig's api_key_env. Lets the real "
+            "secret live in an env var (e.g. a K8s Secret) instead of this file."
+        ),
+    )
+    library_id: Optional[str] = Field(None, description="Zotero library ID — prefer library_id_env instead")
+    library_id_env: Optional[str] = Field(
+        None,
+        description=(
+            "Env var holding the library ID — takes priority over library_id "
+            "when set, same api_key_env pattern. Not a secret, but keeping it "
+            "alongside api_key_env avoids identifying info in a ConfigMap."
+        ),
+    )
     library_type: str = Field("user", description="Library type: 'user' or 'group'")
     default_collections: List[str] = Field(default_factory=list, description="Default collections to search")
     include_notes: bool = Field(False, description="Include notes in results")
@@ -34,13 +50,41 @@ class ZoteroConfig(BaseModel):
         default_factory=lambda: str(Path.home() / "Zotero"),
         description="Path to Zotero data directory"
     )
-    
+
     @field_validator('library_type')
     @classmethod
     def validate_library_type(cls, v):
         if v not in ('user', 'group'):
             raise ValueError('library_type must be "user" or "group"')
         return v
+
+    def resolve_api_key(self) -> Optional[str]:
+        """Effective API key: api_key_env (if set) takes priority over the
+        literal api_key field. Raises if api_key_env is set but the env var
+        isn't — fail loud on a misconfigured indirection rather than silently
+        falling back to a (possibly stale) literal value or None."""
+        if self.api_key_env:
+            key = os.environ.get(self.api_key_env)
+            if not key:
+                raise RuntimeError(
+                    f"sources.zotero.api_key_env={self.api_key_env!r} is set but not present in the environment"
+                )
+            return key
+        return self.api_key
+
+    def resolve_library_id(self) -> Optional[str]:
+        """Effective library ID: library_id_env (if set) takes priority over
+        the literal library_id field. Same fail-loud contract as
+        resolve_api_key() — a misconfigured indirection should be obvious,
+        not silently fall through to None/offline mode."""
+        if self.library_id_env:
+            value = os.environ.get(self.library_id_env)
+            if not value:
+                raise RuntimeError(
+                    f"sources.zotero.library_id_env={self.library_id_env!r} is set but not present in the environment"
+                )
+            return value
+        return self.library_id
 
 
 class LLMConfig(BaseModel):
@@ -421,10 +465,15 @@ class ConfigLoader:
     def has_zotero_credentials(self) -> bool:
         """Check if Zotero API credentials are configured."""
         zotero_config = self.config.sources.zotero
+        try:
+            api_key = zotero_config.resolve_api_key()
+            library_id = zotero_config.resolve_library_id()
+        except RuntimeError:
+            return False
         return (
             zotero_config.enabled and
-            zotero_config.api_key is not None and
-            zotero_config.library_id is not None
+            api_key is not None and
+            library_id is not None
         )
 
 

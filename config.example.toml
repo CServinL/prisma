@@ -22,7 +22,9 @@ enabled = true
 
 # Web API — required for both reads and writes
 api_key = ""            # Your Zotero API key (get from zotero.org/settings/keys)
+# api_key_env = "ZOTERO_API_KEY"  # or: name of an env var holding it instead (takes priority over api_key — keeps the real key out of this file, e.g. sourced from a K8s Secret)
 library_id = ""          # Your library ID (user ID or group ID)
+# library_id_env = "ZOTERO_LIBRARY_ID"  # or: name of an env var holding it instead (takes priority over library_id)
 library_type = "user"    # "user" or "group"
 
 # Optional: Default collections to search (leave empty to search all)

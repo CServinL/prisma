@@ -224,13 +224,11 @@ kg:
             from prisma.utils.config import ZoteroConfig
             ZoteroConfig(
                 enabled=True,
-                mode="web", 
                 api_key="test",
                 library_id="123",
                 library_type='invalid',
                 include_notes=False,
                 include_attachments=False,
-                server_url="http://127.0.0.1:23119"
             )
         
         # Test invalid search limit

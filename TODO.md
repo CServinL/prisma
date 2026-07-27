@@ -989,15 +989,31 @@ first.
 
 **What actually happened:** `tests/unit/` kept as canonical; the 9 duplicate files (plus the
 now-fully-superseded 3 drifted ones) deleted from `tests-sets/mocked/`.
-`tests-sets/mocked/{config,cli}/` — the two files with no `tests/unit` counterpart — were left
-untouched, they were never part of the duplication. `pyproject.toml`'s
-`testpaths = ["tests-sets", "tests"]` (which double-ran the duplicated files on every bare
-`pytest` invocation) needed no further change once the duplicates were gone.
+`tests-sets/mocked/{config,cli}/` — the two files with no byte-identical `tests/unit`
+counterpart — were initially left untouched on the assumption they were never part of the
+duplication. `pyproject.toml`'s `testpaths = ["tests-sets", "tests"]` (which double-ran the
+duplicated files on every bare `pytest` invocation) needed no further change once the
+duplicates were gone.
+
+**Follow-up (2026-07-27):** that assumption about `config/` was wrong — a direct "not all 622
+are needed" complaint prompted re-checking it, and `tests-sets/mocked/config/test_config_loader.py`
+turned out to duplicate `tests/unit/core/test_config.py` in substance (same `ConfigLoader`
+methods — default-loading, YAML-merge, dot-notation `.get()`, `has_zotero_credentials()` — just
+written in a different style with no shared reference between the two), even though it wasn't a
+byte-identical file like the other 9. Deleted; `tests/unit/core/test_config.py` already covered
+every case it had, most with the same or better assertions. `tests-sets/mocked/cli/test_status.py`
+remains genuinely unique (no `tests/unit` equivalent exists for CLI-invocation-level tests) —
+kept. Also found and removed: three empty leftover directories
+(`tests-sets/mocked/{coordinator,integrations,services,storage}`) — filesystem cruft from the
+original dedup pass that `git` never tracked (empty dirs aren't tracked) but `find`/`ls` still
+showed, which is likely why the file count looked larger than it actually was. 622 tests → 616
+after this pass.
 
 **Lesson for future TODO entries:** "delete tree A, keep tree B" recommendations should be
 re-verified against actual recent `git log`/diff activity before executing, not assumed still
 true from when the note was written — the intended migration direction and the actual one can
-silently diverge.
+silently diverge. And "no byte-identical match" isn't the same as "not a duplicate" — near-duplicates
+written in a different style still count and are easy to miss with a pure `diff`/`md5sum` sweep.
 
 ## 4. `server/app.py` is oversized for what the architecture doc describes (real refactor, lower priority)
 

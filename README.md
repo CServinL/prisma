@@ -62,44 +62,34 @@
 
 ## CLI Commands
 
-> 📖 **Complete CLI Reference**: See [CLI Documentation](docs/wiki/cli.md) for detailed command options, examples, and advanced usage.
+The CLI is deliberately minimal — it only covers what can't be an HTTP call
+(start the server, check readiness, bootstrap auth). Research streams,
+literature review, and Zotero library management are API-only.
 
-### Research Streams
+> 📖 **Complete CLI Reference**: See [CLI Documentation](docs/wiki/cli.md) for detailed command options, examples, and the full command→API-route mapping.
+
 ```bash
-# Create a new research stream
-prisma streams create "Stream Name" "search query" --frequency weekly
+# Start the server
+prisma serve
 
-# List all streams
-prisma streams list
-
-# Update streams (find new papers)
-prisma streams update --all
-prisma streams update stream-id --force
-
-# Get stream details
-prisma streams info stream-id
-```
-
-### Research Analysis
-```bash
-# Generate research analysis
-prisma review "neural networks" --output report.md
-
-# Use specific sources
-prisma review "AI ethics" --sources arxiv,scholar --limit 50
-
-# Zotero-only mode
-prisma review "machine learning" --zotero-only
-```
-
-### System Management
-```bash
 # Check system status
 prisma status --verbose
+```
 
-# Zotero integration
-prisma zotero test-connection
-prisma zotero list-collections
+### Research Streams, Review, and Zotero (via the API)
+```bash
+# Create a research stream
+curl -X POST http://127.0.0.1:8765/streams \
+  -H 'Content-Type: application/json' \
+  -d '{"title": "Stream Name", "query": "search query", "refresh_frequency": "weekly"}'
+
+# Generate a literature review
+curl -X POST http://127.0.0.1:8765/review \
+  -H 'Content-Type: application/json' \
+  -d '{"topic": "neural networks"}'
+
+# Zotero status
+curl http://127.0.0.1:8765/zotero/status
 ```
 
 ## Quick Start
@@ -108,9 +98,7 @@ prisma zotero list-collections
 
 ```bash
 pip install prisma
-prisma streams create "AI Research" "artificial intelligence machine learning" --frequency weekly
-prisma streams list
-prisma streams update --all
+prisma serve
 ```
 
 ### Run the workspace UI

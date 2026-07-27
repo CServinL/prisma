@@ -367,3 +367,22 @@ def test_save_and_load_manifest(indexer, vault):
     assert indexer._manifest_path.exists()
     data = json.loads(indexer._manifest_path.read_text())
     assert data["notes/x.md"] == 999.0
+
+
+# ── taint_file ──────────────────────────────────────────────────────────────
+
+def test_taint_file_returns_false_for_nonexistent_file(indexer):
+    assert indexer.taint_file("notes/does-not-exist.md") is False
+
+
+def test_taint_file_clears_manifest_entry_and_enqueues_existing_file(indexer, vault):
+    f = vault.root / "notes" / "test.md"
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text("some content", encoding="utf-8")
+    indexer._manifest["notes/test.md"] = 12345.0
+
+    tainted = indexer.taint_file("notes/test.md")
+
+    assert tainted is True
+    assert "notes/test.md" not in indexer._manifest
+    assert f in indexer._pending

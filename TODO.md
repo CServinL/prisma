@@ -925,36 +925,38 @@ showing the project publicly to research-niche audiences. Goal: decide rewrite v
 targeted cleanup. Findings are evidence-based (grep/diff counts below), ranked most
 demo-blocking first.
 
-## 1. Duplicated Zotero client hierarchy (real refactor)
+## 1. Duplicated Zotero client hierarchy — RESOLVED 2026-07-27, by removal not refactor
 
-Four classes reimplement overlapping CRUD (`get_collections`, `create_collection`,
-`delete_item`, `delete_collection`, `search_items`, `save_items*`, `get_item`,
-`add_item_to_collection`) with inconsistent return types:
+This originally documented four classes reimplementing overlapping CRUD with
+inconsistent return types (`client.py`'s `ZoteroWebAPIClient` returning raw dicts;
+`hybrid_client.py`/`local_api_client.py`/`desktop_client.py` returning typed
+`ZoteroItem`/`ZoteroCollection`), routed through `unified_client.py`'s `from_config`
+factory.
 
-- `integrations/zotero/client.py` (`ZoteroClient`, aliased `ZoteroWebAPIClient` in
-  `unified_client.py`) — returns raw `Dict[str, Any]` / `List[Dict]`. **Violates the
-  CLAUDE.md rule that all structured data is Pydantic v2** — this is the one client
-  that doesn't follow it.
-- `integrations/zotero/hybrid_client.py` (`ZoteroHybridClient`) — returns typed
-  `ZoteroItem`/`ZoteroCollection`. Also has duplicate public/private pairs doing the
-  same check: `has_api_config()` / `_has_api_config()`, `has_local_server_config()` /
-  `_has_local_server_config()` — pick one, delete the other.
-- `integrations/zotero/local_api_client.py` (`ZoteroLocalAPIClient`) — typed, mostly
-  consistent with hybrid_client.
-- `integrations/zotero/desktop_client.py` (`ZoteroDesktopClient`) — smaller surface,
-  some overlap with the above three.
-- `integrations/zotero/unified_client.py` (`ZoteroClient` facade) — a `from_config`
-  factory wrapping the three above; doesn't hide the inconsistency, just routes to it.
+Decided (2026-07-27): prisma only ever talks to Zotero via its Web API now.
+`hybrid_client.py`, `local_api_client.py`, and `desktop_client.py` all existed to read
+from Zotero Desktop's local HTTP server (`localhost:23119`) -- a different machine's
+concern than the server (confirmed live: the server and the user's Zotero Desktop
+install aren't guaranteed to be on the same machine, which is exactly why
+`services/zotero.py`'s own `ZoteroMode.desktop` was already found to be dead code
+earlier this same session). Rather than the originally-planned refactor (one typed
+interface, same Pydantic models across all four), all three local-API-reading clients
+were deleted outright, and `unified_client.py` was reduced from a 4-way mode-selecting
+facade down to a thin wrapper over `client.py`'s Web API client alone -- there is no
+inconsistency left to reconcile since there's only one backend.
 
-None of these are dead code — all four are actively imported and constructed via the
-`unified_client.py` factory. This is duplication carried across sessions, not
-leftover cruft.
+Also removed as part of this: `tests-sets/local-zotero/` (tested the local-API client
+against a real running Zotero Desktop -- nothing left to test), and
+`cli/commands/cleanup.py`'s `cleanup_duplicates`/`library_stats` were rewritten to read
+via the Web API's `get_all_items()` (new, paginated via pyzotero's `everything()`)
+instead of the local API for reads + Web API for deletes split they used before.
 
-**Fix size:** real refactor. Define one typed interface (the architecture doc already
-calls this out implicitly — `unified_client.py` was clearly meant to be the seam),
-make `client.py`/`ZoteroWebAPIClient` return the same Pydantic models as the other
-two, delete the duplicate has_*/​_has_* pairs, and audit for other near-duplicate
-methods across the four files before assuming the facade fully hides the mess.
+**Lesson, matching the one already recorded for finding #3 above:** the original
+"real refactor" plan assumed all four classes needed to keep existing in some form.
+Re-examining *why* the duplication existed (four backends for what's now understood
+to be one legitimate use case) turned out to make the fix "delete three of them," not
+"reconcile four of them" -- worth checking whether apparent duplication is actually
+convergent-on-purpose before planning a refactor around keeping all of it.
 
 ## 2. Inconsistent exception handling (medium — needs a policy, then a sweep)
 
@@ -970,26 +972,48 @@ rather than a deliberate design.
 best-effort paths, and even then log at debug level") then a mechanical sweep — not
 a redesign, but touches most files in the package.
 
-## 3. Duplicated test suites — abandoned migration (quick fix, high value)
+## 3. Duplicated test suites — RESOLVED 2026-07-26, opposite direction than originally planned
 
-`tests-sets/README.md` documents a deliberate reorganization ("Tests are organized by
-what they need to run, not by layer") with its own rule ("Only our code is tested").
-But the **old** `tests/unit/` + `tests/integration/` tree was never deleted after
-`tests-sets/` was created:
+This section originally recommended deleting `tests/unit/` and keeping `tests-sets/mocked/`
+as canonical, on the assumption that `tests-sets/` was the newer, intended-to-stay tree and
+`tests/unit/` was the abandoned leftover. A follow-up audit (2026-07-26, prompted by a direct
+"some tests are duplicated" complaint) re-checked this assumption and found it had inverted
+since this note was written: `diff` across all 9 confirmed-identical pairs plus 3 more that had
+drifted showed **`tests/unit/`'s copies were the ones still receiving real updates**
+(resource-lock-integration tests added to `test_analysis_agent.py` that `tests-sets/mocked`'s
+copy never got) — i.e. active development had continued in `tests/unit/` after this note was
+written, not in `tests-sets/mocked/` as planned. `tests-sets/mocked/services/test_research_stream_manager.py`
+also had 6 tests (`TestUpdateStreamConnectivityOrder`) that `tests/unit/` never received, so
+before deleting anything those were ported into `tests/unit/services/test_research_stream_manager.py`
+first.
 
-- 9 of 14 sampled `tests-sets/mocked/**/test_*.py` files are **byte-identical**
-  (`diff -q` confirmed) to a same-named file still sitting in `tests/unit/`, e.g.
-  `test_models.py` (303 lines), `test_debug_output.py` (277 lines),
-  `test_zotero_integration.py` (271 lines).
-- Net effect: whole test files are maintained (or silently drift) in two places at
-  once, and `tests/` has no README explaining why it still exists alongside
-  `tests-sets/`.
+**What actually happened:** `tests/unit/` kept as canonical; the 9 duplicate files (plus the
+now-fully-superseded 3 drifted ones) deleted from `tests-sets/mocked/`.
+`tests-sets/mocked/{config,cli}/` — the two files with no byte-identical `tests/unit`
+counterpart — were initially left untouched on the assumption they were never part of the
+duplication. `pyproject.toml`'s `testpaths = ["tests-sets", "tests"]` (which double-ran the
+duplicated files on every bare `pytest` invocation) needed no further change once the
+duplicates were gone.
 
-**Fix size:** quick, high-value. Confirm `tests-sets/` + `tests/integration/`
-(the real-API suite, not mocked) already covers everything `tests/unit` covers, point
-CI at `tests-sets/run-all.sh` only, then delete the old `tests/` tree. This alone
-meaningfully shrinks the "is this project well-maintained" first impression for a
-demo audience poking at the repo.
+**Follow-up (2026-07-27):** that assumption about `config/` was wrong — a direct "not all 622
+are needed" complaint prompted re-checking it, and `tests-sets/mocked/config/test_config_loader.py`
+turned out to duplicate `tests/unit/core/test_config.py` in substance (same `ConfigLoader`
+methods — default-loading, YAML-merge, dot-notation `.get()`, `has_zotero_credentials()` — just
+written in a different style with no shared reference between the two), even though it wasn't a
+byte-identical file like the other 9. Deleted; `tests/unit/core/test_config.py` already covered
+every case it had, most with the same or better assertions. `tests-sets/mocked/cli/test_status.py`
+remains genuinely unique (no `tests/unit` equivalent exists for CLI-invocation-level tests) —
+kept. Also found and removed: three empty leftover directories
+(`tests-sets/mocked/{coordinator,integrations,services,storage}`) — filesystem cruft from the
+original dedup pass that `git` never tracked (empty dirs aren't tracked) but `find`/`ls` still
+showed, which is likely why the file count looked larger than it actually was. 622 tests → 616
+after this pass.
+
+**Lesson for future TODO entries:** "delete tree A, keep tree B" recommendations should be
+re-verified against actual recent `git log`/diff activity before executing, not assumed still
+true from when the note was written — the intended migration direction and the actual one can
+silently diverge. And "no byte-identical match" isn't the same as "not a duplicate" — near-duplicates
+written in a different style still count and are easy to miss with a pure `diff`/`md5sum` sweep.
 
 ## 4. `server/app.py` is oversized for what the architecture doc describes (real refactor, lower priority)
 
@@ -1005,6 +1029,104 @@ pattern a future contributor will trip over.
 **Fix size:** real refactor, but lower priority than #1–#3 — it's a maintainability
 smell, not something a demo audience will see directly.
 
+## 5. CLI minimized to what can't be an API call — RESOLVED 2026-07-27
+
+Direct request: "reduce the prisma-server cli to a minimum, only to manage the
+core, the rest can be managed by api." Mapping the CLI's 12 subcommands against
+`app.py`'s ~50 routes found nearly everything already had a live HTTP
+equivalent: `prisma review` → `POST /review`, the whole `prisma streams` group
+→ `GET/POST/PATCH/DELETE /streams` + `/streams/{slug}/run`, `prisma zotero
+status`/`duplicates` → `GET /zotero/status` / `POST /maintenance/deduplicate`.
+Two routes didn't exist yet and were added rather than accepted as feature
+loss: `GET /zotero/stats`, `POST /zotero/sync-pending`.
+
+**Removed:** `prisma review`, `prisma streams` (all 5 subcommands), `prisma
+zotero` (all 3 subcommands), and `cli/commands/cleanup.py` wholesale (639
+lines — see below, this was a bonus find, not just a CLI wrapper).
+
+**Kept** (structurally can't be API calls): `prisma serve`, `prisma status`,
+`prisma auth hash-password`, `prisma reload-config` (see below — generalized
+same day from the originally-kept `reload-resources`).
+
+**Bonus finding:** `cli/commands/cleanup.py`'s `DuplicateDetector` was a
+second, fully independent duplicate-detection implementation for Zotero
+items — not a thin CLI wrapper around `services/dedup.py`'s
+`find_all_duplicates` (the one `/maintenance/deduplicate` actually uses), but
+its own separate logic, never referenced by anything except the
+now-deleted `zotero duplicates` command. Deleting the CLI command deleted the
+whole duplicate implementation with it, not just its UI.
+
+**Follow-up (2026-07-27, later same day): `reload-resources` generalized into
+`reload-config`.** Investigated which of `PrismaConfig`'s sections are
+actually cached in a long-lived object (needing an explicit reload) vs. read
+fresh per call (needing nothing at all) — found the existing `/reload/*`
+routes were inconsistent: `/reload/vault`, `/reload/zotero`, `/reload/chroma`
+were real; `/reload/indexer` was a harmless no-op (`kg_app.py` already
+re-reads its own config fresh per call, so nothing needed reloading there in
+the first place); `chat.*`/`llm.host` (cached in `_chat_agent`) had **no
+reload path at all** until now. Added `POST /reload/chat` to close that gap.
+New `prisma/services/config_reload.py::diff_config_sections()` compares the
+currently-active config against a fresh disk read (4 tracked sections:
+`vault_root`, `sources.zotero`, `retrieval`, `chat`) — no generic diff engine
+needed, Pydantic's own field-wise `__eq__` is enough. The old unconditional
+"rebuild everything, every call, silently defaults on a bad file" `POST
+/reload` is now: reject an invalid config outright (422, nothing touched)
+rather than the previous silent-fallback-to-defaults behavior, diff, reload
+only what changed, and always proxy to the supervisor's already-idempotent
+`/supervisor/resources/reload`. `prisma reload-config` now hits this route
+(main API port) instead of the supervisor port directly, and reports what
+changed/reloaded. TOML migration (`config.yaml` → `config.toml`) folded into
+this same effort — see its own entry below.
+
+See `docs/wiki/cli.md`'s "Moved to the API" table and `reload-config` entry
+for the full command→route mapping, and ADR-004's follow-up section for the
+fuller narrative.
+
+## 6. config.yaml → config.toml migration (2026-07-27)
+
+Direct request, folded into the `reload-config` work above. Clean cutover,
+no dual-format support, no auto-migration script: only two call sites ever
+read this file at all (`ConfigLoader._load_config()`,
+`supervisor.py`'s 3 `cfg_path` reads for `compute_pools`), and nothing
+writes it programmatically — it's hand-edited, and the one real instance of
+it (the user's own forge deployment) gets converted by hand once this
+ships. `ConfigLoader`/`supervisor.py` now use stdlib `tomllib` (Python 3.11+,
+already this project's floor) — `supervisor.py` in particular drops its only
+third-party import (`yaml`) as a result, going one step further into the
+"zero dependencies beyond stdlib" design its own module docstring already
+claimed but didn't quite achieve.
+
+**Real schema wrinkle, not just syntax:** TOML arrays must be homogeneous,
+so `compute_pools[].models`' old YAML shorthand (mixing bare strings and
+override mappings in the same list) isn't valid TOML. Resolved by requiring
+the full table form uniformly (`[[compute_pools.models]]`, only `name`
+required) — a deliberate, documented behavior change, not an oversight.
+
+**Also found while rewriting `config.example.yaml` → `.toml`:** the example
+(and `docs/wiki/configuration.md`'s "Full Reference") documented several
+`sources.zotero.*`/`search.validation.*` fields (`auto_save_papers`,
+`auto_save_collection`, `min_confidence_for_save`, the whole `validation:`
+sub-block) that don't exist on `ZoteroConfig`/`SearchConfig` at all —
+pre-existing doc drift, unrelated to this migration. Dropped from the new
+`config.example.toml` rather than carried forward in new syntax (rewriting
+a fictional YAML key as a fictional TOML key helps no one), but **not**
+otherwise audited/fixed here — worth a dedicated docs-accuracy pass at some
+point, independent of this migration.
+
+**Also found and fixed while updating test fixtures for this migration:** a
+real, unrelated, pre-existing bug in `tests-sets/web-api/conftest.py` and
+`tests-sets/e2e/conftest.py` — both `pytest_collection_modifyitems(items)`
+hooks iterated over the full session-wide `items` list without checking
+whether an item actually belonged to their own directory, so a bare `pytest`
+invocation (the documented default, per `testpaths = ["tests-sets", "tests"]`)
+skipped the **entire test suite** — all 677 tests — whenever
+`ZOTERO_API_KEY`/Ollama weren't reachable on the machine running it, not
+just the web-api/e2e sets that actually need them. Confirmed via `git log`
+this predates the current session's work entirely (from the original RC2
+commit). Fixed by filtering each hook's loop to items under
+`Path(__file__).parent`. Bare `pytest` now correctly runs 640 and skips only
+the 37 that genuinely need external creds/services.
+
 ## Overall verdict
 
 **Not a rewrite.** The architecture itself (supervised multi-process design, flat-MD
@@ -1017,18 +1139,16 @@ check that came back clean), and the two large services (`knowledge_graph_servic
 follow-up if a full cleanup effort is scoped.
 
 Recommended order (each is independently shippable):
-1. Delete the duplicated old `tests/` tree (#3) — cheapest, immediate demo-facing win.
-2. Consolidate the Zotero client hierarchy (#1) — highest risk of actually confusing
-   or breaking behavior for a new contributor, and the CLAUDE.md violation in
-   `client.py` is a concrete, fixable target.
+1. ~~Delete the duplicated old `tests/` tree (#3)~~ — **done 2026-07-26** (opposite
+   direction than originally planned — see #3's own resolved note above).
+2. ~~Consolidate the Zotero client hierarchy (#1)~~ — **done 2026-07-27**, by removal
+   rather than the originally-planned refactor — see #1's own resolved note above.
 3. Establish and sweep an exception-handling policy (#2) — mechanical once decided.
 4. `app.py` route/service-boundary cleanup (#4) — do last, lower external visibility.
 
 This does **not** require "a good programmer to come in and rewrite it" — it needs 3-4
-focused cleanup passes in the order above. A single competent contributor (human or
-AI, working file-by-file with tests as a guardrail) could realistically clear #1 and
-#3 in short order, with #1/#2 (Zotero) being the one item worth extra care since it
-touches active, working code paths.
+focused cleanup passes in the order above. #1 and #3 are now both done; #2 and #4
+remain.
 
 ## Deferred feature: vault unlock over LAN instead of an at-rest key (2026-07-22)
 
@@ -1220,3 +1340,35 @@ has tray/background OS-integration via Tauri, which this can build on.
 - How this interacts with the vault-unlock-over-LAN feature above — encryption-
   at-rest is still deferred to a future session (as of 2026-07-24), so a
   locked/encrypted vault's interaction with sync is still unresolved.
+
+## Chat claim attribution / footnotes (2026-07-26, see ADR-017)
+
+Design settled: distinguishing which claims in an assistant turn are traceable to a specific
+vault document vs. the model's own inference — mirroring academic citation practice ("what is
+self-made is not confused with what belongs to others"). Ontology done
+(`docs/ontologia.md` Axiom 16, `docs/concepts/footnote.md`); data model done
+(`FootnoteRelation`, `Footnote`, `ChatMessage.footnotes` in `storage/models/vault_models.py`,
+replacing the unused `sources_cited` field). Rendering convention: inline superscript marker
+in the turn's text (`word¹`), footnote list appended at the end of the turn.
+
+**Not yet built — remaining checklist:**
+
+- [ ] `ChatAgent` prompting: get the model to self-segment its own response into per-claim
+  spans and self-report `relation` (`citation` / `attribution` / `relational` / `ai-inference`)
+  and `sources` at generation time. No prompting strategy designed yet — this is the actual
+  hard part; ADR-014's tool-marker convention (`SEARCH_VAULT:`/`GRAPH_CONTEXT:` in
+  `chat_tools.py`) is the closest existing precedent for getting this model to reliably emit a
+  structured side-channel, worth evaluating as a starting point rather than inventing a new
+  mechanism.
+- [ ] Wire `relation = relational` footnotes to actually originate from
+  `ChatToolbox._graph_context`'s results specifically (currently no connection between tool
+  output and footnote generation exists — the tool returns `ToolResult.raw`, but nothing maps
+  that into a `Footnote`).
+- [ ] UI rendering: superscript markers in message content, footnote list at the end of each
+  assistant turn, each entry showing `relation` + linked `Note`/`Source` title (not yet
+  designed — no mockup, no component).
+- [ ] `faithfulness_checked` verification — checking a footnoted claim against what its
+  `sources` actually say. Explicitly deferred as a separate, harder problem in ADR-017; not
+  scoped yet (could be a background job, could be synchronous at generation time — undecided).
+- [ ] Depends on Chat API routes existing at all (`docs/ontologia.md`'s "Not yet implemented"
+  still lists these as unbuilt) — this can't be wired end-to-end until that lands.

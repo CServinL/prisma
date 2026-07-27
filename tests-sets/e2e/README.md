@@ -7,45 +7,48 @@ All tests in this directory are automatically skipped when dependencies are abse
 
 | Dependency | Required for |
 |---|---|
-| Internet access (arxiv reachable) | All stream tests |
+| Internet access (arxiv reachable) | All stream tests, review flow |
 | Ollama at `localhost:11434` | Review flow, source evaluation |
-| `ZOTERO_API_KEY` + `ZOTERO_LIBRARY_ID` | Zotero collection creation checks |
-| Zotero Desktop at `localhost:23119` | Local-API collection checks |
+| `ZOTERO_API_KEY` + `ZOTERO_LIBRARY_ID` (or configured in `~/.config/prisma/config.toml`) | Zotero collection creation checks |
+
+Prisma only talks to Zotero via its Web API — there is no local Zotero
+Desktop dependency (see ADR-008's follow-up).
 
 ## Test files
 
 ### `test_review_flow.py`
 
-Full literature review via the CLI: search → analysis → output file.
+Full literature review via the API: search → analysis → output file.
 
 | Test | What it verifies |
 |---|---|
-| `test_review_produces_output_file` | CLI `prisma review` exits 0 and writes an `.md` output |
+| `test_review_produces_output_file` | `POST /review` completes and writes an `.md` output file |
 
 ---
 
-### `test_stream_flow.py` *(planned)*
+### `test_stream_flow.py`
 
-Stream lifecycle from creation through repeated runs and source evaluation.
+Stream lifecycle from creation through repeated runs and source evaluation,
+against the real app (`TestClient`) and the real Zotero Web API.
 
-| # | Test | Dependencies | What it verifies |
-|---|---|---|---|
-| 1 | `test_create_stream_returns_slug` | internet | POST /streams returns a stream with a slug and active status |
-| 2 | `test_run_stream_finds_papers` | internet | POST /streams/{slug}/run returns papers_found > 0 for a real query |
-| 3 | `test_run_stream_saves_sources_to_vault` | internet | Sources appear in GET /notes after a run |
-| 4 | `test_rerun_stream_deduplicates` | internet | Second run on same stream saves 0 duplicates |
-| 5 | `test_rerun_with_force_finds_new_sources` | internet | ?force=true reruns even before next_update |
-| 6 | `test_zotero_collection_created_on_run` | internet + Zotero local API | A collection named after the stream exists in Zotero after first run |
-| 7 | `test_stream_metadata_updated_after_run` | internet | `total_papers`, `last_updated`, `next_update` are all set post-run |
-| 8 | `test_source_evaluation_quality` | internet | Saved papers have title, authors, abstract; abstract is non-trivial |
-| 9 | `test_source_confidence_above_threshold` | internet | All saved papers have confidence_score >= config `min_confidence_score` |
-| 10 | `test_delete_stream_removes_from_listing` | — | DELETE /streams/{slug} → stream no longer in GET /streams |
+| Test | What it verifies |
+|---|---|
+| `test_create_stream_returns_slug` | `POST /streams` returns a stream with a slug and active status |
+| `test_run_stream_finds_papers` | `POST /streams/{slug}/run` finds and saves real papers from arxiv |
+| `test_run_stream_creates_zotero_collection` | A collection named after the stream exists in Zotero after the first run |
+| `test_run_stream_saves_items_to_zotero` | The Zotero collection's item count matches `papers_saved` |
+| `test_rerun_stream_deduplicates` | A second run saves 0 duplicates |
+| `test_rerun_with_force_bypasses_schedule` | An unforced rerun reports "not due"; `?force=true` bypasses it |
+| `test_stream_metadata_updated_after_run` | `total_papers`, `last_updated`, `next_update` are all set post-run |
+| `test_zotero_items_have_required_fields` | Saved items have title, authors, and a non-trivial abstract |
+| `test_zotero_items_above_confidence_threshold` | Saved items passed `SearchAgent`'s confidence filter |
+| `test_delete_stream_removes_from_listing` | `DELETE /streams/{slug}` removes it from `GET /streams` |
 
 ## Skip logic
 
-`conftest.py` applies a module-wide skip when Ollama and Zotero Web API creds are
-absent. Individual tests that also need Zotero local API use a `pytest.mark.skipif`
-on `_zotero_local_reachable()`.
+`conftest.py` applies a module-wide skip when Ollama and Zotero Web API creds
+are absent (stream flow tests are exempted — they manage their own
+internet-only skip gate directly in `test_stream_flow.py`).
 
 ## Running
 

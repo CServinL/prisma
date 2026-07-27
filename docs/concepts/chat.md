@@ -25,19 +25,25 @@ promoted to [Notes](note.md).
 | Field | Type | Description |
 |---|---|---|
 | `role` | `ChatRole` | `user` \| `assistant` |
-| `content` | str | Message text |
+| `content` | str | Message text, with inline superscript footnote markers (e.g. `word¹`) |
 | `timestamp` | datetime | |
-| `sources_cited` | list[str] | Citekeys referenced in this turn |
+| `footnotes` | list[[Footnote](footnote.md)] | Per-claim attribution — what kind of sourcing backs each claim, and which document(s) |
 
 ## Relations
 
 - Uses [Source](source.md)s and [Note](note.md)s as context (via `context_slugs`).
 - Produces [Note](note.md)s via promotion (back-linked on the Note via `promoted_from_chat`).
 - Indexed as a [GraphNode](graph-node.md).
+- Each assistant `ChatMessage` carries [Footnote](footnote.md)s referencing the `Note`/`Source`
+  slugs its claims are attributed to.
 
 ## Relevant axioms
 
 > Chats are grounded. A chat uses only vault nodes as context. See [Axiom 5](../ontologia.md).
+>
+> Claims are footnoted — distinct from grounding, this is about whether each individual claim
+> in the output is marked as sourced or as the model's own inference. See
+> [Axiom 16](../ontologia.md) and [Footnote](footnote.md).
 
 ## Not yet implemented
 

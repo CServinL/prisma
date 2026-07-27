@@ -1,0 +1,131 @@
+# Prisma Configuration Example with Quality-Based Source Management
+#
+# Copy this file to ~/.config/prisma/config.toml and customize for your setup
+
+# Vault directory — empty/omitted defaults to ~/prisma-vault
+vault_root = ""
+
+# Knowledge graph indexer tuning (native KnowledgeGraphService, Kùzu-backed)
+[kg]
+index_extensions = [".md", ".txt"]   # file types included in the graph index (with or without leading dot, both work)
+token_budget = 1000                  # per-section chunk size sent to the LLM (smaller = better extraction quality)
+extraction_concurrency = 3           # max concurrent extraction calls
+max_entities = 15                    # max entities extracted per chunk
+max_relationships = 20               # max relationships extracted per chunk
+max_output_fraction = 0.25           # fraction of the model's context window reserved for output tokens
+
+# Data Sources Configuration
+[sources.zotero]
+# Enable Zotero integration. Prisma only talks to Zotero via its Web
+# API — there is no local Zotero Desktop integration.
+enabled = true
+
+# Web API — required for both reads and writes
+api_key = ""            # Your Zotero API key (get from zotero.org/settings/keys)
+library_id = ""          # Your library ID (user ID or group ID)
+library_type = "user"    # "user" or "group"
+
+# Optional: Default collections to search (leave empty to search all)
+default_collections = []
+
+# Include notes and attachments in searches
+include_notes = false
+include_attachments = false
+
+# Search Configuration with Quality-Based Source Management
+[search]
+default_limit = 10
+
+# Source Configuration with Quality Ratings:
+# ⭐⭐⭐⭐⭐ (5-star): Premium APIs with curated content (semanticscholar, arxiv)
+# ⭐⭐⭐⭐ (4-star): Good APIs with structured data (openlibrary, googlebooks)
+# ⭐⭐⭐ (3-star): Basic APIs or reliable targets (zotero)
+# ⭐⭐ (2-star): HTML scraping with some structure (academia_rss)
+# ⭐ (1-star): Manual forms, requires LLM extraction (academia_search, researchgate)
+
+# Recommended high-quality sources (4-5 stars)
+sources = ["semanticscholar", "arxiv", "openlibrary", "googlebooks", "zotero"]
+
+# Quality settings
+prefer_high_quality = true          # Prioritize 4-5 star sources
+min_confidence_score = 0.3          # Minimum academic confidence (0.0-1.0)
+require_academic_validation = true  # Apply academic content filters
+
+# LLM Configuration for Analysis
+[llm]
+provider = "ollama"
+model = "llama3.1:8b"
+host = "localhost:11434"  # LLM service host
+
+# Chat module (ADR-014: backend-agnostic — ollama today, openrouter/anthropic-capable)
+[chat]
+provider = "ollama"
+model = "qwen2.5:7b-32k"
+pool = "local-ollama"        # must match a compute_pools entry below
+context_window = 32768        # this backend's real usable context (verify via /api/ps, not a claimed value)
+max_tokens = 2000              # hard cap on generated tokens per completion
+
+# Retrieval (ChromaDB semantic search)
+[retrieval]
+embedding_model = "nomic-embed-text"  # Ollama model used for vault embeddings
+ollama_base_url = "http://localhost:11434"
+
+# Output Configuration
+[output]
+directory = "./outputs"  # Directory for generated reports
+format = "markdown"      # Output format (markdown, json, yaml, txt)
+
+# Analysis Configuration
+[analysis]
+summary_length = "medium"           # Summary detail level
+nltk_dedup_sensitivity = "medium"   # "low" | "medium" | "high" — dedup levels 4-5 stem-overlap thresholds
+
+# ── Compute pools (supervisor GPU/LLM concurrency arbitration — ADR-012) ──────
+# Named pools with a concurrency limit each. Any code doing LLM/embedding work
+# (KG extraction, ChromaDB's embeddings, chat) requests a lease from one of
+# these before running, so at most `max_concurrent` such calls run against a
+# given backend at once — protecting whatever "the LLM" actually is: a single
+# local GPU, a beefier remote box, or a rate-limited cloud API.
+#
+# Defaults to a single pool named "default" with max_concurrent = 1 if this
+# section is omitted entirely — matching the common case (one machine, one
+# local GPU, one Ollama instance) with zero config required.
+#
+# One pool = one hardware unit that can hold exactly one resident model at a
+# time (one GPU, or one Ollama instance bound to one GPU). model_affinity
+# defaults to true for exactly this reason: real hardware works this way.
+# When true, concurrent leases are only granted for whichever model is
+# currently resident, up to max_concurrent — a request for a different model
+# is held back (via the caller's normal retry/backoff) until the pool drains.
+# Without this, two tasks using different models would "concurrently" thrash
+# the GPU reloading each other's weights instead of actually running in
+# parallel. See docs/ollama-concurrency.md for a benchmark backing this up.
+#
+# Set model_affinity = false only for pools with no such constraint at all —
+# an auto-scaled/auto-routed cloud API that switches models with no reload
+# penalty. It is the exception, not the default.
+#
+# If a machine has several GPUs, model them as several pools (one per GPU)
+# rather than one lump pool with a big max_concurrent — that lets some GPUs
+# stay pinned to one model while others serve a different one, or lets the
+# same model spread across more GPUs for extra concurrency when one isn't
+# enough. acquire() already tries every pool when the caller doesn't request
+# one specifically, so it naturally lands a request on whichever pool
+# already has that model loaded (or an idle one), and turns away a different
+# model from a busy pool until it drains.
+#
+# Each [[compute_pools.models]] entry is always a table (TOML arrays must be
+# homogeneous — no bare-string shorthand); only `name` is required.
+#
+# [[compute_pools]]
+# name = "local_gpu0"          # single GPU — 3 concurrent calls to the SAME model
+# max_concurrent = 3           # model_affinity omitted — defaults to true
+#
+# [[compute_pools]]
+# name = "local_gpu1"          # a second GPU — can hold a different model at once
+# max_concurrent = 2
+#
+# [[compute_pools]]
+# name = "cloud_api"
+# max_concurrent = 4           # rate-limited cloud inference endpoint
+# model_affinity = false       # auto-scaled/auto-routed — no reload penalty to model

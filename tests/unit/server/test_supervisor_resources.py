@@ -179,14 +179,16 @@ def test_load_compute_pools_reads_model_affinity_flag(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     cfg_dir = tmp_path / ".config" / "prisma"
     cfg_dir.mkdir(parents=True)
-    (cfg_dir / "config.yaml").write_text(
-        "compute_pools:\n"
-        "  - name: local-ollama\n"
-        "    max_concurrent: 3\n"
-        "    model_affinity: true\n"
-        "  - name: cloud_api\n"
-        "    max_concurrent: 4\n"
-        "    model_affinity: false\n"
+    (cfg_dir / "config.toml").write_text(
+        '[[compute_pools]]\n'
+        'name = "local-ollama"\n'
+        "max_concurrent = 3\n"
+        "model_affinity = true\n"
+        "\n"
+        '[[compute_pools]]\n'
+        'name = "cloud_api"\n'
+        "max_concurrent = 4\n"
+        "model_affinity = false\n"
     )
 
     capacity, affinity, pool_models, model_concurrency, vram_budget, model_vram, model_background_limit, pool_provider = _load_compute_pools()
@@ -210,13 +212,15 @@ def test_load_compute_pools_model_affinity_defaults_true_unless_disabled(tmp_pat
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     cfg_dir = tmp_path / ".config" / "prisma"
     cfg_dir.mkdir(parents=True)
-    (cfg_dir / "config.yaml").write_text(
-        "compute_pools:\n"
-        "  - name: local-ollama\n"
-        "    max_concurrent: 3\n"       # no model_affinity key — should default true
-        "  - name: cloud_api\n"
-        "    max_concurrent: 4\n"
-        "    model_affinity: false\n"   # explicitly opted out — auto-scaled/auto-routed
+    (cfg_dir / "config.toml").write_text(
+        '[[compute_pools]]\n'
+        'name = "local-ollama"\n'
+        "max_concurrent = 3\n"       # no model_affinity key — should default true
+        "\n"
+        '[[compute_pools]]\n'
+        'name = "cloud_api"\n'
+        "max_concurrent = 4\n"
+        "model_affinity = false\n"   # explicitly opted out — auto-scaled/auto-routed
     )
 
     capacity, affinity, pool_models, model_concurrency, vram_budget, model_vram, model_background_limit, pool_provider = _load_compute_pools()
@@ -228,18 +232,27 @@ def test_load_compute_pools_type_field_is_authoritative_over_model_affinity(tmp_
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     cfg_dir = tmp_path / ".config" / "prisma"
     cfg_dir.mkdir(parents=True)
-    (cfg_dir / "config.yaml").write_text(
-        "compute_pools:\n"
-        "  - name: local-ollama\n"
-        "    type: gpu\n"
-        "    provider: ollama\n"
-        "    models: [prisma-kg:7b, prisma-chat:7b]\n"
-        "    max_concurrent: 3\n"
-        "  - name: cloud_api\n"
-        "    type: cloud\n"
-        "    provider: openrouter\n"
-        "    models: [anthropic/claude-3.5-sonnet]\n"
-        "    max_concurrent: 8\n"
+    (cfg_dir / "config.toml").write_text(
+        '[[compute_pools]]\n'
+        'name = "local-ollama"\n'
+        'type = "gpu"\n'
+        'provider = "ollama"\n'
+        "max_concurrent = 3\n"
+        "\n"
+        '[[compute_pools.models]]\n'
+        'name = "prisma-kg:7b"\n'
+        "\n"
+        '[[compute_pools.models]]\n'
+        'name = "prisma-chat:7b"\n'
+        "\n"
+        '[[compute_pools]]\n'
+        'name = "cloud_api"\n'
+        'type = "cloud"\n'
+        'provider = "openrouter"\n'
+        "max_concurrent = 8\n"
+        "\n"
+        '[[compute_pools.models]]\n'
+        'name = "anthropic/claude-3.5-sonnet"\n'
     )
 
     capacity, affinity, pool_models, model_concurrency, vram_budget, model_vram, model_background_limit, pool_provider = _load_compute_pools()
@@ -448,17 +461,22 @@ def test_load_compute_pools_parses_per_model_concurrency_overrides(tmp_path, mon
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     cfg_dir = tmp_path / ".config" / "prisma"
     cfg_dir.mkdir(parents=True)
-    (cfg_dir / "config.yaml").write_text(
-        "compute_pools:\n"
-        "  - name: local-ollama\n"
-        "    type: gpu\n"
-        "    max_concurrent: 3\n"
-        "    models:\n"
-        "      - name: prisma-kg:7b\n"
-        "        max_concurrent: 1\n"
-        "      - name: prisma-chat:7b\n"
-        "        max_concurrent: 3\n"
-        "      - nomic-embed-text\n"  # plain string form
+    (cfg_dir / "config.toml").write_text(
+        '[[compute_pools]]\n'
+        'name = "local-ollama"\n'
+        'type = "gpu"\n'
+        "max_concurrent = 3\n"
+        "\n"
+        '[[compute_pools.models]]\n'
+        'name = "prisma-kg:7b"\n'
+        "max_concurrent = 1\n"
+        "\n"
+        '[[compute_pools.models]]\n'
+        'name = "prisma-chat:7b"\n'
+        "max_concurrent = 3\n"
+        "\n"
+        '[[compute_pools.models]]\n'
+        'name = "nomic-embed-text"\n'  # no overrides -- just name (TOML has no bare-string shorthand)
     )
 
     capacity, affinity, pool_models, model_concurrency, vram_budget, model_vram, model_background_limit, pool_provider = _load_compute_pools()
@@ -471,20 +489,25 @@ def test_load_compute_pools_parses_vram_budget_and_model_vram(tmp_path, monkeypa
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     cfg_dir = tmp_path / ".config" / "prisma"
     cfg_dir.mkdir(parents=True)
-    (cfg_dir / "config.yaml").write_text(
-        "compute_pools:\n"
-        "  - name: local-ollama\n"
-        "    type: gpu\n"
-        "    max_concurrent: 3\n"
-        "    vram_budget_mb: 14000\n"
-        "    models:\n"
-        "      - name: qwen2.5:7b-32k\n"
-        "        vram_mb: 7500\n"
-        "      - name: nomic-embed-text\n"
-        "        vram_mb: 1000\n"
-        "  - name: cloud_api\n"
-        "    type: cloud\n"
-        "    max_concurrent: 8\n"
+    (cfg_dir / "config.toml").write_text(
+        '[[compute_pools]]\n'
+        'name = "local-ollama"\n'
+        'type = "gpu"\n'
+        "max_concurrent = 3\n"
+        "vram_budget_mb = 14000\n"
+        "\n"
+        '[[compute_pools.models]]\n'
+        'name = "qwen2.5:7b-32k"\n'
+        "vram_mb = 7500\n"
+        "\n"
+        '[[compute_pools.models]]\n'
+        'name = "nomic-embed-text"\n'
+        "vram_mb = 1000\n"
+        "\n"
+        '[[compute_pools]]\n'
+        'name = "cloud_api"\n'
+        'type = "cloud"\n'
+        "max_concurrent = 8\n"
     )
 
     capacity, affinity, pool_models, model_concurrency, vram_budget, model_vram, model_background_limit, pool_provider = _load_compute_pools()
@@ -744,14 +767,15 @@ def test_load_compute_pools_parses_background_max_concurrent(tmp_path, monkeypat
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     cfg_dir = tmp_path / ".config" / "prisma"
     cfg_dir.mkdir(parents=True)
-    (cfg_dir / "config.yaml").write_text(
-        "compute_pools:\n"
-        "  - name: local-ollama\n"
-        "    type: gpu\n"
-        "    max_concurrent: 4\n"
-        "    models:\n"
-        "      - name: qwen2.5:7b-32k\n"
-        "        background_max_concurrent: 3\n"
+    (cfg_dir / "config.toml").write_text(
+        '[[compute_pools]]\n'
+        'name = "local-ollama"\n'
+        'type = "gpu"\n'
+        "max_concurrent = 4\n"
+        "\n"
+        '[[compute_pools.models]]\n'
+        'name = "qwen2.5:7b-32k"\n'
+        "background_max_concurrent = 3\n"
     )
 
     result = _load_compute_pools()

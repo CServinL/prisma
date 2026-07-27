@@ -10,7 +10,6 @@ def _ep_safe(**kw):
 _imeta.entry_points = _ep_safe
 
 import asyncio
-import hashlib
 import json
 import logging
 import os
@@ -37,7 +36,7 @@ def _t(label: str, _t0=[0.0]):
 _t("importing fastapi")
 from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 from prisma.server.access_log import AccessLogMiddleware
 from prisma.server.auth import (
     AuthMiddleware, LoginRequest, LoginResponse, classify_zone, issue_token, verify_password,
@@ -143,10 +142,6 @@ _client_baseline: dict[str, dict[str, tuple[str, float]]] = {}
 _client_baseline_lock = threading.Lock()
 
 
-def _hash_body(body: str) -> str:
-    return hashlib.sha256(body.encode("utf-8")).hexdigest()
-
-
 def _server_manifest() -> dict[str, tuple[str, float]]:
     """Every synced file's (content_hash, mtime), read fresh from the vault."""
     manifest: dict[str, tuple[str, float]] = {}
@@ -155,7 +150,7 @@ def _server_manifest() -> dict[str, tuple[str, float]]:
         if result is None:
             continue
         body, _mtime = result
-        manifest[path] = (_hash_body(body), mtime)
+        manifest[path] = (_content_hash(body), mtime)
     return manifest
 
 
@@ -170,7 +165,38 @@ def _server_file_entry(path: str) -> tuple[str, float] | None:
     if result is None:
         return None
     body, mtime = result
-    return (_hash_body(body), mtime)
+    return (_content_hash(body), mtime)
+
+
+# ── WS sync protocol message shapes ───────────────────────────────────────────
+# Previously parsed straight out of json.loads() as a raw dict with manual
+# .get()/"key" in dict checks -- unlike the HTTP /sync/* routes, which model
+# the exact same manifest-diff data with Pydantic. A malformed manifest_response
+# entry missing "mtime" used to raise an uncaught KeyError inside the dict
+# comprehension, dropping the *entire* message (caught by the broad except at
+# the WS receive loop, per-entry validation below is strictly better: one bad
+# entry is skipped, the rest of the manifest is still processed.
+
+class SyncManifestFileEntry(BaseModel):
+    path: str
+    hash: str
+    mtime: float
+
+
+class FileChangedMsg(BaseModel):
+    path: str
+    hash: str
+    mtime: float
+
+
+class FileDeletedMsg(BaseModel):
+    path: str
+
+
+class FileSyncedMsg(BaseModel):
+    path: str
+    hash: str = ""
+    mtime: float = 0.0
 
 
 async def _dispatch_sync_decisions(ws: WebSocket, client_id: str, decisions: dict[str, "SyncDecision"]) -> None:
@@ -200,9 +226,18 @@ async def _handle_sync_message(ws: WebSocket, client_id: str, msg: dict) -> None
         baseline = dict(_client_baseline.get(client_id, {}))
 
     if kind == "manifest_response":
-        client_files = {
-            f["path"]: (f["hash"], f["mtime"]) for f in msg.get("files", []) if "path" in f and "hash" in f
-        }
+        # Validated per-entry, not as one list model: a single malformed
+        # entry should be skipped, not drop the entire manifest (which is
+        # what used to happen -- a missing "mtime" raised an uncaught
+        # KeyError inside the old dict comprehension, caught by the WS
+        # loop's broad except, discarding every other file's decision too).
+        client_files: dict[str, tuple[str, float]] = {}
+        for raw_entry in msg.get("files", []):
+            try:
+                entry = SyncManifestFileEntry.model_validate(raw_entry)
+            except ValidationError:
+                continue
+            client_files[entry.path] = (entry.hash, entry.mtime)
         server_files = _server_manifest()
         decisions = diff_manifest(server_files, client_files, baseline)
         await _dispatch_sync_decisions(ws, client_id, decisions)
@@ -217,10 +252,16 @@ async def _handle_sync_message(ws: WebSocket, client_id: str, msg: dict) -> None
                     bl[path] = entry
 
     elif kind in ("file_changed", "file_deleted"):
-        path = msg.get("path")
-        if not path:
+        try:
+            if kind == "file_deleted":
+                path = FileDeletedMsg.model_validate(msg).path
+                client_entry = None
+            else:
+                changed = FileChangedMsg.model_validate(msg)
+                path, client_entry = changed.path, (changed.hash, changed.mtime)
+        except ValidationError:
+            _log.warning("malformed %s message from client_id=%s", kind, client_id)
             return
-        client_entry = None if kind == "file_deleted" else (msg.get("hash", ""), msg.get("mtime", 0.0))
         server_entry = _server_file_entry(path)
         decisions = diff_manifest(
             {path: server_entry} if server_entry else {},
@@ -239,35 +280,31 @@ async def _handle_sync_message(ws: WebSocket, client_id: str, msg: dict) -> None
             await ws.send_text(json.dumps({"type": "ack", "path": path}))
 
     elif kind == "file_synced":
-        path = msg.get("path")
-        if path:
-            with _client_baseline_lock:
-                _client_baseline.setdefault(client_id, {})[path] = (msg.get("hash", ""), msg.get("mtime", 0.0))
+        try:
+            synced = FileSyncedMsg.model_validate(msg)
+        except ValidationError:
+            _log.warning("malformed file_synced message from client_id=%s", client_id)
+            return
+        with _client_baseline_lock:
+            _client_baseline.setdefault(client_id, {})[synced.path] = (synced.hash, synced.mtime)
 
 
 # ── Vault root / config helpers ───────────────────────────────────────────────
 
 def _resolve_vault_root() -> Path:
+    from prisma.utils.config import ConfigLoader
     try:
-        import yaml
-        cfg_path = Path.home() / ".config" / "prisma" / "config.yaml"
-        cfg = yaml.safe_load(cfg_path.read_text()) or {}
-        root = cfg.get("vault_root", "").strip()
-        if root:
-            return Path(root).expanduser().resolve()
+        return ConfigLoader().get_vault_root()
     except Exception:
-        pass
-    return Path.home() / "prisma-vault"
+        return Path.home() / "prisma-vault"
 
 
 def _build_zotero() -> ZoteroService:
+    from prisma.utils.config import ConfigLoader
     try:
-        import yaml
-        cfg_path = Path.home() / ".config" / "prisma" / "config.yaml"
-        cfg = yaml.safe_load(cfg_path.read_text()) or {}
-        zconf = cfg.get("sources", {}).get("zotero", {})
-        api_key = zconf.get("api_key") or None
-        user_id = zconf.get("library_id") or None
+        zconf = ConfigLoader().get_zotero_config()
+        api_key = zconf.api_key or None
+        user_id = zconf.library_id or None
         mode = ZoteroMode.web_api if api_key else ZoteroMode.offline
         return ZoteroService(mode=mode, api_key=api_key, user_id=user_id)
     except Exception:
@@ -326,6 +363,7 @@ def _build_chat_agent(vault: "VaultService", chroma: ChromaIndexer, kg: Knowledg
     )
 
 
+from prisma.utils.text import content_hash as _content_hash
 from prisma.utils.text import significant_words as _significant_words
 
 
@@ -341,6 +379,15 @@ _chat_agent = _build_chat_agent(_vault, _chroma, _indexer)
 _t("building zotero")
 _zotero = _build_zotero()
 _t("module-level init done")
+
+from prisma.utils.config import ConfigLoader as _ConfigLoader
+
+_active_config = _ConfigLoader().config
+"""Snapshot of the config sections that were actually applied to the
+running singletons below (_vault/_zotero/_chroma/_chat_agent) — the
+baseline `POST /reload`'s smart diff compares a fresh disk-read against.
+Kept in sync by every reload path (targeted or smart), not just the smart
+one, so a mix of `/reload/zotero` then `/reload` still diffs correctly."""
 
 
 class _StreamScheduler:
@@ -552,19 +599,54 @@ def _run_review(job_id: str, req: ReviewRequest) -> None:
         _jobs[job_id].update(status="error", errors=[str(exc)])
 
 
+# ── Reload helpers ────────────────────────────────────────────────────────────
+# Each helper rebuilds its subsystem's global AND updates the matching slice
+# of _active_config, so the smart POST /reload's diff (below) stays accurate
+# regardless of whether a targeted /reload/* route or the smart one ran last.
+
+def _reload_vault(new_config: "PrismaConfig | None" = None) -> None:
+    global _vault, _active_config
+    _vault = VaultService(vault_root=_resolve_vault_root())
+    if new_config is not None:
+        _active_config = _active_config.model_copy(update={"vault_root": new_config.vault_root})
+
+
+def _reload_zotero(new_config: "PrismaConfig | None" = None) -> None:
+    global _zotero, _active_config
+    _zotero = _build_zotero()
+    if new_config is not None:
+        new_sources = _active_config.sources.model_copy(update={"zotero": new_config.sources.zotero})
+        _active_config = _active_config.model_copy(update={"sources": new_sources})
+
+
+def _reload_chroma(new_config: "PrismaConfig | None" = None) -> None:
+    global _chroma, _active_config
+    _chroma.stop()
+    _chroma = _build_chroma(_vault)
+    _chroma.start()
+    if new_config is not None:
+        _active_config = _active_config.model_copy(update={"retrieval": new_config.retrieval})
+
+
+def _reload_chat(new_config: "PrismaConfig | None" = None) -> None:
+    global _chat_agent, _active_config
+    _chat_agent = _build_chat_agent(_vault, _chroma, _indexer)
+    if new_config is not None:
+        new_llm = _active_config.llm.model_copy(update={"host": new_config.llm.host})
+        _active_config = _active_config.model_copy(update={"chat": new_config.chat, "llm": new_llm})
+
+
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 @app.post("/reload/vault")
 def reload_vault():
-    global _vault
-    _vault = VaultService(vault_root=_resolve_vault_root())
+    _reload_vault()
     return {"status": "reloaded", "vault_root": str(_vault.root)}
 
 
 @app.post("/reload/zotero")
 def reload_zotero():
-    global _zotero
-    _zotero = _build_zotero()
+    _reload_zotero()
     return {"status": "reloaded", "zotero_mode": _zotero.mode}
 
 
@@ -579,10 +661,17 @@ def reload_indexer():
 
 @app.post("/reload/chroma")
 def reload_chroma():
-    global _chroma
-    _chroma.stop()
-    _chroma = _build_chroma(_vault)
-    _chroma.start()
+    _reload_chroma()
+    return {"status": "reloaded"}
+
+
+@app.post("/reload/chat")
+def reload_chat():
+    """Rebuilds _chat_agent from the current config — closes the one gap
+    found when auditing which config sections actually need an explicit
+    reload path: chat.* / llm.host are cached in _chat_agent at startup
+    with no prior way to pick up a change short of a full process restart."""
+    _reload_chat()
     return {"status": "reloaded"}
 
 
@@ -598,18 +687,53 @@ def restart_worker(name: str):
     )
 
 
-@app.post("/reload")
+class ReloadConfigResponse(BaseModel):
+    changed: list[str]
+    reloaded: list[str]
+    compute_pools_reloaded: bool
+
+
+_RELOAD_FNS = {
+    "vault_root": _reload_vault,
+    "sources.zotero": _reload_zotero,
+    "retrieval": _reload_chroma,
+    "chat": _reload_chat,
+}
+
+
+@app.post("/reload", response_model=ReloadConfigResponse)
 def reload_server():
-    global _vault, _indexer, _chroma, _zotero
-    _indexer.stop()
-    _chroma.stop()
-    _vault = VaultService(vault_root=_resolve_vault_root())
-    _zotero = _build_zotero()
-    _indexer = KnowledgeGraphClient(port=_kg_port())
-    _chroma = _build_chroma(_vault)
-    _indexer.start()
-    _chroma.start()
-    return {"status": "reloaded", "vault_root": str(_vault.root), "zotero_mode": _zotero.mode}
+    """Smart config reload (backs `prisma reload-config`): diffs the
+    currently-active config against a fresh read from disk, rebuilds only
+    the subsystems whose section actually changed (see
+    prisma.services.config_reload for which sections those are and why),
+    and always proxies to the supervisor's own idempotent
+    /supervisor/resources/reload for compute_pools. Unlike the old
+    unconditional "rebuild everything" behavior, a config file that fails
+    to parse/validate is rejected outright rather than silently falling
+    back to defaults — ConfigLoader's own fallback-to-defaults behavior is
+    correct for startup but would be a dangerous silent full reset here."""
+    global _active_config
+    from prisma.utils.config import ConfigLoader
+    from prisma.services.config_reload import diff_config_sections
+
+    try:
+        new_config = ConfigLoader().config
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=f"invalid config: {exc}")
+
+    changed = diff_config_sections(_active_config, new_config)
+    reloaded: list[str] = []
+    for section in changed:
+        _RELOAD_FNS[section](new_config)
+        reloaded.append(section)
+
+    result = resource_lock.reload_resources("127.0.0.1", resource_lock.default_port())
+    compute_pools_reloaded = "error" not in result
+
+    return ReloadConfigResponse(
+        changed=changed, reloaded=reloaded, compute_pools_reloaded=compute_pools_reloaded,
+    )
 
 
 @app.get("/health")
@@ -719,7 +843,11 @@ def status():
     zotero_info = None
     try:
         zs = _zotero.status()
-        zotero_info = {"mode": zs.get("mode"), "available": zs.get("available", False)}
+        zotero_info = {
+            "mode": zs.get("mode"),
+            "available": zs.get("available", False),
+            "reachable": zs.get("reachable", False),
+        }
     except Exception:
         pass
 
@@ -775,18 +903,57 @@ def get_logs(
         return {"path": str(log_path), "lines": [], "total": 0}
 
 
-@app.post("/knowledge-graph/taint")
-def knowledge_graph_taint():
+# ── KG admin/instrumentation ──────────────────────────────────────────────
+# Namespaced under /admin/kg/ rather than /knowledge-graph/ so these read
+# unambiguously as ops/diagnostic tools, not user-facing features — the UI
+# never calls any of these (confirmed: it only ever reads status()'s
+# knowledge_graph fields), they're for direct/curl admin use.
+
+@app.post("/admin/kg/taint")
+def admin_kg_taint():
     """Mark the index stale so the next cycle re-indexes changed files."""
     _indexer.mark_stale()
     return {"status": "stale"}
 
 
-@app.post("/knowledge-graph/drop")
-def knowledge_graph_drop():
+@app.post("/admin/kg/drop")
+def admin_kg_drop():
     """Drop the entire Kùzu graph and tracked manifest, forcing a full reindex from scratch."""
     _indexer.drop_index()
     return {"status": "dropped"}
+
+
+@app.get("/admin/kg/dead-letters")
+def admin_kg_list_dead_letters():
+    """List failed-extraction ("dead letter") records without discarding
+    them — see what failed and why before deciding to clear it."""
+    return _indexer.list_dead_letters()
+
+
+@app.delete("/admin/kg/dead-letters")
+def admin_kg_clear_dead_letters():
+    """Discard recorded dead-letter records so the next incremental cycle
+    retries them fresh. Returns the number cleared."""
+    removed = _indexer.clear_dead_letters()
+    return {"removed": removed}
+
+
+@app.get("/admin/kg/entities")
+def admin_kg_entities(path: str = Query(...)):
+    """Raw entities and relationship edges the knowledge graph extracted
+    from one specific vault-relative file path — for inspecting extraction
+    quality directly (unlike /search or /search/deep, which only ever
+    return file-level scores, never the underlying nodes)."""
+    return _indexer.entities_for_file(path)
+
+
+@app.get("/admin/kg/search")
+def admin_kg_search(q: str = Query(..., min_length=1), top_k: int = Query(20)):
+    """Raw graph query — keyword match over Entity nodes only, bypassing
+    Ollama reasoning and ChromaDB entirely (unlike /search/deep). Isolates
+    the KG layer for diagnosis: a bad /search/deep result could be
+    extraction, ranking, or the LLM's fault — this narrows it down."""
+    return _indexer.search(q, top_k=top_k)
 
 
 @app.post("/render", response_model=RenderResponse)
@@ -1083,7 +1250,7 @@ def rename_node(slug: str, req: RenameRequest):
 def taint_node(slug: str):
     """Force one specific node to be re-extracted/re-embedded on the next
     cycle — without touching the rest of the index/graph. Unlike
-    /knowledge-graph/taint (which just marks the whole index stale), this
+    /admin/kg/taint (which just marks the whole index stale), this
     targets a single file via both ChromaIndexer.taint_file and
     KnowledgeGraphService.taint_file (see their docstrings — both work by
     dropping the file's manifest entry and enqueuing it directly)."""
@@ -1116,9 +1283,8 @@ def create_dir(req: CreateDirRequest):
 
 
 @app.get("/notes", response_model=VaultListing)
-def list_notes(node_type: Optional[str] = Query(None)):
-    nt = NodeType(node_type) if node_type else None
-    return _vault.list_nodes(nt)
+def list_notes(node_type: Optional[NodeType] = Query(None)):
+    return _vault.list_nodes(node_type)
 
 
 @app.get("/notes/{slug}", response_model=RenderedNode)
@@ -1213,18 +1379,16 @@ _ALLOWED_ASSET_EXTS = {
 
 @app.get("/vault/assets/{asset_path:path}")
 def vault_asset(asset_path: str):
-    import os
     from fastapi.responses import FileResponse
-    vault_root = str(_vault.root)
-    candidate = os.path.abspath(os.path.join(vault_root, asset_path))
-    if not candidate.startswith(vault_root + os.sep) and candidate != vault_root:
+    try:
+        candidate_path = _vault.resolve_within_root(asset_path)
+    except ValueError:
         raise HTTPException(status_code=403, detail="access denied")
-    candidate_path = Path(candidate)
     if candidate_path.suffix.lower() not in _ALLOWED_ASSET_EXTS:
         raise HTTPException(status_code=403, detail="file type not allowed")
     if not candidate_path.is_file():
         raise HTTPException(status_code=404, detail="not found")
-    return FileResponse(candidate)
+    return FileResponse(candidate_path)
 
 
 @app.get("/notes/{slug}/view")
@@ -1311,7 +1475,6 @@ def view_html(slug: str, request: Request):
 
 @app.post("/notes/{slug}/md", status_code=202)
 def generate_md_format(slug: str):
-    from prisma.storage.models.vault_models import NodeType as NT
     try:
         node = _vault.get_any(slug)
     except FileNotFoundError:
@@ -1324,20 +1487,15 @@ def generate_md_format(slug: str):
 
 
 class SetTypeRequest(BaseModel):
-    node_type: str
+    node_type: NodeType
 
 @app.patch("/notes/{slug}/type")
 def set_note_type(slug: str, body: SetTypeRequest):
-    from prisma.storage.models.vault_models import NodeType as NT
     try:
-        nt = NT(body.node_type)
-    except ValueError:
-        raise HTTPException(status_code=400, detail=f"invalid node_type {body.node_type!r}")
-    try:
-        _vault.set_node_type(slug, nt)
+        _vault.set_node_type(slug, body.node_type)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail=f"node not found: {slug!r}")
-    return {"slug": slug, "node_type": nt.value}
+    return {"slug": slug, "node_type": body.node_type.value}
 
 
 @app.get("/notes/{slug}/original")
@@ -1683,6 +1841,86 @@ def zotero_collections():
         raise HTTPException(status_code=501, detail=str(e))
     except FileNotFoundError as e:
         raise HTTPException(status_code=503, detail=str(e))
+
+
+class ZoteroStatsResponse(BaseModel):
+    total_items: int
+    item_type_counts: dict[str, int]
+    items_without_doi: int
+    items_without_abstract: int
+    items_without_authors: int
+    quality_score: float
+
+
+@app.get("/zotero/stats", response_model=ZoteroStatsResponse)
+def zotero_stats():
+    """Library-wide item-type breakdown and metadata-quality score, computed
+    over the same ZoteroService.list_items() used by /zotero/items — not a
+    second, independent client (the old CLI's cleanup.py had its own)."""
+    try:
+        items = _zotero.list_items()
+    except NotImplementedError as e:
+        raise HTTPException(status_code=501, detail=str(e))
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+    if not items:
+        return ZoteroStatsResponse(
+            total_items=0, item_type_counts={}, items_without_doi=0,
+            items_without_abstract=0, items_without_authors=0, quality_score=100.0,
+        )
+
+    item_type_counts: dict[str, int] = {}
+    items_without_doi = 0
+    items_without_abstract = 0
+    items_without_authors = 0
+    for item in items:
+        item_type_counts[item.item_type] = item_type_counts.get(item.item_type, 0) + 1
+        if not item.doi:
+            items_without_doi += 1
+        if not item.abstract:
+            items_without_abstract += 1
+        if not item.authors:
+            items_without_authors += 1
+
+    total = len(items)
+    quality_score = 100 - (
+        (items_without_doi + items_without_abstract + items_without_authors) / (total * 3) * 100
+    )
+    return ZoteroStatsResponse(
+        total_items=total,
+        item_type_counts=item_type_counts,
+        items_without_doi=items_without_doi,
+        items_without_abstract=items_without_abstract,
+        items_without_authors=items_without_authors,
+        quality_score=quality_score,
+    )
+
+
+class SyncPendingResponse(BaseModel):
+    synced: int
+    failed: int
+    pending_before: int
+
+
+@app.post("/zotero/sync-pending", response_model=SyncPendingResponse)
+def zotero_sync_pending():
+    """Flush the offline pending-write queue (data/pending_writes.json) —
+    the API equivalent of the old `prisma sync` CLI command. Actions are
+    queued here by the review pipeline (coordinator.py) when a Zotero write
+    fails while offline; nothing else populates this queue today."""
+    from prisma.services.research_stream_manager import ResearchStreamManager
+    from prisma.storage.pending_queue import PendingWriteQueue
+
+    pending_before = PendingWriteQueue().pending_count
+    if pending_before == 0:
+        return SyncPendingResponse(synced=0, failed=0, pending_before=0)
+    if not connectivity.is_online:
+        raise HTTPException(status_code=503, detail="offline — cannot sync right now")
+
+    manager = ResearchStreamManager()
+    synced, failed = manager.sync_pending()
+    return SyncPendingResponse(synced=synced, failed=failed, pending_before=pending_before)
 
 
 @app.get("/zotero/items")

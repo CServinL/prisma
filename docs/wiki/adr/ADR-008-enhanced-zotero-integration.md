@@ -2,7 +2,10 @@
 
 **Date:** 2025-09-15  
 **Author:** CServinL  
-**Status:** Accepted
+**Status:** Superseded (2026-07-27) — see "Follow-up" at the end. The
+Local-API-primary architecture this ADR describes has been reversed:
+prisma only talks to Zotero via its Web API now. Kept for historical
+context on why the local-API-primary decision was made at the time.
 
 ## Context
 
@@ -178,3 +181,53 @@ $ pipenv run python work/validate_architecture.py
 - **Zotero Version Support**: Monitor Zotero 7+ adoption and API evolution for research management
 - **Performance Optimization**: Further optimize Local API usage patterns for research library operations
 - **Research Discovery Enhancement**: Integrate external research APIs with Local API workflows
+
+## Follow-up (2026-07-27): reversed — Web API only, local-API clients removed
+
+The Local-API-primary architecture (`ZoteroHybridClient` → `ZoteroLocalAPIClient` /
+`ZoteroDesktopClient`, this ADR's core decision) is gone. `services/zotero.py`'s own
+`ZoteroMode.desktop` was found to be dead code earlier in the same session that
+prompted this reversal — the server (`prisma serve`) never actually selected it,
+because the assumption underlying this whole ADR (the process reading from Zotero
+Desktop's local HTTP server is *also* the process running on the user's machine) broke
+once prisma split into a server (running on a dedicated machine, "forge") and a
+desktop client (running on the user's own machine, "prisma-desktop"). The local API at
+`localhost:23119` is, definitionally, only reachable from whatever machine Zotero
+Desktop itself runs on — the server has no guarantee of being that machine.
+
+Considered and explicitly rejected: moving the local-API read path into
+`prisma-desktop` (Rust) instead of deleting it, so *something* in the split
+architecture could still use it from the right machine. Decided against — no other
+prisma-desktop feature needs it, and it would be new functionality, not a port (the
+old Python local-API client's write-oriented methods — `add_item_to_collection`,
+`update_item_tags` — were themselves already stubs/no-ops; only reads ever really
+worked, and nothing in prisma-desktop currently consumes Zotero data at all).
+
+**What changed:**
+- Removed entirely: `integrations/zotero/hybrid_client.py`, `local_api_client.py`,
+  `desktop_client.py`, and `tests-sets/local-zotero/` (nothing left to test against).
+- `integrations/zotero/unified_client.py`'s `ZoteroClient` facade collapsed from a
+  4-way mode-selecting router down to a thin wrapper over `client.py`'s Web API client
+  alone — the facade itself is kept (callers like `ResearchStreamManager` depend on
+  `from_config()`/`client_type`/`client_info`), but there's only one backend to route
+  to now.
+- `cli/commands/cleanup.py`'s `cleanup_duplicates`/`library_stats` (previously: local
+  API for reads, Web API for deletes) now read via a new
+  `ZoteroClient.get_all_items()` (Web API, paginated via pyzotero's `everything()`)
+  and write via the same client — no more split.
+- `cli/commands/zotero.py`'s `zotero_status` simplified to report internet
+  connectivity + Web API credentials/reachability only.
+- A new, single canonical live-reachability check,
+  `services/zotero.py::check_web_api_reachable()`, replaces the removed
+  `hybrid_client.py::check_zotero_web_api_access()` (same idea — validate the
+  configured library is actually reachable with these credentials, not just that a
+  key is present) and backs both `ZoteroService.status()`'s new `reachable` field
+  (surfaced in the UI's status panel) and the CLI's `zotero status` command.
+
+See `TODO.md`'s "Code quality assessment" #1 for the fuller before/after and the
+lesson drawn from this reversal (duplication that looks like "needs a refactor" can
+sometimes actually be "needs three of the four things deleted").
+
+## Related
+- ADR-011: Authentication Strategy — the same server/desktop machine split this
+  follow-up's reasoning depends on.

@@ -3,12 +3,16 @@
 Unified Zotero Client
 
 This is the ONLY Zotero client that should be used throughout the application.
-It encapsulates all the different implementation details (Hybrid, Local API, Web API)
-and provides a single, clean interface for all Zotero operations.
+Thin wrapper around the Web API client (client.py) -- prisma only ever talks
+to Zotero via its Web API now (confirmed 2026-07-27). This used to also
+select between Hybrid/Local-API/Desktop-connector backends, but those only
+ever read from Zotero Desktop's local HTTP server, which is a different
+machine's concern than the server -- removed, along with hybrid_client.py/
+local_api_client.py/desktop_client.py.
 
 Usage:
     from prisma.integrations.zotero import ZoteroClient
-    
+
     client = ZoteroClient.from_config(config)
     items = client.get_items()
     client.save_items(items)
@@ -18,12 +22,9 @@ import logging
 from typing import List, Dict, Any, Optional
 from pathlib import Path
 
-from ...storage.models.zotero_models import ZoteroItem, ZoteroCollection, ZoteroTag
+from ...storage.models.zotero_models import ZoteroItem, ZoteroCollection
 from ...utils.config import PrismaConfig
 
-# Import the internal implementation clients (these should not be used directly)
-from .hybrid_client import ZoteroHybridClient, ZoteroHybridConfig
-from .local_api_client import ZoteroLocalAPIClient, ZoteroLocalAPIConfig
 from .client import ZoteroClient as ZoteroWebAPIClient
 
 logger = logging.getLogger(__name__)
@@ -31,135 +32,69 @@ logger = logging.getLogger(__name__)
 
 class ZoteroClient:
     """
-    🎯 UNIFIED ZOTERO CLIENT
-    
-    This is the single entry point for all Zotero operations in Prisma.
-    It automatically selects the best implementation client based on configuration
-    and provides a consistent interface regardless of the underlying implementation.
-    
+    Single entry point for all Zotero operations in Prisma -- wraps the Web
+    API client (client.py) directly, no other backend exists anymore.
+
     Features:
-    - Automatic client selection (Hybrid > Local API > Web API)
-    - Network-aware operation with automatic fallbacks
     - Unified save interface with collection assignment
     - Comprehensive error handling and logging
-    - Integration-agnostic API
+    - Integration-agnostic API (kept as a facade so callers -- CLI,
+      ResearchStreamManager -- don't depend on client.py's exact constructor
+      shape or attribute names)
     """
-    
+
     def __init__(self, config: PrismaConfig):
         """
         Initialize the unified Zotero client
-        
+
         Args:
             config: Prisma configuration containing Zotero settings
         """
         self.config = config
-        self._client = None
-        self._client_type = None
-        
-        # Initialize the appropriate underlying client
-        self._initialize_client()
-    
+        self._client_type = 'web_api'
+        self._client = self._create_web_api_client()
+
     @classmethod
     def from_config(cls, config: PrismaConfig) -> 'ZoteroClient':
         """
         Create a ZoteroClient from Prisma configuration
-        
+
         Args:
             config: Prisma configuration
-            
+
         Returns:
             Configured ZoteroClient instance
         """
         return cls(config)
-    
+
     @classmethod
     def from_config_file(cls, config_path: Path) -> 'ZoteroClient':
         """
         Create a ZoteroClient from configuration file
-        
+
         Args:
             config_path: Path to Prisma configuration file
-            
+
         Returns:
             Configured ZoteroClient instance
         """
         from ...utils.config import load_config
         config = load_config(config_path)
         return cls(config)
-    
-    def _initialize_client(self):
-        """Initialize the appropriate underlying client based on configuration"""
-        zotero_config = self.config.sources.zotero
-        mode = getattr(zotero_config, 'mode', 'hybrid')
-        
-        logger.info(f"🔧 Initializing Zotero client in '{mode}' mode")
-        
-        try:
-            if mode == 'hybrid':
-                self._client = self._create_hybrid_client()
-                self._client_type = 'hybrid'
-                logger.info("✅ Using HybridClient (Local API + Web API with intelligent fallbacks)")
-                
-            elif mode == 'local_api':
-                self._client = self._create_local_api_client()
-                self._client_type = 'local_api'
-                logger.info("✅ Using LocalAPIClient (Zotero 7 Local HTTP API)")
-                
-            elif mode == 'web_api':
-                self._client = self._create_web_api_client()
-                self._client_type = 'web_api'
-                logger.info("✅ Using WebAPIClient (Zotero Web API)")
-                
-            else:
-                # Default to hybrid for unknown modes
-                logger.warning(f"⚠️ Unknown mode '{mode}', defaulting to hybrid")
-                self._client = self._create_hybrid_client()
-                self._client_type = 'hybrid'
-                
-        except Exception as e:
-            logger.error(f"❌ Failed to initialize Zotero client: {e}")
-            raise ValueError(f"Failed to initialize Zotero client: {e}")
-    
-    def _create_hybrid_client(self) -> ZoteroHybridClient:
-        """Create a hybrid client configuration"""
-        zotero_config = self.config.sources.zotero
-        
-        hybrid_config = ZoteroHybridConfig(
-            api_key=getattr(zotero_config, 'api_key', None),
-            library_id=getattr(zotero_config, 'library_id', None),
-            library_type=getattr(zotero_config, 'library_type', 'user'),
-            local_server_url=getattr(zotero_config, 'server_url', 'http://127.0.0.1:23119'),
-            local_server_timeout=5,
-            enable_desktop_save=True,
-            desktop_server_url=getattr(zotero_config, 'server_url', 'http://127.0.0.1:23119'),
-            collection_key=None
-        )
-        return ZoteroHybridClient(hybrid_config)
-    
-    def _create_local_api_client(self) -> ZoteroLocalAPIClient:
-        """Create a local API client configuration"""
-        zotero_config = self.config.sources.zotero
-        
-        local_config = ZoteroLocalAPIConfig(
-            server_url=getattr(zotero_config, 'server_url', 'http://127.0.0.1:23119'),
-            timeout=5,
-            user_id=0  # Default user ID for local API
-        )
-        return ZoteroLocalAPIClient(local_config)
-    
+
     def _create_web_api_client(self) -> ZoteroWebAPIClient:
         """Create a web API client configuration"""
         from .client import ZoteroAPIConfig
-        
+
         zotero_config = self.config.sources.zotero
-        
+
         web_config = ZoteroAPIConfig(
             api_key=getattr(zotero_config, 'api_key', ''),
             library_id=getattr(zotero_config, 'library_id', ''),
             library_type=getattr(zotero_config, 'library_type', 'user')
         )
         return ZoteroWebAPIClient(web_config)
-    
+
     # ==========================================
     # UNIFIED PUBLIC INTERFACE
     # ==========================================
@@ -447,13 +382,13 @@ class ZoteroClient:
             True if client is available
         """
         try:
-            if hasattr(self._client, 'is_available'):
-                return self._client.is_available()
+            if hasattr(self._client, 'test_connection'):
+                return self._client.test_connection()
             else:
                 # Fallback: try to get collections (supported by all clients)
                 self.get_collections()
                 return True
-                
+
         except Exception:
             return False
     
@@ -473,7 +408,6 @@ class ZoteroClient:
             'type': self._client_type,
             'available': self.is_available(),
             'class': self._client.__class__.__name__ if self._client else None,
-            'config_mode': getattr(self.config.sources.zotero, 'mode', 'unknown')
         }
     
     def __repr__(self) -> str:

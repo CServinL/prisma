@@ -60,7 +60,7 @@ Daily workflow — no activation needed, the symlink handles it:
 ```bash
 # edit files, run prisma — changes are live
 prisma serve
-prisma streams list
+prisma status
 ```
 
 For running tests, use the project's own `.venv` instead:
@@ -138,7 +138,7 @@ See ADR-013 and ADR-014's appendix for the full VRAM/concurrency
 measurements behind these numbers, and the correction once the 65536
 claim turned out to be wrong.
 
-> **Upgrade note:** after `pip install --upgrade prisma`, re-run `ollama pull nomic-embed-text` if the configured embedding model changes — check `retrieval.embedding_model` in `config.yaml`.
+> **Upgrade note:** after `pip install --upgrade prisma`, re-run `ollama pull nomic-embed-text` if the configured embedding model changes — check `retrieval.embedding_model` in `config.toml`.
 
 **From WSL:**
 ```bash
@@ -153,18 +153,12 @@ export OLLAMA_HOST=$(ip route show | grep default | awk '{print $3}'):11434
 
 ### Zotero
 
-Install **Zotero Desktop on Windows**. It exposes a local read-only HTTP API on port `23119`.
-
-For writes (creating items and collections), you also need a **Zotero Web API key**:
+Prisma only talks to Zotero via its Web API — there is no local Zotero
+Desktop integration (see ADR-008's follow-up). You need a **Zotero Web API
+key** with read + write access:
 1. Go to `https://www.zotero.org/settings/keys/new`
 2. Create a key with read + write access
 3. Note your **User ID** from `https://www.zotero.org/settings/keys`
-
-From WSL, Zotero's local API is at the Windows host IP:
-```bash
-WINDOWS_IP=$(ip route show | grep default | awk '{print $3}')
-curl http://${WINDOWS_IP}:23119/api/
-```
 
 ---
 
@@ -172,7 +166,7 @@ curl http://${WINDOWS_IP}:23119/api/
 
 ```bash
 mkdir -p ~/.config/prisma
-cp /path/to/repo/config.example.yaml ~/.config/prisma/config.yaml
+cp /path/to/repo/config.example.toml ~/.config/prisma/config.toml
 # edit with your Zotero credentials and Windows host IPs
 ```
 
@@ -230,5 +224,5 @@ Open `http://<server-host>:8765/app` in a browser. On Android and iOS, use "Add 
 
 ```bash
 prisma status --verbose
-prisma zotero test-connection
+curl http://127.0.0.1:8765/zotero/status
 ```

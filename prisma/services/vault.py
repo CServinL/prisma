@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 import threading
 from datetime import datetime
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Iterator
 
 import yaml
@@ -584,18 +584,6 @@ class VaultService:
         companion.write_text(_render_frontmatter(fm) + md_content, encoding="utf-8")
         return True
 
-    def ensure_all_md_formats(self) -> int:
-        """Generate MD companions for every HTML file that lacks body content. Returns count."""
-        import os
-        count = 0
-        for dirpath, dirnames, filenames in os.walk(self.root, followlinks=True):
-            dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS and not d.startswith(".")]
-            for fname in filenames:
-                if fname.endswith(".html"):
-                    if self.ensure_md_format(Path(dirpath) / fname):
-                        count += 1
-        return count
-
     def get_md_body(self, html_path: Path) -> str | None:
         """Return the markdown body of a companion .md if it has content, else None."""
         companion = html_path.with_suffix(".md")
@@ -920,16 +908,39 @@ class VaultService:
     # state, excluded entirely via the leading-dot rule): this is a content
     # dir with its own known type, not something to hide from sync.
 
-    def _safe_sync_path(self, rel_path: str) -> Path:
+    def resolve_within_root(self, rel_path: str) -> Path:
+        """Resolve `rel_path` against the vault root, rejecting traversal and
+        reserved/hidden directories. The one shared vault-containment check —
+        previously `/vault/assets/{path}` (app.py's `vault_asset`) had its own,
+        independently-implemented `os.path.abspath` + string-prefix version
+        that (unlike this one) didn't reject paths under `.git/`/`.vault-files/`
+        etc., only staying safe in practice because no allowed asset extension
+        was expected to live there. Both callers should go through this single
+        implementation now."""
         p = Path(rel_path)
         if p.is_absolute() or ".." in p.parts:
             raise ValueError("path outside vault")
         if any(part in _SKIP_DIRS or part.startswith(".") for part in p.parts[:-1]):
             raise ValueError("path inside a reserved or hidden directory")
+        candidate = self.root / p
+        # A directory *inside* the vault that is itself a symlink pointing
+        # outside it (e.g. vault/notes/escape -> /etc) would sail through
+        # the string-based checks above, which only look at the literal
+        # path components, not what a symlink in the middle of the path
+        # actually resolves to. .resolve() is safe to call even when
+        # `candidate` doesn't exist yet (new-file writes) -- it only
+        # resolves symlinks in the parts that do exist.
+        if not candidate.resolve().is_relative_to(self.root.resolve()):
+            raise ValueError("path escapes vault root via a symlink")
+        return candidate
+
+    def _safe_sync_path(self, rel_path: str) -> Path:
+        path = self.resolve_within_root(rel_path)
+        p = Path(rel_path)
         is_stream_yaml = p.parts[0] == "streams" and rel_path.endswith(".yaml")
         if not (rel_path.endswith(".md") or is_stream_yaml):
             raise ValueError("sync only supports .md files, or .yaml files under streams/")
-        return self.root / p
+        return path
 
     def read_by_path(self, rel_path: str) -> tuple[str, float] | None:
         path = self._safe_sync_path(rel_path)

@@ -47,6 +47,17 @@ class KnowledgeGraphClient:
         data = self._post("/taint_file", params={"rel": rel_path})
         return bool(data.get("tainted")) if data else False
 
+    def list_dead_letters(self) -> list[dict]:
+        return self._get("/list_dead_letters") or []
+
+    def clear_dead_letters(self) -> int:
+        data = self._post("/clear_dead_letters")
+        return int(data.get("removed", 0)) if data else 0
+
+    def entities_for_file(self, rel_path: str) -> dict:
+        data = self._get("/entities_for_file", params={"rel": rel_path})
+        return data if data else {"entities": [], "edges": []}
+
     def status(self) -> dict:
         # Polled on every app.py /status request (itself polled by the UI
         # every ~10s with a 3s abort). A restarting/slow kg must not block

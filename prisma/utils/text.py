@@ -7,6 +7,17 @@ They are lazy-downloaded on first call if missing.
 
 from __future__ import annotations
 
+import hashlib
+
+
+def content_hash(text: str) -> str:
+    """SHA256 hex digest of text's UTF-8 bytes — the single source of truth
+    for this algorithm on the Python side (previously computed ad hoc at 4
+    separate call sites, 2 of them byte-identical copies in the same file).
+    Mirrored by prisma-desktop's Rust `content_hash()` (sync/mod.rs) — keep
+    both in lockstep if this ever changes."""
+    return hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()
+
 
 def significant_words(text: str) -> frozenset[str]:
     """

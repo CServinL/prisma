@@ -5,12 +5,10 @@ This module defines Pydantic models for Research Streams - persistent research t
 that leverage Zotero Collections and Tags for organization and continuous monitoring.
 """
 
-from typing import List, Dict, Any, Optional, Set
+from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta
 from enum import Enum
 from pydantic import BaseModel, Field, field_validator, ConfigDict
-
-from .zotero_models import ZoteroCollection, ZoteroItem, ZoteroTag
 
 
 class RefreshFrequency(str, Enum):

@@ -52,7 +52,7 @@ Both indexes are local and offline-first. ChromaDB persists to `{vault_root}/chr
 ### Embedding model
 
 Use a local embedding model via Ollama (e.g., `nomic-embed-text` or `mxbai-embed-large`)
-to keep the stack fully offline. The model is configurable in `config.yaml` under a new
+to keep the stack fully offline. The model is configurable in `config.toml` under a new
 `retrieval.embedding_model` key.
 
 ## Alternatives Considered

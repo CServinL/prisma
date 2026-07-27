@@ -30,7 +30,7 @@ Tiered authentication, configured per deployment:
 | LAN / offline | `password` | Single shared password, bcrypt-hashed in config |
 | Internet-facing | `oidc` | Standard OIDC Authorization Code + PKCE |
 
-The mode is set in `~/.config/prisma/config.yaml` under `server.auth.mode`.
+The mode is set in `~/.config/prisma/config.toml` under `server.auth.mode`.
 If omitted, defaults to `none`.
 
 ### OIDC mode — any compliant provider
@@ -96,35 +96,33 @@ For OIDC, an `allowed_emails` list in config restricts access to specific accoun
 This is required for providers like Google where any Google account could otherwise
 authenticate against the client ID.
 
-```yaml
-server:
-  auth:
-    mode: oidc
-    oidc_issuer: "https://your-org.zitadel.cloud"
-    client_id: "..."
-    client_secret: "..."
-    allowed_emails:
-      - "you@gmail.com"
-      - "collaborator@domain.com"
+```toml
+[server.auth]
+mode = "oidc"
+oidc_issuer = "https://your-org.zitadel.cloud"
+client_id = "..."
+client_secret = "..."
+allowed_emails = ["you@gmail.com", "collaborator@domain.com"]
 ```
 
 ## Configuration reference
 
-```yaml
-server:
-  host: "127.0.0.1"   # loopback for Model 1; "0.0.0.0" for Models 2-4
-  port: 8765
-  auth:
-    mode: "none"       # none | password | oidc
+```toml
+[server]
+host = "127.0.0.1"   # loopback for Model 1; "0.0.0.0" for Models 2-4
+port = 8765
 
-    # password mode
-    password_hash: ""  # bcrypt hash — generate with: prisma auth hash-password
+[server.auth]
+mode = "none"       # none | password | oidc
 
-    # oidc mode
-    oidc_issuer: ""    # e.g. https://accounts.google.com or https://org.zitadel.cloud
-    client_id: ""
-    client_secret: ""
-    allowed_emails: []
+# password mode
+password_hash = ""  # bcrypt hash — generate with: prisma auth hash-password
+
+# oidc mode
+oidc_issuer = ""    # e.g. https://accounts.google.com or https://org.zitadel.cloud
+client_id = ""
+client_secret = ""
+allowed_emails = []
 ```
 
 ## Alternatives Considered

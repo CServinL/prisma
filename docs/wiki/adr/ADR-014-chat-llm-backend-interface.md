@@ -129,7 +129,7 @@ this is the same supervised-worker pattern already used for `chroma` and
 - **Not released yet — no GA date.** Not a real option today; noted here so
   it isn't rediscovered as if new later. Revisit once it ships and has a
   track record.
-- One more supervised process/port, with its own `config.yaml` and provider
+- One more supervised process/port, with its own `config.toml` and provider
   key management to maintain — real operational weight even though the
   binary itself is small.
 - A local network hop (loopback HTTP) added to every chat LLM call that

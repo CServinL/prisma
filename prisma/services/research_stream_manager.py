@@ -7,7 +7,7 @@ Zotero Collections and smart tagging for organization and continuous monitoring.
 
 import logging
 import json
-from typing import List, Dict, Any, Optional, Set
+from typing import List, Dict, Optional
 from datetime import datetime
 from pathlib import Path
 
@@ -16,7 +16,7 @@ from ..storage.models.research_stream_models import (
     ResearchStream, StreamStatus, RefreshFrequency, SmartTag, TagCategory,
     SearchCriteria, StreamUpdateResult, StreamSummary
 )
-from ..storage.models.zotero_models import ZoteroItem, ZoteroCollection, ZoteroSearchQuery, ZoteroSearchResult
+from ..storage.models.zotero_models import ZoteroItem
 from ..storage.models.api_response_models import LLMRelevanceResult, ZoteroItemCreationData
 from ..storage.pending_queue import PendingWriteQueue
 from ..utils.config import ConfigLoader

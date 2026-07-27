@@ -1,88 +1,53 @@
 # Zotero Integration
 
-Prisma splits Zotero access into two separate concerns: **reads** come from Zotero Desktop's local HTTP API, **writes** go through the Zotero Web API. This separation is deliberate — the local API is read-only by design, and Web API writes guarantee cloud sync.
+Prisma talks to Zotero via its **Web API only** (`api.zotero.org`) — both reads and
+writes. There is no local Zotero Desktop integration; an earlier
+local-API-primary architecture (ADR-008) was reversed once the server started
+running on a separate machine from the user's own — see ADR-008's follow-up
+section for the full story.
 
-## Read / Write Split
+## Configuration
 
-| Operation | Client | Requires |
-|-----------|--------|----------|
-| Search items | Local HTTP API (`WINDOWS_IP:23119`) | Zotero Desktop running |
-| Get collections | Local HTTP API | Zotero Desktop running |
-| Get item metadata | Local HTTP API | Zotero Desktop running |
-| Create collection | Zotero Web API (`api.zotero.org`) | Internet + API key |
-| Create item | Zotero Web API | Internet + API key |
-| Add to collection | Zotero Web API | Internet + API key |
-| Delete / modify | Zotero Web API | Internet + API key |
-
-## Connection Modes
-
-### `hybrid` (recommended)
-
-- **Online reads**: local HTTP API (`WINDOWS_IP:23119`) — always used for reads regardless of internet status
-- **Writes**: Zotero Web API — requires internet; queued offline
-- **Offline**: reads still work via local HTTP; writes queued until next online startup
-
-```yaml
-sources:
-  zotero:
-    mode: "hybrid"
-    server_url: "http://172.x.x.x:23119"   # Windows host IP from WSL (ZoteroConfig field name)
-    api_key: "YOUR_API_KEY"
-    library_id: "YOUR_USER_ID"
-    library_type: "user"
+```toml
+[sources.zotero]
+enabled = true
+api_key = "YOUR_API_KEY"        # https://www.zotero.org/settings/keys/new
+library_id = "YOUR_USER_ID"     # https://www.zotero.org/settings/keys
+library_type = "user"           # "user" | "group"
 ```
 
-### `local_api`
+## Connectivity
 
-Read-only. No writes, no API key needed.
-
-```yaml
-sources:
-  zotero:
-    mode: "local_api"
-    server_url: "http://172.x.x.x:23119"
-```
-
-## WSL Setup
-
-Zotero Desktop runs on **Windows**, not inside WSL. Its local HTTP API is reachable from WSL via the Windows host IP:
-
-```bash
-# Find the Windows host IP
-WINDOWS_IP=$(ip route show | grep default | awk '{print $3}')
-
-# Test (Zotero Desktop must be open)
-curl http://${WINDOWS_IP}:23119/api/
-```
-
-Use that IP in `local_server_url` in your config.
+`services/zotero.py::check_web_api_reachable()` is the canonical live-reachability
+check — validates the configured library is actually reachable with these
+credentials, not just that a key is present. Backs `ZoteroService.status()`'s
+`reachable` field (surfaced in the UI's status panel), `prisma zotero status`,
+and `prisma status`.
 
 ## Offline Write Queue
 
-When Prisma tries to write to Zotero while offline, the operation is added to a local pending queue (`PendingWriteQueue`). On the next startup where `connectivity.is_online` is true and a Zotero client is available, the queue is automatically flushed.
+When Prisma tries to write to Zotero while offline, the operation is added to
+a local pending queue (`PendingWriteQueue`, `data/pending_writes.json`). On
+the next startup where `connectivity.is_online` is true and a Zotero client
+is available, the queue is automatically flushed.
 
-Manual flush via CLI:
+Manual flush via the API:
 ```bash
-prisma sync
+curl -X POST http://127.0.0.1:8765/zotero/sync-pending
 ```
 
 ## Client Hierarchy
 
 ```
-ZoteroClient.from_config(config)   ← factory, reads mode from config
+ZoteroClient.from_config(config)   ← facade (unified_client.py)
        │
-       ├─ HybridClient             ← mode: "hybrid"
-       │      ├─ WebAPIClient      ← writes + preferred reads online
-       │      └─ LocalAPIClient    ← fallback reads / offline reads
-       │
-       └─ LocalAPIClient           ← mode: "local_api"
+       └─ client.py's Web API client (pyzotero-backed)
 ```
 
-All clients implement the same interface (`unified_client.py`):
-- `search_items(query)` 
-- `get_collections()`
-- `save_items(items, collection_key)`
-- `create_collection(name, parent_key)`
+`ZoteroClient` is a thin wrapper — there's only one backend to route to now.
+Kept as a facade (rather than using `client.py` directly) because
+`ResearchStreamManager` and other callers depend on its `from_config()`/
+`client_type`/`client_info` surface.
 
 ## Smart Tags Applied to Saved Items
 

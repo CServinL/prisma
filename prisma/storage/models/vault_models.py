@@ -104,11 +104,33 @@ class ToolCallRecord(BaseModel):
     args: dict = Field(default_factory=dict)
 
 
+class FootnoteRelation(str, Enum):
+    # See docs/ontologia.md Axiom 16 and docs/concepts/footnote.md. Distinct
+    # from Axiom 5 ("grounded" — chat-wide context scope): this is per-claim,
+    # output-side attribution — what kind of sourcing backs THIS claim, not
+    # what the chat as a whole was allowed to read.
+    citation = "citation"  # direct quote / close paraphrase of one passage
+    attribution = "attribution"  # synthesized/paraphrased from one document
+    relational = "relational"  # connects/synthesizes across multiple documents
+    ai_inference = "ai-inference"  # model's own reasoning, no vault source
+
+
+class Footnote(BaseModel):
+    index: int  # sequential per message, 1-based — the superscript number shown inline
+    relation: FootnoteRelation
+    sources: list[str] = Field(default_factory=list)  # Note/Source slugs; empty only for ai_inference
+    claim_text: str | None = None  # span of ChatMessage.content this footnote covers
+    # Whether an automated/manual check confirmed the claim accurately represents
+    # `sources`. Orthogonal to `relation`, not a relation value itself — only
+    # meaningful when `sources` is non-empty. None = not (yet) checked.
+    faithfulness_checked: bool | None = None
+
+
 class ChatMessage(BaseModel):
     role: ChatRole
     content: str
     timestamp: datetime = Field(default_factory=datetime.utcnow)
-    sources_cited: list[str] = Field(default_factory=list)
+    footnotes: list[Footnote] = Field(default_factory=list)
     tool_calls: list[ToolCallRecord] = Field(default_factory=list)
 
 

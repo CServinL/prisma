@@ -88,12 +88,11 @@ def test_decode_token_rejects_garbage():
 @pytest.fixture
 def password_mode_config(tmp_path, monkeypatch):
     pw_hash = hash_password("s3cret")
-    cfg_path = tmp_path / "config.yaml"
+    cfg_path = tmp_path / "config.toml"
     cfg_path.write_text(
-        "server:\n"
-        "  auth:\n"
-        "    mode: password\n"
-        f"    password_hash: '{pw_hash}'\n"
+        "[server.auth]\n"
+        'mode = "password"\n'
+        f"password_hash = '{pw_hash}'\n"
     )
     monkeypatch.setenv("PRISMA_CONFIG", str(cfg_path))
     return pw_hash
@@ -172,9 +171,9 @@ def test_ws_local_zone_accepted_without_token_even_in_password_mode(password_mod
 
 def test_mode_none_bypasses_auth_from_any_zone(monkeypatch, tmp_path):
     # Point at a nonexistent path rather than just delenv — a real
-    # ~/.config/prisma/config.yaml on the machine running this test would
+    # ~/.config/prisma/config.toml on the machine running this test would
     # otherwise be picked up by ConfigLoader's default-locations fallback
     # (a real footgun found earlier in this project: see test_config.py).
-    monkeypatch.setenv("PRISMA_CONFIG", str(tmp_path / "does-not-exist.yaml"))
+    monkeypatch.setenv("PRISMA_CONFIG", str(tmp_path / "does-not-exist.toml"))
     r = _client_from("192.168.1.50").get("/status")
     assert r.status_code == 200

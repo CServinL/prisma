@@ -13,10 +13,9 @@ Key Features:
 - Data format standardization
 """
 
-from typing import List, Dict, Any, Optional, Union
+from typing import List, Dict, Any, Optional
 import logging
 from pydantic import BaseModel, Field, field_validator
-from datetime import datetime
 
 try:
     from pyzotero import zotero
@@ -24,7 +23,7 @@ except ImportError:
     zotero = None
 
 # Import Pydantic models
-from ...storage.models.zotero_models import ZoteroCollection, ZoteroItem, ZoteroAttachment
+from ...storage.models.zotero_models import ZoteroCollection
 
 logger = logging.getLogger(__name__)
 
@@ -152,7 +151,25 @@ class ZoteroClient:
         except Exception as e:
             logger.error(f"Failed to retrieve items: {e}")
             raise ZoteroClientError(f"Failed to retrieve items: {e}")
-    
+
+    def get_all_items(self, item_type: Optional[str] = None) -> List[Dict[str, Any]]:
+        """
+        Retrieve every item in the library, paginating past pyzotero's
+        default per-request limit (unlike get_items, which stops at
+        `limit`) -- for whole-library operations like duplicate detection
+        and library stats, which need everything, not a capped page.
+        """
+        try:
+            params: Dict[str, Any] = {}
+            if item_type:
+                params["itemType"] = item_type
+            items = self._client.everything(self._client.items(**params))
+            logger.info(f"Retrieved {len(items)} items (full library)")
+            return items
+        except Exception as e:
+            logger.error(f"Failed to retrieve all items: {e}")
+            raise ZoteroClientError(f"Failed to retrieve all items: {e}")
+
     def get_collection_items(self, collection_key: str, limit: int = 100) -> List[Dict[str, Any]]:
         """
         Retrieve items from a specific collection

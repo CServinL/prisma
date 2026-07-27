@@ -3,14 +3,15 @@
 Auth CLI Commands
 
 Generates the bcrypt password hash used by ADR-011's password-mode auth
-(server.auth.mode: password in config.yaml) — the server never sees or
+(server.auth.mode = "password" in config.toml) — the server never sees or
 stores the plaintext password itself.
 """
 
 import getpass
 
-import bcrypt
 import click
+
+from prisma.server.auth import hash_password as _hash_password
 
 
 @click.group(name='auth')
@@ -23,8 +24,8 @@ def auth_group():
 def hash_password():
     """Prompt for a password and print its bcrypt hash.
 
-    Paste the output into ~/.config/prisma/config.yaml under
-    server.auth.password_hash, and set server.auth.mode: password.
+    Paste the output into ~/.config/prisma/config.toml under
+    server.auth.password_hash, and set server.auth.mode = "password".
     """
     pw = getpass.getpass("Password: ")
     if not pw:
@@ -32,5 +33,4 @@ def hash_password():
     confirm = getpass.getpass("Confirm password: ")
     if pw != confirm:
         raise click.ClickException("passwords did not match")
-    hashed = bcrypt.hashpw(pw.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
-    click.echo(hashed)
+    click.echo(_hash_password(pw))

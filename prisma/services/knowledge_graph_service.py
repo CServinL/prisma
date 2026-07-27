@@ -24,12 +24,10 @@ did — same holder, same `local-ollama` pool, same `model_affinity` behavior.
 """
 from __future__ import annotations
 
-import hashlib
 import logging
 import re
 import threading
 import time
-import uuid
 from collections import deque
 from datetime import datetime
 from pathlib import Path
@@ -48,6 +46,8 @@ from prisma.services import resource_lock
 from prisma.services.injection_defense import wrap_untrusted
 from prisma.services.vault import VaultService
 from prisma.storage.models.vault_models import NodeType
+from prisma.utils.text import content_hash as _content_hash
+from prisma.utils.vault_paths import is_relevant_vault_path
 
 _log = logging.getLogger("prisma.knowledge_graph")
 
@@ -392,7 +392,7 @@ class KnowledgeGraphService:
         # semaphore is the actual single gate on total concurrent Ollama
         # calls across both pools, so demand never overshoots what's meant
         # to be granted — set it equal to the model's
-        # background_max_concurrent in config.yaml so kg's real demand
+        # background_max_concurrent in config.toml so kg's real demand
         # matches its real supply instead of hammering acquire() with
         # doomed requests.
         self._extraction_concurrency = max(1, extraction_concurrency)
@@ -505,9 +505,7 @@ class KnowledgeGraphService:
         could set "stale" via mark_stale() while the watcher categorically
         never adds streams/ to _pending, leaving "stale" stuck forever with
         nothing left to process — confirmed live 2026-07-25)."""
-        if any(p in path.parts for p in (".vault-files", "streams")) or path.name.startswith("."):
-            return False
-        return path.suffix in self.index_extensions
+        return is_relevant_vault_path(path, self.index_extensions)
 
     def mark_stale(self, path: Path | str | None = None) -> None:
         """Optimistically flags the index stale ahead of the watcher-driven
@@ -593,6 +591,39 @@ class KnowledgeGraphService:
             self._current_file_chunks_done = 0
         threading.Thread(target=self._full_index, daemon=True, name="knowledge-graph-reindex").start()
 
+    def list_dead_letters(self) -> list[dict]:
+        """List every dead-letter file on disk without clearing them —
+        the read-only counterpart to clear_dead_letters(), for inspecting
+        what failed before deciding to discard it. Only parses the fixed
+        5-line header (see _record_dropped_chunk's doc comment), not the
+        full error/chunk body, so this stays cheap even with large dumps."""
+        dead_letter_dir = self._kg_dir / "dead_letters"
+        out: list[dict] = []
+        if not dead_letter_dir.is_dir():
+            return out
+        for path in sorted(dead_letter_dir.glob("*.txt")):
+            entry = {"file": path.name, "source_file": None, "reason": None, "error": None,
+                     "retries": None, "time": None}
+            try:
+                with path.open(encoding="utf-8") as f:
+                    for _ in range(5):
+                        line = f.readline()
+                        if line.startswith("# source_file:"):
+                            entry["source_file"] = line.split(":", 1)[1].strip()
+                        elif line.startswith("# reason:"):
+                            entry["reason"] = line.split(":", 1)[1].strip()
+                        elif line.startswith("# error:"):
+                            entry["error"] = line.split(":", 1)[1].strip()
+                        elif line.startswith("# retries:"):
+                            entry["retries"] = line.split(":", 1)[1].strip()
+                        elif line.startswith("# time:"):
+                            entry["time"] = line.split(":", 1)[1].strip()
+            except OSError as exc:
+                _log.warning("failed to read dead-letter file %s: %s", path, exc)
+                continue
+            out.append(entry)
+        return out
+
     def clear_dead_letters(self) -> int:
         """Delete every dead-letter file on disk and reset the in-memory
         drop counters/recent list. Does not touch `_dropped_chunks_total`'s
@@ -672,7 +703,7 @@ class KnowledgeGraphService:
         Three independent ceilings, take the smallest:
         1. A hardcoded sane ceiling (4000 — see the call site's own history:
            raised from 2000 after a real entity-dense paper needed more).
-        2. `max_output_fraction` (config.yaml's kg.max_output_fraction,
+        2. `max_output_fraction` (config.toml's kg.max_output_fraction,
            default 0.25) of the model's real context window — even if more
            technically fits, quality degrades well before the context limit
            (see kg-extraction-context-length.md), and this fraction is
@@ -1008,7 +1039,7 @@ class KnowledgeGraphService:
         except (OSError, ValueError):
             return False
 
-        content_hash = hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()
+        content_hash = _content_hash(text)
         with self._lock:
             if self._indexed_hash(rel) == content_hash:
                 return False
@@ -1299,7 +1330,7 @@ class KnowledgeGraphService:
                     text = path.read_text(encoding="utf-8", errors="replace")
                 except (OSError, ValueError):
                     continue
-                content_hash = hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()
+                content_hash = _content_hash(text)
                 with self._lock:
                     if self._indexed_hash(rel) != content_hash:
                         needs_processing.add(rel)
@@ -1477,8 +1508,7 @@ class _VaultChangeHandler(FileSystemEventHandler):
         if event.is_directory:
             return
         path = Path(str(event.src_path))
-        if any(p in path.parts for p in (".vault-files", "streams")) or path.name.startswith("."):
+        if not self._service.is_relevant_path(path):
             return
-        if path.suffix in self._service.index_extensions:
-            with self._service._lock:
-                self._service._pending.add(path)
+        with self._service._lock:
+            self._service._pending.add(path)

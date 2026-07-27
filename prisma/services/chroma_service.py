@@ -9,6 +9,7 @@ import requests
 
 from prisma.services import resource_lock
 from prisma.services.vault import VaultService
+from prisma.utils.vault_paths import is_relevant_vault_path
 
 _log = logging.getLogger("prisma.chroma")
 
@@ -107,13 +108,14 @@ class ChromaIndexer:
                 if event.is_directory:
                     return
                 path = Path(str(event.src_path))
-                if any(p in path.parts for p in (".vault-files", "streams", "chats")):
+                # Deliberately excludes "chats" in addition to the KG
+                # indexer's base exclusions — chats are KG-indexed (GraphNode)
+                # but not Chroma-indexed. See is_relevant_vault_path's doc
+                # comment for the drift history this consolidation fixes.
+                if not is_relevant_vault_path(path, {".md"}, extra_exclude_dirs=frozenset({"chats"})):
                     return
-                if path.name.startswith("."):
-                    return
-                if path.suffix == ".md":
-                    with indexer._lock:
-                        indexer._pending.add(path)
+                with indexer._lock:
+                    indexer._pending.add(path)
 
         self._vault.ensure_dirs()
         self._observer = Observer()

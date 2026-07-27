@@ -411,7 +411,7 @@ For now, this simple structure serves our MVP needs perfectly.
 │
 ├── examples/                       # Usage examples
 │   ├── basic_review/
-│   │   ├── config.yaml
+│   │   ├── config.toml
 │   │   ├── run.py
 │   │   └── README.md
 │   ├── advanced_workflows/         # Phase 1

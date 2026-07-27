@@ -1,145 +1,107 @@
 # CLI Reference
 
+The CLI is deliberately minimal — it only covers what can't be an HTTP call
+(starting the server, checking readiness before/without one running, and
+bootstrapping auth). Everything else — literature review, research streams,
+Zotero library management — is API-only. See "Moved to the API" below for
+the exact routes.
+
 All commands follow the pattern: `prisma [COMMAND] [SUBCOMMAND] [OPTIONS]`
 
-Use `--config PATH` on `prisma review` and `prisma streams` commands to override the default config file (`~/.config/prisma/config.yaml`). Alternatively set the `PRISMA_CONFIG` environment variable.
-
 ---
 
-## `prisma review`
+## `prisma serve`
 
-Generate a one-shot literature review.
+Start Prisma: a supervisor process managing the API, Web, ChromaDB, and
+knowledge graph server processes independently (see ADR-012). A crash in
+any one of them no longer takes down the others.
 
 ```bash
-prisma review TOPIC [OPTIONS]
+prisma serve [OPTIONS]
 ```
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--output, -o PATH` | `./outputs/literature_review_<topic>.md` | Output file path |
-| `--sources, -s TEXT` | config value | Comma-separated sources: `arxiv,semanticscholar,...` |
-| `--limit, -l INT` | 10 | Max papers per source |
-| `--zotero-only` | false | Search only your Zotero library (works offline) |
-| `--include-authors` | false | Add author analysis to report |
-| `--refresh-cache, -r` | false | Bypass cached metadata |
-| `--config, -c PATH` | `~/.config/prisma/config.yaml` | Config file |
-
-Examples:
-```bash
-prisma review "explainable AI" --output xai_review.md
-prisma review "transformers" --sources arxiv,semanticscholar --limit 30
-prisma review "federated learning" --include-authors
-prisma review "mechanistic interpretability" --zotero-only   # works offline
-```
-
----
-
-## `prisma streams`
-
-Manage persistent research streams.
-
-### `prisma streams create`
-
-```bash
-prisma streams create NAME QUERY [OPTIONS]
-```
-
-| Option | Default | Description |
-|--------|---------|-------------|
-| `--description, -d TEXT` | — | Stream description |
-| `--frequency, -f` | `weekly` | `daily`, `weekly`, `monthly`, `manual` |
-| `--parent-collection, -p TEXT` | — | Parent Zotero collection key |
-| `--config, -c PATH` | — | Config file |
-
-### `prisma streams list`
-
-```bash
-prisma streams list [--status active|paused|archived]
-```
-
-### `prisma streams update`
-
-```bash
-prisma streams update [STREAM_ID] [--all] [--force] [--refresh-cache]
-```
-
-| Option | Description |
-|--------|-------------|
-| `--all, -a` | Update all active streams |
-| `--force, -f` | Ignore frequency, update now |
-| `--refresh-cache, -r` | Bypass cached metadata |
-
-### `prisma streams info`
-
-```bash
-prisma streams info STREAM_ID
-```
-
-### `prisma streams summary`
-
-```bash
-prisma streams summary
-```
+| `--host` | `127.0.0.1` | Bind address |
+| `--port` | 8765 | API port |
+| `--web-port` | 8766 | Web (UI) port |
+| `--chroma-port` | 8767 | ChromaDB server port |
+| `--kg-port` | 8768 | Knowledge graph server port |
+| `--supervisor-port` | 8760 | Supervisor control port (loopback only) |
+| `--reload` | false | Auto-reload the API on code changes (dev only) |
 
 ---
 
 ## `prisma status`
 
-Check system status.
+Check system status and readiness — the one diagnostic that has to run
+outside the API, since it checks whether the config file, dependencies, and
+network are even in a state where `prisma serve` would succeed.
 
 ```bash
 prisma status [--verbose]
 ```
 
-Checks: internet connectivity, config loaded, pending write queue, Zotero connectivity, dependencies, Ollama/LLM reachable.
+Checks: internet connectivity, config loaded, pending write queue, Zotero
+Web API credentials + reachability, dependencies, Ollama/LLM reachable.
 
 ---
 
-## `prisma sync`
+## `prisma reload-config`
 
-Flush the offline pending write queue to Zotero.
+Diffs the config currently loaded by the server against what's now on disk,
+and reloads only the subsystems whose section actually changed — vault,
+Zotero, retrieval/Chroma, chat — plus the supervisor's `compute_pools`
+(always, since that reload is already cheap/idempotent). No restart, no
+lost in-flight leases or connections for anything that didn't change.
 
 ```bash
-prisma sync
+prisma reload-config [--port PORT]
 ```
 
-Prisma queues Zotero write actions (save paper, create collection) when offline or when Zotero is unavailable. Run this once connectivity is restored to push all queued actions. The queue is also flushed automatically on startup when online.
+Backed by `POST /reload` (see `prisma/services/config_reload.py` for which
+sections are tracked and why — most config is read fresh per request
+already and needs no reload at all). Prints which sections changed and
+which subsystems got reloaded.
 
 ---
 
-## `prisma zotero`
+## `prisma auth`
 
-### `prisma zotero status`
+### `prisma auth hash-password`
 
-Check Zotero integration: internet connectivity, Web API credentials, local HTTP server, desktop app, current mode.
-
-```bash
-prisma zotero status
-```
-
-### `prisma zotero duplicates`
-
-Find and clean up duplicate items in your Zotero library.
+Prompts for a password (hidden, confirmed twice) and prints its bcrypt
+hash. Paste the output into `~/.config/prisma/config.toml` under
+`server.auth.password_hash`, and set `server.auth.mode = "password"` (ADR-011).
+This can't be an API call — the server has no password configured yet when
+you run it, and you wouldn't want to send a plaintext password over the
+network just to get its hash locally.
 
 ```bash
-prisma zotero duplicates [OPTIONS]
+prisma auth hash-password
 ```
 
-| Option | Description |
-|--------|-------------|
-| `--collection, -c TEXT` | Specific collection to clean |
-| `--dry-run, -n` | Show what would be deleted without deleting |
-| `--auto-select, -a` | Automatically keep oldest item |
-| `--export-report, -e FILE` | Export analysis to JSON |
-| `--verbose, -v` | Show detailed info per duplicate |
+---
 
-### `prisma zotero stats`
+## Moved to the API (2026-07-27)
 
-Show library statistics: item counts by type, items missing metadata, collection organization, recent additions.
+`prisma review`, `prisma streams`, and `prisma zotero` were removed — each
+had a full HTTP equivalent already, or gained one as part of this change.
+Use the API directly (curl, the UI, or your own script):
 
-```bash
-prisma zotero stats [--collection TEXT]
-```
+| Old CLI command | API route |
+|---|---|
+| `prisma review TOPIC` | `POST /review` (poll `GET /review/{job_id}`) |
+| `prisma streams create` | `POST /streams` |
+| `prisma streams list` | `GET /streams` |
+| `prisma streams info SLUG` | `GET /streams/{slug}` |
+| `prisma streams update SLUG [--force]` | `POST /streams/{slug}/run?force=` |
+| `prisma streams update --all` | loop `POST /streams/{slug}/run` over `GET /streams` |
+| `prisma streams summary` | compute client-side from `GET /streams` |
+| `prisma zotero status` | `GET /zotero/status` |
+| `prisma zotero duplicates` | `POST /maintenance/deduplicate` (poll `GET /maintenance/deduplicate/{job_id}`) |
+| `prisma zotero stats` | `GET /zotero/stats` (new route) |
+| `prisma sync` | `POST /zotero/sync-pending` (new route) |
 
 ---
 

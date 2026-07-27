@@ -1,13 +1,13 @@
 """
 Configuration utilities for Prisma using Pydantic.
-Load and validate YAML configuration files with robust type validation.
+Load and validate TOML configuration files with robust type validation.
 """
 
 import os
-import yaml
+import tomllib
 import logging
 from pathlib import Path
-from typing import Dict, Any, Optional, List
+from typing import Any, Optional, List
 from pydantic import BaseModel, Field, field_validator, ConfigDict
 
 logger = logging.getLogger(__name__)
@@ -18,17 +18,13 @@ class ZoteroConfig(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
     
     enabled: bool = Field(False, description="Whether Zotero integration is enabled")
-    mode: str = Field("hybrid", description="Zotero client mode: 'hybrid', 'local_api', 'sqlite', 'web'")
     api_key: Optional[str] = Field(None, description="Zotero API key")
     library_id: Optional[str] = Field(None, description="Zotero library ID")
     library_type: str = Field("user", description="Library type: 'user' or 'group'")
     default_collections: List[str] = Field(default_factory=list, description="Default collections to search")
     include_notes: bool = Field(False, description="Include notes in results")
     include_attachments: bool = Field(False, description="Include attachments in results")
-    
-    # Local API configuration
-    local_api_url: str = Field("http://localhost:23119", description="Zotero Local HTTP API URL")
-    
+
     # Legacy local database support
     library_path: str = Field(
         default_factory=lambda: str(Path.home() / "Zotero" / "zotero.sqlite"),
@@ -259,12 +255,38 @@ class ServerConfig(BaseModel):
     auth: AuthConfig = Field(default_factory=lambda: AuthConfig())
 
 
+class KGConfig(BaseModel):
+    """Knowledge graph indexer tuning (`[kg]` in config.toml), read only by
+    the kg worker process (kg_app.py). Per-deployment, not shared constants —
+    a cloud-routed extraction model (cheap per-token cost, no local-hardware
+    speed concern) can afford a much higher cap than a local model
+    (cservinl, 2026-07-25)."""
+    max_output_fraction: float = Field(0.25, description="Fraction of the model's context window reserved for output tokens")
+    max_entities: int = Field(15, description="Max entities extracted per chunk")
+    max_relationships: int = Field(20, description="Max relationships extracted per chunk")
+    index_extensions: List[str] = Field(
+        default_factory=list,
+        description="File extensions to index, with or without a leading dot (both '.md' and 'md' work). Empty = caller's own default.",
+    )
+    extraction_concurrency: int = Field(3, description="Concurrent extraction calls to the LLM backend")
+    # See docs/kg-extraction-context-length.md — a controlled test on real
+    # paper content found the old 8000 default produced ~10x fewer unique
+    # entities and ~4x fewer relationships than chunking at ~2000
+    # tokens/section, not just marginally worse. Lowered further to 1000
+    # (2026-07-05, per cservinl) after a dense chunk's JSON output exceeded
+    # max_tokens and got dropped — smaller input chunks mean proportionally
+    # smaller (and less likely to truncate) output.
+    token_budget: int = Field(1000, description="Max tokens per extraction chunk")
+
+
 class PrismaConfig(BaseModel):
     """Complete Prisma configuration with validation"""
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
+    vault_root: str = Field("", description="Vault directory path. Empty = ~/prisma-vault")
     sources: SourcesConfig = Field(default_factory=lambda: SourcesConfig())
     llm: LLMConfig = Field(default_factory=lambda: LLMConfig())
+    kg: KGConfig = Field(default_factory=lambda: KGConfig())
     chat: ChatConfig = Field(default_factory=lambda: ChatConfig())
     output: OutputConfig = Field(default_factory=lambda: OutputConfig())
     search: SearchConfig = Field(default_factory=lambda: SearchConfig())
@@ -285,12 +307,25 @@ class PrismaConfig(BaseModel):
 
 
 class ConfigLoader:
-    """Load and validate configuration from YAML files and environment variables."""
-    
-    def __init__(self):
-        self.config_path = self._get_config_path()
+    """Load and validate configuration from TOML files and environment variables."""
+
+    def __init__(self, config_path: str | Path | None = None):
+        # Explicit param takes priority over PRISMA_CONFIG/default-location
+        # discovery — for callers (e.g. the CLI's --config flag) that
+        # already have a specific path in hand, rather than needing to set
+        # an env var as a side effect just to point this at it.
+        self.config_path = Path(config_path).expanduser() if config_path else self._get_config_path()
         self.config = self._load_config()
-    
+
+    def get_vault_root(self) -> Path:
+        root = self.config.vault_root.strip()
+        if root:
+            return Path(root).expanduser().resolve()
+        return Path.home() / "prisma-vault"
+
+    def get_kg_config(self) -> KGConfig:
+        return self.config.kg
+
     def _get_config_path(self) -> Optional[Path]:
         """Get configuration file path from environment or default location."""
         # Check environment variable first
@@ -302,9 +337,9 @@ class ConfigLoader:
         
         # Check default locations
         default_locations = [
-            Path.home() / '.config' / 'prisma' / 'config.yaml',
-            Path('./config.yaml'),
-            Path('./prisma-config.yaml')
+            Path.home() / '.config' / 'prisma' / 'config.toml',
+            Path('./config.toml'),
+            Path('./prisma-config.toml')
         ]
         
         for path in default_locations:
@@ -314,13 +349,13 @@ class ConfigLoader:
         return None
     
     def _load_config(self) -> PrismaConfig:
-        """Load configuration from YAML file with defaults and validation."""
+        """Load configuration from TOML file with defaults and validation."""
         user_data = {}
-        
+
         if self.config_path:
             try:
-                with open(self.config_path, 'r', encoding='utf-8') as f:
-                    user_data = yaml.safe_load(f) or {}
+                with open(self.config_path, 'rb') as f:
+                    user_data = tomllib.load(f) or {}
                 logger.debug(f"Loaded config from {self.config_path}")
             except Exception as e:
                 logger.error(f"Failed to load config from {self.config_path}: {e}")

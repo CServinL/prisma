@@ -11,7 +11,7 @@ Each ADR documents a significant design decision: what was decided, why, and wha
 | [ADR-005](ADR-005-sequential-processing.md) | Sequential Processing | Active |
 | [ADR-006](ADR-006-simple-folder-structure.md) | Simple Folder Structure | Active |
 | [ADR-007](ADR-007-research-streams-architecture.md) | Research Streams Architecture | Active |
-| [ADR-008](ADR-008-enhanced-zotero-integration.md) | Enhanced Zotero Integration | Active |
+| [ADR-008](ADR-008-enhanced-zotero-integration.md) | Enhanced Zotero Integration (Local-API-primary, since reversed — see follow-up) | Superseded |
 | [ADR-009](ADR-009-hybrid-retrieval-architecture.md) | Hybrid Retrieval — Graphify + ChromaDB (Graphify since replaced, see follow-up) | Evolved |
 | [ADR-010](ADR-010-transport-layer-strategy.md) | Transport Layer Strategy — REST + WebSocket | Accepted |
 | [ADR-011](ADR-011-authentication-strategy.md) | Authentication Strategy | Accepted |
@@ -20,3 +20,4 @@ Each ADR documents a significant design decision: what was decided, why, and wha
 | [ADR-014](ADR-014-chat-llm-backend-interface.md) | Chat Module's LLM Backend Interface — `openai` SDK, multi-`base_url` | Accepted |
 | [ADR-015](ADR-015-chat-excerpt-context-model.md) | Chat Excerpt & Context Model — one Excerpt per chat, compressed vs. verbatim pinning by backend context budget | Accepted |
 | [ADR-016](ADR-016-chunking-and-structured-extraction-tooling.md) | Chunking and Structured-Extraction Tooling — `semchunk` over Chonkie, Instructor over Outlines | Accepted |
+| [ADR-017](ADR-017-claim-attribution-and-footnote-model.md) | Claim Attribution & Footnote Model for Chat — per-claim sourcing, distinct from grounding | Proposed |

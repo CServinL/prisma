@@ -981,6 +981,32 @@ def test_dropped_chunks_total_is_zero_when_nothing_failed(kg):
     assert status["dropped_chunks_recent"] == []
 
 
+def test_list_dead_letters_returns_header_fields_without_clearing(kg, vault):
+    f = vault.root / "notes" / "test.md"
+    f.write_text("---\ntype: note\n---\nSome content that will fail extraction.", encoding="utf-8")
+
+    with _patch_create(kg, side_effect=ValueError("validation retries exhausted")), \
+         patch("prisma.services.resource_lock.acquire", return_value=(True, "local-ollama", "req-1")), \
+         patch("prisma.services.resource_lock.release"):
+        kg._extract_file(f, "note")
+
+    dead_letter = Path(kg.status()["dropped_chunks_recent"][0]["dead_letter_path"])
+
+    entries = kg.list_dead_letters()
+
+    assert len(entries) == 1
+    assert entries[0]["file"] == dead_letter.name
+    assert entries[0]["source_file"] == "notes/test.md"
+    assert "validation retries exhausted" in entries[0]["error"]
+    # read-only — the file and in-memory counters are untouched
+    assert dead_letter.exists()
+    assert kg.status()["dropped_chunks_total"] == 1
+
+
+def test_list_dead_letters_returns_empty_when_none_exist(kg):
+    assert kg.list_dead_letters() == []
+
+
 def test_clear_dead_letters_removes_files_and_resets_counters(kg, vault):
     f = vault.root / "notes" / "test.md"
     f.write_text("---\ntype: note\n---\nSome content that will fail extraction.", encoding="utf-8")
@@ -1004,3 +1030,78 @@ def test_clear_dead_letters_removes_files_and_resets_counters(kg, vault):
 
 def test_clear_dead_letters_returns_zero_when_none_exist(kg):
     assert kg.clear_dead_letters() == 0
+
+
+# ── taint_file ──────────────────────────────────────────────────────────────
+
+def test_taint_file_returns_false_for_nonexistent_file(kg):
+    assert kg.taint_file("notes/does-not-exist.md") is False
+
+
+def test_taint_file_clears_tracking_and_enqueues_existing_file(kg, vault):
+    f = vault.root / "notes" / "test.md"
+    f.write_text("---\ntype: note\n---\nSome content about neural networks.", encoding="utf-8")
+    result = _extraction(nodes=[{"id": "test_neural_networks", "label": "Neural Networks"}])
+
+    with _patch_create(kg, return_value=result), \
+         patch("prisma.services.resource_lock.acquire", return_value=(True, "local-ollama", "req-1")):
+        kg._extract_file(f, "note")
+
+    assert kg._indexed_hash("notes/test.md") is not None  # extraction tracked it
+
+    tainted = kg.taint_file("notes/test.md")
+
+    assert tainted is True
+    assert kg._indexed_hash("notes/test.md") is None  # tracking cleared
+    assert f in kg._pending  # enqueued for re-extraction
+
+
+# ── entities_for_file ─────────────────────────────────────────────────────
+
+def test_entities_for_file_returns_nodes_and_edges(kg, vault):
+    f = vault.root / "notes" / "test.md"
+    f.write_text("---\ntype: source\n---\nPaper A relates to Paper B.", encoding="utf-8")
+    result = _extraction(
+        nodes=[{"id": "a", "label": "A"}, {"id": "b", "label": "B"}],
+        edges=[{"source": "a", "target": "b", "relation": "cites", "confidence": "EXTRACTED"}],
+    )
+
+    with _patch_create(kg, return_value=result), \
+         patch("prisma.services.resource_lock.acquire", return_value=(True, "local-ollama", "req-1")):
+        kg._extract_file(f, "source")
+
+    data = kg.entities_for_file("notes/test.md")
+
+    entity_ids = {e["id"] for e in data["entities"]}
+    assert entity_ids == {"a", "b"}
+    assert len(data["edges"]) == 1
+    assert data["edges"][0]["source"] == "a"
+    assert data["edges"][0]["target"] == "b"
+    assert data["edges"][0]["relation"] == "cites"
+
+
+def test_entities_for_file_empty_for_untracked_file(kg):
+    data = kg.entities_for_file("notes/never-extracted.md")
+    assert data["entities"] == []
+    assert data["edges"] == []
+
+
+# ── query (compatibility wrapper over search()) ────────────────────────────
+
+def test_query_returns_text_summary_of_matching_entities(kg, vault):
+    f = vault.root / "notes" / "test.md"
+    f.write_text("---\ntype: note\n---\nContent about quantum computing.", encoding="utf-8")
+    result = _extraction(nodes=[{"id": "quantum_computing", "label": "Quantum Computing"}])
+
+    with _patch_create(kg, return_value=result), \
+         patch("prisma.services.resource_lock.acquire", return_value=(True, "local-ollama", "req-1")):
+        kg._extract_file(f, "note")
+
+    results = kg.query("quantum")
+
+    assert len(results) == 1
+    assert "notes/test.md" in results[0]["text"]
+
+
+def test_query_returns_empty_when_no_matches(kg):
+    assert kg.query("nothing indexed matches this") == []

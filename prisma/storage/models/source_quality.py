@@ -6,7 +6,7 @@ for ensuring we only include legitimate academic content.
 """
 
 from enum import Enum
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional
 from pydantic import BaseModel, Field
 
 

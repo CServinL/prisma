@@ -25,7 +25,7 @@ class TestAnalysisAgent(unittest.TestCase):
         # singleton (built once, at first import of that module, long before
         # this test runs) — patching Path.exists here wouldn't retroactively
         # change it. These tests assume the Ollama-native code path
-        # regardless of whatever real ~/.config/prisma/config.yaml the
+        # regardless of whatever real ~/.config/prisma/config.toml the
         # machine running this test happens to have, so force it directly.
         self.analysis_agent.llm_config.provider = 'ollama'
         self.sample_paper = PaperMetadata(

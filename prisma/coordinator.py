@@ -3,7 +3,6 @@ Prisma Coordinator - Main orchestration logic for literature reviews.
 MVP: Fast, simple, working implementation.
 """
 
-import json
 from pathlib import Path
 from typing import Dict, List, Any
 import time

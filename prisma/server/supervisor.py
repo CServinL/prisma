@@ -1,10 +1,11 @@
 """Prisma process supervisor — see ADR-012.
 
-Deliberately imports nothing beyond the standard library (plus `yaml`, a
-small, low-risk dependency already required for config) — no fastapi, no
-chromadb, no graphify. This is the "most basic and safe" layer: if every
-other dependency in this codebase has a bug, the supervisor should still be
-able to report that and attempt recovery.
+Deliberately imports nothing beyond the standard library — no fastapi, no
+chromadb, no graphify, not even pydantic, and (since the config format
+moved to TOML) not even yaml anymore: `tomllib` is stdlib as of Python
+3.11. This is the "most basic and safe" layer: if every other dependency in
+this codebase has a bug, the supervisor should still be able to report that
+and attempt recovery.
 
 Spawns and monitors three long-running worker processes:
   - api:    prisma.server.app       (REST + WebSocket)
@@ -20,7 +21,7 @@ Exposes a minimal control surface on a loopback-only port:
   POST /supervisor/resources/release
        {"resource": "local_ollama", "request_id": "..."}
   POST /supervisor/resources/reload
-       Re-reads compute_pools from config.yaml into the running
+       Re-reads compute_pools from config.toml into the running
        ResourceManager — no restart, no lost in-flight leases. For tuning
        max_concurrent/per-model overrides against real observed GPU
        utilization without killing every worker to pick up one number.
@@ -28,7 +29,7 @@ Exposes a minimal control surface on a loopback-only port:
 Compute-resource locking (GPU/LLM/embeddings): the supervisor has no idea
 which actions actually use a GPU, or whether "the LLM" is a local GPU, a
 remote Ollama box, or a cloud API — it just holds named, capacity-limited
-pool leases (configured via compute_pools in config.yaml; default: one
+pool leases (configured via compute_pools in config.toml; default: one
 pool, "default", concurrency 1) and arbitrates them. Any code about to do
 LLM/embedding work is responsible for its own acquire -> use -> release
 around that work.
@@ -63,9 +64,9 @@ log = logging.getLogger("prisma.supervisor")
 
 def _resolve_vault_root() -> Path:
     try:
-        import yaml
-        cfg_path = Path.home() / ".config" / "prisma" / "config.yaml"
-        cfg = yaml.safe_load(cfg_path.read_text()) or {}
+        import tomllib
+        cfg_path = Path.home() / ".config" / "prisma" / "config.toml"
+        cfg = tomllib.loads(cfg_path.read_text()) or {}
         root = cfg.get("vault_root", "").strip()
         if root:
             return Path(root).expanduser().resolve()
@@ -83,9 +84,9 @@ def _venv_bin(name: str) -> str:
 
 def _ollama_base_url() -> str:
     try:
-        import yaml
-        cfg_path = Path.home() / ".config" / "prisma" / "config.yaml"
-        cfg = yaml.safe_load(cfg_path.read_text()) or {}
+        import tomllib
+        cfg_path = Path.home() / ".config" / "prisma" / "config.toml"
+        cfg = tomllib.loads(cfg_path.read_text()) or {}
         host = cfg.get("llm", {}).get("host", "localhost:11434")
         return f"http://{host}"
     except Exception:
@@ -120,7 +121,7 @@ def _model_vram_profile_path() -> Path:
 def _load_vram_profiles() -> dict[str, int]:
     """Auto-learned model -> real resident VRAM MB, from past
     _probe_model_vram() runs. Distinct from compute_pools.*.models[].vram_mb
-    in config.yaml: that's a manual, user-curated estimate and always wins
+    in config.toml: that's a manual, user-curated estimate and always wins
     when present (see _profile_missing_models) — this file only fills in
     models nobody ever measured by hand."""
     try:
@@ -177,7 +178,7 @@ def _check_pool_vram_fit(
     model_vram: dict[str, dict[str, int]],
 ) -> dict[str, dict]:
     """Sum each VRAM-budget-aware pool's configured models' vram_mb (a
-    config.yaml value, falling back to a saved auto-profile) against its
+    config.toml value, falling back to a saved auto-profile) against its
     vram_budget_mb — catches "these models don't fit together" at
     startup/config-load time instead of a human reasoning through the
     arithmetic after chat becomes unusable during a sync (the real incident
@@ -227,7 +228,7 @@ def _profile_missing_models(
     pool_provider: dict[str, str] | None = None,
 ) -> None:
     """Run once at supervisor startup, in its own daemon thread — for any
-    model in a VRAM-budget-aware pool with neither a config.yaml `vram_mb`
+    model in a VRAM-budget-aware pool with neither a config.toml `vram_mb`
     nor a previously saved profile, probe it for real and persist the
     result, updating the live ResourceManager immediately so it takes
     effect without a restart.
@@ -284,24 +285,35 @@ def _load_compute_pools() -> tuple[
 ]:
     """Named compute pools and their concurrency limits, e.g.:
 
-        compute_pools:
-          - name: local-ollama       # a single GPU / single Ollama instance
-            type: gpu                # models here can genuinely coexist in VRAM
-            provider: ollama          # ollama | llama_cpp — see note below
-            max_concurrent: 3         # fallback for any model below with no override
-            vram_budget_mb: 14000     # total VRAM this pool may commit across ALL resident models
-            models:
-              - name: qwen2.5:7b-32k
-                max_concurrent: 4      # matches this machine's OLLAMA_NUM_PARALLEL
-                background_max_concurrent: 3  # reserve >=1 slot for interactive (chat)
-                vram_mb: 7500          # estimate used only before it's ever been observed loaded
-              - name: nomic-embed-text
-                vram_mb: 1000
-          - name: openrouter
-            type: cloud               # auto-scaled/auto-routed — no swap penalty to model
-            provider: openrouter
-            max_concurrent: 8
-            models: [anthropic/claude-3.5-sonnet]
+        [[compute_pools]]
+        name = "local-ollama"        # a single GPU / single Ollama instance
+        type = "gpu"                 # models here can genuinely coexist in VRAM
+        provider = "ollama"          # ollama | llama_cpp — see note below
+        max_concurrent = 3           # fallback for any model below with no override
+        vram_budget_mb = 14000       # total VRAM this pool may commit across ALL resident models
+
+        [[compute_pools.models]]
+        name = "qwen2.5:7b-32k"
+        max_concurrent = 4              # matches this machine's OLLAMA_NUM_PARALLEL
+        background_max_concurrent = 3   # reserve >=1 slot for interactive (chat)
+        vram_mb = 7500                  # estimate used only before it's ever been observed loaded
+
+        [[compute_pools.models]]
+        name = "nomic-embed-text"
+        vram_mb = 1000
+
+        [[compute_pools]]
+        name = "openrouter"
+        type = "cloud"                # auto-scaled/auto-routed — no swap penalty to model
+        provider = "openrouter"
+        max_concurrent = 8
+
+        [[compute_pools.models]]
+        name = "anthropic/claude-3.5-sonnet"
+
+    Each `models` entry is always a table (TOML arrays must be homogeneous,
+    unlike YAML — the old bare-string shorthand for "no overrides" is gone;
+    just omit every optional key and keep `name`).
 
     `type: gpu` pools model actual GPU VRAM sharing, which turned out to be
     richer than "one resident model at a time": verified empirically
@@ -336,10 +348,9 @@ def _load_compute_pools() -> tuple[
     degraded fallback. `provider: ollama` (the default) keeps the live
     `/api/ps` behavior described above.
 
-    Each `models` entry is either a plain string (uses the pool's own
-    `max_concurrent`, no `vram_mb`/`background_max_concurrent`) or a
-    `{name, max_concurrent?, vram_mb?, background_max_concurrent?}`
-    mapping. `max_concurrent` still matters even with a VRAM budget: it
+    Each `models` entry is a `{name, max_concurrent?, vram_mb?,
+    background_max_concurrent?}` table — only `name` is required.
+    `max_concurrent` still matters even with a VRAM budget: it
     bounds how many *simultaneous same-model* calls run at once, a
     separate concern from whether a second, different model may also load
     alongside it. `background_max_concurrent` reserves headroom for
@@ -362,9 +373,9 @@ def _load_compute_pools() -> tuple[
     assumption when nothing is configured.
     """
     try:
-        import yaml
-        cfg_path = Path.home() / ".config" / "prisma" / "config.yaml"
-        cfg = yaml.safe_load(cfg_path.read_text()) or {}
+        import tomllib
+        cfg_path = Path.home() / ".config" / "prisma" / "config.toml"
+        cfg = tomllib.loads(cfg_path.read_text()) or {}
         pools = cfg.get("compute_pools")
         if pools:
             capacity = {p["name"]: int(p.get("max_concurrent", 1)) for p in pools}
@@ -383,17 +394,17 @@ def _load_compute_pools() -> tuple[
                 overrides: dict[str, int] = {}
                 vram: dict[str, int] = {}
                 background: dict[str, int] = {}
+                # TOML arrays must be homogeneous, so unlike the old YAML
+                # config, `models` entries are always tables (no bare-string
+                # shorthand) -- one less branch to handle here as a result.
                 for entry in p.get("models", []):
-                    if isinstance(entry, dict):
-                        names.add(entry["name"])
-                        if "max_concurrent" in entry:
-                            overrides[entry["name"]] = int(entry["max_concurrent"])
-                        if "vram_mb" in entry:
-                            vram[entry["name"]] = int(entry["vram_mb"])
-                        if "background_max_concurrent" in entry:
-                            background[entry["name"]] = int(entry["background_max_concurrent"])
-                    else:
-                        names.add(entry)
+                    names.add(entry["name"])
+                    if "max_concurrent" in entry:
+                        overrides[entry["name"]] = int(entry["max_concurrent"])
+                    if "vram_mb" in entry:
+                        vram[entry["name"]] = int(entry["vram_mb"])
+                    if "background_max_concurrent" in entry:
+                        background[entry["name"]] = int(entry["background_max_concurrent"])
                 pool_models[p["name"]] = names
                 model_concurrency[p["name"]] = overrides
                 pool_vram_budget[p["name"]] = int(p["vram_budget_mb"]) if "vram_budget_mb" in p else None
@@ -882,7 +893,7 @@ class ResourceManager:
         model_background_limit: dict[str, dict[str, int]] | None = None,
         pool_provider: dict[str, str] | None = None,
     ) -> None:
-        """Re-read compute_pools from config.yaml into a *running*
+        """Re-read compute_pools from config.toml into a *running*
         ResourceManager, without restarting the supervisor or touching
         in-flight leases. Motivated by tuning `max_concurrent`/per-model
         overrides against real observed GPU utilization (e.g. a model turns

@@ -157,8 +157,6 @@ backoff), or on request via its control API.
 | GET | `/search/deep` | Semantic search via ChromaDB + knowledge graph re-ranking |
 | GET | `/home` | Render the vault home/dashboard note |
 | POST | `/render` | Render arbitrary markdown to HTML |
-| POST | `/knowledge-graph/taint` | Force full re-index of knowledge graph |
-| POST | `/knowledge-graph/drop` | Drop the entire knowledge graph, forcing a full reindex from scratch |
 | GET | `/vault/assets/{path}` | Serve vault static assets |
 | POST | `/reload` | Reinitialize vault, Zotero, knowledge graph, ChromaDB client (in-process state, not a restart) |
 | POST | `/reload/vault` | Reinitialize VaultService from config |
@@ -166,6 +164,22 @@ backoff), or on request via its control API.
 | POST | `/reload/indexer` | Restart knowledge graph indexer |
 | POST | `/reload/chroma` | Rebuild the ChromaDB client (reconnects to the Chroma server process) |
 | GET | `/ws` | WebSocket — server push events (`vault_change`, `stream_progress`) |
+
+### Admin/instrumentation (API process)
+
+Namespaced under `/admin/kg/` rather than sitting alongside the user-facing routes above,
+so they read unambiguously as ops/diagnostic tools — the UI never calls any of these. Each
+proxies through `KnowledgeGraphClient` to the knowledge graph process (see ADR-009's hybrid
+retrieval design and its "Follow-up" section for what the KG layer is actually for).
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| POST | `/admin/kg/taint` | Mark the whole index stale; next cycle re-indexes changed files |
+| POST | `/admin/kg/drop` | Drop the entire Kùzu graph + manifest, forcing a full reindex from scratch |
+| GET | `/admin/kg/dead-letters` | List failed-extraction records (file, source, error, retries, time) without discarding them |
+| DELETE | `/admin/kg/dead-letters` | Discard dead-letter records so the next cycle retries them fresh |
+| GET | `/admin/kg/entities?path=…` | Raw entities + relationship edges extracted from one vault-relative file — inspect extraction quality directly |
+| GET | `/admin/kg/search?q=…` | Raw keyword match over Entity nodes only, bypassing Ollama + ChromaDB — isolates the KG layer so a bad `/search/deep` result can be attributed to extraction vs. ranking vs. the LLM |
 
 ## Background Services
 

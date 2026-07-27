@@ -2,9 +2,8 @@
 Report Agent - Generates final literature review reports.
 """
 
-from typing import List, Dict, Any, Optional
+from typing import List, Optional
 from datetime import datetime
-from pathlib import Path
 
 from ..storage.models.agent_models import LiteratureReviewReport, ReportMetadata, AnalysisResult
 

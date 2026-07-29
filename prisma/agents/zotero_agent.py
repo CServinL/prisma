@@ -186,7 +186,7 @@ class ZoteroAgent:
             # If specific collections are requested
             if criteria.collections:
                 for collection_key in criteria.collections:
-                    items = self.client.get_collection_items(collection_key, limit=criteria.limit)
+                    items = self.client.get_collection_items(collection_key)
                     papers.extend([ZoteroItem.from_zotero_data(item) for item in items])
             
             # If query search is requested

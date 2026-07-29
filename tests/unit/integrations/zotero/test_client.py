@@ -13,6 +13,7 @@ import pytest
 from prisma.integrations.zotero.client import (
     ZoteroAPIConfig,
     ZoteroClient,
+    ZoteroClientError,
     check_web_api_reachable,
 )
 
@@ -46,6 +47,32 @@ def test_check_web_api_reachable_false_on_exception(monkeypatch):
     assert check_web_api_reachable("key", "12345") is False
 
 
+def test_check_web_api_reachable_uses_users_endpoint_by_default(monkeypatch):
+    captured = {}
+    def _urlopen(req, timeout=None):
+        captured["url"] = req.full_url
+        cm = MagicMock()
+        cm.__enter__.return_value = MagicMock(status=200)
+        return cm
+    monkeypatch.setattr("urllib.request.urlopen", _urlopen)
+    check_web_api_reachable("key", "12345")
+    assert "/users/12345/" in captured["url"]
+
+
+def test_check_web_api_reachable_uses_groups_endpoint_for_group_libraries(monkeypatch):
+    # Regression: group libraries were always probed against /users/, so
+    # this reported "unreachable" regardless of real connectivity.
+    captured = {}
+    def _urlopen(req, timeout=None):
+        captured["url"] = req.full_url
+        cm = MagicMock()
+        cm.__enter__.return_value = MagicMock(status=200)
+        return cm
+    monkeypatch.setattr("urllib.request.urlopen", _urlopen)
+    check_web_api_reachable("key", "12345", library_type="group")
+    assert "/groups/12345/" in captured["url"]
+
+
 # ── status() ───────────────────────────────────────────────────────────────
 
 def test_status_unconfigured():
@@ -59,6 +86,36 @@ def test_status_configured_and_reachable(monkeypatch):
     monkeypatch.setattr("prisma.integrations.zotero.client.check_web_api_reachable", lambda *a, **kw: True)
     body = c.status()
     assert body.model_dump() == {"mode": "web-api", "available": True, "reachable": True}
+
+
+def test_status_passes_library_type_to_reachability_check(monkeypatch):
+    c = ZoteroClient(ZoteroAPIConfig(api_key="key123", library_id="12345", library_type="group"))
+    c._client = MagicMock()
+    captured = {}
+    def _fake_reachable(api_key, library_id, library_type="user"):
+        captured["library_type"] = library_type
+        return True
+    monkeypatch.setattr("prisma.integrations.zotero.client.check_web_api_reachable", _fake_reachable)
+    c.status()
+    assert captured["library_type"] == "group"
+
+
+# ── is_available() ─────────────────────────────────────────────────────────
+
+def test_is_available_true_when_configured_does_not_hit_network(monkeypatch):
+    # Regression: is_available() used to call test_connection() -> a live
+    # key_info() network request. stream_runner.py calls this up to once
+    # per paper found per run, so this must be a pure config check.
+    c = _client()
+    def _fail(*a, **kw):
+        raise AssertionError("is_available() must not perform network I/O")
+    monkeypatch.setattr(c, "test_connection", _fail)
+    assert c.is_available() is True
+
+
+def test_is_available_false_when_unconfigured():
+    c = ZoteroClient(ZoteroAPIConfig(api_key="", library_id="", library_type="user"))
+    assert c.is_available() is False
 
 
 # ── find_by_identifier ────────────────────────────────────────────────────
@@ -105,14 +162,25 @@ def test_find_by_identifier_respects_collection_scope():
     assert c.find_by_identifier(doi="10.1/x", collection_key="TARGET") is None
 
 
+def test_find_by_identifier_uses_higher_search_limit_than_default():
+    # Regression: search_items()'s 100-item default risked a false negative
+    # for a common title/DOI whose exact match sat past page 1.
+    c = _client()
+    c._client.items.return_value = [_zotero_item_raw("K1", doi="10.1/xyz", title="A paper")]
+    c.find_by_identifier(doi="10.1/xyz")
+    _, kwargs = c._client.items.call_args
+    assert kwargs["limit"] > 100
+
+
 # ── get_collection_items ───────────────────────────────────────────────────
 
 def test_get_collection_items_without_query():
     c = _client()
+    c._client.everything.side_effect = lambda x: x
     c._client.collection_items.return_value = [_zotero_item_raw("K1", title="A")]
     items = c.get_collection_items("COLL1")
     assert [i.key for i in items] == ["K1"]
-    c._client.collection_items.assert_called_once_with("COLL1", limit=100)
+    c._client.collection_items.assert_called_once_with("COLL1")
 
 
 def test_get_collection_items_passes_q_to_zotero_native_search():
@@ -121,16 +189,33 @@ def test_get_collection_items_passes_q_to_zotero_native_search():
     # server-side search (matches title/creators/abstract/etc.), scoped to
     # the collection, in one call.
     c = _client()
+    c._client.everything.side_effect = lambda x: x
     c._client.collection_items.return_value = [_zotero_item_raw("K2", title="Match")]
     items = c.get_collection_items("COLL1", query="neural networks")
     assert [i.key for i in items] == ["K2"]
-    c._client.collection_items.assert_called_once_with("COLL1", limit=100, q="neural networks")
+    c._client.collection_items.assert_called_once_with("COLL1", q="neural networks")
+
+
+def test_get_collection_items_paginates_past_first_page():
+    # Regression: the old implementation was capped at limit=100, so
+    # ensure_collection()/stream dedup could silently miss items past
+    # page 1 for a large collection.
+    c = _client()
+    c._client.collection_items.return_value = "page1_query_result"
+    c._client.everything.return_value = [
+        _zotero_item_raw("K1", title="A"), _zotero_item_raw("K2", title="B"),
+        _zotero_item_raw("K3", title="C"),
+    ]
+    items = c.get_collection_items("COLL1")
+    assert [i.key for i in items] == ["K1", "K2", "K3"]
+    c._client.everything.assert_called_once_with("page1_query_result")
 
 
 # ── ensure_collection ──────────────────────────────────────────────────────
 
 def test_ensure_collection_returns_existing():
     c = _client()
+    c._client.everything.side_effect = lambda x: x
     c._client.collections.return_value = [
         {"key": "C1", "version": 1, "data": {"name": "My Stream"}, "library": {}}
     ]
@@ -141,6 +226,7 @@ def test_ensure_collection_returns_existing():
 
 def test_ensure_collection_creates_when_missing():
     c = _client()
+    c._client.everything.side_effect = lambda x: x
     c._client.collections.return_value = []
     c._client.create_collections.return_value = {
         "successful": {"0": {"key": "C2", "version": 1, "data": {"name": "New Stream"}}}
@@ -148,6 +234,33 @@ def test_ensure_collection_creates_when_missing():
     result = c.ensure_collection("New Stream")
     assert result.key == "C2"
     c._client.create_collections.assert_called_once()
+
+
+def test_ensure_collection_finds_existing_collection_past_first_page():
+    # Regression: get_collections()'s 100-item cap meant a library with
+    # >100 collections could get a duplicate created for an existing one
+    # sitting past page 1.
+    c = _client()
+    c._client.collections.return_value = ["page1_query_result"]
+    c._client.everything.return_value = [
+        {"key": "C1", "version": 1, "data": {"name": "Old Stream"}, "library": {}},
+        {"key": "C99", "version": 1, "data": {"name": "My Stream"}, "library": {}},
+    ]
+    result = c.ensure_collection("My Stream")
+    assert result.key == "C99"
+    c._client.create_collections.assert_not_called()
+
+
+def test_ensure_collection_raises_when_creation_fails():
+    # Regression: ensure_collection() used to return None on a failed
+    # create_collection(), and callers (e.g. stream_runner.py) immediately
+    # access .key with no None-check.
+    c = _client()
+    c._client.everything.side_effect = lambda x: x
+    c._client.collections.return_value = []
+    c._client.create_collections.return_value = {"successful": {}}
+    with pytest.raises(ZoteroClientError):
+        c.ensure_collection("Broken Stream")
 
 
 # ── get_pdf_bytes ──────────────────────────────────────────────────────────

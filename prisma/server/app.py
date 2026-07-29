@@ -2219,9 +2219,18 @@ def _run_deduplicate(job_id: str, dry_run: bool = False, max_level: int = 3, sen
                 _log.info("deduplicate[%s]: dry_run would delete key=%s title=%r (keep=%s)", job_id, item.key, item.title, keep.key)
             else:
                 try:
-                    _zotero.delete_item(item.key)
-                    items_deleted += 1
-                    _log.info("deduplicate[%s]: deleted key=%s title=%r", job_id, item.key, item.title)
+                    # delete_item() catches its own exceptions and returns
+                    # bool -- it never raises, so this must check the
+                    # return value explicitly, not rely on `except` to
+                    # catch a failure (previously counted every call as a
+                    # successful deletion regardless of outcome).
+                    deleted = _zotero.delete_item(item.key)
+                    if deleted:
+                        items_deleted += 1
+                        _log.info("deduplicate[%s]: deleted key=%s title=%r", job_id, item.key, item.title)
+                    else:
+                        errors.append(f"{item.key}: delete_item returned False")
+                        _log.warning("deduplicate[%s]: failed to delete key=%s", job_id, item.key)
                 except Exception as exc:
                     errors.append(f"{item.key}: {exc}")
                     _log.warning("deduplicate[%s]: failed to delete key=%s: %s", job_id, item.key, exc)

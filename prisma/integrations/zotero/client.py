@@ -41,21 +41,26 @@ from ...utils.config import PrismaConfig
 logger = logging.getLogger(__name__)
 
 
-def check_web_api_reachable(api_key: Optional[str], library_id: Optional[str], timeout: float = 2.0) -> bool:
+def check_web_api_reachable(
+    api_key: Optional[str], library_id: Optional[str], timeout: float = 2.0, library_type: str = "user",
+) -> bool:
     """Live reachability check: validates the configured library is
     actually reachable with these credentials, not just that a key is
     present. Backs ZoteroClient.status()'s `reachable` field, `prisma
     status`, and the UI status panel. Deliberately uses urllib directly
     rather than pyzotero -- this is a short-timeout probe, not a real
     library operation, and doesn't need pyzotero's pagination/retry
-    machinery."""
+    machinery. `library_type="group"` hits /groups/{id}/... instead of
+    /users/{id}/... -- a group library probed against the user endpoint
+    always 404s and reports unreachable regardless of real connectivity."""
     if not api_key or not library_id:
         return False
     import urllib.error
     import urllib.request
 
+    segment = "groups" if library_type == "group" else "users"
     req = urllib.request.Request(
-        f"https://api.zotero.org/users/{library_id}/collections?limit=1",
+        f"https://api.zotero.org/{segment}/{library_id}/collections?limit=1",
         headers={"Zotero-API-Key": api_key, "Zotero-API-Version": "3"},
     )
     try:
@@ -179,17 +184,26 @@ class ZoteroClient:
             return False
 
     def is_available(self) -> bool:
-        return self.test_connection()
+        """Cheap, network-free check: are credentials configured at all?
+        Deliberately NOT a live reachability probe -- callers on hot paths
+        (stream_runner.py checks this up to once per paper found, per
+        run) need an O(1) "should we even attempt writes" gate, matching
+        the old ZoteroMode-based check this replaced (a free enum
+        comparison, no network). Use test_connection()/status().reachable
+        for an actual live check."""
+        return bool(self.config.api_key and self.config.library_id)
 
     def status(self) -> ZoteroStatus:
         """`available` keeps its existing meaning (credentials configured);
         `reachable` is the live check (mirrors the same short-timeout
         pattern already used for Ollama)."""
-        configured = bool(self.config.api_key and self.config.library_id)
+        configured = self.is_available()
         return ZoteroStatus(
             mode="web-api",
             available=configured,
-            reachable=check_web_api_reachable(self.config.api_key, self.config.library_id) if configured else False,
+            reachable=check_web_api_reachable(
+                self.config.api_key, self.config.library_id, library_type=self.config.library_type,
+            ) if configured else False,
         )
 
     # ── Collections ───────────────────────────────────────────────────────────
@@ -202,6 +216,19 @@ class ZoteroClient:
         except Exception as e:
             logger.error(f"Failed to retrieve collections: {e}")
             raise ZoteroClientError(f"Failed to retrieve collections: {e}")
+
+    def get_all_collections(self) -> List[ZoteroCollection]:
+        """Every collection in the library, paginating past pyzotero's
+        default per-request limit -- get_collections()'s 100-item cap let
+        ensure_collection() miss an existing collection past page 1 and
+        create a duplicate for any library with >100 collections."""
+        try:
+            raw = self._client.everything(self._client.collections())
+            logger.info(f"Retrieved {len(raw)} collections (full library)")
+            return [ZoteroCollection.from_zotero_data(c) for c in raw]
+        except Exception as e:
+            logger.error(f"Failed to retrieve all collections: {e}")
+            raise ZoteroClientError(f"Failed to retrieve all collections: {e}")
 
     def create_collection(self, collection_data: Dict[str, Any]) -> Optional[ZoteroCollection]:
         """
@@ -229,15 +256,22 @@ class ZoteroClient:
             logger.error(f"Failed to create collection: {e}")
             return None
 
-    def ensure_collection(self, name: str, parent_key: Optional[str] = None) -> Optional[ZoteroCollection]:
-        """Return the existing collection with this name, or create it."""
-        for c in self.get_collections():
+    def ensure_collection(self, name: str, parent_key: Optional[str] = None) -> ZoteroCollection:
+        """Return the existing collection with this name, or create it.
+        Raises ZoteroClientError if creation fails, rather than returning
+        None -- callers (e.g. stream_runner.py) use the result's .key
+        immediately and shouldn't need a None-check for a failure this
+        method can detect and report explicitly."""
+        for c in self.get_all_collections():
             if c.name == name:
                 return c
         data: Dict[str, Any] = {"name": name}
         if parent_key:
             data["parentCollection"] = parent_key
-        return self.create_collection(data)
+        created = self.create_collection(data)
+        if created is None:
+            raise ZoteroClientError(f"Failed to create collection {name!r}")
+        return created
 
     def delete_collection(self, collection_key: str) -> bool:
         """Delete a collection."""
@@ -288,16 +322,21 @@ class ZoteroClient:
             logger.error(f"Failed to retrieve all items: {e}")
             raise ZoteroClientError(f"Failed to retrieve all items: {e}")
 
-    def get_collection_items(self, collection_key: str, limit: int = 100, query: Optional[str] = None) -> List[ZoteroItem]:
-        """`query`, if given, is passed straight through to Zotero's own
-        `q` search parameter (same full-text match across title/creators/
-        abstract/etc. that search_items() uses) scoped server-side to this
-        collection -- not a client-side title-only substring filter."""
+    def get_collection_items(self, collection_key: str, query: Optional[str] = None) -> List[ZoteroItem]:
+        """Every item in this collection, paginating past pyzotero's
+        default per-request limit -- callers (stream_runner.py's dedup
+        index, /zotero/items) need the whole collection, not just page 1,
+        or a growing collection would silently start missing items past
+        the 100th. `query`, if given, is passed straight through to
+        Zotero's own `q` search parameter (same full-text match across
+        title/creators/abstract/etc. that search_items() uses) scoped
+        server-side to this collection -- not a client-side title-only
+        substring filter."""
         try:
-            params: Dict[str, Any] = {"limit": limit}
+            params: Dict[str, Any] = {}
             if query:
                 params["q"] = query
-            raw = self._client.collection_items(collection_key, **params)
+            raw = self._client.everything(self._client.collection_items(collection_key, **params))
             logger.info(f"Retrieved {len(raw)} items from collection {collection_key}")
             return [ZoteroItem.from_zotero_data(i) for i in raw]
         except Exception as e:
@@ -338,19 +377,26 @@ class ZoteroClient:
         the check to one collection; omit it to search the whole library.
         Returns None if nothing matches -- callers fall through to their
         own NLTK stem-overlap/LLM checks.
+
+        Uses a higher-than-default search limit: relying on
+        search_items()'s 100-item default risked a false negative (and a
+        resulting duplicate insert) for a common title/DOI whose exact
+        match happened to sit past page 1 of Zotero's relevance ranking.
         """
+        _IDENTIFIER_SEARCH_LIMIT = 250
+
         def _in_collection(item: ZoteroItem) -> bool:
             return collection_key is None or collection_key in item.collections
 
         if doi:
             doi_norm = doi.lower().strip()
-            for item in self.search_items(doi):
+            for item in self.search_items(doi, limit=_IDENTIFIER_SEARCH_LIMIT):
                 if item.doi and item.doi.lower().strip() == doi_norm and _in_collection(item):
                     return item
 
         if title:
             title_norm = title.lower().strip()
-            for item in self.search_items(title):
+            for item in self.search_items(title, limit=_IDENTIFIER_SEARCH_LIMIT):
                 if item.title and item.title.lower().strip() == title_norm and _in_collection(item):
                     return item
 

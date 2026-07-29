@@ -36,7 +36,7 @@ def _t(label: str, _t0=[0.0]):
 _t("importing fastapi")
 from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 from prisma.server.access_log import AccessLogMiddleware
 from prisma.server.auth import (
     AuthMiddleware, LoginRequest, LoginResponse, classify_zone, issue_token, verify_password,
@@ -559,7 +559,7 @@ class JobStatus(BaseModel):
     authors_found: int = 0
     output_file: str = ""
     content_html: str = ""
-    errors: list[str] = []
+    errors: list[str] = Field(default_factory=list)
 
 
 # ── Background worker ─────────────────────────────────────────────────────────
@@ -1816,7 +1816,7 @@ class StreamMeta(BaseModel):
     total_papers: int = 0
     last_updated: Optional[str] = None
     next_update: Optional[str] = None
-    tags: list[str] = []
+    tags: list[str] = Field(default_factory=list)
 
 
 def _stream_meta(s) -> StreamMeta:
@@ -2170,8 +2170,8 @@ class DedupJobState(BaseModel):
     sensitivity: str
     duplicates_found: int = 0
     items_deleted: int = 0
-    would_delete: list[WouldDeleteEntry] = []
-    errors: list[str] = []
+    would_delete: list[WouldDeleteEntry] = Field(default_factory=list)
+    errors: list[str] = Field(default_factory=list)
 
 
 def _run_deduplicate(job_id: str, dry_run: bool = False, max_level: int = 3, sensitivity: str = "medium") -> None:

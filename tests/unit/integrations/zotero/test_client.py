@@ -236,19 +236,20 @@ def test_ensure_collection_creates_when_missing():
     c._client.create_collections.assert_called_once()
 
 
-def test_ensure_collection_finds_existing_collection_past_first_page():
-    # Regression: get_collections()'s 100-item cap meant a library with
-    # >100 collections could get a duplicate created for an existing one
-    # sitting past page 1.
+def test_get_all_collections_paginates_via_everything():
+    # Regression: get_collections()'s 100-item cap meant ensure_collection()
+    # could miss an existing collection past page 1 and create a duplicate.
+    # get_all_collections() must route through pyzotero's everything() the
+    # same way get_all_items() already does.
     c = _client()
-    c._client.collections.return_value = ["page1_query_result"]
+    c._client.collections.return_value = "page1_query_result"
     c._client.everything.return_value = [
         {"key": "C1", "version": 1, "data": {"name": "Old Stream"}, "library": {}},
         {"key": "C99", "version": 1, "data": {"name": "My Stream"}, "library": {}},
     ]
-    result = c.ensure_collection("My Stream")
-    assert result.key == "C99"
-    c._client.create_collections.assert_not_called()
+    result = c.get_all_collections()
+    assert [col.key for col in result] == ["C1", "C99"]
+    c._client.everything.assert_called_once_with("page1_query_result")
 
 
 def test_ensure_collection_raises_when_creation_fails():

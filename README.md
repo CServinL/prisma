@@ -27,15 +27,14 @@
 
 ## Key Features
 
-- **📚 Multi-Document Support**: Papers, books, chapters, theses, reports, and grey literature
-- **🔗 Zotero Integration**: Leverages existing research libraries and bibliographic data  
-- **🌊 Research Streams**: Persistent topic monitoring with automatic discovery and organization
-- **⭐ Quality-Based Sources**: 1-5 star rating system prioritizing reliable academic databases
-- **🛡️ Academic Validation**: Filters out non-academic content with confidence scoring
-- **🌐 Multi-Source Search**: Combines premium APIs with structured data sources
-- **📖 Full-Text Analysis**: Processes PDFs, abstracts, and metadata across all document types
-- **🤖 AI-Powered Curation**: Uses local or cloud-capable LLMs (Ollama, OpenRouter, llama.cpp) for intelligent research assessment and organization
-- **📊 Library Organization**: Generates structured research organization and enhanced library management
+- **🌐 Multi-Source Discovery**: Searches papers (arXiv, Semantic Scholar, Academia.edu) and books (OpenLibrary, Google Books) in parallel per stream query
+- **🔗 Zotero Bookmarking**: Saves discovered papers into your existing Zotero library via its Web API — Zotero stays the library, Prisma adds to it
+- **🌊 Research Streams**: Persistent topic monitoring — scheduled searches automatically discover, deduplicate, and file new papers into a dedicated Zotero collection per stream
+- **⭐ Quality-Rated Sources**: Each search source is rated 1-5 stars by API reliability/structure, prioritizing curated academic APIs over scraping-dependent ones
+- **🛡️ Academic Validation**: Filters out non-academic content (blogs, ads, spam) via keyword/structure heuristics plus LLM confidence scoring
+- **📖 Abstract-Level Relevance**: LLM assessment runs on title + abstract, not full PDF text — importing a paper into your vault separately converts its PDF to readable Markdown
+- **🤖 AI-Powered Curation**: Local or cloud-capable LLMs (Ollama, OpenRouter, llama.cpp) assess relevance, score confidence, and summarize what's found
+- **🏷️ Smart Tagging (Streams only)**: Papers saved via a Research Stream are auto-tagged with confidence score, source, topic, and stream ID
 - **🗂️ Vault Workspace**: A local, flat-Markdown second brain for notes, sources, and chats — `prisma serve` opens it as a web app, installable PWA, or native desktop shell
 - **💬 Chat**: Ask Prisma questions about your vault — grounded in ChromaDB semantic search + native knowledge-graph context, with tool-calling, citations, and a pinning/Excerpt model for managing context budget across local or cloud-capable LLM backends
 - **🕸️ Native Knowledge Graph**: Entity/relationship extraction (structured LLM output, no third-party dependency) stored in an embedded graph DB, re-ranking search results and answering "what connects to what" — with a live progress UI (sync status, extraction stats, failure inspection)

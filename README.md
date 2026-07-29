@@ -27,7 +27,7 @@
 
 ## Key Features
 
-- **🌐 Multi-Source Discovery**: Searches papers (arXiv, Semantic Scholar, Academia.edu) and books (OpenLibrary, Google Books) in parallel per stream query
+- **🌐 Multi-Source Discovery**: Searches papers (arXiv, Semantic Scholar, PubMed, IEEE Xplore\*) and books (OpenLibrary, Google Books) per stream query, each source independently quota-controlled (\*IEEE Xplore requires your own API key)
 - **🔗 Zotero Bookmarking**: Saves discovered papers into your existing Zotero library via its Web API — Zotero stays the library, Prisma adds to it
 - **🌊 Research Streams**: Persistent topic monitoring — scheduled searches automatically discover, deduplicate, and file new papers into a dedicated Zotero collection per stream
 - **⭐ Quality-Rated Sources**: Each search source is rated 1-5 stars by API reliability/structure, prioritizing curated academic APIs over scraping-dependent ones

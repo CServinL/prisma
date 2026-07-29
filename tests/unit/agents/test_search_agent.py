@@ -22,11 +22,11 @@ class TestSearchAgent(unittest.TestCase):
         self.search_agent = SearchAgent()
     
     def test_initialization(self):
-        """Test SearchAgent initializes correctly."""
-        self.assertIsNotNone(self.search_agent.arxiv_base_url)
-        self.assertEqual(self.search_agent.arxiv_base_url, "http://export.arxiv.org/api/query")
-    
-    @patch('prisma.agents.search_agent.requests.get')
+        """Test SearchAgent builds its source registry correctly."""
+        expected = {"arxiv", "semanticscholar", "openlibrary", "googlebooks", "pubmed", "ieee_xplore"}
+        self.assertEqual(self.search_agent.available_sources, expected)
+
+    @patch('prisma.integrations.sources.arxiv.requests.get')
     def test_search_success(self, mock_get):
         """Test successful search operation."""
         # Mock response

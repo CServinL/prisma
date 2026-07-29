@@ -59,8 +59,14 @@ class PrismaCoordinator:
         errors = []
         warnings = []
 
-        # Block offline only when internet-dependent sources are requested
-        _internet_sources = {'arxiv', 'semanticscholar', 'openlibrary', 'googlebooks', 'academia'}
+        # Block offline only when internet-dependent sources are requested.
+        # Derived from the SearchAgent's own source registry rather than a
+        # hand-maintained literal -- previously this list had to be
+        # remembered and updated by hand every time a source was added or
+        # removed (the exact kind of gap that made the 2026-07-29
+        # `academia` cleanup need a manual find-and-fix pass across
+        # several files).
+        _internet_sources = self.search_agent.available_sources
         _requested_sources = set(config.get('sources', []))
         _needs_internet = bool(_requested_sources & _internet_sources)
         if _needs_internet and not connectivity.is_online:

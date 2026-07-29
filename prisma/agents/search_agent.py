@@ -1,21 +1,25 @@
 """
 Search Agent - Academic papers and books search with quality-based source management
+
+Fetching/parsing/quota-control for each individual source lives in
+prisma/integrations/sources/ (one module per source, all implementing the
+Source interface in .../sources/base.py). This class only does
+cross-source orchestration: picking which sources to search and in what
+order, academic-content validation and confidence scoring (applied
+uniformly across every source's papers, using that source's real quality
+rating), deduplication, and result aggregation.
 """
 
-import requests
-import xml.etree.ElementTree as ET
-import time
 import logging
 from typing import Dict, List
-from urllib.parse import quote
 from datetime import datetime
 
+from ..integrations.sources import Source, build_sources
 from ..utils.text import significant_words
 
 from ..storage.models.agent_models import SearchResult, PaperMetadata, BookMetadata
-from ..storage.models.api_response_models import OpenLibraryResponse
 from ..storage.models.source_quality import (
-    SourceQuality, get_source_quality,
+    get_source_quality,
     validate_academic_content, get_academic_confidence_score,
     AcademicValidationCriteria
 )
@@ -23,26 +27,10 @@ from ..storage.models.source_quality import (
 logger = logging.getLogger(__name__)
 
 
-_SOURCE_PROBE_URLS: dict[str, str] = {
-    "arxiv": "http://export.arxiv.org/api/query?search_query=test&max_results=1",
-    "semanticscholar": "https://api.semanticscholar.org/graph/v1/paper/search?query=test&limit=1",
-    "openlibrary": "https://openlibrary.org/search.json?q=test&limit=1",
-    "googlebooks": "https://www.googleapis.com/books/v1/volumes?q=test&maxResults=1",
-    "academia": "https://www.academia.edu",
-    "zotero": "http://localhost:23119",
-}
-
-
 class SearchAgent:
     """Search for academic papers and books across multiple quality-rated sources."""
 
     def __init__(self):
-        self.arxiv_base_url = "http://export.arxiv.org/api/query"
-        self.openlibrary_base_url = "https://openlibrary.org"
-        self.googlebooks_base_url = "https://www.googleapis.com/books/v1/volumes"
-        self.academia_base_url = "https://www.academia.edu"
-        self.semantic_scholar_base_url = "https://api.semanticscholar.org/graph/v1"
-
         self.validation_criteria = AcademicValidationCriteria()
 
         try:
@@ -51,27 +39,40 @@ class SearchAgent:
             self.default_sources: List[str] = list(cfg.sources)
             self.min_confidence_score: float = cfg.min_confidence_score
             self.prefer_high_quality: bool = cfg.prefer_high_quality
+            self.require_academic_validation: bool = cfg.require_academic_validation
+            self._sources: Dict[str, Source] = build_sources(cfg)
         except Exception:
             self.default_sources = ["semanticscholar", "arxiv"]
             self.min_confidence_score = 0.5
             self.prefer_high_quality = True
+            self.require_academic_validation = True
+            self._sources = build_sources()
+
+    @property
+    def available_sources(self) -> set[str]:
+        """Names of every discovery source actually wired up (excludes
+        'zotero', which is handled separately, not a Source). Used by
+        callers that need to know which requested source names actually
+        require internet access, without hardcoding a second copy of this
+        list (see PrismaCoordinator.run_review's offline check)."""
+        return set(self._sources.keys())
 
     def preflight(self, sources: List[str], timeout: float = 5.0) -> List[str]:
         """Return only sources that respond within *timeout* seconds."""
         available: List[str] = []
         for source in sources:
-            probe = _SOURCE_PROBE_URLS.get(source.lower())
-            if probe is None:
-                logger.warning("preflight: unknown source %r — skipping", source)
+            src = self._sources.get(source.lower())
+            if src is None:
+                if source.lower() != "zotero":
+                    logger.warning("preflight: unknown source %r — skipping", source)
                 continue
             try:
-                r = requests.get(probe, timeout=timeout)
-                if r.status_code < 500:
+                if src.probe(timeout=timeout):
                     available.append(source)
                 else:
-                    logger.warning("preflight: %s returned %d — skipping", source, r.status_code)
+                    logger.warning("preflight: %s unreachable or over quota — skipping", source)
             except Exception as exc:
-                logger.warning("preflight: %s unreachable (%s) — skipping", source, exc)
+                logger.warning("preflight: %s probe raised (%s) — skipping", source, exc)
         return available
 
     def search(
@@ -118,40 +119,34 @@ class SearchAgent:
             papers_before = len(all_papers)
             books_before = len(all_books)
 
-            if source.lower() == 'arxiv':
-                papers = self._search_arxiv(query, limit, published_after=published_after)
-                all_papers.extend(papers)
-            elif source.lower() == 'openlibrary':
-                books = self._search_openlibrary(query, limit)
-                all_books.extend(books)
-            elif source.lower() == 'googlebooks':
-                books = self._search_googlebooks(query, limit)
-                all_books.extend(books)
-            elif source.lower() == 'academia':
-                papers = self._search_academia(query, limit)
-                all_papers.extend(papers)
-            elif source.lower() == 'semanticscholar':
-                papers = self._search_semantic_scholar(query, limit, published_after=published_after)
-                all_papers.extend(papers)
+            src = self._sources.get(source.lower())
+            if src is not None:
+                result = src.search(query, limit, published_after=published_after)
+                validated_papers, rejected = self._validate_papers(result.papers, source_quality)
+                all_papers.extend(validated_papers)
+                all_books.extend(result.books)
+                source_stats[source]['rejected'] = rejected
             elif source.lower() == 'zotero':
-                print(f"[INFO] Zotero local search - used for caching/deduplication")
-                # Note: Zotero search handled separately in research streams
+                # Zotero isn't a discovery Source (integrations/sources/) --
+                # it's the bookmark layer, searched separately in research
+                # streams via the Zotero Web API, not here.
+                print(f"[INFO] Zotero search - used for caching/deduplication")
             else:
                 print(f"[WARNING] Source '{source}' not yet implemented")
-            
+
             # Update statistics
             source_stats[source]['papers_found'] = len(all_papers) - papers_before
             source_stats[source]['books_found'] = len(all_books) - books_before
-        
+
         # Remove duplicates and limit results
         unique_papers = self._deduplicate_papers(all_papers)
         unique_books = self._deduplicate_books(all_books)
         limited_papers = unique_papers[:limit]
         limited_books = unique_books[:limit]
-        
+
         # Print quality summary
         self._print_quality_summary(source_stats, len(limited_papers), len(limited_books))
-        
+
         return SearchResult(
             papers=limited_papers,
             books=limited_books,
@@ -160,118 +155,51 @@ class SearchAgent:
             query=query,
             timestamp=datetime.now()
         )
-    
-    def _search_arxiv(
-        self, query: str, limit: int, published_after: datetime | None = None
-    ) -> List[PaperMetadata]:
-        """Search arXiv API for papers."""
-        try:
-            search_query = f"all:{quote(query)}"
-            if published_after is not None:
-                date_str = published_after.strftime("%Y%m%d%H%M%S")
-                search_query += f"+AND+submittedDate:[{date_str}+TO+99991231235959]"
 
-            url = (
-                f"{self.arxiv_base_url}?search_query={search_query}"
-                f"&start=0&max_results={limit}"
-                f"&sortBy=submittedDate&sortOrder=descending"
-            )
-            
-            # Make request
-            response = requests.get(url, timeout=30)
-            response.raise_for_status()
-            
-            # Parse XML response
-            root = ET.fromstring(response.content)
-            
-            papers = []
-            entries = root.findall('{http://www.w3.org/2005/Atom}entry')
-            
-            for entry in entries:
-                paper = self._parse_arxiv_entry(entry)
-                if paper:
-                    papers.append(paper)
-            
-            return papers
-            
-        except Exception as e:
-            print(f"[ERROR] ArXiv search failed: {e}")
-            return []
-    
-    def _parse_arxiv_entry(self, entry) -> PaperMetadata | None:
-        """Parse a single arXiv entry into paper metadata."""
-        try:
-            # Namespaces
-            atom_ns = '{http://www.w3.org/2005/Atom}'
-            arxiv_ns = '{http://arxiv.org/schemas/atom}'
-            
-            # Extract basic fields
-            title = entry.find(f'{atom_ns}title').text.strip().replace('\n', ' ')
-            summary = entry.find(f'{atom_ns}summary').text.strip().replace('\n', ' ')
-            
-            # Get arXiv ID from the ID field
-            arxiv_id = entry.find(f'{atom_ns}id').text.split('/')[-1]
-            
-            # Extract authors
-            authors = []
-            for author in entry.findall(f'{atom_ns}author'):
-                name = author.find(f'{atom_ns}name').text
-                authors.append(name)
-            
-            # Extract publication date
-            published = entry.find(f'{atom_ns}published').text[:10]  # YYYY-MM-DD
-            
-            # Build paper metadata using Pydantic model
-            paper = PaperMetadata(
-                title=title,
-                authors=authors,
-                abstract=summary,
-                source='arxiv',
-                arxiv_id=arxiv_id,
-                url=f"https://arxiv.org/abs/{arxiv_id}",
-                pdf_url=f"https://arxiv.org/pdf/{arxiv_id}.pdf",
-                published_date=published,
-                connected_papers_url=f"https://www.connectedpapers.com/search?q={quote(title)}",
-                doi=None,
-                journal=None,
-                volume=None,
-                issue=None,
-                pages=None
-            )
-            
-            # Validate academic quality
+    def _validate_papers(self, papers: List[PaperMetadata], source_quality) -> tuple[List[PaperMetadata], int]:
+        """Academic-content validation + confidence scoring, applied
+        uniformly to every source's papers (previously only arxiv and
+        semanticscholar did this inline, each with its own copy of the
+        same logic, and both hardcoded SourceQuality.FIVE_STAR regardless
+        of the real source -- centralizing it here fixes both: every
+        paper source is validated the same way, scored against its own
+        actual quality rating. Books are never validated -- this always
+        was, and still is, papers-only (BookMetadata has no venue/abstract
+        concept validate_academic_content checks)."""
+        if not self.require_academic_validation:
+            return list(papers), 0
+
+        accepted: List[PaperMetadata] = []
+        rejected = 0
+        for paper in papers:
             is_valid, reasons = validate_academic_content(
-                title=title,
-                authors=authors,
-                abstract=summary,
-                venue="arXiv",  # arXiv is a recognized academic venue
-                criteria=self.validation_criteria
+                title=paper.title,
+                authors=paper.authors,
+                abstract=paper.abstract,
+                venue=paper.journal or "",
+                criteria=self.validation_criteria,
             )
-            
             if not is_valid:
-                logger.debug(f"arXiv paper rejected: {'; '.join(reasons)}")
-                return None
-            
-            # Calculate confidence score
+                logger.debug("%s paper rejected: %s", paper.source, "; ".join(reasons))
+                rejected += 1
+                continue
+
             confidence = get_academic_confidence_score(
-                title=title,
-                authors=authors,
-                abstract=summary,
-                venue="arXiv",
-                source_quality=SourceQuality.FIVE_STAR
+                title=paper.title,
+                authors=paper.authors,
+                abstract=paper.abstract,
+                venue=paper.journal or "",
+                source_quality=source_quality,
             )
-            
             if confidence < self.min_confidence_score:
-                logger.debug(f"arXiv paper low confidence: {confidence:.2f}")
-                return None
-            
-            logger.debug(f"arXiv paper accepted with confidence: {confidence:.2f}")
-            return paper
-            
-        except Exception as e:
-            print(f"[ERROR] Failed to parse arXiv entry: {e}")
-            return None
-    
+                logger.debug("%s paper low confidence: %.2f", paper.source, confidence)
+                rejected += 1
+                continue
+
+            logger.debug("%s paper accepted with confidence: %.2f", paper.source, confidence)
+            accepted.append(paper)
+        return accepted, rejected
+
     # Within-run dedup: ≥5 shared stems → same paper (no LLM; sources are different APIs for same content)
     _STEM_DEDUP_THRESHOLD = 5
 
@@ -328,425 +256,33 @@ class SearchAgent:
             unique.append(paper)
 
         return unique
-    
+
     def _deduplicate_books(self, books: List[BookMetadata]) -> List[BookMetadata]:
         """Remove duplicate books based on title and ISBN similarity."""
         if not books:
             return []
-        
+
         unique_books = []
         seen_books = set()
-        
+
         for book in books:
             # Create a unique key from title and ISBN (if available)
             title_key = book.title.lower().strip()
             isbn_key = book.isbn_13 or book.isbn_10 or ""
             book_key = f"{title_key}|{isbn_key}"
-            
+
             if book_key not in seen_books:
                 seen_books.add(book_key)
                 unique_books.append(book)
-        
+
         return unique_books
-    
-    def _search_openlibrary(self, query: str, limit: int) -> List[BookMetadata]:
-        """Search Open Library API for books."""
-        try:
-            # Format query for Open Library search
-            search_query = quote(query)
-            
-            # Build request URL - using the subjects endpoint for better results
-            url = f"{self.openlibrary_base_url}/search.json?q={search_query}&limit={limit}"
-            
-            # Make request
-            response = requests.get(url, timeout=30)
-            response.raise_for_status()
-            
-            # Parse JSON response using Pydantic model
-            api_response = OpenLibraryResponse.model_validate(response.json())
-            
-            books = []
-            for doc in api_response.docs:
-                book = self._parse_openlibrary_doc(doc)
-                if book:
-                    books.append(book)
-
-            return books
-            
-        except Exception as e:
-            print(f"[ERROR] Open Library search failed: {e}")
-            return []
-    
-    def _parse_openlibrary_doc(self, doc) -> BookMetadata | None:
-        """Parse a single Open Library document into book metadata."""
-        try:
-            # Extract basic fields from validated Pydantic model
-            title = doc.title.strip()
-            if not title:
-                return None            # Extract authors from validated model
-            authors = []
-            if doc.author_name:
-                authors = [name.strip() for name in doc.author_name if name.strip()]
-            
-            # Extract description/summary
-            description = ""
-            # Note: first_sentence is not in our Pydantic model, so we'll skip this for now
-            
-            # Extract ISBNs from validated model
-            isbn_10 = None
-            isbn_13 = None
-            if doc.isbn:
-                for isbn in doc.isbn:
-                    isbn_clean = isbn.replace('-', '').replace(' ', '')
-                    if len(isbn_clean) == 10:
-                        isbn_10 = isbn_clean
-                    elif len(isbn_clean) == 13:
-                        isbn_13 = isbn_clean
-            
-            # Extract publication info
-            # Extract publisher from validated model
-            publisher = None
-            if doc.publisher:
-                if isinstance(doc.publisher, list) and doc.publisher:
-                    publisher = doc.publisher[0]
-                elif isinstance(doc.publisher, str):
-                    publisher = doc.publisher
-            
-            published_date = None
-            if doc.first_publish_year:
-                published_date = str(doc.first_publish_year)
-            
-            # Extract subjects from validated model
-            subjects = doc.subject[:10] if doc.subject else []  # Limit to 10 subjects
-            
-            # Build Open Library URL
-            ol_url = f"https://openlibrary.org{doc.key}" if doc.key else f"https://openlibrary.org/search?q={quote(title)}"
-            
-            # Build book metadata using Pydantic model
-            book = BookMetadata(
-                title=title,
-                authors=authors,
-                description=description,
-                source='openlibrary',
-                url=ol_url,
-                isbn_10=isbn_10,
-                isbn_13=isbn_13,
-                publisher=publisher,
-                published_date=published_date,
-                subjects=subjects,
-                page_count=None,  # Not easily available in current model
-                language=doc.get('language', [None])[0] if doc.get('language') else None,
-                oclc=None,
-                lccn=None,
-                edition=None,
-                preview_url=None,
-                cover_url=None
-            )
-            
-            return book
-            
-        except Exception as e:
-            print(f"[ERROR] Failed to parse Open Library entry: {e}")
-            return None
-    
-    def _search_googlebooks(self, query: str, limit: int) -> List[BookMetadata]:
-        """Search Google Books API for books."""
-        try:
-            # Format query for Google Books API
-            search_query = quote(query)
-            
-            # Build request URL
-            url = f"{self.googlebooks_base_url}?q={search_query}&maxResults={min(limit, 40)}"
-            
-            # Make request
-            response = requests.get(url, timeout=30)
-            response.raise_for_status()
-            
-            # Parse JSON response
-            data = response.json()
-            
-            books = []
-            items = data.get('items', [])
-            
-            for item in items:
-                book = self._parse_googlebooks_item(item)
-                if book:
-                    books.append(book)
-            
-            return books
-            
-        except Exception as e:
-            print(f"[ERROR] Google Books search failed: {e}")
-            return []
-    
-    def _parse_googlebooks_item(self, item: Dict) -> BookMetadata | None:
-        """Parse a single Google Books item into book metadata."""
-        try:
-            volume_info = item.get('volumeInfo', {})
-            
-            # Extract basic fields
-            title = volume_info.get('title', '').strip()
-            if not title:
-                return None
-            
-            # Extract authors
-            authors = volume_info.get('authors', [])
-            if not isinstance(authors, list):
-                authors = []
-            
-            # Extract description
-            description = volume_info.get('description', '')
-            
-            # Extract ISBNs
-            isbn_10 = None
-            isbn_13 = None
-            industry_identifiers = volume_info.get('industryIdentifiers', [])
-            for identifier in industry_identifiers:
-                if identifier.get('type') == 'ISBN_10':
-                    isbn_10 = identifier.get('identifier')
-                elif identifier.get('type') == 'ISBN_13':
-                    isbn_13 = identifier.get('identifier')
-            
-            # Extract publication info
-            publisher = volume_info.get('publisher')
-            published_date = volume_info.get('publishedDate')
-            
-            # Extract categories (subjects)
-            categories = volume_info.get('categories', [])
-            if not isinstance(categories, list):
-                categories = []
-            
-            # Extract page count
-            page_count = volume_info.get('pageCount')
-            
-            # Extract language
-            language = volume_info.get('language')
-            
-            # Build Google Books URL
-            google_url = volume_info.get('infoLink', f"https://books.google.com/books?q={quote(title)}")
-            
-            # Extract preview URL
-            preview_url = volume_info.get('previewLink')
-            
-            # Extract cover URL
-            cover_url = None
-            image_links = volume_info.get('imageLinks', {})
-            if image_links:
-                cover_url = image_links.get('thumbnail') or image_links.get('smallThumbnail')
-            
-            # Build book metadata using Pydantic model
-            book = BookMetadata(
-                title=title,
-                authors=authors,
-                description=description,
-                source='googlebooks',
-                url=google_url,
-                isbn_10=isbn_10,
-                isbn_13=isbn_13,
-                publisher=publisher,
-                published_date=published_date,
-                page_count=page_count,
-                categories=categories,
-                language=language,
-                preview_url=preview_url,
-                cover_url=cover_url,
-                oclc=None,
-                lccn=None,
-                edition=None
-            )
-            
-            return book
-            
-        except Exception as e:
-            print(f"[ERROR] Failed to parse Google Books entry: {e}")
-            return None
-    
-    def _search_academia(self, query: str, limit: int) -> List[PaperMetadata]:
-        """Search Academia.edu for academic papers (web scraping approach)."""
-        try:
-            # Format query for Academia.edu search
-            search_query = quote(query)
-            
-            # Build search URL
-            url = f"{self.academia_base_url}/search?q={search_query}"
-            
-            # Headers to mimic a real browser request
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.5',
-                'Accept-Encoding': 'gzip, deflate, br',
-                'Connection': 'keep-alive',
-                'Upgrade-Insecure-Requests': '1',
-            }
-            
-            # Make request with rate limiting
-            time.sleep(1)  # Respectful rate limiting
-            response = requests.get(url, headers=headers, timeout=30)
-            response.raise_for_status()
-            
-            papers = []
-            
-            # For now, return a simulated result to avoid complex HTML parsing
-            # In a production implementation, you would parse the HTML response
-            # This is a placeholder that demonstrates the structure
-            
-            # Note: Academia.edu search results would require HTML parsing with BeautifulSoup
-            # which would need to be added as a dependency. For now, we'll return empty
-            # but show the framework is in place.
-            
-            print(f"[INFO] Academia.edu search initiated for '{query}' - HTML parsing not implemented")
-            return papers
-            
-        except Exception as e:
-            print(f"[ERROR] Academia.edu search failed: {e}")
-            return []
-    
-    def _parse_academia_paper(self, paper_element) -> PaperMetadata | None:
-        """Parse Academia.edu paper element into paper metadata."""
-        # This would be implemented with BeautifulSoup HTML parsing
-        # Placeholder for the structure
-        try:
-            # Extract from HTML elements:
-            # - Title from .work-title or similar
-            # - Authors from .author-name or similar  
-            # - Abstract from .abstract or similar
-            # - URL from href attributes
-            # - Publication info from metadata
-            
-            return None  # Placeholder
-            
-        except Exception as e:
-            print(f"[ERROR] Failed to parse Academia.edu entry: {e}")
-            return None
-
-    def _search_semantic_scholar(
-        self, query: str, limit: int, published_after: datetime | None = None
-    ) -> List[PaperMetadata]:
-        """Search Semantic Scholar API for academic papers."""
-        try:
-            url = f"{self.semantic_scholar_base_url}/paper/search"
-            params: dict = {
-                'query': query,
-                'limit': min(limit, 100),
-                'fields': 'paperId,title,abstract,authors,venue,year,doi,url',
-            }
-            if published_after is not None:
-                # Semantic Scholar only has year-level granularity
-                params['year'] = f"{published_after.year}-"
-            
-            # Make request with rate limiting
-            time.sleep(0.1)  # Respectful rate limiting for API
-            response = requests.get(url, params=params, timeout=30)
-            response.raise_for_status()
-            
-            # Parse JSON response
-            data = response.json()
-            
-            papers = []
-            paper_data = data.get('data', [])
-            
-            for paper_item in paper_data:
-                paper = self._parse_semantic_scholar_paper(paper_item)
-                if paper:
-                    papers.append(paper)
-            
-            return papers
-            
-        except Exception as e:
-            print(f"[ERROR] Semantic Scholar search failed: {e}")
-            return []
-
-    def _parse_semantic_scholar_paper(self, paper_data: Dict) -> PaperMetadata | None:
-        """Parse a single Semantic Scholar paper into paper metadata."""
-        try:
-            # Extract basic fields
-            title = paper_data.get('title', '').strip()
-            if not title:
-                return None
-                
-            abstract = paper_data.get('abstract', '') or ''
-            
-            # Extract authors
-            authors = []
-            author_list = paper_data.get('authors', [])
-            for author in author_list:
-                if isinstance(author, dict) and 'name' in author:
-                    authors.append(author['name'])
-                elif isinstance(author, str):
-                    authors.append(author)
-            
-            # Extract publication info
-            venue = paper_data.get('venue') or ''
-            year = paper_data.get('year')
-            doi = paper_data.get('doi')
-            paper_id = paper_data.get('paperId', '')
-            
-            # Build URLs
-            paper_url = paper_data.get('url') or f"https://www.semanticscholar.org/paper/{paper_id}"
-            
-            # Format publication date
-            published_date = None
-            if year:
-                published_date = f"{year}-01-01"
-            
-            # Build paper metadata using Pydantic model
-            paper = PaperMetadata(
-                title=title,
-                authors=authors,
-                abstract=abstract,
-                source='semanticscholar',
-                url=paper_url,
-                pdf_url=None,  # Semantic Scholar doesn't provide direct PDF URLs
-                published_date=published_date,
-                doi=doi,
-                journal=venue,
-                volume=None,
-                issue=None,
-                pages=None,
-                arxiv_id=None,
-                connected_papers_url=f"https://www.connectedpapers.com/search?q={quote(title)}"
-            )
-            
-            # Validate academic quality
-            is_valid, reasons = validate_academic_content(
-                title=title,
-                authors=authors,
-                abstract=abstract,
-                venue=venue,
-                criteria=self.validation_criteria
-            )
-            
-            if not is_valid:
-                logger.debug(f"Semantic Scholar paper rejected: {'; '.join(reasons)}")
-                return None
-            
-            # Calculate confidence score
-            confidence = get_academic_confidence_score(
-                title=title,
-                authors=authors,
-                abstract=abstract,
-                venue=venue,
-                source_quality=SourceQuality.FIVE_STAR
-            )
-            
-            if confidence < self.min_confidence_score:
-                logger.debug(f"Semantic Scholar paper low confidence: {confidence:.2f}")
-                return None
-            
-            logger.debug(f"Semantic Scholar paper accepted with confidence: {confidence:.2f}")
-            return paper
-            
-        except Exception as e:
-            logger.error(f"Failed to parse Semantic Scholar entry: {e}")
-            return None
 
     def _print_quality_summary(self, source_stats: Dict, total_papers: int, total_books: int):
         """Print summary of search results by source quality"""
         print(f"\n📊 Search Quality Summary:")
         print(f"   Total Results: {total_papers} papers, {total_books} books")
         print(f"   Sources Used:")
-        
+
         for source, stats in source_stats.items():
             if stats['papers_found'] + stats['books_found'] > 0:
                 quality_stars = "⭐" * stats['quality']

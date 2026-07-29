@@ -42,8 +42,6 @@ default_limit = 10
 # ⭐⭐⭐⭐⭐ (5-star): Premium APIs with curated content (semanticscholar, arxiv)
 # ⭐⭐⭐⭐ (4-star): Good APIs with structured data (openlibrary, googlebooks)
 # ⭐⭐⭐ (3-star): Basic APIs or reliable targets (zotero)
-# ⭐⭐ (2-star): HTML scraping with some structure (academia_rss)
-# ⭐ (1-star): Manual forms, requires LLM extraction (academia_search, researchgate)
 
 # Recommended high-quality sources (4-5 stars)
 sources = ["semanticscholar", "arxiv", "openlibrary", "googlebooks", "zotero"]
@@ -52,6 +50,29 @@ sources = ["semanticscholar", "arxiv", "openlibrary", "googlebooks", "zotero"]
 prefer_high_quality = true          # Prioritize 4-5 star sources
 min_confidence_score = 0.3          # Minimum academic confidence (0.0-1.0)
 require_academic_validation = true  # Apply academic content filters
+
+# Per-source quota/API-key overrides (optional). Every source ships a
+# sane, web-verified default rate limit and works with zero config below --
+# only add a [search.source_overrides.<name>] block once you have a real
+# API key for a source, or want to tune its rate limit yourself.
+#
+# [search.source_overrides.pubmed]
+# api_key_env = "PUBMED_API_KEY"   # NCBI account key: raises 3 req/s -> 10 req/s
+#
+# [search.source_overrides.ieee_xplore]
+# api_key_env = "IEEE_XPLORE_API_KEY"  # required -- IEEE has no anonymous mode
+# # requests_per_second / daily_cap: IEEE doesn't publish a rate limit or
+# # daily quota anywhere; the built-in default (0.5 req/s, no daily cap) is
+# # a conservative placeholder. Once you've registered a key and IEEE has
+# # sent their API user guide, override these here with the real numbers.
+# requests_per_second = 0.5
+#
+# [search.source_overrides.semanticscholar]
+# api_key_env = "SEMANTIC_SCHOLAR_API_KEY"  # moves you off the shared anonymous pool
+#
+# [search.source_overrides.googlebooks]
+# api_key_env = "GOOGLE_BOOKS_API_KEY"  # gives you your own 10,000 req/day quota
+# daily_cap = 10000
 
 # LLM Configuration for Analysis
 [llm]

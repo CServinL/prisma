@@ -29,14 +29,13 @@
 
 | Component | Status |
 |-----------|--------|
-| arXiv, Semantic Scholar, OpenLibrary, Google Books | ✅ Implemented |
+| arXiv, Semantic Scholar, PubMed, OpenLibrary, Google Books | ✅ Implemented |
+| Per-source quota control (rate limiting + daily caps) | ✅ Implemented |
+| IEEE Xplore search | ⚠️ Implemented, but real rate limit unverified (requires your own API key) |
 | Academic validation + confidence scoring | ✅ Implemented |
 | LLM relevance assessment (Ollama) | ✅ Implemented |
 | Duplicate detection | ✅ Implemented |
 | Literature review report generation | ✅ Implemented |
 | Research Streams | ✅ Implemented |
-| Zotero hybrid client (read local / write web) | ✅ Implemented |
+| Zotero Web API client | ✅ Implemented |
 | Offline write queue | ✅ Implemented |
-| Academia.edu search | ⚠️ Stub — HTTP request made, parsing not implemented |
-| PubMed search | ❌ Not started |
-| ResearchGate search | ❌ Not started |

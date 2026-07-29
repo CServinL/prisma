@@ -67,12 +67,12 @@ class AcademicValidationCriteria(BaseModel):
 SOURCE_REGISTRY: Dict[str, SourceMetadata] = {
     
     # ⭐⭐⭐⭐⭐ FIVE STAR SOURCES
-    "semantic_scholar": SourceMetadata(
+    "semanticscholar": SourceMetadata(
         name="Semantic Scholar",
         quality=SourceQuality.FIVE_STAR,
         access_method="api",
         requires_llm=False,
-        rate_limits="1000 req/sec public, higher with API key",
+        rate_limits="~1 req/s conservative default (public docs conflict: cited anywhere from 5000 req/5min to 1000 req/s on the shared anonymous pool); 1 req/s guaranteed (not shared) with a free API key",
         content_types=["papers", "citations", "authors"],
         description="AI-powered academic search with curated content and rich metadata",
         strengths=[
@@ -111,6 +111,26 @@ SOURCE_REGISTRY: Dict[str, SourceMetadata] = {
         ]
     ),
     
+    "pubmed": SourceMetadata(
+        name="PubMed",
+        quality=SourceQuality.FIVE_STAR,
+        access_method="api",
+        requires_llm=False,
+        rate_limits="3 req/s without a key, 10 req/s with a free NCBI account API key",
+        content_types=["papers", "biomedical_literature"],
+        description="NCBI's biomedical and life-sciences literature database, via the E-utilities API",
+        strengths=[
+            "Free, official NCBI API with well-documented endpoints",
+            "Authoritative for biomedical/clinical/life-sciences literature",
+            "Structured metadata (esummary) plus full abstract text (efetch)",
+            "DOI, journal, and author information"
+        ],
+        limitations=[
+            "Biomedical/life-sciences focus, not general-purpose",
+            "Three separate API calls per search (esearch/esummary/efetch)"
+        ]
+    ),
+
     # ⭐⭐⭐⭐ FOUR STAR SOURCES
     "openlibrary": SourceMetadata(
         name="Open Library",
@@ -156,6 +176,27 @@ SOURCE_REGISTRY: Dict[str, SourceMetadata] = {
         ]
     ),
     
+    "ieee_xplore": SourceMetadata(
+        name="IEEE Xplore",
+        quality=SourceQuality.FOUR_STAR,
+        access_method="api",
+        requires_llm=False,
+        rate_limits="Unverified as of 2026-07-29 -- IEEE publishes no rate limit or daily quota anywhere in their docs; a conservative provisional default (0.5 req/s, no daily cap) is used until a registered key's real API user guide arrives",
+        content_types=["papers", "conference_papers", "standards"],
+        description="IEEE's engineering/CS literature database, via the Metadata API",
+        strengths=[
+            "Structured JSON API with rich metadata (DOI, venue, volume/issue/pages)",
+            "Strong coverage of engineering and computer science",
+            "Covers journals, conference papers, and standards"
+        ],
+        limitations=[
+            "API key required for every request -- no anonymous mode at all",
+            "Real rate limit/daily quota not publicly documented -- current default is a guess, not verified",
+            "Max 200 records per query",
+            "Full text is paywalled outside open-access articles"
+        ]
+    ),
+
     # ⭐⭐⭐ THREE STAR SOURCES
     "zotero": SourceMetadata(
         name="Zotero Local Database",
@@ -179,73 +220,6 @@ SOURCE_REGISTRY: Dict[str, SourceMetadata] = {
         ]
     ),
     
-    # ⭐⭐ TWO STAR SOURCES  
-    "academia_rss": SourceMetadata(
-        name="Academia.edu RSS Feeds",
-        quality=SourceQuality.TWO_STAR,
-        access_method="rss",
-        requires_llm=True,
-        rate_limits="Respectful scraping needed",
-        content_types=["papers", "theses", "presentations"],
-        description="Individual researcher RSS feeds from Academia.edu",
-        strengths=[
-            "Real-time updates from researchers",
-            "XML structure easier to parse",
-            "Academic social network content"
-        ],
-        limitations=[
-            "Requires knowing specific usernames",
-            "Limited metadata in RSS",
-            "Need LLM to extract details",
-            "Individual feeds only"
-        ]
-    ),
-    
-    # ⭐ ONE STAR SOURCES
-    "academia_search": SourceMetadata(
-        name="Academia.edu Search",
-        quality=SourceQuality.ONE_STAR,
-        access_method="html_scraping",
-        requires_llm=True,
-        rate_limits="Very limited, anti-bot measures",
-        content_types=["papers", "theses", "presentations"],
-        description="Direct HTML scraping of Academia.edu search results",
-        strengths=[
-            "Large repository of academic content",
-            "Theses and conference presentations",
-            "International academic content"
-        ],
-        limitations=[
-            "No API, only HTML scraping",
-            "Anti-bot measures and CAPTCHAs",
-            "Requires LLM for data extraction",
-            "Rate limiting and blocking risks",
-            "HTML structure changes frequently"
-        ]
-    ),
-    
-    "researchgate": SourceMetadata(
-        name="ResearchGate",
-        quality=SourceQuality.ONE_STAR,
-        access_method="html_scraping",
-        requires_llm=True,
-        rate_limits="Aggressive anti-scraping",
-        content_types=["papers", "preprints", "datasets"],
-        description="Academic social network requiring HTML scraping",
-        strengths=[
-            "Large academic community",
-            "Pre-publication papers",
-            "Researcher networking data",
-            "Research datasets"
-        ],
-        limitations=[
-            "No public API",
-            "Strong anti-scraping measures",
-            "Requires authentication",
-            "Legal and ToS concerns",
-            "Complex HTML structure"
-        ]
-    )
 }
 
 

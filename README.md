@@ -18,29 +18,30 @@
 
 ## System Requirements
 
-**Required (Offline):**
-- **Zotero Desktop** with Local HTTP API enabled (library management operations)
-- **Ollama** with local LLM (research analysis and curation)
+**Required:**
+- **Ollama** (or another configured LLM provider — OpenRouter, llama.cpp) for research analysis, chat, and knowledge-graph extraction
 
-**Optional (Online):**
-- **Zotero Web API** access (for discovering and saving new research)
-- **Internet** access to source APIs (arXiv, Semantic Scholar, etc.)
+**Optional:**
+- **Zotero Web API** access (for library integration — discovering, deduplicating, and saving research; Prisma runs without it, just without the bookmark layer)
+- **Internet** access to source APIs (arXiv, Semantic Scholar, etc.) and the Zotero Web API
 
 ## Key Features
 
-- **📚 Multi-Document Support**: Papers, books, chapters, theses, reports, and grey literature
-- **🔗 Zotero Integration**: Leverages existing research libraries and bibliographic data  
-- **🌊 Research Streams**: Persistent topic monitoring with automatic discovery and organization
-- **⭐ Quality-Based Sources**: 1-5 star rating system prioritizing reliable academic databases
-- **🛡️ Academic Validation**: Filters out non-academic content with confidence scoring
-- **🌐 Multi-Source Search**: Combines premium APIs with structured data sources
-- **📖 Full-Text Analysis**: Processes PDFs, abstracts, and metadata across all document types
-- **🤖 AI-Powered Curation**: Uses local LLMs for intelligent research assessment and organization
-- **📊 Library Organization**: Generates structured research organization and enhanced library management
+- **🌐 Multi-Source Discovery**: Searches papers (arXiv, Semantic Scholar, Academia.edu) and books (OpenLibrary, Google Books) in parallel per stream query
+- **🔗 Zotero Bookmarking**: Saves discovered papers into your existing Zotero library via its Web API — Zotero stays the library, Prisma adds to it
+- **🌊 Research Streams**: Persistent topic monitoring — scheduled searches automatically discover, deduplicate, and file new papers into a dedicated Zotero collection per stream
+- **⭐ Quality-Rated Sources**: Each search source is rated 1-5 stars by API reliability/structure, prioritizing curated academic APIs over scraping-dependent ones
+- **🛡️ Academic Validation**: Filters out non-academic content (blogs, ads, spam) via keyword/structure heuristics plus LLM confidence scoring
+- **📖 Abstract-Level Relevance**: LLM assessment runs on title + abstract, not full PDF text — importing a paper into your vault separately converts its PDF to readable Markdown
+- **🤖 AI-Powered Curation**: Local or cloud-capable LLMs (Ollama, OpenRouter, llama.cpp) assess relevance, score confidence, and summarize what's found
+- **🏷️ Smart Tagging (Streams only)**: Papers saved via a Research Stream are auto-tagged with confidence score, source, topic, and stream ID
 - **🗂️ Vault Workspace**: A local, flat-Markdown second brain for notes, sources, and chats — `prisma serve` opens it as a web app, installable PWA, or native desktop shell
 - **💬 Chat**: Ask Prisma questions about your vault — grounded in ChromaDB semantic search + native knowledge-graph context, with tool-calling, citations, and a pinning/Excerpt model for managing context budget across local or cloud-capable LLM backends
 - **🕸️ Native Knowledge Graph**: Entity/relationship extraction (structured LLM output, no third-party dependency) stored in an embedded graph DB, re-ranking search results and answering "what connects to what" — with a live progress UI (sync status, extraction stats, failure inspection)
 - **🔍 Semantic Search**: ChromaDB embeddings + the knowledge graph re-rank results beyond keyword matching
+- **🧹 Deduplication**: Multi-level matching (DOI, exact title, year+author, NLTK stem overlap, LLM identity check) catches duplicates other tools miss, on demand or during stream refresh
+- **🔄 Vault Sync**: Server-orchestrated sync keeps the [desktop app](https://github.com/CServinL/prisma-desktop) and server vault in agreement, working offline and reconciling on reconnect
+- **⚡ Live Updates**: Vault changes and stream-refresh progress push to the UI over WebSocket in real time
 
 ## Research Library Management Process
 
@@ -52,9 +53,9 @@
 2. **Assess Relevance** - Use LLM to quickly evaluate research relevance to the topic
 3. **Curate Content** - Filter and organize relevant research immediately
 4. **For Relevant Research:**
-   - **Check Zotero Storage** - Search local Zotero library for duplicates (offline HTTP API)
-   - **Save to Zotero** - Store new research and add to stream collection (if online)
-   - **Mark Unsaved** - Flag research that couldn't be saved (if offline)
+   - **Check Zotero Storage** - Search the Zotero Web API for duplicates
+   - **Save to Zotero** - Store new research and add to stream collection (if Zotero is reachable)
+   - **Mark Unsaved** - Flag research that couldn't be saved (if Zotero is unreachable or not configured)
 5. **Analyze Content** - Comprehensive LLM analysis for research assessment
 6. **Enhance Library** - Improve organization and provide research insights (noting any unsaved research)
 
@@ -132,7 +133,7 @@ Changes to source files are immediately active — no reinstall needed.
 - [Configuration](docs/wiki/configuration.md) — YAML reference
 - [Research Streams](docs/wiki/streams.md) — persistent topic monitoring
 - [Sources](docs/wiki/sources.md) — quality ratings and academic validation
-- [Zotero Integration](docs/wiki/zotero.md) — read/write split, offline mode
+- [Zotero Integration](docs/wiki/zotero.md) — Web API client, connectivity/reachability, offline write queue
 - [Architecture](docs/wiki/architecture.md) — components and data flow
 - [Roadmap](docs/wiki/roadmap.md) — planned features
 
@@ -144,8 +145,9 @@ Changes to source files are immediately active — no reinstall needed.
 - **⌨️ Click** for the command-line interface
 - **🗂️ Flat Markdown vault** — no database; notes, sources, chats, and streams are plain `.md`/`.yaml` files
 - **🔍 ChromaDB** for semantic search, running as its own supervised server process
+- **🕸️ Kùzu** — embedded graph DB backing the native knowledge graph (entity/relationship extraction via structured LLM output, no third-party `graphify` dependency)
 - **🌐 FastAPI + SvelteKit** — REST + WebSocket API, installable as a PWA on any platform, or wrapped in a native [Tauri desktop shell](https://github.com/CServinL/prisma-desktop)
-- **🛡️ Supervised processes** — `prisma serve` runs a small supervisor that isolates the API, UI, and ChromaDB into independent, crash-recoverable processes
+- **🛡️ Supervised processes** — `prisma serve` runs a small supervisor that isolates the API, Web UI, ChromaDB, and knowledge-graph module into independent, crash-recoverable processes
 
 See [Architecture Overview](docs/wiki/architecture.md) for complete technical details.
 

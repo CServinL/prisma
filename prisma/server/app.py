@@ -2022,17 +2022,13 @@ def zotero_sync_pending():
 
 @app.get("/zotero/items", response_model=list[ZoteroItem])
 def zotero_items(collection: Optional[str] = Query(None), q: Optional[str] = Query(None)):
-    """Combined collection+query filtering isn't a single pyzotero call --
-    ZoteroClient has get_collection_items(key)/search_items(q) separately,
-    not one method taking both. Scope by collection first (the API-level
-    filter), then narrow by query client-side if both are given."""
+    """When both are given, get_collection_items(key, query=q) passes q
+    straight through to Zotero's own server-side `q` search (matches across
+    title/creators/abstract/etc., not just a client-side title substring)
+    scoped to the collection in one API call."""
     try:
         if collection:
-            items = _zotero.get_collection_items(collection)
-            if q:
-                q_norm = q.lower()
-                items = [i for i in items if i.title and q_norm in i.title.lower()]
-            return items
+            return _zotero.get_collection_items(collection, query=q or None)
         if q:
             return _zotero.search_items(q)
         return _zotero.get_all_items()
@@ -2277,7 +2273,11 @@ class DedupJobStatusResponse(DedupJobState):
 @app.get("/maintenance/deduplicate/{job_id}", response_model=DedupJobStatusResponse)
 def deduplicate_status(job_id: str):
     job = _jobs.get(job_id)
-    if job is None:
+    # _jobs is shared with /review (job entries stored as plain dicts there) --
+    # a review job_id passed to this dedup-specific endpoint isn't a dedup
+    # job, so treat it the same as "not found" rather than raising on
+    # job.model_dump() not existing on a dict.
+    if job is None or not isinstance(job, DedupJobState):
         raise HTTPException(status_code=404, detail="job not found")
     return {"job_id": job_id, **job.model_dump()}
 

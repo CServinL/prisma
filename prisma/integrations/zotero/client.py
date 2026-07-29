@@ -288,9 +288,16 @@ class ZoteroClient:
             logger.error(f"Failed to retrieve all items: {e}")
             raise ZoteroClientError(f"Failed to retrieve all items: {e}")
 
-    def get_collection_items(self, collection_key: str, limit: int = 100) -> List[ZoteroItem]:
+    def get_collection_items(self, collection_key: str, limit: int = 100, query: Optional[str] = None) -> List[ZoteroItem]:
+        """`query`, if given, is passed straight through to Zotero's own
+        `q` search parameter (same full-text match across title/creators/
+        abstract/etc. that search_items() uses) scoped server-side to this
+        collection -- not a client-side title-only substring filter."""
         try:
-            raw = self._client.collection_items(collection_key, limit=limit)
+            params: Dict[str, Any] = {"limit": limit}
+            if query:
+                params["q"] = query
+            raw = self._client.collection_items(collection_key, **params)
             logger.info(f"Retrieved {len(raw)} items from collection {collection_key}")
             return [ZoteroItem.from_zotero_data(i) for i in raw]
         except Exception as e:

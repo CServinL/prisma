@@ -74,6 +74,23 @@ def test_sync_pending_offline_returns_503(monkeypatch):
     assert r.status_code == 503
 
 
+def test_zotero_items_passes_query_through_when_scoped_to_collection(monkeypatch):
+    # Regression: /zotero/items used to narrow by a client-side title-only
+    # substring when both collection and q were given; it must now pass q
+    # straight through to get_collection_items so Zotero's own richer
+    # search (title/creators/abstract/etc.) applies, scoped to the collection.
+    from prisma.server import app as app_mod
+    from unittest.mock import MagicMock
+
+    mock_zotero = MagicMock()
+    mock_zotero.get_collection_items.return_value = [_item()]
+    monkeypatch.setattr(app_mod, "_zotero", mock_zotero)
+
+    r = client.get("/zotero/items", params={"collection": "COLL1", "q": "neural networks"})
+    assert r.status_code == 200
+    mock_zotero.get_collection_items.assert_called_once_with("COLL1", query="neural networks")
+
+
 def test_sync_pending_online_flushes_queue(monkeypatch):
     class _NonEmptyQueue:
         def __init__(self, *a, **kw):

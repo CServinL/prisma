@@ -67,8 +67,9 @@ def make_citekey(authors: list[str], year: int | None, title: str | None = None)
     names = [a for a in authors if a.strip()]
     if not names:
         first_word = ""
-        if title:
-            first_word = re.sub(r"[^a-z]", "", title.split()[0].lower())
+        title_words = title.split() if title else []
+        if title_words:
+            first_word = re.sub(r"[^a-z]", "", title_words[0].lower())
         return f"{first_word or 'unknown'}{year or ''}"
     last = names[0].split()[-1].lower()
     last = re.sub(r"[^a-z]", "", last)

@@ -105,6 +105,28 @@ def test_find_by_identifier_respects_collection_scope():
     assert c.find_by_identifier(doi="10.1/x", collection_key="TARGET") is None
 
 
+# ── get_collection_items ───────────────────────────────────────────────────
+
+def test_get_collection_items_without_query():
+    c = _client()
+    c._client.collection_items.return_value = [_zotero_item_raw("K1", title="A")]
+    items = c.get_collection_items("COLL1")
+    assert [i.key for i in items] == ["K1"]
+    c._client.collection_items.assert_called_once_with("COLL1", limit=100)
+
+
+def test_get_collection_items_passes_q_to_zotero_native_search():
+    # Regression: previously the route filtered client-side on title
+    # substring only -- this passes q straight through to Zotero's own
+    # server-side search (matches title/creators/abstract/etc.), scoped to
+    # the collection, in one call.
+    c = _client()
+    c._client.collection_items.return_value = [_zotero_item_raw("K2", title="Match")]
+    items = c.get_collection_items("COLL1", query="neural networks")
+    assert [i.key for i in items] == ["K2"]
+    c._client.collection_items.assert_called_once_with("COLL1", limit=100, q="neural networks")
+
+
 # ── ensure_collection ──────────────────────────────────────────────────────
 
 def test_ensure_collection_returns_existing():

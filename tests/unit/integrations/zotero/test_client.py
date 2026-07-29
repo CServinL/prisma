@@ -51,14 +51,14 @@ def test_check_web_api_reachable_false_on_exception(monkeypatch):
 def test_status_unconfigured():
     c = ZoteroClient(ZoteroAPIConfig(api_key="", library_id="", library_type="user"))
     body = c.status()
-    assert body == {"mode": "web-api", "available": False, "reachable": False}
+    assert body.model_dump() == {"mode": "web-api", "available": False, "reachable": False}
 
 
 def test_status_configured_and_reachable(monkeypatch):
     c = _client()
     monkeypatch.setattr("prisma.integrations.zotero.client.check_web_api_reachable", lambda *a, **kw: True)
     body = c.status()
-    assert body == {"mode": "web-api", "available": True, "reachable": True}
+    assert body.model_dump() == {"mode": "web-api", "available": True, "reachable": True}
 
 
 # ── find_by_identifier ────────────────────────────────────────────────────

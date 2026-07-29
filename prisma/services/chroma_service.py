@@ -9,6 +9,8 @@ import requests
 
 from prisma.services import resource_lock
 from prisma.services.vault import VaultService
+from prisma.storage.models.chroma_models import ChromaStatus
+from prisma.storage.models.search_models import GraphSearchResult
 from prisma.utils.vault_paths import is_relevant_vault_path
 
 _log = logging.getLogger("prisma.chroma")
@@ -143,7 +145,7 @@ class ChromaIndexer:
                 _log.warning("chroma indexer thread did not exit within 5s — likely mid-extraction")
         _log.info("chroma stopped")
 
-    def status(self) -> dict:
+    def status(self) -> ChromaStatus:
         try:
             self._ensure_client()
             chunks = self._collection.count()
@@ -152,10 +154,10 @@ class ChromaIndexer:
         with self._lock:
             files = len(self._manifest)
             activity = self._current_activity
-        return {
-            "chunks": chunks, "files_indexed": files, "model": self._model,
-            "provider": self._provider, "current_activity": activity,
-        }
+        return ChromaStatus(
+            chunks=chunks, files_indexed=files, model=self._model,
+            provider=self._provider, current_activity=activity,
+        )
 
     def _set_activity(self, activity: str | None) -> None:
         with self._lock:
@@ -178,7 +180,7 @@ class ChromaIndexer:
 
     # ── Query ─────────────────────────────────────────────────────────────────
 
-    def query(self, question: str, top_k: int = 20) -> list[dict]:
+    def query(self, question: str, top_k: int = 20) -> list[GraphSearchResult]:
         try:
             self._ensure_client()
             total = self._collection.count()
@@ -211,7 +213,7 @@ class ChromaIndexer:
                 file_scores[path] = score
         ranked = sorted(file_scores.items(), key=lambda x: -x[1])[:top_k]
         _log.info("chroma query: q=%r chunks_searched=%d files_returned=%d", question[:60], total, len(ranked))
-        return [{"source_file": sf, "score": score} for sf, score in ranked]
+        return [GraphSearchResult(source_file=sf, score=score) for sf, score in ranked]
 
     # ── Internal ──────────────────────────────────────────────────────────────
 

@@ -83,7 +83,7 @@ The key separation:
 |---|---|
 | **Stream run** | `Stream.query` → search sources (internet + Zotero library) → per-candidate pipeline (see below) → `ZoteroCollection` updated |
 | **Per-candidate pipeline** | ① collection check (already in this stream?) → ② bookmark (add to Zotero library if new) → ③ LLM relevance gate (title + abstract vs stream.query) → ④ add to stream's collection |
-| **Library search** | `ZoteroService.search(query)` — queries the Zotero library before (or in parallel with) internet sources; results already have enriched metadata; used as a cheap first pass |
+| **Library search** | `ZoteroClient.search_items(query)` — queries the Zotero library before (or in parallel with) internet sources; results already have enriched metadata; used as a cheap first pass |
 | **Vault import** | `POST /zotero/import/{key}` → `ZoteroItem` + optional PDF → `Source` (.md + companion) |
 | **Literature review** | topic → `SearchAgent` → `AnalysisAgent` → `ReportAgent` → `LiteratureReviewReport` → `Note` |
 | **DSL rendering** | markdown body → resolve `WikiLink` / `Transclusion` / `Citation` → HTML (server-side, before display) |

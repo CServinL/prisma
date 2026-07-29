@@ -42,7 +42,7 @@ ov.add_component("ui_watcher",   label="UI watcher",        layer="webproc",   g
 ov.add_component("chroma_server", label="chroma run",       layer="chroma",    group="Chroma",    tech="ChromaDB's own server — not embedded")
 
 ov.add_component("vault_svc",    label="VaultService",      layer="services",  group="Services",  tech="Markdown CRUD")
-ov.add_component("zotero_svc",   label="ZoteroService",     layer="services",  group="Services",  tech="Hybrid client")
+ov.add_component("zotero_svc",   label="ZoteroClient",      layer="services",  group="Services",  tech="Web API only (pyzotero)")
 ov.add_component("kg_svc", label="KnowledgeGraphService", layer="services",  group="Services",  tech="Watchdog + per-section Ollama extraction")
 ov.add_component("chroma_svc",   label="ChromaService",     layer="services",  group="Services",  tech="Watchdog + HttpClient")
 ov.add_component("stream_mgr",   label="StreamManager",     layer="services",  group="Services",  tech="Scheduler + agents")
@@ -54,7 +54,6 @@ ov.add_component("ui_build",     label="ui/build/",         layer="storage",   g
 ov.add_component("pending_q",    label="PendingQueue",      layer="storage",   group="Local",     tech="JSON write buffer")
 
 ov.add_component("ollama",       label="Ollama",            layer="external",  group="Windows",   tech=":11434 (GPU)")
-ov.add_component("zotero_local", label="Zotero Desktop",    layer="external",  group="Windows",   tech=":23119 read-only")
 ov.add_component("zotero_web",   label="Zotero Web API",    layer="external",  group="Internet",  tech="api.zotero.org")
 ov.add_component("search_apis",  label="Search APIs",       layer="external",  group="Internet",  tech="arXiv / S2 / OpenLibrary")
 
@@ -85,7 +84,6 @@ ov.connect("zotero_svc",   "pending_q",    label="enqueue")
 ov.connect("ui_static",    "ui_build",     label="serves")
 ov.connect("kg_svc", "ollama",       label="extract (per-section)")
 ov.connect("chroma_svc",   "ollama",       label="embed")
-ov.connect("zotero_svc",   "zotero_local", label="reads")
 ov.connect("zotero_svc",   "zotero_web",   label="r/w")
 ov.connect("stream_mgr",   "search_apis",  label="search")
 ov.connect("stream_mgr",   "zotero_svc",   label="save")
@@ -114,7 +112,7 @@ sl.add_component("vault_fs",     label="Vault files",      layer="persist",   gr
 sl.add_component("chromadb",     label="ChromaDB",         layer="persist",   group="Persistence",tech="vault/chromadb/")
 sl.add_component("kg_out", label="Knowledge graph (Kùzu)", layer="persist",   group="Persistence",tech="vault/kg-out/")
 
-sl.add_component("zotero_client",label="ZoteroClient",     layer="zotero",    group="Zotero",     tech="unified wrapper over the Web API client")
+sl.add_component("zotero_client",label="ZoteroClient",     layer="zotero",    group="Zotero",     tech="pyzotero-backed Web API client")
 sl.add_component("pending_q",    label="PendingQueue",     layer="zotero",    group="Zotero",     tech="offline write buffer")
 sl.add_component("zotero_web",   label="Zotero Web API",   layer="zotero",    group="Zotero",     tech="api.zotero.org read+write")
 

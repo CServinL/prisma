@@ -100,12 +100,12 @@ class ChatToolbox:
         hits = self._chroma.query(query, top_k=top_k)
         items = []
         for h in hits:
-            path = self._vault.root / h["source_file"]
+            path = self._vault.root / h.source_file
             try:
                 excerpt = path.read_text(encoding="utf-8", errors="replace")[:_EXCERPT_CHARS]
             except OSError:
                 excerpt = ""
-            items.append({"source_file": h["source_file"], "score": h["score"], "text": excerpt})
+            items.append({"source_file": h.source_file, "score": h.score, "text": excerpt})
         wrapped = "\n\n".join(
             wrap_untrusted(i["source_file"], i["text"]) for i in items if i["text"]
         )
@@ -113,6 +113,6 @@ class ChatToolbox:
 
     def _graph_context(self, query: str, budget: int = 1500) -> ToolResult:
         results = self._kg.query(query, budget=budget)
-        text = results[0]["text"] if results else ""
+        text = results[0].text if results else ""
         wrapped = wrap_untrusted("knowledge-graph", text) if text else ""
-        return ToolResult(text=wrapped, raw=results)
+        return ToolResult(text=wrapped, raw=[r.model_dump() for r in results])

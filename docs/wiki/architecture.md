@@ -14,11 +14,7 @@ prisma/                        # repo root
 │   │   └── zotero_agent.py        # Zotero search and item creation
 │   ├── integrations/
 │   │   └── zotero/
-│   │       ├── client.py          # ZoteroClient factory (from_config)
-│   │       ├── hybrid_client.py   # Online: Web API reads+writes / Local API reads
-│   │       ├── local_api_client.py  # Offline reads via Zotero Desktop HTTP
-│   │       ├── desktop_client.py  # Desktop-specific operations
-│   │       └── unified_client.py  # Common interface all clients implement
+│   │       └── client.py          # ZoteroClient (pyzotero-backed, Web API only) + from_config()
 │   ├── server/
 │   │   ├── supervisor.py          # Process supervisor — spawns/monitors api, web, chroma, kg (ADR-012)
 │   │   ├── app.py                 # API process — REST + WebSocket, no UI mount
@@ -28,7 +24,8 @@ prisma/                        # repo root
 │   │   └── log_setup.py           # Rotating log files per concern (server, chroma, kg, ollama…)
 │   ├── services/
 │   │   ├── vault.py               # Vault CRUD: notes, sources, chats, streams
-│   │   ├── zotero_service.py      # Zotero integration (offline/online)
+│   │   ├── stream_runner.py       # Stream refresh execution (search -> dedup -> relevance -> save to Zotero)
+│   │   ├── dedup.py               # Shared duplicate-detection logic (stream_runner + /maintenance/deduplicate)
 │   │   ├── knowledge_graph_service.py  # Native Kùzu-backed knowledge graph indexer (watchdog + Ollama, per-section) — runs inside kg_app.py
 │   │   ├── knowledge_graph_client.py   # Thin HTTP client app.py uses to reach kg_app.py
 │   │   ├── chroma_service.py      # ChromaDB semantic index (watchdog + nomic-embed-text)
@@ -43,11 +40,9 @@ prisma/                        # repo root
 │   │   │   └── source_quality.py        # SourceQuality enum, SOURCE_REGISTRY, validation
 │   │   └── pending_queue.py       # Offline write queue (flushed on next online start)
 │   ├── cli/
-│   │   ├── prisma_cli.py          # Click root group + global options
+│   │   ├── prisma_cli.py          # `serve`/`status`/`reload-config` -- local-machine-only surface, everything else moved to the API (see docs/wiki/cli.md)
 │   │   └── commands/
-│   │       ├── streams.py         # prisma streams subcommands
-│   │       ├── zotero.py          # prisma zotero subcommands
-│   │       └── cleanup.py         # prisma cleanup subcommands
+│   │       └── auth.py            # prisma auth hash-password
 │   └── utils/
 │       ├── config.py              # YAML config loader, Pydantic-validated models
 │       └── text.py                # Text utilities (significant_words, etc.)
@@ -61,7 +56,7 @@ prisma/                        # repo root
 ## Pipeline Data Flow
 
 ```
-prisma review "topic"
+POST /review {"topic": ...}
        │
        ▼
 PrismaCoordinator.run_review()
@@ -81,7 +76,7 @@ PrismaCoordinator.run_review()
        │
        ├─ AnalysisAgent.analyze()  (deep LLM analysis on remaining papers)
        │
-       ├─ ZoteroAgent / unified_client.save_items()  (if auto_save enabled)
+       ├─ ZoteroAgent / ZoteroClient.save_items()  (if auto_save enabled)
        │
        └─ ReportAgent.generate() → Markdown file
 ```
@@ -89,22 +84,21 @@ PrismaCoordinator.run_review()
 ## Research Streams Data Flow
 
 ```
-prisma streams update --all
+POST /streams/{slug}/run
        │
        ▼
-ResearchStreamManager.update_stream()
+stream_runner.run_stream()
        │
        ├─ SearchAgent.search()  (using stream's query)
        │
-       ├─ Deduplication against existing stream papers
+       ├─ dedup.py: find_duplicate() against existing collection items
+       │      (DOI/title exact match -> ZoteroClient.find_by_identifier() -> stem overlap -> LLM)
        │
-       ├─ ZoteroClient.create_collection()  (if collection missing)
-       │      └─ if offline: enqueue to PendingWriteQueue
+       ├─ ZoteroClient.ensure_collection()  (idempotent: existing or newly created)
        │
-       ├─ ZoteroClient.save_items()  (new papers → Zotero collection)
-       │      └─ if offline: enqueue to PendingWriteQueue
+       ├─ ZoteroClient.add_paper() / add_item_to_collection()  (new papers → Zotero collection)
        │
-       └─ Smart tag application + stream state saved to data/research_streams.json
+       └─ Smart tag application + stream state saved via VaultService.save_stream()
 ```
 
 ## Server (Supervisor + API + Web + ChromaDB)

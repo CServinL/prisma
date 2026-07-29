@@ -18,6 +18,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+from pydantic import BaseModel
+
 logger = logging.getLogger(__name__)
 
 _DEFAULT_FILE = Path("./data/pending_writes.json")
@@ -25,10 +27,24 @@ _MAX_ATTEMPTS = 3
 _VERSION = 1
 
 
+class PendingAction(BaseModel):
+    """One queued write, persisted to disk until flush() replays it against
+    a live Zotero client -- same "structured data <-> JSON file" need as
+    ResearchStream (research_stream_manager.py), modeled the same way
+    instead of as a raw dict."""
+    id: str
+    type: str
+    timestamp: str
+    data: dict[str, Any]
+    collection_key: Optional[str] = None
+    attempts: int = 0
+    last_error: Optional[str] = None
+
+
 class PendingWriteQueue:
     def __init__(self, queue_file: Optional[Path] = None):
         self._file = queue_file or _DEFAULT_FILE
-        self._actions: list[dict] = []
+        self._actions: list[PendingAction] = []
         self._load()
 
     # ------------------------------------------------------------------
@@ -39,7 +55,7 @@ class PendingWriteQueue:
         try:
             if self._file.exists():
                 data = json.loads(self._file.read_text(encoding="utf-8"))
-                self._actions = data.get("actions", [])
+                self._actions = [PendingAction.model_validate(a) for a in data.get("actions", [])]
                 logger.debug("Loaded %d pending actions from %s", len(self._actions), self._file)
         except Exception as exc:
             logger.error("Failed to load pending queue: %s", exc)
@@ -48,7 +64,7 @@ class PendingWriteQueue:
     def _save(self):
         try:
             self._file.parent.mkdir(parents=True, exist_ok=True)
-            payload = {"version": _VERSION, "actions": self._actions}
+            payload = {"version": _VERSION, "actions": [a.model_dump() for a in self._actions]}
             self._file.write_text(
                 json.dumps(payload, indent=2, default=str),
                 encoding="utf-8",
@@ -76,15 +92,15 @@ class PendingWriteQueue:
         """
         action_id = str(uuid.uuid4())
         self._actions.append(
-            {
-                "id": action_id,
-                "type": action_type,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "data": data,
-                "collection_key": collection_key,
-                "attempts": 0,
-                "last_error": None,
-            }
+            PendingAction(
+                id=action_id,
+                type=action_type,
+                timestamp=datetime.now(timezone.utc).isoformat(),
+                data=data,
+                collection_key=collection_key,
+                attempts=0,
+                last_error=None,
+            )
         )
         self._save()
         logger.info("Queued %s action %s (total pending: %d)", action_type, action_id, len(self._actions))
@@ -111,33 +127,33 @@ class PendingWriteQueue:
         remaining = []
 
         for action in self._actions:
-            if action["attempts"] >= _MAX_ATTEMPTS:
+            if action.attempts >= _MAX_ATTEMPTS:
                 logger.warning(
                     "Dropping action %s (%s) after %d failed attempts: %s",
-                    action["id"], action["type"], action["attempts"], action.get("last_error"),
+                    action.id, action.type, action.attempts, action.last_error,
                 )
                 continue
 
             # Conflict detection for save_paper actions
-            if action["type"] == "save_paper":
-                if self._already_in_zotero(action["data"], zotero_client):
+            if action.type == "save_paper":
+                if self._already_in_zotero(action.data, zotero_client):
                     logger.info(
                         "Dropping save_paper action %s — item already exists in Zotero",
-                        action["id"],
+                        action.id,
                     )
                     success += 1  # treated as resolved, not failed
                     continue
 
-            action["attempts"] += 1
+            action.attempts += 1
             try:
                 self._dispatch(action, zotero_client)
                 success += 1
-                logger.info("Flushed %s action %s", action["type"], action["id"])
+                logger.info("Flushed %s action %s", action.type, action.id)
             except Exception as exc:
-                action["last_error"] = str(exc)
+                action.last_error = str(exc)
                 remaining.append(action)
                 failed += 1
-                logger.warning("Failed to flush %s action %s: %s", action["type"], action["id"], exc)
+                logger.warning("Failed to flush %s action %s: %s", action.type, action.id, exc)
 
         self._actions = remaining
         self._save()
@@ -172,26 +188,26 @@ class PendingWriteQueue:
 
         return False
 
-    def _dispatch(self, action: dict, zotero_client):
-        t = action["type"]
+    def _dispatch(self, action: "PendingAction", zotero_client):
+        t = action.type
 
         if t == "save_paper":
             result = zotero_client.save_items(
-                items=[action["data"]],
-                collection_key=action.get("collection_key"),
+                items=[action.data],
+                collection_key=action.collection_key,
             )
             if result is None:
                 raise RuntimeError("save_items returned None")
 
         elif t == "create_collection":
-            result = zotero_client.create_collection(action["data"])
+            result = zotero_client.create_collection(action.data)
             if result is None:
                 raise RuntimeError("create_collection returned None")
 
         elif t == "add_to_collection":
             result = zotero_client.add_item_to_collection(
-                action["data"]["item_key"],
-                action["data"]["collection_key"],
+                action.data["item_key"],
+                action.data["collection_key"],
             )
             if result is None:
                 raise RuntimeError("add_item_to_collection returned None")

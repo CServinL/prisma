@@ -609,17 +609,17 @@ REASON: [one sentence]"""
             self._log_ollama("check_identity_single", elapsed_ms, None, error=str(exc))
             return LLMIdentityResult(are_same=False, confidence=0.0, reason=f"error: {exc}")
 
-    def _simple_relevance_check(self, title: str, abstract: str, topic: str) -> Dict[str, Any]:
+    def _simple_relevance_check(self, title: str, abstract: str, topic: str) -> LLMRelevanceResult:
         """This method is deprecated - semantic evaluation should be used instead."""
-        return {
-            "is_relevant": False,
-            "relevance_level": "NOT_RELEVANT",
-            "confidence": "LOW",
-            "reasoning": "Fallback method - semantic evaluation unavailable",
-            "semantic_score": 0.0
-        }
-    
-    def _fetch_full_text(self, paper: dict) -> str:
+        return LLMRelevanceResult(
+            is_relevant=False,
+            relevance_level="NOT_RELEVANT",
+            confidence=0.0,
+            reasoning="Fallback method - semantic evaluation unavailable",
+            semantic_score=0.0,
+        )
+
+    def _fetch_full_text(self, paper: PaperMetadata) -> str:
         """Fetch full text of paper if available."""
         # TODO: Implement paper fetching from various sources
         return ""

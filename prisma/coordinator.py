@@ -12,7 +12,7 @@ from .agents.analysis_agent import AnalysisAgent
 from .agents.report_agent import ReportAgent
 from .agents.zotero_agent import ZoteroAgent, ZoteroSearchCriteria
 from .connectivity import monitor as connectivity
-from .storage.models.agent_models import CoordinatorResult
+from .storage.models.agent_models import CoordinatorResult, PipelineMetadata
 from .storage.pending_queue import PendingWriteQueue
 from .utils.config import config
 
@@ -71,7 +71,7 @@ class PrismaCoordinator:
                 output_file=config.get('output_file', './offline_error.md'),
                 errors=["Offline — selected sources require internet access"],
                 total_duration=0.0,
-                pipeline_metadata={"online": False},
+                pipeline_metadata=PipelineMetadata(online=False),
             )
 
         try:
@@ -95,7 +95,7 @@ class PrismaCoordinator:
                     output_file=config.get('output_file', './failed_search.md'),
                     errors=["No papers found for the given query"],
                     total_duration=time.time() - start_time,
-                    pipeline_metadata={}
+                    pipeline_metadata=PipelineMetadata(),
                 )
             
             if self.debug:
@@ -149,13 +149,13 @@ class PrismaCoordinator:
                     output_file=config.get('output_file', './no_relevant_papers.md'),
                     errors=[f"No relevant papers found for topic '{config['topic']}' after relevance assessment"],
                     total_duration=time.time() - start_time,
-                    pipeline_metadata={
-                        'search_time': search_time,
-                        'relevance_time': relevance_time,
-                        'papers_found': len(search_results.papers),
-                        'papers_discarded': discarded_papers,
-                        'papers_relevant': len(relevant_papers)
-                    }
+                    pipeline_metadata=PipelineMetadata(
+                        search_time=search_time,
+                        relevance_time=relevance_time,
+                        papers_found=len(search_results.papers),
+                        papers_discarded=discarded_papers,
+                        papers_relevant=len(relevant_papers),
+                    ),
                 )
             
             # Step 4: Check Zotero Storage for duplicates (if available)
@@ -262,22 +262,22 @@ class PrismaCoordinator:
                 authors_found=analysis_results.author_count,
                 output_file=str(output_path),
                 total_duration=total_duration,
-                pipeline_metadata={
-                    'search_time': search_time,
-                    'relevance_time': relevance_time,
-                    'duplicate_check_time': duplicate_check_time,
-                    'analysis_time': analysis_time,
-                    'report_time': report_time,
-                    'search_results': search_results.total_found,
-                    'sources_searched': search_results.sources_searched,
-                    'papers_found': len(search_results.papers),
-                    'papers_discarded': discarded_papers,
-                    'papers_relevant': len(relevant_papers),
-                    'papers_existing': existing_papers,
-                    'papers_new': len(new_papers),
-                    'papers_unsaved': len(unsaved_papers),
-                    'saved_to_zotero': saved_papers_count
-                },
+                pipeline_metadata=PipelineMetadata(
+                    search_time=search_time,
+                    relevance_time=relevance_time,
+                    duplicate_check_time=duplicate_check_time,
+                    analysis_time=analysis_time,
+                    report_time=report_time,
+                    search_results=search_results.total_found,
+                    sources_searched=search_results.sources_searched,
+                    papers_found=len(search_results.papers),
+                    papers_discarded=discarded_papers,
+                    papers_relevant=len(relevant_papers),
+                    papers_existing=existing_papers,
+                    papers_new=len(new_papers),
+                    papers_unsaved=len(unsaved_papers),
+                    saved_to_zotero=saved_papers_count,
+                ),
                 errors=errors,
                 warnings=warnings
             )
@@ -295,7 +295,7 @@ class PrismaCoordinator:
                 output_file=config.get('output_file', './error_output.md'),
                 errors=errors,
                 total_duration=time.time() - start_time,
-                pipeline_metadata={}
+                pipeline_metadata=PipelineMetadata(),
             )
     
     def get_status(self) -> Dict[str, Any]:

@@ -5,6 +5,8 @@ import pytest
 
 from prisma.services.chat_tools import TOOL_CALL_RE, ChatToolbox, system_prompt_tool_section
 from prisma.services.vault import VaultService
+from prisma.storage.models.kg_models import GraphQueryResult
+from prisma.storage.models.search_models import GraphSearchResult
 
 
 def test_system_prompt_tool_section_includes_all_markers():
@@ -43,7 +45,7 @@ def test_toolbox_search_vault_returns_wrapped_text_and_raw(vault):
     note.write_text("Attention mechanisms let models weigh input tokens.", encoding="utf-8")
 
     chroma = MagicMock()
-    chroma.query.return_value = [{"source_file": "notes/attention.md", "score": 0.9}]
+    chroma.query.return_value = [GraphSearchResult(source_file="notes/attention.md", score=0.9)]
     kg = MagicMock()
 
     toolbox = ChatToolbox(chroma, kg, vault)
@@ -57,7 +59,7 @@ def test_toolbox_search_vault_returns_wrapped_text_and_raw(vault):
 
 def test_toolbox_search_vault_skips_unreadable_files(vault):
     chroma = MagicMock()
-    chroma.query.return_value = [{"source_file": "notes/missing.md", "score": 0.5}]
+    chroma.query.return_value = [GraphSearchResult(source_file="notes/missing.md", score=0.5)]
     kg = MagicMock()
 
     toolbox = ChatToolbox(chroma, kg, vault)
@@ -70,7 +72,7 @@ def test_toolbox_search_vault_skips_unreadable_files(vault):
 def test_toolbox_graph_context_returns_wrapped_text(vault):
     chroma = MagicMock()
     kg = MagicMock()
-    kg.query.return_value = [{"text": "- notes/a.md (score=0.8)"}]
+    kg.query.return_value = [GraphQueryResult(text="- notes/a.md (score=0.8)")]
 
     toolbox = ChatToolbox(chroma, kg, vault)
     result = toolbox.call("GRAPH_CONTEXT", "how do these relate")

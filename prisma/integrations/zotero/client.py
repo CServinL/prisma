@@ -28,7 +28,7 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 try:
     from pyzotero import zotero
@@ -90,6 +90,28 @@ class ZoteroAPIConfig(BaseModel):
 class ZoteroClientError(Exception):
     """Base exception for Zotero client errors"""
     pass
+
+
+class ZoteroStatus(BaseModel):
+    """`{mode, available, reachable}` -- mirrors the shape /status,
+    `prisma status`, and the UI panel already expect."""
+    mode: str
+    available: bool
+    reachable: bool
+
+
+class ZoteroClientInfo(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    available: bool
+    class_name: Optional[str] = Field(None, alias="class")
+
+
+class ZoteroLibraryStats(BaseModel):
+    total_items: int
+    total_collections: int
+    api_available: bool
+    error: Optional[str] = None
 
 
 class ZoteroClient:
@@ -159,18 +181,16 @@ class ZoteroClient:
     def is_available(self) -> bool:
         return self.test_connection()
 
-    def status(self) -> Dict[str, Any]:
-        """`{mode, available, reachable}` -- mirrors the shape /status,
-        `prisma status`, and the UI panel already expect. `available` keeps
-        its existing meaning (credentials configured); `reachable` is the
-        live check (mirrors the same short-timeout pattern already used
-        for Ollama)."""
+    def status(self) -> ZoteroStatus:
+        """`available` keeps its existing meaning (credentials configured);
+        `reachable` is the live check (mirrors the same short-timeout
+        pattern already used for Ollama)."""
         configured = bool(self.config.api_key and self.config.library_id)
-        return {
-            "mode": "web-api",
-            "available": configured,
-            "reachable": check_web_api_reachable(self.config.api_key, self.config.library_id) if configured else False,
-        }
+        return ZoteroStatus(
+            mode="web-api",
+            available=configured,
+            reachable=check_web_api_reachable(self.config.api_key, self.config.library_id) if configured else False,
+        )
 
     # ── Collections ───────────────────────────────────────────────────────────
 
@@ -507,29 +527,29 @@ class ZoteroClient:
     # ── Client information ────────────────────────────────────────────────────
 
     @property
-    def client_info(self) -> Dict[str, Any]:
-        return {
-            "available": self.is_available(),
-            "class": self._client.__class__.__name__ if self._client else None,
-        }
+    def client_info(self) -> ZoteroClientInfo:
+        return ZoteroClientInfo(
+            available=self.is_available(),
+            class_name=self._client.__class__.__name__ if self._client else None,
+        )
 
-    def get_library_stats(self) -> Dict[str, Any]:
+    def get_library_stats(self) -> ZoteroLibraryStats:
         try:
             items = self.get_all_items()
             collections = self.get_collections()
-            return {
-                "total_items": len(items),
-                "total_collections": len(collections),
-                "api_available": True,
-            }
+            return ZoteroLibraryStats(
+                total_items=len(items),
+                total_collections=len(collections),
+                api_available=True,
+            )
         except Exception as e:
             logger.error(f"Failed to get library stats: {e}")
-            return {
-                "total_items": 0,
-                "total_collections": 0,
-                "api_available": False,
-                "error": str(e),
-            }
+            return ZoteroLibraryStats(
+                total_items=0,
+                total_collections=0,
+                api_available=False,
+                error=str(e),
+            )
 
     def __repr__(self) -> str:
         return f"ZoteroClient(available={self.is_available()})"

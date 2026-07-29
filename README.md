@@ -18,13 +18,12 @@
 
 ## System Requirements
 
-**Required (Offline):**
-- **Zotero Desktop** with Local HTTP API enabled (library management operations)
-- **Ollama** with local LLM (research analysis and curation)
+**Required:**
+- **Ollama** (or another configured LLM provider — OpenRouter, llama.cpp) for research analysis, chat, and knowledge-graph extraction
 
-**Optional (Online):**
-- **Zotero Web API** access (for discovering and saving new research)
-- **Internet** access to source APIs (arXiv, Semantic Scholar, etc.)
+**Optional:**
+- **Zotero Web API** access (for library integration — discovering, deduplicating, and saving research; Prisma runs without it, just without the bookmark layer)
+- **Internet** access to source APIs (arXiv, Semantic Scholar, etc.) and the Zotero Web API
 
 ## Key Features
 
@@ -52,9 +51,9 @@
 2. **Assess Relevance** - Use LLM to quickly evaluate research relevance to the topic
 3. **Curate Content** - Filter and organize relevant research immediately
 4. **For Relevant Research:**
-   - **Check Zotero Storage** - Search local Zotero library for duplicates (offline HTTP API)
-   - **Save to Zotero** - Store new research and add to stream collection (if online)
-   - **Mark Unsaved** - Flag research that couldn't be saved (if offline)
+   - **Check Zotero Storage** - Search the Zotero Web API for duplicates
+   - **Save to Zotero** - Store new research and add to stream collection (if Zotero is reachable)
+   - **Mark Unsaved** - Flag research that couldn't be saved (if Zotero is unreachable or not configured)
 5. **Analyze Content** - Comprehensive LLM analysis for research assessment
 6. **Enhance Library** - Improve organization and provide research insights (noting any unsaved research)
 
@@ -132,7 +131,7 @@ Changes to source files are immediately active — no reinstall needed.
 - [Configuration](docs/wiki/configuration.md) — YAML reference
 - [Research Streams](docs/wiki/streams.md) — persistent topic monitoring
 - [Sources](docs/wiki/sources.md) — quality ratings and academic validation
-- [Zotero Integration](docs/wiki/zotero.md) — read/write split, offline mode
+- [Zotero Integration](docs/wiki/zotero.md) — Web API client, connectivity/reachability, offline write queue
 - [Architecture](docs/wiki/architecture.md) — components and data flow
 - [Roadmap](docs/wiki/roadmap.md) — planned features
 

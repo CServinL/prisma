@@ -12,13 +12,14 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from typing import Dict, Optional
+from typing import Optional
 from urllib.parse import quote
 
 import requests
 
 from ...services.rate_limiter import RateLimiter
 from ...storage.models.agent_models import PaperMetadata
+from ...storage.models.api_response_models import SemanticScholarPaper
 from .base import Source, SourceSearchResult
 
 logger = logging.getLogger(__name__)
@@ -63,11 +64,20 @@ class SemanticScholarSource(Source):
 
             response = requests.get(url, params=params, headers=self._headers, timeout=30)
             response.raise_for_status()
-            data = response.json()
+            raw_items = response.json().get("data", [])
 
             papers = []
-            for paper_item in data.get("data", []):
-                paper = _parse_paper(paper_item)
+            for raw_item in raw_items:
+                # One malformed item shouldn't drop the whole response --
+                # validated per-item, same resilience the old raw-dict
+                # parsing had, but now with real field validation instead of
+                # bare .get() calls.
+                try:
+                    validated = SemanticScholarPaper.model_validate(raw_item)
+                    paper = _to_paper_metadata(validated)
+                except Exception as exc:
+                    logger.debug("Semantic Scholar item failed to parse, skipping: %s", exc)
+                    continue
                 if paper:
                     papers.append(paper)
             return SourceSearchResult(papers=papers)
@@ -76,45 +86,29 @@ class SemanticScholarSource(Source):
             return SourceSearchResult()
 
 
-def _parse_paper(paper_data: Dict) -> Optional[PaperMetadata]:
-    try:
-        title = paper_data.get("title", "").strip()
-        if not title:
-            return None
-
-        abstract = paper_data.get("abstract", "") or ""
-
-        authors = []
-        for author in paper_data.get("authors", []):
-            if isinstance(author, dict) and "name" in author:
-                authors.append(author["name"])
-            elif isinstance(author, str):
-                authors.append(author)
-
-        venue = paper_data.get("venue") or ""
-        year = paper_data.get("year")
-        doi = paper_data.get("doi")
-        paper_id = paper_data.get("paperId", "")
-
-        paper_url = paper_data.get("url") or f"https://www.semanticscholar.org/paper/{paper_id}"
-        published_date = f"{year}-01-01" if year else None
-
-        return PaperMetadata(
-            title=title,
-            authors=authors,
-            abstract=abstract,
-            source="semanticscholar",
-            url=paper_url,
-            pdf_url=None,  # Semantic Scholar doesn't provide direct PDF URLs
-            published_date=published_date,
-            doi=doi,
-            journal=venue,
-            volume=None,
-            issue=None,
-            pages=None,
-            arxiv_id=None,
-            connected_papers_url=f"https://www.connectedpapers.com/search?q={quote(title)}",
-        )
-    except Exception as exc:
-        logger.error("Failed to parse Semantic Scholar entry: %s", exc)
+def _to_paper_metadata(paper: SemanticScholarPaper) -> Optional[PaperMetadata]:
+    title = paper.title.strip()
+    if not title:
         return None
+
+    authors = [a.name for a in paper.authors if a.name]
+    venue = paper.venue or ""
+    paper_url = paper.url or f"https://www.semanticscholar.org/paper/{paper.paperId}"
+    published_date = f"{paper.year}-01-01" if paper.year else None
+
+    return PaperMetadata(
+        title=title,
+        authors=authors,
+        abstract=paper.abstract or "",
+        source="semanticscholar",
+        url=paper_url,
+        pdf_url=None,  # Semantic Scholar doesn't provide direct PDF URLs
+        published_date=published_date,
+        doi=paper.doi,
+        journal=venue,
+        volume=None,
+        issue=None,
+        pages=None,
+        arxiv_id=None,
+        connected_papers_url=f"https://www.connectedpapers.com/search?q={quote(title)}",
+    )

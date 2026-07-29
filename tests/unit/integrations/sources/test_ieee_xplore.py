@@ -1,6 +1,7 @@
 from unittest.mock import MagicMock, patch
 
-from prisma.integrations.sources.ieee_xplore import IEEEXploreSource, _parse_article
+from prisma.integrations.sources.ieee_xplore import IEEEXploreSource, _to_paper_metadata
+from prisma.storage.models.api_response_models import IEEEXploreArticle
 
 _FAKE_ARTICLE = {
     "title": "A Sufficiently Long Test Paper Title About Robotics",
@@ -49,17 +50,19 @@ def test_search_with_key_parses_articles(mock_get):
 
 
 def test_parse_article_flat_authors_list():
-    article = dict(_FAKE_ARTICLE, authors=["Solo Author"])
-    paper = _parse_article(article)
+    article = IEEEXploreArticle.model_validate(dict(_FAKE_ARTICLE, authors=["Solo Author"]))
+    paper = _to_paper_metadata(article)
     assert paper.authors == ["Solo Author"]
 
 
 def test_parse_article_missing_title_returns_none():
-    assert _parse_article({"title": ""}) is None
+    article = IEEEXploreArticle.model_validate({"title": ""})
+    assert _to_paper_metadata(article) is None
 
 
 def test_parse_article_no_url_returns_none():
-    article = dict(_FAKE_ARTICLE)
-    article.pop("article_number")
-    article["html_url"] = None
-    assert _parse_article(article) is None
+    raw = dict(_FAKE_ARTICLE)
+    raw.pop("article_number")
+    raw["html_url"] = None
+    article = IEEEXploreArticle.model_validate(raw)
+    assert _to_paper_metadata(article) is None

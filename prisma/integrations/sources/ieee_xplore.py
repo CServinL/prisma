@@ -18,12 +18,13 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import List, Optional
 
 import requests
 
 from ...services.rate_limiter import RateLimiter
 from ...storage.models.agent_models import PaperMetadata
+from ...storage.models.api_response_models import IEEEXploreArticle
 from .base import Source, SourceSearchResult
 
 logger = logging.getLogger(__name__)
@@ -87,8 +88,18 @@ class IEEEXploreSource(Source):
             data = response.json()
 
             papers = []
-            for article in data.get("articles", []):
-                paper = _parse_article(article)
+            for raw_article in data.get("articles", []):
+                # Validated per-article, not via a top-level wrapper, so one
+                # malformed article doesn't drop the whole batch -- and
+                # `authors` is intentionally typed Any on the model (its
+                # real shape is unconfirmed), so _extract_authors still
+                # does the interpretation after validation.
+                try:
+                    validated = IEEEXploreArticle.model_validate(raw_article)
+                    paper = _to_paper_metadata(validated)
+                except Exception as exc:
+                    logger.debug("IEEE Xplore article failed to parse, skipping: %s", exc)
+                    continue
                 if paper:
                     papers.append(paper)
             return SourceSearchResult(papers=papers)
@@ -97,8 +108,7 @@ class IEEEXploreSource(Source):
             return SourceSearchResult()
 
 
-def _extract_authors(article: Dict) -> List[str]:
-    authors_field = article.get("authors")
+def _extract_authors(authors_field) -> List[str]:
     if isinstance(authors_field, dict):
         # documented shape: {"authors": [{"full_name": "...", ...}, ...]}
         entries = authors_field.get("authors", [])
@@ -118,46 +128,33 @@ def _extract_authors(article: Dict) -> List[str]:
     return names
 
 
-def _parse_article(article: Dict) -> Optional[PaperMetadata]:
-    try:
-        title = (article.get("title") or "").strip()
-        if not title:
-            return None
-
-        authors = _extract_authors(article)
-        abstract = article.get("abstract") or ""
-        doi = article.get("doi") or None
-        journal = article.get("publication_title") or ""
-        published_date = article.get("publication_date") or (
-            str(article.get("publication_year")) if article.get("publication_year") else None
-        )
-        article_number = article.get("article_number")
-        url = article.get("html_url") or (
-            f"https://ieeexplore.ieee.org/document/{article_number}" if article_number else None
-        )
-        if not url:
-            return None
-
-        return PaperMetadata(
-            title=title,
-            authors=authors,
-            abstract=abstract,
-            source="ieee_xplore",
-            url=url,
-            pdf_url=article.get("pdf_url"),
-            published_date=published_date,
-            doi=doi,
-            journal=journal,
-            volume=article.get("volume") or None,
-            issue=article.get("issue") or None,
-            pages=(
-                f"{article['start_page']}-{article['end_page']}"
-                if article.get("start_page") and article.get("end_page")
-                else None
-            ),
-            arxiv_id=None,
-            connected_papers_url=None,
-        )
-    except Exception as exc:
-        logger.error("Failed to parse IEEE Xplore entry: %s", exc)
+def _to_paper_metadata(article: IEEEXploreArticle) -> Optional[PaperMetadata]:
+    title = article.title.strip()
+    if not title:
         return None
+
+    published_date = article.publication_date or (
+        str(article.publication_year) if article.publication_year else None
+    )
+    url = article.html_url or (
+        f"https://ieeexplore.ieee.org/document/{article.article_number}" if article.article_number else None
+    )
+    if not url:
+        return None
+
+    return PaperMetadata(
+        title=title,
+        authors=_extract_authors(article.authors),
+        abstract=article.abstract or "",
+        source="ieee_xplore",
+        url=url,
+        pdf_url=article.pdf_url,
+        published_date=published_date,
+        doi=article.doi,
+        journal=article.publication_title or "",
+        volume=article.volume,
+        issue=article.issue,
+        pages=f"{article.start_page}-{article.end_page}" if article.start_page and article.end_page else None,
+        arxiv_id=None,
+        connected_papers_url=None,
+    )

@@ -19,6 +19,7 @@ import requests
 
 from ...services.rate_limiter import RateLimiter
 from ...storage.models.agent_models import PaperMetadata
+from ...storage.models.api_response_models import PubMedSummaryResult
 from .base import Source, SourceSearchResult
 
 logger = logging.getLogger(__name__)
@@ -68,10 +69,17 @@ class PubMedSource(Source):
 
             papers = []
             for pmid in pmids:
-                summary = summaries.get(pmid)
-                if not summary:
+                raw_summary = summaries.get(pmid)
+                if not raw_summary:
                     continue
-                paper = _parse_summary(pmid, summary, abstracts.get(pmid, ""))
+                # Validated per-article, not via a top-level wrapper, so one
+                # malformed article doesn't drop the whole batch.
+                try:
+                    validated = PubMedSummaryResult.model_validate(raw_summary)
+                    paper = _to_paper_metadata(validated, abstracts.get(pmid, ""))
+                except Exception as exc:
+                    logger.debug("PubMed article %s failed to parse, skipping: %s", pmid, exc)
+                    continue
                 if paper:
                     papers.append(paper)
             return SourceSearchResult(papers=papers)
@@ -127,42 +135,32 @@ class PubMedSource(Source):
         return abstracts
 
 
-def _parse_summary(pmid: str, summary: dict, abstract: str) -> Optional[PaperMetadata]:
-    try:
-        title = (summary.get("title") or "").strip()
-        if not title:
-            return None
-
-        authors = [a.get("name", "").strip() for a in summary.get("authors", []) if a.get("name")]
-
-        doi = None
-        for article_id in summary.get("articleids", []):
-            if article_id.get("idtype") == "doi":
-                doi = article_id.get("value")
-                break
-
-        journal = summary.get("fulljournalname") or summary.get("source") or ""
-        published_date = _normalize_pubdate(summary.get("pubdate", ""))
-
-        return PaperMetadata(
-            title=title,
-            authors=authors,
-            abstract=abstract,
-            source="pubmed",
-            url=f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/",
-            pdf_url=None,
-            published_date=published_date,
-            doi=doi,
-            journal=journal,
-            volume=summary.get("volume") or None,
-            issue=summary.get("issue") or None,
-            pages=summary.get("pages") or None,
-            arxiv_id=None,
-            connected_papers_url=None,
-        )
-    except Exception as exc:
-        logger.error("Failed to parse PubMed entry %s: %s", pmid, exc)
+def _to_paper_metadata(summary: PubMedSummaryResult, abstract: str) -> Optional[PaperMetadata]:
+    title = summary.title.strip()
+    if not title:
         return None
+
+    authors = [a.name.strip() for a in summary.authors if a.name.strip()]
+    doi = next((a.value for a in summary.articleids if a.idtype == "doi"), None)
+    journal = summary.fulljournalname or summary.source or ""
+    published_date = _normalize_pubdate(summary.pubdate)
+
+    return PaperMetadata(
+        title=title,
+        authors=authors,
+        abstract=abstract,
+        source="pubmed",
+        url=f"https://pubmed.ncbi.nlm.nih.gov/{summary.uid}/",
+        pdf_url=None,
+        published_date=published_date,
+        doi=doi,
+        journal=journal,
+        volume=summary.volume,
+        issue=summary.issue,
+        pages=summary.pages,
+        arxiv_id=None,
+        connected_papers_url=None,
+    )
 
 
 _MONTHS = {

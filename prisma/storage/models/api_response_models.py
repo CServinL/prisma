@@ -71,6 +71,7 @@ class SemanticScholarPaper(BaseModel):
     influentialCitationCount: Optional[int] = Field(None, description="Influential citation count")
     isOpenAccess: Optional[bool] = Field(None, description="Open access status")
     openAccessPdf: Optional[Dict[str, str]] = Field(None, description="Open access PDF info")
+    doi: Optional[str] = Field(None, description="Digital Object Identifier")
     
     @field_validator('title')
     @classmethod
@@ -104,6 +105,7 @@ class GoogleBooksVolumeInfo(BaseModel):
     language: Optional[str] = Field(None, description="Language")
     previewLink: Optional[str] = Field(None, description="Preview link")
     infoLink: Optional[str] = Field(None, description="Info link")
+    imageLinks: Optional[Dict[str, str]] = Field(None, description="Cover image links (thumbnail, smallThumbnail)")
 
 
 class GoogleBooksItem(BaseModel):
@@ -155,6 +157,72 @@ class ArXivEntry(BaseModel):
     def validate_summary(cls, v):
         """Clean and validate summary"""
         return v.strip().replace('\n', ' ') if v else ""
+
+
+class PubMedArticleId(BaseModel):
+    """One entry in a PubMed esummary article's `articleids` list (pubmed, doi, pmc, etc.)"""
+    model_config = ConfigDict(populate_by_name=True)
+
+    idtype: str = Field(..., description="ID type: pubmed, doi, pmc, etc.")
+    value: str = Field(..., description="The identifier value")
+
+
+class PubMedAuthor(BaseModel):
+    """PubMed esummary author entry"""
+    model_config = ConfigDict(populate_by_name=True)
+
+    name: str = Field("", description="Author display name, e.g. 'Smith J'")
+
+
+class PubMedSummaryResult(BaseModel):
+    """One article's esummary.fcgi (db=pubmed, version=2.0) JSON result --
+    validated before parsing so a shape change in NCBI's response surfaces
+    as a clear validation error instead of a silently-empty/wrong field."""
+    model_config = ConfigDict(populate_by_name=True, extra="ignore")
+
+    uid: str = Field(..., description="PubMed ID (PMID)")
+    title: str = Field("", description="Article title")
+    authors: List[PubMedAuthor] = Field(default_factory=list)
+    source: str = Field("", description="Abbreviated journal name")
+    fulljournalname: Optional[str] = Field(None, description="Full journal name")
+    pubdate: str = Field("", description="Free-form publication date, e.g. '2026 Jul 15'")
+    volume: Optional[str] = Field(None)
+    issue: Optional[str] = Field(None)
+    pages: Optional[str] = Field(None)
+    articleids: List[PubMedArticleId] = Field(default_factory=list)
+
+
+class IEEEXploreArticle(BaseModel):
+    """One article from IEEE Xplore's Metadata API
+    (https://developer.ieee.org/docs/read/Metadata_API_responses).
+    UNVERIFIED against a real API response as of 2026-07-29 -- field names
+    come from IEEE's own published docs, not a live call (no API key
+    available yet); correct this model once real responses can be checked."""
+    model_config = ConfigDict(populate_by_name=True, extra="ignore")
+
+    title: str = Field("")
+    abstract: Optional[str] = Field(None)
+    authors: Optional[Any] = Field(None, description="Either {'authors': [...]} or a flat list -- shape unconfirmed")
+    doi: Optional[str] = Field(None)
+    publication_title: Optional[str] = Field(None)
+    publication_year: Optional[int] = Field(None)
+    publication_date: Optional[str] = Field(None)
+    volume: Optional[str] = Field(None)
+    issue: Optional[str] = Field(None)
+    start_page: Optional[str] = Field(None)
+    end_page: Optional[str] = Field(None)
+    article_number: Optional[int] = Field(None)
+    html_url: Optional[str] = Field(None)
+    pdf_url: Optional[str] = Field(None)
+
+
+class IEEEXploreSearchResponse(BaseModel):
+    """Top-level IEEE Xplore Metadata API search response."""
+    model_config = ConfigDict(populate_by_name=True, extra="ignore")
+
+    totalfound: int = Field(0)
+    totalsearched: int = Field(0)
+    articles: List[IEEEXploreArticle] = Field(default_factory=list)
 
 
 class LLMRelevanceResult(BaseModel):

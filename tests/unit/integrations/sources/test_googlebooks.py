@@ -5,6 +5,7 @@ from prisma.integrations.sources.googlebooks import GoogleBooksSource
 _RESPONSE = {
     "items": [
         {
+            "id": "abc123XYZ",
             "volumeInfo": {
                 "title": "Deep Learning",
                 "authors": ["Ian Goodfellow"],

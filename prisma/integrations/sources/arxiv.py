@@ -14,6 +14,7 @@ import requests
 
 from ...services.rate_limiter import RateLimiter
 from ...storage.models.agent_models import PaperMetadata
+from ...storage.models.api_response_models import ArXivEntry
 from .base import Source, SourceSearchResult
 
 logger = logging.getLogger(__name__)
@@ -73,27 +74,36 @@ class ArxivSource(Source):
 
 def _parse_entry(entry) -> Optional[PaperMetadata]:
     try:
-        title = entry.find(f"{_ATOM_NS}title").text.strip().replace("\n", " ")
-        summary = entry.find(f"{_ATOM_NS}summary").text.strip().replace("\n", " ")
         arxiv_id = entry.find(f"{_ATOM_NS}id").text.split("/")[-1]
-
-        authors = []
-        for author in entry.findall(f"{_ATOM_NS}author"):
-            name = author.find(f"{_ATOM_NS}name").text
-            authors.append(name)
-
-        published = entry.find(f"{_ATOM_NS}published").text[:10]  # YYYY-MM-DD
-
+        authors = [
+            {"name": author.find(f"{_ATOM_NS}name").text}
+            for author in entry.findall(f"{_ATOM_NS}author")
+        ]
+        # Validated through ArXivEntry so a missing required field (title,
+        # summary, published) raises here rather than surfacing as a
+        # confusing downstream AttributeError -- also reuses the model's
+        # own title/summary strip+newline-collapse validators instead of
+        # duplicating that cleanup inline.
+        validated = ArXivEntry.model_validate(
+            {
+                "id": arxiv_id,
+                "title": entry.find(f"{_ATOM_NS}title").text,
+                "summary": entry.find(f"{_ATOM_NS}summary").text,
+                "authors": authors,
+                "published": entry.find(f"{_ATOM_NS}published").text,
+                "pdf_url": f"https://arxiv.org/pdf/{arxiv_id}.pdf",
+            }
+        )
         return PaperMetadata(
-            title=title,
-            authors=authors,
-            abstract=summary,
+            title=validated.title,
+            authors=[a.name for a in validated.authors],
+            abstract=validated.summary,
             source="arxiv",
-            arxiv_id=arxiv_id,
-            url=f"https://arxiv.org/abs/{arxiv_id}",
-            pdf_url=f"https://arxiv.org/pdf/{arxiv_id}.pdf",
-            published_date=published,
-            connected_papers_url=f"https://www.connectedpapers.com/search?q={quote(title)}",
+            arxiv_id=validated.id,
+            url=f"https://arxiv.org/abs/{validated.id}",
+            pdf_url=validated.pdf_url,
+            published_date=validated.published[:10],  # YYYY-MM-DD
+            connected_papers_url=f"https://www.connectedpapers.com/search?q={quote(validated.title)}",
             doi=None,
             # arXiv isn't stored anywhere else on this model, but is a real,
             # recognized venue -- needed so SearchAgent's centralized

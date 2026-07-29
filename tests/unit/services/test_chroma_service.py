@@ -105,11 +105,11 @@ def test_status_returns_zero_on_empty_collection(indexer):
     client = _mock_chroma_client(col)
     with patch("chromadb.HttpClient", return_value=client):
         status = indexer.status()
-    assert status["chunks"] == 0
-    assert status["files_indexed"] == 0
-    assert status["model"] == "nomic-embed-text"
-    assert status["provider"] == "ollama"
-    assert status["current_activity"] is None
+    assert status.chunks == 0
+    assert status.files_indexed == 0
+    assert status.model == "nomic-embed-text"
+    assert status.provider == "ollama"
+    assert status.current_activity is None
 
 
 def test_full_index_sets_activity_per_file_then_clears(indexer, vault):
@@ -132,7 +132,7 @@ def test_full_index_sets_activity_per_file_then_clears(indexer, vault):
     activities = [c.args[0] for c in mock_set_activity.call_args_list]
     assert any(a and "scanning file" in a and "test.md" in a for a in activities)
     assert activities[-1] is None  # cleared when done
-    assert indexer.status()["current_activity"] is None
+    assert indexer.status().current_activity is None
 
 
 def test_full_index_skips_chats_directory(indexer, vault):
@@ -194,10 +194,10 @@ def test_query_returns_ranked_file_scores(indexer, vault):
 
     assert len(result) == 2
     # a.md has best chunk at distance 0.1 → score 0.9; b.md at 0.5 → score 0.5
-    assert result[0]["source_file"] == "notes/a.md"
-    assert abs(result[0]["score"] - 0.9) < 1e-6
-    assert result[1]["source_file"] == "notes/b.md"
-    assert abs(result[1]["score"] - 0.5) < 1e-6
+    assert result[0].source_file == "notes/a.md"
+    assert abs(result[0].score - 0.9) < 1e-6
+    assert result[1].source_file == "notes/b.md"
+    assert abs(result[1].score - 0.5) < 1e-6
 
 
 def test_upsert_file_updates_manifest(indexer, vault, tmp_path):

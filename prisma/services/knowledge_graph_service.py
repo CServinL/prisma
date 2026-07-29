@@ -45,6 +45,17 @@ from watchdog.observers import Observer
 from prisma.services import resource_lock
 from prisma.services.injection_defense import wrap_untrusted
 from prisma.services.vault import VaultService
+from prisma.storage.models.kg_models import (
+    DeadLetterEntry,
+    DroppedChunkInfo,
+    EdgeInfo,
+    EntitiesForFileResponse,
+    EntityInfo,
+    GraphQueryResult,
+    KGStatus,
+    RankedNode,
+)
+from prisma.storage.models.search_models import DeepSearchCandidate, GraphSearchResult
 from prisma.storage.models.vault_models import NodeType
 from prisma.utils.text import content_hash as _content_hash
 from prisma.utils.vault_paths import is_relevant_vault_path
@@ -591,14 +602,14 @@ class KnowledgeGraphService:
             self._current_file_chunks_done = 0
         threading.Thread(target=self._full_index, daemon=True, name="knowledge-graph-reindex").start()
 
-    def list_dead_letters(self) -> list[dict]:
+    def list_dead_letters(self) -> list[DeadLetterEntry]:
         """List every dead-letter file on disk without clearing them —
         the read-only counterpart to clear_dead_letters(), for inspecting
         what failed before deciding to discard it. Only parses the fixed
         5-line header (see _record_dropped_chunk's doc comment), not the
         full error/chunk body, so this stays cheap even with large dumps."""
         dead_letter_dir = self._kg_dir / "dead_letters"
-        out: list[dict] = []
+        out: list[DeadLetterEntry] = []
         if not dead_letter_dir.is_dir():
             return out
         for path in sorted(dead_letter_dir.glob("*.txt")):
@@ -621,7 +632,7 @@ class KnowledgeGraphService:
             except OSError as exc:
                 _log.warning("failed to read dead-letter file %s: %s", path, exc)
                 continue
-            out.append(entry)
+            out.append(DeadLetterEntry.model_validate(entry))
         return out
 
     def clear_dead_letters(self) -> int:
@@ -722,31 +733,31 @@ class KnowledgeGraphService:
             ceilings.append(max(0, context_window - prompt_tokens_estimate - 200))
         return max(500, min(ceilings))
 
-    def status(self) -> dict:
+    def status(self) -> KGStatus:
         with self._lock:
-            return {
-                "state": self._state,
-                "last_indexed": self._last_indexed.isoformat() if self._last_indexed else None,
-                "last_error": self._last_error,
-                "current_activity": self._current_activity,
-                "sync_total": self._sync_total,
-                "sync_done": self._sync_done,
-                "current_file": self._current_file,
-                "current_file_chunks_done": self._current_file_chunks_done,
-                "current_file_chunks_total": self._current_file_chunks_total,
-                "chunk_avg_duration_ms": (
+            return KGStatus(
+                state=self._state,
+                last_indexed=self._last_indexed.isoformat() if self._last_indexed else None,
+                last_error=self._last_error,
+                current_activity=self._current_activity,
+                sync_total=self._sync_total,
+                sync_done=self._sync_done,
+                current_file=self._current_file,
+                current_file_chunks_done=self._current_file_chunks_done,
+                current_file_chunks_total=self._current_file_chunks_total,
+                chunk_avg_duration_ms=(
                     sum(self._chunk_durations) / len(self._chunk_durations) if self._chunk_durations else None
                 ),
-                "chunk_duration_samples": len(self._chunk_durations),
-                "chunk_avg_retries": (
+                chunk_duration_samples=len(self._chunk_durations),
+                chunk_avg_retries=(
                     sum(self._chunk_retries) / len(self._chunk_retries) if self._chunk_retries else None
                 ),
-                "chunk_avg_size_tokens": (
+                chunk_avg_size_tokens=(
                     sum(self._chunk_sizes) / len(self._chunk_sizes) if self._chunk_sizes else None
                 ),
-                "dropped_chunks_total": self._dropped_chunks_total,
-                "dropped_chunks_recent": list(self._dropped_chunks),
-            }
+                dropped_chunks_total=self._dropped_chunks_total,
+                dropped_chunks_recent=[DroppedChunkInfo.model_validate(c) for c in self._dropped_chunks],
+            )
 
     def _set_activity(self, activity: str | None) -> None:
         with self._lock:
@@ -1386,13 +1397,13 @@ class KnowledgeGraphService:
     # is enough to keep /search and ollama_deep_search working without
     # regression while that refinement is deferred.
 
-    def entities_for_file(self, rel_path: str) -> dict:
+    def entities_for_file(self, rel_path: str) -> EntitiesForFileResponse:
         """Raw entities/edges extracted from one specific file — for
         inspecting extraction quality directly (search/ranked_nodes only
         ever return file-level scores, never the underlying nodes)."""
         if self._conn is None:
-            return {"entities": [], "edges": []}
-        entities: list[dict] = []
+            return EntitiesForFileResponse(entities=[], edges=[])
+        entities: list[EntityInfo] = []
         try:
             result = self._conn.execute(
                 "MATCH (e:Entity {source_file: $rel}) "
@@ -1401,14 +1412,14 @@ class KnowledgeGraphService:
             )
             while result.has_next():
                 eid, label, file_type, trust_tier, source_location = result.get_next()
-                entities.append({
-                    "id": eid, "label": label, "file_type": file_type,
-                    "trust_tier": trust_tier, "source_location": source_location,
-                })
+                entities.append(EntityInfo(
+                    id=eid, label=label, file_type=file_type,
+                    trust_tier=trust_tier, source_location=source_location,
+                ))
         except Exception as exc:
             _log.warning("entities_for_file failed for %s: %s", rel_path, exc)
-            return {"entities": [], "edges": []}
-        edges: list[dict] = []
+            return EntitiesForFileResponse(entities=[], edges=[])
+        edges: list[EdgeInfo] = []
         try:
             result = self._conn.execute(
                 "MATCH (a:Entity)-[r:RelatesTo {source_file: $rel}]->(b:Entity) "
@@ -1417,15 +1428,15 @@ class KnowledgeGraphService:
             )
             while result.has_next():
                 src, relation, dst, confidence, confidence_score = result.get_next()
-                edges.append({
-                    "source": src, "relation": relation, "target": dst,
-                    "confidence": confidence, "confidence_score": confidence_score,
-                })
+                edges.append(EdgeInfo(
+                    source=src, relation=relation, target=dst,
+                    confidence=confidence, confidence_score=confidence_score,
+                ))
         except Exception as exc:
             _log.warning("entities_for_file edges failed for %s: %s", rel_path, exc)
-        return {"entities": entities, "edges": edges, "extracted_by": self.indexed_model(rel_path)}
+        return EntitiesForFileResponse(entities=entities, edges=edges, extracted_by=self.indexed_model(rel_path))
 
-    def search(self, question: str, top_k: int = 20) -> list[dict]:
+    def search(self, question: str, top_k: int = 20) -> list[GraphSearchResult]:
         terms = [t.lower() for t in re.findall(r"[a-zA-Z0-9_]+", question) if len(t) > 2]
         if not terms or self._conn is None:
             return []
@@ -1446,7 +1457,7 @@ class KnowledgeGraphService:
             if score > 0:
                 file_scores[source_file] = file_scores.get(source_file, 0.0) + score
         ranked = sorted(file_scores.items(), key=lambda x: -x[1])[:top_k]
-        return [{"source_file": sf, "score": score} for sf, score in ranked]
+        return [GraphSearchResult(source_file=sf, score=score) for sf, score in ranked]
 
     # ── Compatibility wrappers ───────────────────────────────────────────────
     # Same names/shapes as GraphifyIndexer's — app.py's call sites (/search,
@@ -1456,33 +1467,30 @@ class KnowledgeGraphService:
     # see TODO.md. These wrap the same basic `search()` this module actually
     # implements today.
 
-    def ranked_nodes(self, question: str, top_k: int = 20) -> list[dict]:
+    def ranked_nodes(self, question: str, top_k: int = 20) -> list[RankedNode]:
         results = self.search(question, top_k=top_k)
-        for r in results:
-            r.setdefault("label", "")
-        return results
+        return [RankedNode(source_file=r.source_file, score=r.score) for r in results]
 
-    def query(self, question: str, budget: int = 1500) -> list[dict]:
+    def query(self, question: str, budget: int = 1500) -> list[GraphQueryResult]:
         results = self.search(question, top_k=10)
         if not results:
             return []
-        text = "\n".join(f"- {r['source_file']} (score={r['score']:.1f})" for r in results)
-        return [{"text": text[: budget * 4]}]
+        text = "\n".join(f"- {r.source_file} (score={r.score:.1f})" for r in results)
+        return [GraphQueryResult(text=text[: budget * 4])]
 
-    def ollama_deep_search(self, question: str, top_k: int = 10, chroma=None) -> list[dict]:
+    def ollama_deep_search(self, question: str, top_k: int = 10, chroma=None) -> list[DeepSearchCandidate]:
         relevant_nodes = self.ranked_nodes(question, top_k=30)
-        max_g = max((n["score"] for n in relevant_nodes), default=1.0) or 1.0
+        max_g = max((n.score for n in relevant_nodes), default=1.0) or 1.0
         file_scores: dict[str, float] = {
-            n["source_file"]: n["score"] / max_g for n in relevant_nodes if n.get("source_file")
+            n.source_file: n.score / max_g for n in relevant_nodes if n.source_file
         }
         if chroma is not None:
             for item in chroma.query(question, top_k=top_k * 3):
-                sf = item["source_file"]
-                file_scores[sf] = max(file_scores.get(sf, 0.0), item["score"])
+                file_scores[item.source_file] = max(file_scores.get(item.source_file, 0.0), item.score)
         if not file_scores:
             return []
         ranked = sorted(file_scores.items(), key=lambda x: -x[1])[:top_k]
-        return [{"source_file": sf, "reason": "", "score": score} for sf, score in ranked]
+        return [DeepSearchCandidate(source_file=sf, reason="", score=score) for sf, score in ranked]
 
 
 def _frontmatter(body: str) -> dict:

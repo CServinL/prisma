@@ -568,7 +568,7 @@ def test_search_ranks_by_term_match(kg, vault):
 
     results = kg.search("neural networks")
     assert results
-    assert results[0]["source_file"] == "notes/a.md"
+    assert results[0].source_file == "notes/a.md"
 
 
 def test_search_excludes_chat_trust_tier(kg, vault):
@@ -602,10 +602,10 @@ def test_search_returns_empty_for_no_matching_terms(kg, vault):
 def test_status_starts_stale(vault, tmp_path):
     service = KnowledgeGraphService(vault, kg_dir=tmp_path / "kg-out")
     status = service.status()
-    assert status["state"] == "stale"
-    assert status["last_indexed"] is None
-    assert status["last_error"] is None
-    assert status["current_activity"] is None
+    assert status.state == "stale"
+    assert status.last_indexed is None
+    assert status.last_error is None
+    assert status.current_activity is None
 
 
 def test_full_index_clears_activity_when_done(kg, vault):
@@ -617,7 +617,7 @@ def test_full_index_clears_activity_when_done(kg, vault):
          patch("prisma.services.resource_lock.acquire", return_value=(True, "local-ollama", "req-1")):
         kg._full_index()
 
-    assert kg.status()["current_activity"] is None
+    assert kg.status().current_activity is None
 
 
 def test_extract_file_sets_activity_during_extraction(kg, vault):
@@ -638,7 +638,7 @@ def test_mark_stale_does_not_override_indexing_state(kg):
     with kg._lock:
         kg._state = "indexing"
     kg.mark_stale()
-    assert kg.status()["state"] == "indexing"
+    assert kg.status().state == "indexing"
 
 
 def test_mark_stale_ignores_stream_paths(kg, vault):
@@ -650,14 +650,14 @@ def test_mark_stale_ignores_stream_paths(kg, vault):
     with kg._lock:
         kg._state = "idle"
     kg.mark_stale(vault.root / "streams" / "my-topic.yaml")
-    assert kg.status()["state"] == "idle"
+    assert kg.status().state == "idle"
 
 
 def test_mark_stale_still_applies_to_md_paths(kg, vault):
     with kg._lock:
         kg._state = "idle"
     kg.mark_stale(vault.root / "notes" / "a.md")
-    assert kg.status()["state"] == "stale"
+    assert kg.status().state == "stale"
 
 
 def test_is_relevant_path_matches_watcher_exclusions(kg, vault):
@@ -685,7 +685,7 @@ def test_process_pending_clears_stale_even_with_no_real_change(kg, vault):
 
     kg._process_pending({f})
 
-    assert kg.status()["state"] == "idle"
+    assert kg.status().state == "idle"
 
 
 def test_full_index_sets_idle_and_last_indexed(kg, vault):
@@ -698,9 +698,9 @@ def test_full_index_sets_idle_and_last_indexed(kg, vault):
         kg._full_index()
 
     status = kg.status()
-    assert status["state"] == "idle"
-    assert status["last_indexed"] is not None
-    assert status["last_error"] is None
+    assert status.state == "idle"
+    assert status.last_indexed is not None
+    assert status.last_error is None
 
 
 # ── Knowledge Graph progress page ─────────────────────────────────────────────
@@ -717,9 +717,9 @@ def test_full_index_resets_sync_progress_when_done(kg, vault):
         kg._full_index()
 
     status = kg.status()
-    assert status["sync_total"] == 0
-    assert status["sync_done"] == 0
-    assert status["current_file"] is None
+    assert status.sync_total == 0
+    assert status.sync_done == 0
+    assert status.current_file is None
 
 
 def test_extract_files_concurrently_skips_all_when_generation_is_stale(kg, vault):
@@ -753,10 +753,10 @@ def test_drop_index_clears_graph_and_resets_progress_state(kg, vault):
     query = kg._conn.execute("MATCH (e:Entity {id: 'a_thing'}) RETURN e.id")
     assert not query.has_next()
     status = kg.status()
-    assert status["state"] == "stale"
-    assert status["sync_total"] == 0
-    assert status["sync_done"] == 0
-    assert status["current_file"] is None
+    assert status.state == "stale"
+    assert status.sync_total == 0
+    assert status.sync_done == 0
+    assert status.current_file is None
 
 
 def test_drop_index_bumps_index_generation(kg):
@@ -778,10 +778,10 @@ def test_full_index_tracks_progress_while_running(kg, vault):
     seen_total = {}
 
     def fake_extract_files_concurrently(paths, on_file_done=None, generation=None):
-        seen_total["sync_total"] = kg.status()["sync_total"]
+        seen_total["sync_total"] = kg.status().sync_total
         if on_file_done:
             on_file_done(paths[0])
-            seen_total["sync_done_after_one"] = kg.status()["sync_done"]
+            seen_total["sync_done_after_one"] = kg.status().sync_done
         return 0
 
     with patch.object(kg, "_extract_files_concurrently", side_effect=fake_extract_files_concurrently):
@@ -812,7 +812,7 @@ def test_full_index_sync_total_excludes_already_indexed_files(kg, vault):
     seen_total = {}
 
     def fake_extract_files_concurrently(paths, on_file_done=None, generation=None):
-        seen_total["sync_total"] = kg.status()["sync_total"]
+        seen_total["sync_total"] = kg.status().sync_total
         return 0
 
     with patch.object(kg, "_extract_files_concurrently", side_effect=fake_extract_files_concurrently):
@@ -837,8 +837,8 @@ def test_extract_file_tracks_current_file_chunk_progress(kg, vault):
     # Extraction finished, so chunks_done should have reached the total —
     # current_file itself is only meaningful mid-extraction (not cleared
     # here, since _extract_file doesn't clear it — only _full_index does).
-    assert status["current_file_chunks_total"] > 0
-    assert status["current_file_chunks_done"] == status["current_file_chunks_total"]
+    assert status.current_file_chunks_total > 0
+    assert status.current_file_chunks_done == status.current_file_chunks_total
 
 
 def test_call_ollama_extract_records_chunk_duration(kg, vault):
@@ -852,15 +852,15 @@ def test_call_ollama_extract_records_chunk_duration(kg, vault):
         kg._extract_file(f, "note")
 
     status = kg.status()
-    assert status["chunk_duration_samples"] == 1
-    assert status["chunk_avg_duration_ms"] is not None
-    assert status["chunk_avg_duration_ms"] >= 0
+    assert status.chunk_duration_samples == 1
+    assert status.chunk_avg_duration_ms is not None
+    assert status.chunk_avg_duration_ms >= 0
 
 
 def test_chunk_avg_duration_is_none_when_no_calls_made_yet(kg):
     status = kg.status()
-    assert status["chunk_avg_duration_ms"] is None
-    assert status["chunk_duration_samples"] == 0
+    assert status.chunk_avg_duration_ms is None
+    assert status.chunk_duration_samples == 0
 
 
 def test_call_ollama_extract_records_chunk_size(kg, vault):
@@ -875,13 +875,13 @@ def test_call_ollama_extract_records_chunk_size(kg, vault):
         kg._extract_file(f, "note")
 
     status = kg.status()
-    assert status["chunk_avg_size_tokens"] is not None
-    assert status["chunk_avg_size_tokens"] > 0
+    assert status.chunk_avg_size_tokens is not None
+    assert status.chunk_avg_size_tokens > 0
 
 
 def test_chunk_avg_size_is_none_when_no_calls_made_yet(kg):
     status = kg.status()
-    assert status["chunk_avg_size_tokens"] is None
+    assert status.chunk_avg_size_tokens is None
 
 
 def test_call_ollama_extract_tracks_instructor_retry_count(kg, vault):
@@ -904,7 +904,7 @@ def test_call_ollama_extract_tracks_instructor_retry_count(kg, vault):
         kg._extract_file(f, "note")
 
     status = kg.status()
-    assert status["chunk_avg_retries"] == 2
+    assert status.chunk_avg_retries == 2
 
 
 def test_dropped_chunk_recorded_in_memory_and_on_disk(kg, vault):
@@ -917,13 +917,13 @@ def test_dropped_chunk_recorded_in_memory_and_on_disk(kg, vault):
         kg._extract_file(f, "note")
 
     status = kg.status()
-    assert status["dropped_chunks_total"] == 1
-    assert len(status["dropped_chunks_recent"]) == 1
-    dropped = status["dropped_chunks_recent"][0]
-    assert dropped["source_file"] == "notes/test.md"
-    assert "validation retries exhausted" in dropped["error"]
-    assert dropped["dead_letter_path"] is not None
-    dead_letter = Path(dropped["dead_letter_path"])
+    assert status.dropped_chunks_total == 1
+    assert len(status.dropped_chunks_recent) == 1
+    dropped = status.dropped_chunks_recent[0]
+    assert dropped.source_file == "notes/test.md"
+    assert "validation retries exhausted" in dropped.error
+    assert dropped.dead_letter_path is not None
+    dead_letter = Path(dropped.dead_letter_path)
     assert dead_letter.exists()
     content = dead_letter.read_text(encoding="utf-8")
     assert "notes/test.md" in content
@@ -955,12 +955,12 @@ def test_dropped_chunk_summarizes_multiline_error_but_keeps_full_detail_on_disk(
         kg._extract_file(f, "note")
 
     status = kg.status()
-    dropped = status["dropped_chunks_recent"][0]
-    assert "\n" not in dropped["error"]
-    assert "unexpected end of hex escape" in dropped["error"]
-    assert "<failed_attempts>" not in dropped["error"]
+    dropped = status.dropped_chunks_recent[0]
+    assert "\n" not in dropped.error
+    assert "unexpected end of hex escape" in dropped.error
+    assert "<failed_attempts>" not in dropped.error
 
-    dead_letter = Path(dropped["dead_letter_path"])
+    dead_letter = Path(dropped.dead_letter_path)
     content = dead_letter.read_text(encoding="utf-8")
     lines = content.splitlines()
     assert lines[0].startswith("# source_file:")
@@ -977,8 +977,8 @@ def test_dropped_chunk_summarizes_multiline_error_but_keeps_full_detail_on_disk(
 
 def test_dropped_chunks_total_is_zero_when_nothing_failed(kg):
     status = kg.status()
-    assert status["dropped_chunks_total"] == 0
-    assert status["dropped_chunks_recent"] == []
+    assert status.dropped_chunks_total == 0
+    assert status.dropped_chunks_recent == []
 
 
 def test_list_dead_letters_returns_header_fields_without_clearing(kg, vault):
@@ -990,17 +990,17 @@ def test_list_dead_letters_returns_header_fields_without_clearing(kg, vault):
          patch("prisma.services.resource_lock.release"):
         kg._extract_file(f, "note")
 
-    dead_letter = Path(kg.status()["dropped_chunks_recent"][0]["dead_letter_path"])
+    dead_letter = Path(kg.status().dropped_chunks_recent[0].dead_letter_path)
 
     entries = kg.list_dead_letters()
 
     assert len(entries) == 1
-    assert entries[0]["file"] == dead_letter.name
-    assert entries[0]["source_file"] == "notes/test.md"
-    assert "validation retries exhausted" in entries[0]["error"]
+    assert entries[0].file == dead_letter.name
+    assert entries[0].source_file == "notes/test.md"
+    assert "validation retries exhausted" in entries[0].error
     # read-only — the file and in-memory counters are untouched
     assert dead_letter.exists()
-    assert kg.status()["dropped_chunks_total"] == 1
+    assert kg.status().dropped_chunks_total == 1
 
 
 def test_list_dead_letters_returns_empty_when_none_exist(kg):
@@ -1016,7 +1016,7 @@ def test_clear_dead_letters_removes_files_and_resets_counters(kg, vault):
          patch("prisma.services.resource_lock.release"):
         kg._extract_file(f, "note")
 
-    dead_letter = Path(kg.status()["dropped_chunks_recent"][0]["dead_letter_path"])
+    dead_letter = Path(kg.status().dropped_chunks_recent[0].dead_letter_path)
     assert dead_letter.exists()
 
     removed = kg.clear_dead_letters()
@@ -1024,8 +1024,8 @@ def test_clear_dead_letters_removes_files_and_resets_counters(kg, vault):
     assert removed == 1
     assert not dead_letter.exists()
     status = kg.status()
-    assert status["dropped_chunks_total"] == 0
-    assert status["dropped_chunks_recent"] == []
+    assert status.dropped_chunks_total == 0
+    assert status.dropped_chunks_recent == []
 
 
 def test_clear_dead_letters_returns_zero_when_none_exist(kg):
@@ -1072,18 +1072,18 @@ def test_entities_for_file_returns_nodes_and_edges(kg, vault):
 
     data = kg.entities_for_file("notes/test.md")
 
-    entity_ids = {e["id"] for e in data["entities"]}
+    entity_ids = {e.id for e in data.entities}
     assert entity_ids == {"a", "b"}
-    assert len(data["edges"]) == 1
-    assert data["edges"][0]["source"] == "a"
-    assert data["edges"][0]["target"] == "b"
-    assert data["edges"][0]["relation"] == "cites"
+    assert len(data.edges) == 1
+    assert data.edges[0].source == "a"
+    assert data.edges[0].target == "b"
+    assert data.edges[0].relation == "cites"
 
 
 def test_entities_for_file_empty_for_untracked_file(kg):
     data = kg.entities_for_file("notes/never-extracted.md")
-    assert data["entities"] == []
-    assert data["edges"] == []
+    assert data.entities == []
+    assert data.edges == []
 
 
 # ── query (compatibility wrapper over search()) ────────────────────────────
@@ -1100,7 +1100,7 @@ def test_query_returns_text_summary_of_matching_entities(kg, vault):
     results = kg.query("quantum")
 
     assert len(results) == 1
-    assert "notes/test.md" in results[0]["text"]
+    assert "notes/test.md" in results[0].text
 
 
 def test_query_returns_empty_when_no_matches(kg):

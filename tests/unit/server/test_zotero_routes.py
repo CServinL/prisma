@@ -6,21 +6,22 @@ old `prisma zotero stats` and `prisma sync` CLI commands.
 from fastapi.testclient import TestClient
 
 from prisma.server.app import app
-from prisma.services.zotero import ZoteroItem
+from prisma.storage.models.zotero_models import ZoteroItem, ZoteroCreator
 
 client = TestClient(app, client=("127.0.0.1", 12345))
 
 
 def _item(item_type="journalArticle", doi="10.1/x", abstract="abs", authors=("A",)):
+    creators = [ZoteroCreator(creator_type="author", name=a) for a in authors]
     return ZoteroItem(
-        key="K1", title="T", item_type=item_type, authors=list(authors), year=2024,
-        abstract=abstract, doi=doi, url=None, publication=None, tags=[], collection_keys=[],
+        key="K1", title="T", item_type=item_type, creators=creators, date="2024",
+        abstract_note=abstract, doi=doi, url=None, publication_title=None, tags=[], collections=[],
     )
 
 
 def test_zotero_stats_empty_library(monkeypatch):
     from prisma.server import app as app_module
-    monkeypatch.setattr(app_module._zotero, "list_items", lambda **kw: [])
+    monkeypatch.setattr(app_module._zotero, "get_all_items", lambda **kw: [])
 
     r = client.get("/zotero/stats")
     assert r.status_code == 200
@@ -36,7 +37,7 @@ def test_zotero_stats_counts_and_quality(monkeypatch):
         _item(doi=None),
         _item(abstract=None, authors=()),
     ]
-    monkeypatch.setattr(app_module._zotero, "list_items", lambda **kw: items)
+    monkeypatch.setattr(app_module._zotero, "get_all_items", lambda **kw: items)
 
     r = client.get("/zotero/stats")
     assert r.status_code == 200
@@ -71,6 +72,23 @@ def test_sync_pending_offline_returns_503(monkeypatch):
 
     r = client.post("/zotero/sync-pending")
     assert r.status_code == 503
+
+
+def test_zotero_items_passes_query_through_when_scoped_to_collection(monkeypatch):
+    # Regression: /zotero/items used to narrow by a client-side title-only
+    # substring when both collection and q were given; it must now pass q
+    # straight through to get_collection_items so Zotero's own richer
+    # search (title/creators/abstract/etc.) applies, scoped to the collection.
+    from prisma.server import app as app_mod
+    from unittest.mock import MagicMock
+
+    mock_zotero = MagicMock()
+    mock_zotero.get_collection_items.return_value = [_item()]
+    monkeypatch.setattr(app_mod, "_zotero", mock_zotero)
+
+    r = client.get("/zotero/items", params={"collection": "COLL1", "q": "neural networks"})
+    assert r.status_code == 200
+    mock_zotero.get_collection_items.assert_called_once_with("COLL1", query="neural networks")
 
 
 def test_sync_pending_online_flushes_queue(monkeypatch):

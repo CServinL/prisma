@@ -6,7 +6,7 @@ wires together everything else in this module.
 Uses a real tmp_path-backed VaultService (same convention as
 test_vault_streams.py -- no mocks for the vault itself), and mocks only the
 external collaborators: SearchAgent, AnalysisAgent, ConfigLoader, and
-ZoteroService (a MagicMock, since the real one makes live Zotero API calls).
+ZoteroClient (a MagicMock, since the real one makes live Zotero API calls).
 SearchAgent/AnalysisAgent are imported *inside* run_stream
 (`from prisma.agents.search_agent import SearchAgent`), so they must be
 patched at their source module, not at prisma.services.stream_runner.
@@ -18,7 +18,6 @@ import pytest
 
 from prisma.services.stream_runner import run_stream
 from prisma.services.vault import VaultService
-from prisma.services.zotero import ZoteroMode
 
 
 @pytest.fixture
@@ -36,13 +35,13 @@ def _paper(title, doi=None, abstract=""):
     return p
 
 
-def _zotero_item(key, title, doi=None, version=1, collection_keys=None):
+def _zotero_item(key, title, doi=None, version=1, collections=None):
     item = MagicMock()
     item.key = key
     item.title = title
     item.doi = doi
     item.version = version
-    item.collection_keys = collection_keys or []
+    item.collections = collections or []
     return item
 
 
@@ -88,7 +87,7 @@ def test_all_sources_fail_preflight(vault):
 def test_zotero_offline_finds_but_does_not_save(vault):
     stream = vault.create_stream(title="Test Stream", query="short")
     zotero = MagicMock()
-    zotero.mode = ZoteroMode.offline
+    zotero.is_available.return_value = False
 
     mock_search_agent = MagicMock()
     mock_search_agent.preflight.return_value = ["arxiv"]
@@ -108,18 +107,18 @@ def test_zotero_offline_finds_but_does_not_save(vault):
     # Zotero offline -> the internet-paper loop breaks immediately, so
     # relevance checking (and any Zotero write) never happens.
     MockAnalysisAgent.return_value.batch_relevance_check.assert_not_called()
-    zotero.add_item.assert_not_called()
+    zotero.add_paper.assert_not_called()
 
 
 def test_saves_relevant_new_paper_via_zotero_online(vault):
     stream = vault.create_stream(title="Test Stream", query="short")
     zotero = MagicMock()
-    zotero.mode = ZoteroMode.web_api
+    zotero.is_available.return_value = True
     zotero.ensure_collection.return_value = MagicMock(key="COLLECTION1")
-    zotero.list_items.return_value = []  # empty existing collection
+    zotero.get_collection_items.return_value = []  # empty existing collection
     zotero.find_by_identifier.return_value = None  # not already in library
     saved_item = _zotero_item("NEW1", "Paper One", version=1)
-    zotero.add_item.return_value = saved_item
+    zotero.add_paper.return_value = saved_item
 
     mock_search_agent = MagicMock()
     mock_search_agent.preflight.return_value = ["arxiv"]
@@ -136,10 +135,8 @@ def test_saves_relevant_new_paper_via_zotero_online(vault):
 
     assert result.papers_saved == 1
     assert result.papers_skipped_llm == 0
-    zotero.add_item.assert_called_once()
-    zotero.add_to_collection.assert_called_once_with(
-        "NEW1", 1, "COLLECTION1", current_collection_keys=[]
-    )
+    zotero.add_paper.assert_called_once()
+    zotero.add_item_to_collection.assert_called_once_with("NEW1", "COLLECTION1")
 
     # collection_key was persisted onto the stream (ensure_collection's
     # result differs from the stream's prior None collection_key)
@@ -150,11 +147,11 @@ def test_saves_relevant_new_paper_via_zotero_online(vault):
 def test_dedup_skips_paper_already_in_collection(vault):
     stream = vault.create_stream(title="Test Stream", query="short")
     zotero = MagicMock()
-    zotero.mode = ZoteroMode.web_api
+    zotero.is_available.return_value = True
     zotero.ensure_collection.return_value = MagicMock(key="COLLECTION1")
     # Already-known item with the exact same title as the "new" paper found
     # below -- find_duplicate's level-2 exact-title match should catch this.
-    zotero.list_items.return_value = [_zotero_item("EXISTING1", "Duplicate Paper")]
+    zotero.get_collection_items.return_value = [_zotero_item("EXISTING1", "Duplicate Paper")]
 
     mock_search_agent = MagicMock()
     mock_search_agent.preflight.return_value = ["arxiv"]
@@ -170,18 +167,18 @@ def test_dedup_skips_paper_already_in_collection(vault):
 
     assert result.papers_saved == 0
     # never even reaches the bookmark/relevance-check stage for this paper
-    zotero.add_item.assert_not_called()
+    zotero.add_paper.assert_not_called()
     mock_analysis_agent.batch_relevance_check.assert_not_called()
 
 
 def test_llm_relevance_check_rejects_paper(vault):
     stream = vault.create_stream(title="Test Stream", query="short")
     zotero = MagicMock()
-    zotero.mode = ZoteroMode.web_api
+    zotero.is_available.return_value = True
     zotero.ensure_collection.return_value = MagicMock(key="COLLECTION1")
-    zotero.list_items.return_value = []
+    zotero.get_collection_items.return_value = []
     zotero.find_by_identifier.return_value = None
-    zotero.add_item.return_value = _zotero_item("NEW1", "Irrelevant Paper")
+    zotero.add_paper.return_value = _zotero_item("NEW1", "Irrelevant Paper")
 
     mock_search_agent = MagicMock()
     mock_search_agent.preflight.return_value = ["arxiv"]
@@ -198,7 +195,7 @@ def test_llm_relevance_check_rejects_paper(vault):
 
     assert result.papers_saved == 0
     assert result.papers_skipped_llm == 1
-    zotero.add_to_collection.assert_not_called()
+    zotero.add_item_to_collection.assert_not_called()
 
 
 def test_library_search_source_saves_relevant_existing_item(vault):
@@ -207,17 +204,13 @@ def test_library_search_source_saves_relevant_existing_item(vault):
     # letting the internet search return no papers at all.
     stream = vault.create_stream(title="Test Stream", query="short")
     zotero = MagicMock()
-    zotero.mode = ZoteroMode.web_api
+    zotero.is_available.return_value = True
     zotero.ensure_collection.return_value = MagicMock(key="COLLECTION1")
 
-    library_item = _zotero_item("LIB1", "Library Paper", version=2, collection_keys=["OTHER"])
+    library_item = _zotero_item("LIB1", "Library Paper", version=2, collections=["OTHER"])
 
-    def _list_items(collection_key=None, q=None, limit=None):
-        if collection_key is not None:
-            return []  # collection currently empty
-        return [library_item]  # library-wide search result
-
-    zotero.list_items.side_effect = _list_items
+    zotero.get_collection_items.return_value = []  # collection currently empty
+    zotero.search_items.return_value = [library_item]  # library-wide search result
 
     mock_search_agent = MagicMock()
     mock_search_agent.preflight.return_value = ["arxiv"]
@@ -233,6 +226,4 @@ def test_library_search_source_saves_relevant_existing_item(vault):
         result = run_stream(stream.slug, vault, zotero, force=True)
 
     assert result.papers_saved == 1
-    zotero.add_to_collection.assert_called_once_with(
-        "LIB1", 2, "COLLECTION1", current_collection_keys=["OTHER"]
-    )
+    zotero.add_item_to_collection.assert_called_once_with("LIB1", "COLLECTION1")

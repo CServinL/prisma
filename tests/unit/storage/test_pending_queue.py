@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch, mock_open
 
-from prisma.storage.pending_queue import PendingWriteQueue, _MAX_ATTEMPTS
+from prisma.storage.pending_queue import PendingAction, PendingWriteQueue, _MAX_ATTEMPTS
 
 
 def _make_queue(tmp_path: Path = None) -> PendingWriteQueue:
@@ -176,15 +176,15 @@ class TestFlushDispatch(unittest.TestCase):
         self.assertEqual(fail, 1)
 
     def test_unknown_action_type_is_dropped_as_failure(self):
-        self.q._actions.append({
-            "id": "x",
-            "type": "unknown_action",
-            "data": {},
-            "collection_key": None,
-            "attempts": 0,
-            "last_error": None,
-            "timestamp": "2025-01-01T00:00:00+00:00",
-        })
+        self.q._actions.append(PendingAction(
+            id="x",
+            type="unknown_action",
+            data={},
+            collection_key=None,
+            attempts=0,
+            last_error=None,
+            timestamp="2025-01-01T00:00:00+00:00",
+        ))
         self.q._save()
         client = _zotero_client()
         ok, fail = self.q.flush(client)
@@ -198,15 +198,15 @@ class TestFlushMaxAttempts(unittest.TestCase):
         self.q = _make_queue()
 
     def test_exceeded_attempts_dropped(self):
-        self.q._actions.append({
-            "id": "z",
-            "type": "save_paper",
-            "data": {"DOI": "", "title": "Old"},
-            "collection_key": None,
-            "attempts": _MAX_ATTEMPTS,
-            "last_error": "timeout",
-            "timestamp": "2025-01-01T00:00:00+00:00",
-        })
+        self.q._actions.append(PendingAction(
+            id="z",
+            type="save_paper",
+            data={"DOI": "", "title": "Old"},
+            collection_key=None,
+            attempts=_MAX_ATTEMPTS,
+            last_error="timeout",
+            timestamp="2025-01-01T00:00:00+00:00",
+        ))
         self.q._save()
         client = _zotero_client(search_results=[])
         ok, fail = self.q.flush(client)

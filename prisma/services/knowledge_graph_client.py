@@ -18,6 +18,15 @@ import logging
 
 import requests
 
+from prisma.storage.models.kg_models import (
+    DeadLetterEntry,
+    EntitiesForFileResponse,
+    GraphQueryResult,
+    KGStatus,
+    RankedNode,
+)
+from prisma.storage.models.search_models import DeepSearchCandidate, GraphSearchResult
+
 _log = logging.getLogger("prisma.knowledge_graph_client")
 
 
@@ -47,56 +56,65 @@ class KnowledgeGraphClient:
         data = self._post("/taint_file", params={"rel": rel_path})
         return bool(data.get("tainted")) if data else False
 
-    def list_dead_letters(self) -> list[dict]:
-        return self._get("/list_dead_letters") or []
+    def list_dead_letters(self) -> list[DeadLetterEntry]:
+        data = self._get("/list_dead_letters") or []
+        return [DeadLetterEntry.model_validate(d) for d in data]
 
     def clear_dead_letters(self) -> int:
         data = self._post("/clear_dead_letters")
         return int(data.get("removed", 0)) if data else 0
 
-    def entities_for_file(self, rel_path: str) -> dict:
+    def entities_for_file(self, rel_path: str) -> EntitiesForFileResponse:
         data = self._get("/entities_for_file", params={"rel": rel_path})
-        return data if data else {"entities": [], "edges": []}
+        return EntitiesForFileResponse.model_validate(data) if data else EntitiesForFileResponse(entities=[], edges=[])
 
-    def status(self) -> dict:
+    def status(self) -> KGStatus:
         # Polled on every app.py /status request (itself polled by the UI
         # every ~10s with a 3s abort). A restarting/slow kg must not block
         # that whole response for up to self._timeout (10s default) — a
         # short, independent timeout here degrades gracefully to "kg
         # unreachable" instead of making the entire app look offline over
         # one subsystem's restart.
-        return self._get("/status", timeout=2.0) or {
-            "state": "stale", "last_indexed": None, "last_error": "kg process unreachable",
-        }
+        data = self._get("/status", timeout=2.0)
+        if data is None:
+            return KGStatus(
+                state="stale", last_indexed=None, last_error="kg process unreachable",
+                sync_total=0, sync_done=0, current_file_chunks_done=0,
+                current_file_chunks_total=0, chunk_duration_samples=0,
+                dropped_chunks_total=0, dropped_chunks_recent=[],
+            )
+        return KGStatus.model_validate(data)
 
-    def search(self, question: str, top_k: int = 20) -> list[dict]:
-        return self._get("/search", params={"q": question, "top_k": top_k}) or []
+    def search(self, question: str, top_k: int = 20) -> list[GraphSearchResult]:
+        data = self._get("/search", params={"q": question, "top_k": top_k}) or []
+        return [GraphSearchResult.model_validate(d) for d in data]
 
-    def ranked_nodes(self, question: str, top_k: int = 20) -> list[dict]:
-        return self._get("/ranked_nodes", params={"q": question, "top_k": top_k}) or []
+    def ranked_nodes(self, question: str, top_k: int = 20) -> list[RankedNode]:
+        data = self._get("/ranked_nodes", params={"q": question, "top_k": top_k}) or []
+        return [RankedNode.model_validate(d) for d in data]
 
-    def query(self, question: str, budget: int = 1500) -> list[dict]:
-        return self._get("/query", params={"q": question, "budget": budget}) or []
+    def query(self, question: str, budget: int = 1500) -> list[GraphQueryResult]:
+        data = self._get("/query", params={"q": question, "budget": budget}) or []
+        return [GraphQueryResult.model_validate(d) for d in data]
 
     def _ollama_ready(self) -> bool:
         # Also polled on every /status request — see status()'s comment.
         data = self._get("/ollama_ready", timeout=2.0)
         return bool(data.get("reachable")) if data else False
 
-    def ollama_deep_search(self, question: str, top_k: int = 10, chroma=None) -> list[dict]:
+    def ollama_deep_search(self, question: str, top_k: int = 10, chroma=None) -> list[DeepSearchCandidate]:
         relevant_nodes = self.ranked_nodes(question, top_k=30)
-        max_g = max((n["score"] for n in relevant_nodes), default=1.0) or 1.0
+        max_g = max((n.score for n in relevant_nodes), default=1.0) or 1.0
         file_scores: dict[str, float] = {
-            n["source_file"]: n["score"] / max_g for n in relevant_nodes if n.get("source_file")
+            n.source_file: n.score / max_g for n in relevant_nodes if n.source_file
         }
         if chroma is not None:
             for item in chroma.query(question, top_k=top_k * 3):
-                sf = item["source_file"]
-                file_scores[sf] = max(file_scores.get(sf, 0.0), item["score"])
+                file_scores[item.source_file] = max(file_scores.get(item.source_file, 0.0), item.score)
         if not file_scores:
             return []
         ranked = sorted(file_scores.items(), key=lambda x: -x[1])[:top_k]
-        return [{"source_file": sf, "reason": "", "score": score} for sf, score in ranked]
+        return [DeepSearchCandidate(source_file=sf, reason="", score=score) for sf, score in ranked]
 
     # ── Internal ──────────────────────────────────────────────────────────
 

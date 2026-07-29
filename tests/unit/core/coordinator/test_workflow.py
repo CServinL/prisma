@@ -150,10 +150,8 @@ class TestCoordinatorWorkflow(CoordinatorTestBase):
             
             # Verify pipeline metadata exists and contains expected fields
             if result.pipeline_metadata is not None:
-                self.assertIn('papers_found', result.pipeline_metadata)
-                self.assertIn('papers_discarded', result.pipeline_metadata)
-                self.assertEqual(result.pipeline_metadata['papers_found'], 3)
-                self.assertEqual(result.pipeline_metadata['papers_discarded'], 3)
+                self.assertEqual(result.pipeline_metadata.papers_found, 3)
+                self.assertEqual(result.pipeline_metadata.papers_discarded, 3)
     
     def test_run_review_with_relevance_assessment_error(self):
         """Test run_review when relevance assessment fails."""

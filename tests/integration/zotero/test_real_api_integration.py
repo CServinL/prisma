@@ -290,7 +290,7 @@ class TestRealZoteroAPIIntegration:
         
         try:
             # Test getting items from the empty collection
-            collection_items = zotero_client.get_collection_items(test_collection.key, limit=5)
+            collection_items = zotero_client.get_collection_items(test_collection.key)
             assert isinstance(collection_items, list)
             initial_count = len(collection_items)
             

@@ -228,6 +228,44 @@ See `TODO.md`'s "Code quality assessment" #1 for the fuller before/after and the
 lesson drawn from this reversal (duplication that looks like "needs a refactor" can
 sometimes actually be "needs three of the four things deleted").
 
+## Follow-up (2026-07-28): the two remaining Web API clients merged into one
+
+Even after the 2026-07-27 reversal above, two independent Web-API client
+implementations remained: `services/zotero.py` (`ZoteroService`, hand-rolled
+`urllib.request`, its own flatter `ZoteroItem`/`ZoteroCollection` models, a
+429-retry loop duplicated three times in the same file) and
+`integrations/zotero/client.py` + `unified_client.py` (`ZoteroClient`,
+pyzotero-backed, richer Zotero-API-faithful models in
+`storage/models/zotero_models.py`). `services/zotero.py` also still carried a
+genuine local-Zotero-Desktop-SQLite-reading fallback path
+(`ZoteroMode.offline` → `_detect_db_path()` scanning `~/Zotero/zotero.sqlite`
+and its WSL2 equivalent) — dead on forge, but a real contradiction of this
+ADR's own "Web API only, everywhere" follow-up above.
+
+**Decision: consolidate onto `integrations/zotero/client.py`** — pyzotero
+offloads pagination/rate-limiting/retry correctness to a maintained library
+instead of three copies of a hand-rolled loop, and its data model is closer
+to Zotero's actual API shape (structured creators, tags, `abstractNote`/
+`publicationTitle` aliases) than `services/zotero.py`'s flat strings.
+
+**What changed:**
+- `unified_client.py`'s facade (a `ZoteroClient` class doing `hasattr`-based
+  capability dispatch onto a single, statically-known backend — already
+  ceremonial per the 2026-07-27 follow-up above) collapsed directly into
+  `client.py`'s own, differently-named `ZoteroClient` class. One file, one
+  class, no more dispatch layer, no more two classes sharing a name.
+- `client.py` gained every capability `services/zotero.py`'s four callers
+  actually used: `check_web_api_reachable()`, `status()`, `ensure_collection()`,
+  `find_by_identifier()`, `get_pdf_bytes()`, `add_paper()` (paper → Zotero-item
+  conversion, ported from the old `_webapi_add_item`).
+- `server/app.py`, `services/stream_runner.py`, `services/dedup.py`,
+  `cli/prisma_cli.py` all migrated to `integrations.zotero.ZoteroClient`.
+- `services/zotero.py` deleted entirely — including the SQLite-offline path,
+  which finally makes "Web API only, everywhere" true of every remaining code
+  path, not just the primary one.
+- See `docs/wiki/zotero.md`'s "Client Hierarchy" section for the resulting
+  single-client shape.
+
 ## Related
 - ADR-011: Authentication Strategy — the same server/desktop machine split this
   follow-up's reasoning depends on.

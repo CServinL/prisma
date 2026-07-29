@@ -227,18 +227,45 @@ class LiteratureReviewReport(BaseModel):
         return v.strip()
 
 
+class PipelineMetadata(BaseModel):
+    """Per-stage timing/counts for one run_review() call. All-optional:
+    which fields are populated depends on how far the pipeline got before
+    returning (e.g. an early "no papers found" exit has none of the later
+    stage timings) -- extra="forbid" so a renamed/typo'd key at any of the
+    5 return sites in coordinator.py raises immediately instead of silently
+    dropping the field (previously a raw dict, and the key set had already
+    drifted: only the success path set report_time/saved_to_zotero)."""
+    model_config = ConfigDict(extra="forbid")
+
+    online: Optional[bool] = None
+    search_time: Optional[float] = None
+    relevance_time: Optional[float] = None
+    duplicate_check_time: Optional[float] = None
+    analysis_time: Optional[float] = None
+    report_time: Optional[float] = None
+    search_results: Optional[int] = None
+    sources_searched: Optional[List[str]] = None
+    papers_found: Optional[int] = None
+    papers_discarded: Optional[int] = None
+    papers_relevant: Optional[int] = None
+    papers_existing: Optional[int] = None
+    papers_new: Optional[int] = None
+    papers_unsaved: Optional[int] = None
+    saved_to_zotero: Optional[int] = None
+
+
 class CoordinatorResult(BaseModel):
     """Coordinator pipeline result model"""
     model_config = ConfigDict(populate_by_name=True)
-    
+
     success: bool = Field(..., description="Whether the pipeline completed successfully")
     papers_analyzed: int = Field(..., ge=0, description="Number of papers analyzed")
     authors_found: int = Field(..., ge=0, description="Number of unique authors found")
     output_file: str = Field(..., description="Path to generated report file")
-    
+
     # Processing metadata
     total_duration: Optional[float] = Field(None, ge=0.0, description="Total pipeline duration")
-    pipeline_metadata: Optional[Dict[str, Any]] = Field(None, description="Additional pipeline metadata")
+    pipeline_metadata: Optional[PipelineMetadata] = Field(None, description="Additional pipeline metadata")
     
     # Error handling
     errors: List[str] = Field(default_factory=list, description="Any errors encountered")

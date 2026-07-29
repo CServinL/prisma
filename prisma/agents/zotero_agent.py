@@ -50,6 +50,48 @@ class ZoteroSearchCriteria(BaseModel):
         return v
 
 
+class ZoteroCollectionSummary(BaseModel):
+    key: str
+    name: str
+    parent: Optional[str] = None
+
+
+class ZoteroLibrarySummary(BaseModel):
+    """get_library_summary()'s return shape -- library_id/library_type are
+    always present; everything else is only populated on the success path
+    (error is only set on the ZoteroClientError path)."""
+    library_id: str
+    library_type: str
+    collections_count: Optional[int] = None
+    sample_items_count: Optional[int] = None
+    academic_papers_in_sample: Optional[int] = None
+    item_types: Optional[Dict[str, int]] = None
+    year_range: Optional[Tuple[int, int]] = None
+    collections: Optional[List[ZoteroCollectionSummary]] = None
+    error: Optional[str] = None
+
+
+class ZoteroItemExport(BaseModel):
+    """export_papers_metadata()'s return shape -- mirrors ZoteroItem.to_dict()."""
+    key: str
+    item_type: str
+    title: Optional[str] = None
+    authors: List[str] = Field(default_factory=list)
+    abstract: Optional[str] = None
+    publication: Optional[str] = None
+    volume: Optional[str] = None
+    issue: Optional[str] = None
+    pages: Optional[str] = None
+    date: Optional[str] = None
+    year: Optional[int] = None
+    doi: Optional[str] = None
+    url: Optional[str] = None
+    tags: List[str] = Field(default_factory=list)
+    collections: List[str] = Field(default_factory=list)
+    citation_key: str
+    is_academic_paper: bool
+
+
 class ZoteroAgent:
     """
     Agent for interacting with Zotero libraries
@@ -144,7 +186,7 @@ class ZoteroAgent:
             # If specific collections are requested
             if criteria.collections:
                 for collection_key in criteria.collections:
-                    items = self.client.get_collection_items(collection_key, limit=criteria.limit)
+                    items = self.client.get_collection_items(collection_key)
                     papers.extend([ZoteroItem.from_zotero_data(item) for item in items])
             
             # If query search is requested
@@ -264,13 +306,13 @@ class ZoteroAgent:
         )
         
         return self.search_papers(criteria)
-    
-    def get_library_summary(self) -> Dict[str, Any]:
+
+    def get_library_summary(self) -> "ZoteroLibrarySummary":
         """
         Get a summary of the Zotero library
-        
+
         Returns:
-            Dictionary with library statistics and information
+            ZoteroLibrarySummary with library statistics and information
         """
         try:
             collections = self.get_collections()
@@ -292,46 +334,42 @@ class ZoteroAgent:
                     years.append(item.year)
             
             year_range = (min(years), max(years)) if years else None
-            
-            summary = {
-                "library_id": self.config.library_id,
-                "library_type": self.config.library_type,
-                "collections_count": len(collections),
-                "sample_items_count": len(items),
-                "academic_papers_in_sample": academic_papers,
-                "item_types": item_types,
-                "year_range": year_range,
-                "collections": [
-                    {
-                        "key": c.key,
-                        "name": c.name,
-                        "parent": c.parent_collection
-                    }
+
+            summary = ZoteroLibrarySummary(
+                library_id=self.config.library_id,
+                library_type=self.config.library_type,
+                collections_count=len(collections),
+                sample_items_count=len(items),
+                academic_papers_in_sample=academic_papers,
+                item_types=item_types,
+                year_range=year_range,
+                collections=[
+                    ZoteroCollectionSummary(key=c.key, name=c.name, parent=c.parent_collection)
                     for c in collections
-                ]
-            }
-            
-            logger.info(f"Generated library summary: {summary['collections_count']} collections, "
-                       f"{summary['sample_items_count']} items sampled")
-            
+                ],
+            )
+
+            logger.info(f"Generated library summary: {summary.collections_count} collections, "
+                       f"{summary.sample_items_count} items sampled")
+
             return summary
-            
+
         except ZoteroClientError as e:
             logger.error(f"Failed to generate library summary: {e}")
-            return {
-                "error": str(e),
-                "library_id": self.config.library_id,
-                "library_type": self.config.library_type
-            }
-    
-    def export_papers_metadata(self, papers: List[ZoteroItem]) -> List[Dict[str, Any]]:
+            return ZoteroLibrarySummary(
+                error=str(e),
+                library_id=self.config.library_id,
+                library_type=self.config.library_type,
+            )
+
+    def export_papers_metadata(self, papers: List[ZoteroItem]) -> List["ZoteroItemExport"]:
         """
         Export papers metadata in a standardized format
-        
+
         Args:
             papers: List of ZoteroItem objects
-            
+
         Returns:
-            List of dictionaries with standardized paper metadata
+            List of ZoteroItemExport with standardized paper metadata
         """
-        return [paper.to_dict() for paper in papers]
+        return [ZoteroItemExport.model_validate(paper.to_dict()) for paper in papers]

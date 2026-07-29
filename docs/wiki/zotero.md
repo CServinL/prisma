@@ -4,7 +4,10 @@ Prisma talks to Zotero via its **Web API only** (`api.zotero.org`) — both read
 writes. There is no local Zotero Desktop integration; an earlier
 local-API-primary architecture (ADR-008) was reversed once the server started
 running on a separate machine from the user's own — see ADR-008's follow-up
-section for the full story.
+section for the full story. Until 2026-07-28 a second, hand-rolled client
+(`services/zotero.py`) still carried a dormant local-Zotero-Desktop-SQLite
+read path left over from that era; it has since been deleted, so this claim
+is now literally true of every code path, not just the primary one.
 
 ## Configuration
 
@@ -34,11 +37,11 @@ Secret, for example — and never touch the config file at all.
 
 ## Connectivity
 
-`services/zotero.py::check_web_api_reachable()` is the canonical live-reachability
-check — validates the configured library is actually reachable with these
-credentials, not just that a key is present. Backs `ZoteroService.status()`'s
-`reachable` field (surfaced in the UI's status panel), `prisma zotero status`,
-and `prisma status`.
+`integrations/zotero/client.py::check_web_api_reachable()` is the canonical
+live-reachability check — validates the configured library is actually
+reachable with these credentials, not just that a key is present. Backs
+`ZoteroClient.status()`'s `reachable` field (surfaced in the UI's status
+panel) and `prisma status`.
 
 ## Offline Write Queue
 
@@ -54,16 +57,25 @@ curl -X POST http://127.0.0.1:8765/zotero/sync-pending
 
 ## Client Hierarchy
 
-```
-ZoteroClient.from_config(config)   ← facade (unified_client.py)
-       │
-       └─ client.py's Web API client (pyzotero-backed)
-```
+There is a single Zotero client: `integrations/zotero/client.py::ZoteroClient`,
+built via `ZoteroClient.from_config(config)`, wrapping `pyzotero` and reading/
+writing the typed `ZoteroItem`/`ZoteroCollection` models in
+`storage/models/zotero_models.py`.
 
-`ZoteroClient` is a thin wrapper — there's only one backend to route to now.
-Kept as a facade (rather than using `client.py` directly) because
-`ResearchStreamManager` and other callers depend on its `from_config()`/
-`client_type`/`client_info` surface.
+Until 2026-07-28 there were two independent implementations: this one, and a
+hand-rolled `urllib.request` client in `services/zotero.py` (with its own
+flatter data model and a 429-retry loop duplicated three times in the same
+file) used by `server/app.py`, `services/stream_runner.py`, and
+`services/dedup.py`. There was also a `unified_client.py` facade in front of
+this file that did `hasattr`-based capability dispatch onto a single,
+statically-known backend — ceremonial even before the consolidation, since no
+second backend existed to dispatch to. Both were merged into this one file;
+all callers now depend on `ZoteroClient` directly.
+
+`agents/zotero_agent.py::ZoteroAgent` is a legitimate third layer on top —
+adds search-criteria filtering/caching (`search_papers`,
+`get_academic_papers`, `get_recent_papers`) — not a duplicate client, it only
+ever talks to `ZoteroClient`.
 
 ## Smart Tags Applied to Saved Items
 

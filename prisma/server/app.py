@@ -36,7 +36,7 @@ def _t(label: str, _t0=[0.0]):
 _t("importing fastapi")
 from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 from prisma.server.access_log import AccessLogMiddleware
 from prisma.server.auth import (
     AuthMiddleware, LoginRequest, LoginResponse, classify_zone, issue_token, verify_password,
@@ -62,14 +62,21 @@ _t("renderer ok")
 _t("importing knowledge_graph_client")
 from prisma.services.knowledge_graph_client import KnowledgeGraphClient
 from prisma.services import resource_lock
+from prisma.storage.models.kg_models import (
+    DeadLetterEntry, EntitiesForFileResponse, KGStatus,
+)
+from prisma.storage.models.search_models import DeepSearchCandidate, GraphSearchResult
 _t("knowledge_graph_client ok")
 
 _t("importing chroma_service")
 from prisma.services.chroma_service import ChromaIndexer
+from prisma.storage.models.chroma_models import ChromaStatus
 _t("chroma_service ok")
 
 _t("importing zotero")
-from prisma.services.zotero import ZoteroMode, ZoteroService
+from prisma.integrations.zotero import ZoteroClient
+from prisma.integrations.zotero.client import ZoteroStatus
+from prisma.storage.models.zotero_models import ZoteroCollection, ZoteroItem
 _t("zotero ok")
 
 _t("importing sync_orchestrator")
@@ -299,16 +306,16 @@ def _resolve_vault_root() -> Path:
         return Path.home() / "prisma-vault"
 
 
-def _build_zotero() -> ZoteroService:
+def _build_zotero() -> ZoteroClient:
     from prisma.utils.config import ConfigLoader
     try:
-        zconf = ConfigLoader().get_zotero_config()
-        api_key = zconf.resolve_api_key() or None
-        user_id = zconf.resolve_library_id() or None
-        mode = ZoteroMode.web_api if api_key else ZoteroMode.offline
-        return ZoteroService(mode=mode, api_key=api_key, user_id=user_id)
+        return ZoteroClient.from_config(ConfigLoader().config)
     except Exception:
-        return ZoteroService(mode=ZoteroMode.offline)
+        # Fall back to an unconfigured client rather than crashing startup --
+        # is_available()/status() degrade gracefully on missing/bad credentials,
+        # no separate "offline mode" construction path needed.
+        from prisma.integrations.zotero.client import ZoteroAPIConfig
+        return ZoteroClient(ZoteroAPIConfig(api_key="", library_id="", library_type="user"))
 
 
 def _kg_port() -> int:
@@ -340,12 +347,12 @@ def _chat_blocked_reason(chroma: ChromaIndexer, kg: KnowledgeGraphClient) -> str
     two other Ollama callers directly to give a real answer instead of a
     generic failure message."""
     try:
-        if kg.status().get("state") == "indexing":
+        if kg.status().state == "indexing":
             return "the knowledge graph is currently indexing your vault"
     except Exception:
         pass
     try:
-        if chroma.status().get("current_activity"):
+        if chroma.status().current_activity:
             return "the semantic search index is currently updating"
     except Exception:
         pass
@@ -506,7 +513,7 @@ app.include_router(build_sync_router(
 ))
 
 _executor = ThreadPoolExecutor(max_workers=2)
-_jobs: dict[str, dict] = {}
+_jobs: dict[str, object] = {}  # review jobs: dict (JobStatus-shaped); dedup jobs: DedupJobState instance
 
 
 # ── Request / response models ─────────────────────────────────────────────────
@@ -552,7 +559,7 @@ class JobStatus(BaseModel):
     authors_found: int = 0
     output_file: str = ""
     content_html: str = ""
-    errors: list[str] = []
+    errors: list[str] = Field(default_factory=list)
 
 
 # ── Background worker ─────────────────────────────────────────────────────────
@@ -638,19 +645,36 @@ def _reload_chat(new_config: "PrismaConfig | None" = None) -> None:
 
 # ── Routes ────────────────────────────────────────────────────────────────────
 
-@app.post("/reload/vault")
+class ReloadVaultResponse(BaseModel):
+    status: str
+    vault_root: str
+
+
+class ReloadZoteroResponse(BaseModel):
+    status: str
+    mode: str
+    available: bool
+    reachable: bool
+
+
+class ReloadedResponse(BaseModel):
+    status: str
+
+
+@app.post("/reload/vault", response_model=ReloadVaultResponse)
 def reload_vault():
     _reload_vault()
     return {"status": "reloaded", "vault_root": str(_vault.root)}
 
 
-@app.post("/reload/zotero")
+@app.post("/reload/zotero", response_model=ReloadZoteroResponse)
 def reload_zotero():
     _reload_zotero()
-    return {"status": "reloaded", "zotero_mode": _zotero.mode}
+    zs = _zotero.status()
+    return {"status": "reloaded", "mode": zs.mode, "available": zs.available, "reachable": zs.reachable}
 
 
-@app.post("/reload/indexer")
+@app.post("/reload/indexer", response_model=ReloadedResponse)
 def reload_indexer():
     global _indexer
     _indexer.stop()
@@ -659,13 +683,13 @@ def reload_indexer():
     return {"status": "reloaded"}
 
 
-@app.post("/reload/chroma")
+@app.post("/reload/chroma", response_model=ReloadedResponse)
 def reload_chroma():
     _reload_chroma()
     return {"status": "reloaded"}
 
 
-@app.post("/reload/chat")
+@app.post("/reload/chat", response_model=ReloadedResponse)
 def reload_chat():
     """Rebuilds _chat_agent from the current config — closes the one gap
     found when auditing which config sections actually need an explicit
@@ -736,7 +760,12 @@ def reload_server():
     )
 
 
-@app.get("/health")
+class HealthResponse(BaseModel):
+    status: str
+    online: bool
+
+
+@app.get("/health", response_model=HealthResponse)
 def health():
     return {"status": "ok", "online": connectivity.is_online}
 
@@ -817,7 +846,49 @@ async def websocket_endpoint(ws: WebSocket, client_id: str | None = Query(None))
             _ws_clients.pop(ws, None)
 
 
-@app.get("/status")
+class ConfigStatus(BaseModel):
+    ok: bool
+    error: Optional[str] = None
+
+
+class VaultStats(BaseModel):
+    root: str
+    notes: int
+    sources: int
+    chats: int
+    streams: int
+
+
+class OllamaStatus(BaseModel):
+    reachable: bool
+
+
+class ChatConfigStatus(BaseModel):
+    provider: str
+    model: str
+    pool: str
+
+
+class SystemStatusResponse(BaseModel):
+    online: bool
+    config: ConfigStatus
+    pending_jobs: int
+    knowledge_graph: KGStatus
+    chroma: ChromaStatus
+    vault: VaultStats
+    zotero: Optional[ZoteroStatus] = None
+    ollama: OllamaStatus
+    # resources/processes are proxied verbatim from the supervisor's own
+    # stdlib-only control API (see resource_lock.py's module docstring and
+    # ADR-012's finding #6 -- supervisor.py deliberately can't import
+    # pydantic, so there's no schema on the producing side to validate
+    # against here either) -- left as raw dicts, not a gap.
+    resources: dict
+    processes: dict
+    chat_config: ChatConfigStatus
+
+
+@app.get("/status", response_model=SystemStatusResponse)
 def status():
     from prisma.utils.config import ConfigLoader
     try:
@@ -830,31 +901,29 @@ def status():
 
     try:
         listing = _vault.list_nodes()
-        vault_stats = {
-            "root": str(_vault.root),
-            "notes": len(listing.notes),
-            "sources": len(listing.sources),
-            "chats": len(listing.chats),
-            "streams": len(listing.streams),
-        }
+        vault_stats = VaultStats(
+            root=str(_vault.root),
+            notes=len(listing.notes),
+            sources=len(listing.sources),
+            chats=len(listing.chats),
+            streams=len(listing.streams),
+        )
     except Exception:
-        vault_stats = {"root": str(_vault.root), "notes": 0, "sources": 0, "chats": 0, "streams": 0}
+        vault_stats = VaultStats(root=str(_vault.root), notes=0, sources=0, chats=0, streams=0)
 
     zotero_info = None
     try:
-        zs = _zotero.status()
-        zotero_info = {
-            "mode": zs.get("mode"),
-            "available": zs.get("available", False),
-            "reachable": zs.get("reachable", False),
-        }
+        zotero_info = _zotero.status()
     except Exception:
         pass
 
     return {
         "online": connectivity.is_online,
         "config": {"ok": config_ok, "error": config_error},
-        "pending_jobs": sum(1 for j in _jobs.values() if j["status"] in ("pending", "running")),
+        "pending_jobs": sum(
+            1 for j in _jobs.values()
+            if (j["status"] if isinstance(j, dict) else j.status) in ("pending", "running")
+        ),
         "knowledge_graph": _indexer.status(),
         "chroma": _chroma.status(),
         "vault": vault_stats,
@@ -871,7 +940,13 @@ def status():
     }
 
 
-@app.get("/logs")
+class LogsResponse(BaseModel):
+    path: str
+    lines: list[str]
+    total: int
+
+
+@app.get("/logs", response_model=LogsResponse)
 def get_logs(
     concern: str = Query("server", description="server|access|maintenance|ollama|activity|chroma|kg|supervisor|stream"),
     slug: Optional[str] = Query(None, description="stream slug (required when concern=stream)"),
@@ -909,28 +984,36 @@ def get_logs(
 # never calls any of these (confirmed: it only ever reads status()'s
 # knowledge_graph fields), they're for direct/curl admin use.
 
-@app.post("/admin/kg/taint")
+class AdminStatusResponse(BaseModel):
+    status: str
+
+
+class AdminRemovedResponse(BaseModel):
+    removed: int
+
+
+@app.post("/admin/kg/taint", response_model=AdminStatusResponse)
 def admin_kg_taint():
     """Mark the index stale so the next cycle re-indexes changed files."""
     _indexer.mark_stale()
     return {"status": "stale"}
 
 
-@app.post("/admin/kg/drop")
+@app.post("/admin/kg/drop", response_model=AdminStatusResponse)
 def admin_kg_drop():
     """Drop the entire Kùzu graph and tracked manifest, forcing a full reindex from scratch."""
     _indexer.drop_index()
     return {"status": "dropped"}
 
 
-@app.get("/admin/kg/dead-letters")
+@app.get("/admin/kg/dead-letters", response_model=list[DeadLetterEntry])
 def admin_kg_list_dead_letters():
     """List failed-extraction ("dead letter") records without discarding
     them — see what failed and why before deciding to clear it."""
     return _indexer.list_dead_letters()
 
 
-@app.delete("/admin/kg/dead-letters")
+@app.delete("/admin/kg/dead-letters", response_model=AdminRemovedResponse)
 def admin_kg_clear_dead_letters():
     """Discard recorded dead-letter records so the next incremental cycle
     retries them fresh. Returns the number cleared."""
@@ -938,7 +1021,7 @@ def admin_kg_clear_dead_letters():
     return {"removed": removed}
 
 
-@app.get("/admin/kg/entities")
+@app.get("/admin/kg/entities", response_model=EntitiesForFileResponse)
 def admin_kg_entities(path: str = Query(...)):
     """Raw entities and relationship edges the knowledge graph extracted
     from one specific vault-relative file path — for inspecting extraction
@@ -947,7 +1030,7 @@ def admin_kg_entities(path: str = Query(...)):
     return _indexer.entities_for_file(path)
 
 
-@app.get("/admin/kg/search")
+@app.get("/admin/kg/search", response_model=list[GraphSearchResult])
 def admin_kg_search(q: str = Query(..., min_length=1), top_k: int = Query(20)):
     """Raw graph query — keyword match over Entity nodes only, bypassing
     Ollama reasoning and ChromaDB entirely (unlike /search/deep). Isolates
@@ -1224,7 +1307,16 @@ class RenameRequest(BaseModel):
 class CreateDirRequest(BaseModel):
     path: str
 
-@app.post("/nodes/{slug}/move")
+class SlugResponse(BaseModel):
+    slug: str
+
+
+class TaintNodeResponse(BaseModel):
+    chroma_tainted: bool
+    kg_tainted: bool
+
+
+@app.post("/nodes/{slug}/move", response_model=SlugResponse)
 def move_node(slug: str, req: MoveRequest):
     try:
         new_slug = _vault.move_node(slug, req.dest_dir)
@@ -1235,7 +1327,7 @@ def move_node(slug: str, req: MoveRequest):
     except (FileExistsError, ValueError) as e:
         raise HTTPException(status_code=409, detail=str(e))
 
-@app.post("/nodes/{slug}/rename")
+@app.post("/nodes/{slug}/rename", response_model=SlugResponse)
 def rename_node(slug: str, req: RenameRequest):
     try:
         new_slug = _vault.rename_node(slug, req.title)
@@ -1246,7 +1338,7 @@ def rename_node(slug: str, req: RenameRequest):
     except (FileExistsError, ValueError) as e:
         raise HTTPException(status_code=409, detail=str(e))
 
-@app.post("/nodes/{slug}/taint")
+@app.post("/nodes/{slug}/taint", response_model=TaintNodeResponse)
 def taint_node(slug: str):
     """Force one specific node to be re-extracted/re-embedded on the next
     cycle — without touching the rest of the index/graph. Unlike
@@ -1262,7 +1354,11 @@ def taint_node(slug: str):
     kg_tainted = _indexer.taint_file(rel)
     return {"chroma_tainted": chroma_tainted, "kg_tainted": kg_tainted}
 
-@app.delete("/nodes/{slug}")
+class OkResponse(BaseModel):
+    ok: bool
+
+
+@app.delete("/nodes/{slug}", response_model=OkResponse)
 def delete_node(slug: str):
     try:
         _vault.delete_node(slug)
@@ -1273,7 +1369,7 @@ def delete_node(slug: str):
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
 
-@app.post("/dirs")
+@app.post("/dirs", response_model=OkResponse)
 def create_dir(req: CreateDirRequest):
     try:
         _vault.create_dir(req.path)
@@ -1473,7 +1569,12 @@ def view_html(slug: str, request: Request):
     return HTMLResponse(content=body)
 
 
-@app.post("/notes/{slug}/md", status_code=202)
+class GenerateMdResponse(BaseModel):
+    generated: bool
+    slug: str
+
+
+@app.post("/notes/{slug}/md", status_code=202, response_model=GenerateMdResponse)
 def generate_md_format(slug: str):
     try:
         node = _vault.get_any(slug)
@@ -1646,13 +1747,13 @@ class DeepSearchResult(BaseModel):
     reason: str = ""
 
 
-def _resolve_source_files(items: list[dict], query_stems: frozenset | None = None) -> list[DeepSearchResult]:
-    """Map [{source_file, score, reason}] to DeepSearchResult, resolving slugs."""
+def _resolve_source_files(items: list[DeepSearchCandidate], query_stems: frozenset | None = None) -> list[DeepSearchResult]:
+    """Map DeepSearchCandidate(source_file, score, reason) to DeepSearchResult, resolving slugs."""
     vault_root = str(_vault.root)
     seen: set[str] = set()
     out: list[tuple[float, str, str, str, str]] = []
     for item in items:
-        src = item.get("source_file", "")
+        src = item.source_file
         if not src:
             continue
         slug = Path(vault_root, src).stem
@@ -1667,11 +1768,11 @@ def _resolve_source_files(items: list[dict], query_stems: frozenset | None = Non
             title = slug
             body = ""
         excerpt = body[:200].replace("\n", " ").strip() if body else ""
-        score = item.get("score", 0.5)
+        score = item.score
         if query_stems:
             doc_stems = _significant_words(title + " " + (body[:500] if body else ""))
             score += len(query_stems & doc_stems) * 0.05
-        out.append((score, slug, title, excerpt, item.get("reason", "")))
+        out.append((score, slug, title, excerpt, item.reason))
     out.sort(key=lambda x: -x[0])
     return [DeepSearchResult(slug=sl, title=ti, excerpt=ex, score=sc, reason=re)
             for sc, sl, ti, ex, re in out]
@@ -1688,8 +1789,8 @@ def deep_search(q: str = Query(..., min_length=1)) -> list[DeepSearchResult]:
     # Fallback: graph scoring aggregated by file
     graph_nodes = _indexer.ranked_nodes(q, top_k=30)
     if graph_nodes:
-        items = [{"source_file": n["source_file"], "score": n["score"], "reason": n.get("label", "")}
-                 for n in graph_nodes if n.get("source_file")]
+        items = [DeepSearchCandidate(source_file=n.source_file, score=n.score, reason=n.label)
+                 for n in graph_nodes if n.source_file]
         results = _resolve_source_files(items, query_stems=query_stems)
         # Pad with text search for coverage
         seen = {r.slug for r in results}
@@ -1715,7 +1816,7 @@ class StreamMeta(BaseModel):
     total_papers: int = 0
     last_updated: Optional[str] = None
     next_update: Optional[str] = None
-    tags: list[str] = []
+    tags: list[str] = Field(default_factory=list)
 
 
 def _stream_meta(s) -> StreamMeta:
@@ -1828,18 +1929,16 @@ def run_stream(slug: str, force: bool = Query(False)):
 
 # ── Zotero routes ─────────────────────────────────────────────────────────────
 
-@app.get("/zotero/status")
+@app.get("/zotero/status", response_model=ZoteroStatus)
 def zotero_status():
     return _zotero.status()
 
 
-@app.get("/zotero/collections")
+@app.get("/zotero/collections", response_model=list[ZoteroCollection])
 def zotero_collections():
     try:
-        return _zotero.list_collections()
-    except NotImplementedError as e:
-        raise HTTPException(status_code=501, detail=str(e))
-    except FileNotFoundError as e:
+        return _zotero.get_collections()
+    except Exception as e:
         raise HTTPException(status_code=503, detail=str(e))
 
 
@@ -1855,13 +1954,11 @@ class ZoteroStatsResponse(BaseModel):
 @app.get("/zotero/stats", response_model=ZoteroStatsResponse)
 def zotero_stats():
     """Library-wide item-type breakdown and metadata-quality score, computed
-    over the same ZoteroService.list_items() used by /zotero/items — not a
+    over the same ZoteroClient.get_all_items() used elsewhere — not a
     second, independent client (the old CLI's cleanup.py had its own)."""
     try:
-        items = _zotero.list_items()
-    except NotImplementedError as e:
-        raise HTTPException(status_code=501, detail=str(e))
-    except FileNotFoundError as e:
+        items = _zotero.get_all_items()
+    except Exception as e:
         raise HTTPException(status_code=503, detail=str(e))
 
     if not items:
@@ -1878,7 +1975,7 @@ def zotero_stats():
         item_type_counts[item.item_type] = item_type_counts.get(item.item_type, 0) + 1
         if not item.doi:
             items_without_doi += 1
-        if not item.abstract:
+        if not item.abstract_note:
             items_without_abstract += 1
         if not item.authors:
             items_without_authors += 1
@@ -1923,13 +2020,19 @@ def zotero_sync_pending():
     return SyncPendingResponse(synced=synced, failed=failed, pending_before=pending_before)
 
 
-@app.get("/zotero/items")
+@app.get("/zotero/items", response_model=list[ZoteroItem])
 def zotero_items(collection: Optional[str] = Query(None), q: Optional[str] = Query(None)):
+    """When both are given, get_collection_items(key, query=q) passes q
+    straight through to Zotero's own server-side `q` search (matches across
+    title/creators/abstract/etc., not just a client-side title substring)
+    scoped to the collection in one API call."""
     try:
-        return _zotero.list_items(collection_key=collection, q=q)
-    except NotImplementedError as e:
-        raise HTTPException(status_code=501, detail=str(e))
-    except FileNotFoundError as e:
+        if collection:
+            return _zotero.get_collection_items(collection, query=q or None)
+        if q:
+            return _zotero.search_items(q)
+        return _zotero.get_all_items()
+    except Exception as e:
         raise HTTPException(status_code=503, detail=str(e))
 
 
@@ -1970,7 +2073,7 @@ def _pdf_bytes_to_md(data: bytes) -> str:
 
 @app.post("/zotero/import/{key}", response_model=RenderedNode, status_code=201)
 def zotero_import(key: str):
-    from prisma.services.zotero import _make_citekey
+    from prisma.utils.text import make_citekey
     item = _zotero.get_item(key)
     if item is None:
         raise HTTPException(status_code=404, detail=f"Zotero item not found: {key!r}")
@@ -1998,11 +2101,11 @@ def zotero_import(key: str):
         body = _pdf_bytes_to_md(pdf_bytes)
     else:
         lines = []
-        if item.abstract:
-            lines.append(item.abstract)
+        if item.abstract_note:
+            lines.append(item.abstract_note)
             lines.append("")
-        if item.publication:
-            lines.append(f"**{item.publication}**")
+        if item.publication_title:
+            lines.append(f"**{item.publication_title}**")
         if item.authors:
             lines.append(", ".join(item.authors))
         if item.doi:
@@ -2011,7 +2114,7 @@ def zotero_import(key: str):
             lines.append(f"URL: {item.url}")
         body = "\n".join(lines)
 
-    citekey = _make_citekey(item.authors, item.year, item.title)
+    citekey = make_citekey(item.authors, item.year, item.title)
     from prisma.services.vault import _slugify, _render_frontmatter
     slug = _vault._unique_slug(_slugify(citekey))
     fm: dict = {
@@ -2020,7 +2123,7 @@ def zotero_import(key: str):
         "citekey": citekey,
         "zotero_key": item.key,
         "authors": item.authors,
-        "tags": item.tags,
+        "tags": [t.tag for t in item.tags],
     }
     if item.year:
         fm["year"] = item.year
@@ -2046,21 +2149,47 @@ class DeduplicateResult(BaseModel):
     status: str
 
 
+class WouldDeleteEntry(BaseModel):
+    key: str
+    title: str
+    doi: Optional[str] = None
+    keep_key: str
+    keep_title: str
+
+
+class DedupJobState(BaseModel):
+    """One `_jobs[job_id]` entry for a /maintenance/deduplicate run --
+    constructed once and updated via model_copy(update=...) so every
+    write site keeps the same field set (previously 4 separate dict
+    literals, 3 of which silently dropped `sensitivity` after the initial
+    "running" write — a polled job never showed which sensitivity it
+    actually ran with)."""
+    status: str
+    dry_run: bool
+    max_level: int
+    sensitivity: str
+    duplicates_found: int = 0
+    items_deleted: int = 0
+    would_delete: list[WouldDeleteEntry] = Field(default_factory=list)
+    errors: list[str] = Field(default_factory=list)
+
+
 def _run_deduplicate(job_id: str, dry_run: bool = False, max_level: int = 3, sensitivity: str = "medium") -> None:
     from prisma.services.dedup import find_all_duplicates
-    _jobs[job_id] = {"status": "running", "dry_run": dry_run, "max_level": max_level, "sensitivity": sensitivity, "duplicates_found": 0, "items_deleted": 0, "would_delete": [], "errors": []}
-    _log.info("deduplicate[%s]: start — zotero mode=%s dry_run=%s max_level=%d sensitivity=%s", job_id, _zotero.mode, dry_run, max_level, sensitivity)
+    job = DedupJobState(status="running", dry_run=dry_run, max_level=max_level, sensitivity=sensitivity)
+    _jobs[job_id] = job
+    _log.info("deduplicate[%s]: start — zotero available=%s dry_run=%s max_level=%d sensitivity=%s", job_id, _zotero.is_available(), dry_run, max_level, sensitivity)
     try:
-        items = _zotero.list_items()
+        items = _zotero.get_all_items()
         _log.info("deduplicate[%s]: fetched %d items", job_id, len(items))
     except Exception as exc:
         _log.error("deduplicate[%s]: failed to fetch items: %s", job_id, exc)
-        _jobs[job_id] = {"status": "error", "dry_run": dry_run, "max_level": max_level, "duplicates_found": 0, "items_deleted": 0, "would_delete": [], "errors": [str(exc)]}
+        _jobs[job_id] = job.model_copy(update={"status": "error", "errors": [str(exc)]})
         return
 
     def _keep(group: list):
         def score(i):
-            return (bool(i.abstract), bool(i.doi), len(i.authors), i.version)
+            return (bool(i.abstract_note), bool(i.doi), len(i.authors), i.version or 0)
         return max(group, key=score)
 
     _log.info("deduplicate[%s]: running find_all_duplicates", job_id)
@@ -2068,13 +2197,13 @@ def _run_deduplicate(job_id: str, dry_run: bool = False, max_level: int = 3, sen
         groups = find_all_duplicates(items, zotero=_zotero, log=_log, max_level=max_level, sensitivity=sensitivity)
     except Exception as exc:
         _log.error("deduplicate[%s]: find_all_duplicates failed: %s", job_id, exc, exc_info=True)
-        _jobs[job_id] = {"status": "error", "dry_run": dry_run, "max_level": max_level, "duplicates_found": 0, "items_deleted": 0, "would_delete": [], "errors": [str(exc)]}
+        _jobs[job_id] = job.model_copy(update={"status": "error", "errors": [str(exc)]})
         return
 
     _log.info("deduplicate[%s]: found %d duplicate group(s)", job_id, len(groups))
     duplicates_found = 0
     items_deleted = 0
-    would_delete: list[dict] = []
+    would_delete: list[WouldDeleteEntry] = []
     errors: list[str] = []
 
     for group in groups:
@@ -2084,15 +2213,24 @@ def _run_deduplicate(job_id: str, dry_run: bool = False, max_level: int = 3, sen
         for item in group:
             if item.key == keep.key:
                 continue
-            entry = {"key": item.key, "title": item.title, "doi": item.doi, "keep_key": keep.key, "keep_title": keep.title}
+            entry = WouldDeleteEntry(key=item.key, title=item.title, doi=item.doi, keep_key=keep.key, keep_title=keep.title)
             if dry_run:
                 would_delete.append(entry)
                 _log.info("deduplicate[%s]: dry_run would delete key=%s title=%r (keep=%s)", job_id, item.key, item.title, keep.key)
             else:
                 try:
-                    _zotero.delete_item(item.key, item.version)
-                    items_deleted += 1
-                    _log.info("deduplicate[%s]: deleted key=%s title=%r", job_id, item.key, item.title)
+                    # delete_item() catches its own exceptions and returns
+                    # bool -- it never raises, so this must check the
+                    # return value explicitly, not rely on `except` to
+                    # catch a failure (previously counted every call as a
+                    # successful deletion regardless of outcome).
+                    deleted = _zotero.delete_item(item.key)
+                    if deleted:
+                        items_deleted += 1
+                        _log.info("deduplicate[%s]: deleted key=%s title=%r", job_id, item.key, item.title)
+                    else:
+                        errors.append(f"{item.key}: delete_item returned False")
+                        _log.warning("deduplicate[%s]: failed to delete key=%s", job_id, item.key)
                 except Exception as exc:
                     errors.append(f"{item.key}: {exc}")
                     _log.warning("deduplicate[%s]: failed to delete key=%s: %s", job_id, item.key, exc)
@@ -2100,7 +2238,10 @@ def _run_deduplicate(job_id: str, dry_run: bool = False, max_level: int = 3, sen
     if not dry_run:
         _activity.info("action=deduplicate found=%d deleted=%d errors=%d", duplicates_found, items_deleted, len(errors))
     _log.info("deduplicate[%s]: done — found=%d deleted=%d would_delete=%d errors=%d", job_id, duplicates_found, items_deleted, len(would_delete), len(errors))
-    _jobs[job_id] = {"status": "done", "dry_run": dry_run, "max_level": max_level, "duplicates_found": duplicates_found, "items_deleted": items_deleted, "would_delete": would_delete, "errors": errors}
+    _jobs[job_id] = job.model_copy(update={
+        "status": "done", "duplicates_found": duplicates_found,
+        "items_deleted": items_deleted, "would_delete": would_delete, "errors": errors,
+    })
 
 
 @app.post("/maintenance/deduplicate", response_model=DeduplicateResult, status_code=202)
@@ -2122,8 +2263,8 @@ def deduplicate_library(
     sensitivity (levels 4-5 only): low | medium | high — defaults to analysis.nltk_dedup_sensitivity in config.
       low: certain=13 ambiguous=10 | medium: certain=10 ambiguous=7 | high: certain=7 ambiguous=5
     """
-    if _zotero.mode == ZoteroMode.offline:
-        raise HTTPException(status_code=503, detail="Zotero not available in offline mode")
+    if not _zotero.is_available():
+        raise HTTPException(status_code=503, detail="Zotero not configured")
     if sensitivity is None:
         from prisma.utils.config import ConfigLoader
         sensitivity = ConfigLoader().load().analysis.nltk_dedup_sensitivity
@@ -2134,12 +2275,20 @@ def deduplicate_library(
     return DeduplicateResult(job_id=job_id, status="running")
 
 
-@app.get("/maintenance/deduplicate/{job_id}")
+class DedupJobStatusResponse(DedupJobState):
+    job_id: str
+
+
+@app.get("/maintenance/deduplicate/{job_id}", response_model=DedupJobStatusResponse)
 def deduplicate_status(job_id: str):
     job = _jobs.get(job_id)
-    if job is None:
+    # _jobs is shared with /review (job entries stored as plain dicts there) --
+    # a review job_id passed to this dedup-specific endpoint isn't a dedup
+    # job, so treat it the same as "not found" rather than raising on
+    # job.model_dump() not existing on a dict.
+    if job is None or not isinstance(job, DedupJobState):
         raise HTTPException(status_code=404, detail="job not found")
-    return {"job_id": job_id, **job}
+    return {"job_id": job_id, **job.model_dump()}
 
 
 @app.post("/review", response_model=JobStatus, status_code=202)

@@ -15,17 +15,8 @@ Usage:
     client.save_items(items, collection_key="research_stream_key")
 """
 
-# Import the unified client - this is the ONLY client that should be used
-from .unified_client import ZoteroClient
+from .client import ZoteroClient, ZoteroClientError
 
-# Import core exception types that may be needed
-try:
-    from .client import ZoteroClientError
-except ImportError:
-    class ZoteroClientError(Exception):
-        pass
-
-# Export only the unified interface
 __all__ = [
     "ZoteroClient",
     "ZoteroClientError",

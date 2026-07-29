@@ -152,7 +152,7 @@ def status(verbose: bool):
             all_good = False
         elif api_key and library_id:
             click.echo(f"  Web API: library_id={library_id} ✅ credentials configured")
-            from ..services.zotero import check_web_api_reachable
+            from ..integrations.zotero.client import check_web_api_reachable
             if check_web_api_reachable(api_key, library_id):
                 click.echo("    ✅ Reachable")
             else:

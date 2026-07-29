@@ -53,7 +53,7 @@ def _run_status(tmp_path, config_data=None, wsl=False, windows_ip="10.0.0.1",
     with patch("prisma.cli.prisma_cli._is_wsl", return_value=wsl), \
          patch("prisma.cli.prisma_cli._wsl_windows_ip", return_value=windows_ip), \
          patch("prisma.connectivity.monitor.is_online", online), \
-         patch("prisma.services.zotero.check_web_api_reachable", return_value=zotero_reachable), \
+         patch("prisma.integrations.zotero.client.check_web_api_reachable", return_value=zotero_reachable), \
          patch("requests.get", side_effect=fake_requests_get):
         result = runner.invoke(cli, ["status"], env=invoke_env, catch_exceptions=False)
 

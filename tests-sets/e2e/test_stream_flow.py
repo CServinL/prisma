@@ -18,7 +18,6 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from prisma.services.vault import VaultService
-from prisma.services.zotero import ZoteroMode
 
 
 # ── Availability checks ───────────────────────────────────────────────────────
@@ -67,8 +66,8 @@ def vault(tmp_path_factory):
 def zotero():
     import prisma.server.app as app_mod
     z = app_mod._zotero
-    if z.mode != ZoteroMode.web_api:
-        pytest.skip("Zotero not in web_api mode — check config.toml api_key")
+    if not z.is_available():
+        pytest.skip("Zotero not available — check config.toml api_key/library_id")
     return z
 
 
@@ -122,7 +121,7 @@ def test_run_stream_creates_zotero_collection(client, vault, zotero):
     assert stream.collection_key, "stream.collection_key should be set after run"
     _state["collection_key"] = stream.collection_key
 
-    collections = zotero.list_collections()
+    collections = zotero.get_collections()
     keys = {c.key for c in collections}
     assert stream.collection_key in keys, (
         f"collection {stream.collection_key!r} not found in Zotero; "
@@ -132,7 +131,7 @@ def test_run_stream_creates_zotero_collection(client, vault, zotero):
 
 def test_run_stream_saves_items_to_zotero(zotero):
     key = _state["collection_key"]
-    items = zotero.list_items(collection_key=key)
+    items = zotero.get_collection_items(key)
     assert len(items) == _state["run1"]["papers_saved"], (
         f"expected {_state['run1']['papers_saved']} items in Zotero collection, "
         f"got {len(items)}"
@@ -172,13 +171,13 @@ def test_stream_metadata_updated_after_run(client):
 
 def test_zotero_items_have_required_fields(zotero):
     key = _state["collection_key"]
-    items = zotero.list_items(collection_key=key)
+    items = zotero.get_collection_items(key)
     assert items, "no items in Zotero collection"
 
     for item in items:
         assert item.title, f"{item.key}: missing title"
         assert item.authors, f"{item.key}: missing authors"
-        assert item.abstract and len(item.abstract.strip()) > 50, (
+        assert item.abstract_note and len(item.abstract_note.strip()) > 50, (
             f"{item.key}: abstract too short or missing"
         )
 
@@ -187,7 +186,7 @@ def test_zotero_items_above_confidence_threshold(zotero):
     # SearchAgent filters by min_confidence_score before items reach _run_stream.
     # All items in Zotero passed the filter — verify they have non-trivial content.
     key = _state["collection_key"]
-    items = zotero.list_items(collection_key=key)
+    items = zotero.get_collection_items(key)
     assert items
     for item in items:
         assert item.title.strip(), f"{item.key}: empty title"

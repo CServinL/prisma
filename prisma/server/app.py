@@ -69,7 +69,7 @@ from prisma.services.chroma_service import ChromaIndexer
 _t("chroma_service ok")
 
 _t("importing zotero")
-from prisma.services.zotero import ZoteroMode, ZoteroService
+from prisma.integrations.zotero import ZoteroClient
 _t("zotero ok")
 
 _t("importing sync_orchestrator")
@@ -299,16 +299,16 @@ def _resolve_vault_root() -> Path:
         return Path.home() / "prisma-vault"
 
 
-def _build_zotero() -> ZoteroService:
+def _build_zotero() -> ZoteroClient:
     from prisma.utils.config import ConfigLoader
     try:
-        zconf = ConfigLoader().get_zotero_config()
-        api_key = zconf.resolve_api_key() or None
-        user_id = zconf.resolve_library_id() or None
-        mode = ZoteroMode.web_api if api_key else ZoteroMode.offline
-        return ZoteroService(mode=mode, api_key=api_key, user_id=user_id)
+        return ZoteroClient.from_config(ConfigLoader().config)
     except Exception:
-        return ZoteroService(mode=ZoteroMode.offline)
+        # Fall back to an unconfigured client rather than crashing startup --
+        # is_available()/status() degrade gracefully on missing/bad credentials,
+        # no separate "offline mode" construction path needed.
+        from prisma.integrations.zotero.client import ZoteroAPIConfig
+        return ZoteroClient(ZoteroAPIConfig(api_key="", library_id="", library_type="user"))
 
 
 def _kg_port() -> int:
@@ -647,7 +647,7 @@ def reload_vault():
 @app.post("/reload/zotero")
 def reload_zotero():
     _reload_zotero()
-    return {"status": "reloaded", "zotero_mode": _zotero.mode}
+    return {"status": "reloaded", **_zotero.status()}
 
 
 @app.post("/reload/indexer")
@@ -1836,10 +1836,8 @@ def zotero_status():
 @app.get("/zotero/collections")
 def zotero_collections():
     try:
-        return _zotero.list_collections()
-    except NotImplementedError as e:
-        raise HTTPException(status_code=501, detail=str(e))
-    except FileNotFoundError as e:
+        return _zotero.get_collections()
+    except Exception as e:
         raise HTTPException(status_code=503, detail=str(e))
 
 
@@ -1855,13 +1853,11 @@ class ZoteroStatsResponse(BaseModel):
 @app.get("/zotero/stats", response_model=ZoteroStatsResponse)
 def zotero_stats():
     """Library-wide item-type breakdown and metadata-quality score, computed
-    over the same ZoteroService.list_items() used by /zotero/items — not a
+    over the same ZoteroClient.get_all_items() used elsewhere — not a
     second, independent client (the old CLI's cleanup.py had its own)."""
     try:
-        items = _zotero.list_items()
-    except NotImplementedError as e:
-        raise HTTPException(status_code=501, detail=str(e))
-    except FileNotFoundError as e:
+        items = _zotero.get_all_items()
+    except Exception as e:
         raise HTTPException(status_code=503, detail=str(e))
 
     if not items:
@@ -1878,7 +1874,7 @@ def zotero_stats():
         item_type_counts[item.item_type] = item_type_counts.get(item.item_type, 0) + 1
         if not item.doi:
             items_without_doi += 1
-        if not item.abstract:
+        if not item.abstract_note:
             items_without_abstract += 1
         if not item.authors:
             items_without_authors += 1
@@ -1925,11 +1921,21 @@ def zotero_sync_pending():
 
 @app.get("/zotero/items")
 def zotero_items(collection: Optional[str] = Query(None), q: Optional[str] = Query(None)):
+    """Combined collection+query filtering isn't a single pyzotero call --
+    ZoteroClient has get_collection_items(key)/search_items(q) separately,
+    not one method taking both. Scope by collection first (the API-level
+    filter), then narrow by query client-side if both are given."""
     try:
-        return _zotero.list_items(collection_key=collection, q=q)
-    except NotImplementedError as e:
-        raise HTTPException(status_code=501, detail=str(e))
-    except FileNotFoundError as e:
+        if collection:
+            items = _zotero.get_collection_items(collection)
+            if q:
+                q_norm = q.lower()
+                items = [i for i in items if i.title and q_norm in i.title.lower()]
+            return items
+        if q:
+            return _zotero.search_items(q)
+        return _zotero.get_all_items()
+    except Exception as e:
         raise HTTPException(status_code=503, detail=str(e))
 
 
@@ -1970,7 +1976,7 @@ def _pdf_bytes_to_md(data: bytes) -> str:
 
 @app.post("/zotero/import/{key}", response_model=RenderedNode, status_code=201)
 def zotero_import(key: str):
-    from prisma.services.zotero import _make_citekey
+    from prisma.utils.text import make_citekey
     item = _zotero.get_item(key)
     if item is None:
         raise HTTPException(status_code=404, detail=f"Zotero item not found: {key!r}")
@@ -1998,11 +2004,11 @@ def zotero_import(key: str):
         body = _pdf_bytes_to_md(pdf_bytes)
     else:
         lines = []
-        if item.abstract:
-            lines.append(item.abstract)
+        if item.abstract_note:
+            lines.append(item.abstract_note)
             lines.append("")
-        if item.publication:
-            lines.append(f"**{item.publication}**")
+        if item.publication_title:
+            lines.append(f"**{item.publication_title}**")
         if item.authors:
             lines.append(", ".join(item.authors))
         if item.doi:
@@ -2011,7 +2017,7 @@ def zotero_import(key: str):
             lines.append(f"URL: {item.url}")
         body = "\n".join(lines)
 
-    citekey = _make_citekey(item.authors, item.year, item.title)
+    citekey = make_citekey(item.authors, item.year, item.title)
     from prisma.services.vault import _slugify, _render_frontmatter
     slug = _vault._unique_slug(_slugify(citekey))
     fm: dict = {
@@ -2020,7 +2026,7 @@ def zotero_import(key: str):
         "citekey": citekey,
         "zotero_key": item.key,
         "authors": item.authors,
-        "tags": item.tags,
+        "tags": [t.tag for t in item.tags],
     }
     if item.year:
         fm["year"] = item.year
@@ -2049,9 +2055,9 @@ class DeduplicateResult(BaseModel):
 def _run_deduplicate(job_id: str, dry_run: bool = False, max_level: int = 3, sensitivity: str = "medium") -> None:
     from prisma.services.dedup import find_all_duplicates
     _jobs[job_id] = {"status": "running", "dry_run": dry_run, "max_level": max_level, "sensitivity": sensitivity, "duplicates_found": 0, "items_deleted": 0, "would_delete": [], "errors": []}
-    _log.info("deduplicate[%s]: start — zotero mode=%s dry_run=%s max_level=%d sensitivity=%s", job_id, _zotero.mode, dry_run, max_level, sensitivity)
+    _log.info("deduplicate[%s]: start — zotero available=%s dry_run=%s max_level=%d sensitivity=%s", job_id, _zotero.is_available(), dry_run, max_level, sensitivity)
     try:
-        items = _zotero.list_items()
+        items = _zotero.get_all_items()
         _log.info("deduplicate[%s]: fetched %d items", job_id, len(items))
     except Exception as exc:
         _log.error("deduplicate[%s]: failed to fetch items: %s", job_id, exc)
@@ -2060,7 +2066,7 @@ def _run_deduplicate(job_id: str, dry_run: bool = False, max_level: int = 3, sen
 
     def _keep(group: list):
         def score(i):
-            return (bool(i.abstract), bool(i.doi), len(i.authors), i.version)
+            return (bool(i.abstract_note), bool(i.doi), len(i.authors), i.version or 0)
         return max(group, key=score)
 
     _log.info("deduplicate[%s]: running find_all_duplicates", job_id)
@@ -2090,7 +2096,7 @@ def _run_deduplicate(job_id: str, dry_run: bool = False, max_level: int = 3, sen
                 _log.info("deduplicate[%s]: dry_run would delete key=%s title=%r (keep=%s)", job_id, item.key, item.title, keep.key)
             else:
                 try:
-                    _zotero.delete_item(item.key, item.version)
+                    _zotero.delete_item(item.key)
                     items_deleted += 1
                     _log.info("deduplicate[%s]: deleted key=%s title=%r", job_id, item.key, item.title)
                 except Exception as exc:
@@ -2122,8 +2128,8 @@ def deduplicate_library(
     sensitivity (levels 4-5 only): low | medium | high — defaults to analysis.nltk_dedup_sensitivity in config.
       low: certain=13 ambiguous=10 | medium: certain=10 ambiguous=7 | high: certain=7 ambiguous=5
     """
-    if _zotero.mode == ZoteroMode.offline:
-        raise HTTPException(status_code=503, detail="Zotero not available in offline mode")
+    if not _zotero.is_available():
+        raise HTTPException(status_code=503, detail="Zotero not configured")
     if sensitivity is None:
         from prisma.utils.config import ConfigLoader
         sensitivity = ConfigLoader().load().analysis.nltk_dedup_sensitivity

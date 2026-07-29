@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 from prisma.utils.text import significant_words
 
 if TYPE_CHECKING:
-    from prisma.services.zotero import ZoteroService
+    from prisma.integrations.zotero import ZoteroClient
 
 _STEM_THRESHOLDS = {
     "low":    (13, 10),
@@ -51,7 +51,7 @@ def find_duplicate(
     by_title: dict,
     stems: list[tuple[frozenset, object]],
     *,
-    zotero: "ZoteroService | None" = None,
+    zotero: "ZoteroClient | None" = None,
     collection_key: str | None = None,
     log: logging.Logger | None = None,
     sensitivity: str = "medium",
@@ -142,7 +142,7 @@ def _authors_match(a, b) -> bool:
 def find_all_duplicates(
     items: list,
     *,
-    zotero: "ZoteroService | None" = None,
+    zotero: "ZoteroClient | None" = None,
     log: logging.Logger | None = None,
     max_level: int = 3,
     sensitivity: str = "medium",

@@ -8,6 +8,7 @@ They are lazy-downloaded on first call if missing.
 from __future__ import annotations
 
 import hashlib
+import re
 
 
 def content_hash(text: str) -> str:
@@ -59,3 +60,16 @@ def significant_words(text: str) -> frozenset[str]:
 def stem_overlap(text_a: str, text_b: str) -> int:
     """Number of shared significant stems between two texts."""
     return len(significant_words(text_a) & significant_words(text_b))
+
+
+def make_citekey(authors: list[str], year: int | None, title: str | None = None) -> str:
+    """First author's last name + year (falls back to title's first word if no authors)."""
+    names = [a for a in authors if a.strip()]
+    if not names:
+        first_word = ""
+        if title:
+            first_word = re.sub(r"[^a-z]", "", title.split()[0].lower())
+        return f"{first_word or 'unknown'}{year or ''}"
+    last = names[0].split()[-1].lower()
+    last = re.sub(r"[^a-z]", "", last)
+    return f"{last}{year or ''}"

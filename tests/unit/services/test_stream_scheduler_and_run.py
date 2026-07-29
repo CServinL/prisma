@@ -9,7 +9,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from prisma.services.vault import VaultService
-from prisma.services.zotero import ZoteroCollection, ZoteroItem, ZoteroMode
+from prisma.storage.models.zotero_models import ZoteroCollection, ZoteroCreator, ZoteroItem
 from prisma.storage.models.vault_models import StreamStatus, RefreshFrequency
 from prisma.storage.models.agent_models import PaperMetadata, SearchResult
 
@@ -206,11 +206,12 @@ class TestRunStream:
     @pytest.fixture
     def mock_zotero(self):
         z = MagicMock()
-        z.mode = ZoteroMode.web_api
+        z.is_available.return_value = True
         z.ensure_collection.return_value = ZoteroCollection(key="TESTCOLL", name="Test")
-        z.list_items.return_value = []
+        z.get_collection_items.return_value = []
+        z.search_items.return_value = []
         z.find_by_identifier.return_value = None
-        z.add_item.return_value = MagicMock(key="ITEM1", version=0, collection_keys=[])
+        z.add_paper.return_value = MagicMock(key="ITEM1", version=0, collections=[])
         return z
 
     def _patched_run(self, vault, indexer, cfg, agent_mock, zotero=None):
@@ -225,11 +226,12 @@ class TestRunStream:
 
         if zotero is None:
             zotero = MagicMock()
-            zotero.mode = ZoteroMode.web_api
+            zotero.is_available.return_value = True
             zotero.ensure_collection.return_value = ZoteroCollection(key="TESTCOLL", name="Test")
-            zotero.list_items.return_value = []
+            zotero.get_collection_items.return_value = []
+            zotero.search_items.return_value = []
             zotero.find_by_identifier.return_value = None
-            zotero.add_item.return_value = MagicMock(key="ITEM1", version=0, collection_keys=[])
+            zotero.add_paper.return_value = MagicMock(key="ITEM1", version=0, collections=[])
 
         # AnalysisAgent makes real Ollama HTTP calls — mock it; all papers are relevant by default
         from prisma.storage.models.api_response_models import LLMIdentityResult
@@ -333,11 +335,12 @@ class TestRunStream:
 
         import prisma.server.app as app_mod
         zotero = MagicMock()
-        zotero.mode = ZoteroMode.web_api
+        zotero.is_available.return_value = True
         zotero.ensure_collection.return_value = ZoteroCollection(key="TESTCOLL", name="AI")
-        zotero.list_items.return_value = []
+        zotero.get_collection_items.return_value = []
+        zotero.search_items.return_value = []
         zotero.find_by_identifier.return_value = None
-        zotero.add_item.return_value = MagicMock(key="ITEM1", version=0, collection_keys=[])
+        zotero.add_paper.return_value = MagicMock(key="ITEM1", version=0, collections=[])
 
         patches = self._patched_run(vault, mock_indexer, mock_cfg, agent, zotero=zotero)
         with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
@@ -347,8 +350,8 @@ class TestRunStream:
         assert result.papers_found == 1
         assert result.papers_saved == 1
         zotero.ensure_collection.assert_called_once()
-        zotero.add_item.assert_called_once()
-        zotero.add_to_collection.assert_called_once()
+        zotero.add_paper.assert_called_once()
+        zotero.add_item_to_collection.assert_called_once()
 
     def test_does_not_save_duplicate_papers(self, vault, mock_indexer, mock_cfg):
         vault.create_stream(title="AI", query="q")
@@ -360,15 +363,16 @@ class TestRunStream:
 
         existing = ZoteroItem(
             key="EXISTING", title="Attention Is All You Need",
-            item_type="preprint", authors=["Vaswani A"],
-            year=2017, abstract=None, doi=None, url=None,
-            publication=None, tags=[], collection_keys=["TESTCOLL"],
+            item_type="preprint", creators=[ZoteroCreator(creator_type="author", name="Vaswani A")],
+            date="2017", abstract_note=None, doi=None, url=None,
+            publication_title=None, tags=[], collections=["TESTCOLL"],
         )
         import prisma.server.app as app_mod
         zotero = MagicMock()
-        zotero.mode = ZoteroMode.web_api
+        zotero.is_available.return_value = True
         zotero.ensure_collection.return_value = ZoteroCollection(key="TESTCOLL", name="AI")
-        zotero.list_items.return_value = [existing]
+        zotero.get_collection_items.return_value = [existing]
+        zotero.search_items.return_value = []
 
         patches = self._patched_run(vault, mock_indexer, mock_cfg, agent, zotero=zotero)
         with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
@@ -376,7 +380,7 @@ class TestRunStream:
             result = _run_stream("ai", force=True)
 
         assert result.papers_saved == 0
-        zotero.add_item.assert_not_called()
+        zotero.add_paper.assert_not_called()
 
     def test_updates_stream_metadata_after_run(self, vault, mock_indexer, mock_cfg):
         vault.create_stream(title="Meta", query="q", refresh_frequency="weekly")

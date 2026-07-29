@@ -6,21 +6,22 @@ old `prisma zotero stats` and `prisma sync` CLI commands.
 from fastapi.testclient import TestClient
 
 from prisma.server.app import app
-from prisma.services.zotero import ZoteroItem
+from prisma.storage.models.zotero_models import ZoteroItem, ZoteroCreator
 
 client = TestClient(app, client=("127.0.0.1", 12345))
 
 
 def _item(item_type="journalArticle", doi="10.1/x", abstract="abs", authors=("A",)):
+    creators = [ZoteroCreator(creator_type="author", name=a) for a in authors]
     return ZoteroItem(
-        key="K1", title="T", item_type=item_type, authors=list(authors), year=2024,
-        abstract=abstract, doi=doi, url=None, publication=None, tags=[], collection_keys=[],
+        key="K1", title="T", item_type=item_type, creators=creators, date="2024",
+        abstract_note=abstract, doi=doi, url=None, publication_title=None, tags=[], collections=[],
     )
 
 
 def test_zotero_stats_empty_library(monkeypatch):
     from prisma.server import app as app_module
-    monkeypatch.setattr(app_module._zotero, "list_items", lambda **kw: [])
+    monkeypatch.setattr(app_module._zotero, "get_all_items", lambda **kw: [])
 
     r = client.get("/zotero/stats")
     assert r.status_code == 200
@@ -36,7 +37,7 @@ def test_zotero_stats_counts_and_quality(monkeypatch):
         _item(doi=None),
         _item(abstract=None, authors=()),
     ]
-    monkeypatch.setattr(app_module._zotero, "list_items", lambda **kw: items)
+    monkeypatch.setattr(app_module._zotero, "get_all_items", lambda **kw: items)
 
     r = client.get("/zotero/stats")
     assert r.status_code == 200

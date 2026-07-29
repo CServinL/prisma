@@ -3,9 +3,9 @@ import time
 from datetime import datetime, timedelta
 from typing import Callable
 
+from prisma.integrations.zotero import ZoteroClient
 from prisma.services.dedup import build_index, find_duplicate
 from prisma.services.vault import VaultService
-from prisma.services.zotero import ZoteroMode, ZoteroService
 from prisma.storage.models.vault_models import StreamRunResult
 from prisma.utils.text import significant_words
 
@@ -13,7 +13,7 @@ from prisma.utils.text import significant_words
 def run_stream(
     slug: str,
     vault: VaultService,
-    zotero: ZoteroService,
+    zotero: ZoteroClient,
     *,
     force: bool = False,
     get_stream_logger: Callable[[str], logging.Logger] | None = None,
@@ -95,7 +95,7 @@ def run_stream(
     errors: list[str] = []
 
     collection_key = stream.collection_key
-    if zotero.mode != ZoteroMode.offline:
+    if zotero.is_available():
         _slog.info("ensuring Zotero collection exists")
         try:
             collection = zotero.ensure_collection(stream.title)
@@ -112,10 +112,10 @@ def run_stream(
 
     collection_items: list = []
     collection_item_keys: set[str] = set()
-    if collection_key and zotero.mode != ZoteroMode.offline:
+    if collection_key and zotero.is_available():
         _slog.info("loading existing collection items for dedup")
         try:
-            collection_items = zotero.list_items(collection_key=collection_key)
+            collection_items = zotero.get_collection_items(collection_key)
             collection_item_keys = {item.key for item in collection_items}
             _slog.info("collection has %d existing items", len(collection_items))
         except Exception as exc:
@@ -132,10 +132,10 @@ def run_stream(
 
     # Source 1: Zotero library
     library_papers_found = 0
-    if collection_key and zotero.mode != ZoteroMode.offline:
+    if collection_key and zotero.is_available():
         _slog.info("source=library query=%r limit=%d", stream.query, cfg.default_limit)
         try:
-            library_candidates = zotero.list_items(q=stream.query, limit=cfg.default_limit)
+            library_candidates = zotero.search_items(stream.query, limit=cfg.default_limit)
             library_papers_found = len(library_candidates)
             _slog.info("library search returned %d candidates", library_papers_found)
         except Exception as exc:
@@ -162,7 +162,7 @@ def run_stream(
             _slog.info("batch relevance check for %d library items", len(new_library_candidates))
             relevance_flags = _get_analysis().batch_relevance_check(
                 stream.query,
-                [(item.key, item.title, item.abstract) for item in new_library_candidates],
+                [(item.key, item.title, item.abstract_note) for item in new_library_candidates],
             )
             for lib_item, is_relevant in zip(new_library_candidates, relevance_flags):
                 _slog.info("library %r → relevant=%s", lib_item.title, is_relevant)
@@ -170,10 +170,7 @@ def run_stream(
                     papers_skipped_llm += 1
                     continue
                 try:
-                    zotero.add_to_collection(
-                        lib_item.key, lib_item.version, collection_key,
-                        current_collection_keys=lib_item.collection_keys,
-                    )
+                    zotero.add_item_to_collection(lib_item.key, collection_key)
                     collection_item_keys.add(lib_item.key)
                     _dedup_title[lib_item.title.lower().strip()] = lib_item
                     if lib_item.doi:
@@ -181,7 +178,7 @@ def run_stream(
                     papers_saved += 1
                     _slog.info("saved library item key=%r (total saved=%d)", lib_item.key, papers_saved)
                 except Exception as exc:
-                    _slog.error("add_to_collection failed for key=%r: %s", lib_item.key, exc)
+                    _slog.error("add_item_to_collection failed for key=%r: %s", lib_item.key, exc)
                     errors.append(str(exc))
 
     # Source 2: Internet — Phase 2a: dedup + bookmark
@@ -189,7 +186,7 @@ def run_stream(
     bookmarked: list[tuple[object, object]] = []
     for paper in result.papers:
         _slog.info("internet paper %r doi=%s", paper.title, paper.doi or "none")
-        if zotero.mode == ZoteroMode.offline or not collection_key:
+        if not zotero.is_available() or not collection_key:
             _slog.info("skipping — Zotero offline or no collection")
             break
 
@@ -199,13 +196,13 @@ def run_stream(
         try:
             existing_in_library = zotero.find_by_identifier(doi=paper.doi, title=paper.title)
             if existing_in_library is not None:
-                if collection_key and collection_key in (existing_in_library.collection_keys or []):
+                if collection_key and collection_key in existing_in_library.collections:
                     _slog.info("%r already in collection (item.collections) — skipping", paper.title)
                     continue
                 _slog.info("%r already in library key=%r — reusing", paper.title, existing_in_library.key)
                 library_item = existing_in_library
             else:
-                library_item = zotero.add_item(paper)
+                library_item = zotero.add_paper(paper)
                 _slog.info("bookmarked %r → key=%r", paper.title, library_item.key)
             bookmarked.append((paper, library_item))
         except Exception as exc:
@@ -231,12 +228,7 @@ def run_stream(
                 papers_skipped_llm += 1
                 continue
             try:
-                zotero.add_to_collection(
-                    library_item.key,
-                    library_item.version,
-                    collection_key,
-                    current_collection_keys=library_item.collection_keys,
-                )
+                zotero.add_item_to_collection(library_item.key, collection_key)
                 collection_item_keys.add(library_item.key)
                 _dedup_title[paper.title.lower().strip()] = library_item
                 if paper.doi:
@@ -244,7 +236,7 @@ def run_stream(
                 papers_saved += 1
                 _slog.info("saved %r (total saved=%d)", paper.title, papers_saved)
             except Exception as exc:
-                _slog.error("add_to_collection failed for %r: %s", paper.title, exc)
+                _slog.error("add_item_to_collection failed for %r: %s", paper.title, exc)
                 errors.append(str(exc))
 
     freq_map = {"daily": 1, "weekly": 7, "monthly": 30, "manual": 0}

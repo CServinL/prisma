@@ -60,12 +60,24 @@ active feature work, not "is this usable yet." Core pipeline:
 
 ## Phase 3 — Sources
 
-- **PubMed** — biomedical literature
-- **IEEE Xplore** — engineering and CS
-- **Academia.edu** — complete the HTML parsing stub
-- **ResearchGate** — scraping or API if available
-- **JSTOR, Web of Science** — subscription databases (institutional access)
-- **Grey literature** — theses, technical reports, government publications
+Done as of 2026-07-29: **PubMed** and **IEEE Xplore** are implemented (see
+`docs/wiki/sources.md`), alongside a real per-source quota-control system
+(`prisma.services.rate_limiter.RateLimiter`) and a source-module registry
+(`prisma/integrations/sources/`) that replaced the old monolithic
+`SearchAgent` dispatch. IEEE Xplore's rate limit is a conservative,
+unverified placeholder until the user has a registered key and IEEE's real
+API user guide — don't advertise it as fully reliable until that's
+confirmed.
+
+Not planned initially: Academia.edu, ResearchGate, JSTOR/Web of Science, and
+grey literature were all considered and dropped (2026-07-29) — no reliable
+API for any of them (HTML scraping / anti-bot measures / institutional-only
+access), not worth the maintenance burden versus the API-backed sources
+above. The half-implemented Academia.edu stub and the aspirational
+`academia_rss`/`academia_search`/`researchgate` `SOURCE_REGISTRY` entries
+were removed from the codebase the same day. Research Rabbit was also
+evaluated and dropped the same day — no public API and no viable
+integration path exists.
 
 ---
 

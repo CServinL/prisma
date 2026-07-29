@@ -7,7 +7,7 @@ import os
 import tomllib
 import logging
 from pathlib import Path
-from typing import Any, Optional, List
+from typing import Any, Dict, Optional, List
 from pydantic import BaseModel, Field, field_validator, ConfigDict
 
 logger = logging.getLogger(__name__)
@@ -184,6 +184,47 @@ class OutputConfig(BaseModel):
         return v
 
 
+class SourceQuotaConfig(BaseModel):
+    """Per-source quota/API-key override for one entry in
+    SearchConfig.source_overrides. Any field left unset falls back to that
+    source module's own hardcoded, web-verified default (see
+    prisma/integrations/sources/) -- so zero config is required for any
+    source to work out of the box; this only matters once you have a real
+    API key (raises a source's rate limit) or want to tune a limit
+    yourself. Same api_key/api_key_env resolver pattern as ZoteroConfig
+    above -- api_key_env takes priority, keeps the real secret out of this
+    file."""
+    model_config = ConfigDict(extra="ignore")
+
+    requests_per_second: Optional[float] = Field(
+        None, gt=0, description="Override this source's rate limit (requests/second)"
+    )
+    daily_cap: Optional[int] = Field(
+        None, ge=1, description="Override this source's hard daily request cap"
+    )
+    api_key: Optional[str] = Field(None, description="API key -- prefer api_key_env instead")
+    api_key_env: Optional[str] = Field(
+        None,
+        description="Env var holding the API key -- takes priority over api_key when set, same pattern as ZoteroConfig.api_key_env",
+    )
+
+    def resolve_api_key(self, source_name: str = "") -> Optional[str]:
+        """Same fail-loud contract as ZoteroConfig.resolve_api_key(): if
+        api_key_env is set but the env var isn't, raise rather than
+        silently falling back to None/an unauthenticated request.
+        `source_name` is only used to make the error message point at the
+        right [sources.*] block."""
+        if self.api_key_env:
+            key = os.environ.get(self.api_key_env)
+            if not key:
+                label = f"sources.{source_name}" if source_name else "a source"
+                raise RuntimeError(
+                    f"{label}.api_key_env={self.api_key_env!r} is set but not present in the environment"
+                )
+            return key
+        return self.api_key
+
+
 class SearchConfig(BaseModel):
     """Search configuration"""
     model_config = ConfigDict(extra="ignore")
@@ -196,11 +237,19 @@ class SearchConfig(BaseModel):
     min_confidence_score: float = Field(0.5, ge=0.0, le=1.0)
     prefer_high_quality: bool = Field(True)
     require_academic_validation: bool = Field(True)
+    source_overrides: Dict[str, SourceQuotaConfig] = Field(
+        default_factory=dict,
+        description=(
+            "Per-source quota/API-key overrides, keyed by source name "
+            "(e.g. 'pubmed', 'ieee_xplore', 'semanticscholar', 'googlebooks'). "
+            "Sources not listed here use their module's built-in defaults."
+        ),
+    )
 
     @field_validator('sources')
     @classmethod
     def validate_sources(cls, v):
-        valid_sources = ['arxiv', 'zotero', 'pubmed', 'google_scholar', 'semanticscholar', 'openlibrary', 'googlebooks', 'academia']
+        valid_sources = ['arxiv', 'zotero', 'pubmed', 'google_scholar', 'semanticscholar', 'openlibrary', 'googlebooks', 'ieee_xplore']
         for source in v:
             if source not in valid_sources:
                 raise ValueError(f'source "{source}" not in valid sources: {valid_sources}')

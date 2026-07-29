@@ -6,15 +6,16 @@ The core workflow: search → assess → deduplicate → analyze → report.
 
 ### 1. Multi-source Search
 
-Prisma queries multiple academic databases in parallel, sorted by source quality (highest first). Each result is validated against academic criteria before being accepted.
+Prisma queries multiple academic databases one at a time, in source-quality order (highest first). Each is a quota-controlled, independent module (`prisma/integrations/sources/`) — a slow or rate-limited source never blocks the others from being tried. Each paper result is validated against academic criteria before being accepted.
 
 Supported sources:
 - **Semantic Scholar** — 214M+ papers, full metadata, abstracts
 - **arXiv** — preprints with PDF links
+- **PubMed** — biomedical/life-sciences literature, via NCBI E-utilities
 - **OpenLibrary** — academic books via Internet Archive
 - **Google Books** — book catalog with publisher metadata
+- **IEEE Xplore** — engineering/CS papers (requires your own API key; real rate limit unverified as of 2026-07-29)
 - **Zotero** — your personal library (deduplication and discovery)
-- **Academia.edu** — framework exists, HTML parsing not yet implemented
 
 ### 2. Academic Validation
 
@@ -154,13 +155,11 @@ Status (chunk count, files indexed, model name) is exposed at `GET /status` unde
 
 Prisma detects network connectivity at startup and adapts:
 
-- **Online**: full pipeline available; Zotero writes go to the Web API
-- **Offline**: literature review is disabled (requires internet for APIs); research stream reads work via Zotero local HTTP; writes are queued to a local pending queue and flushed automatically on next online startup
+- **Online**: full pipeline available; Zotero reads and writes go through the Web API
+- **Offline**: literature review and research stream updates are both disabled (both need internet — source search APIs, and Zotero's Web API for reads too, since there is no local Zotero access path anymore); creating a *new* stream still works, with its Zotero collection creation queued and flushed automatically on next online startup
 
 ---
 
 ## What is NOT implemented yet
 
-- Academia.edu result parsing (the HTTP request is made but HTML parsing is absent)
-- PubMed source (referenced in docs but absent from `SearchAgent`)
-- ResearchGate source (referenced in docs, absent from code)
+- IEEE Xplore's real rate limit/daily quota — IEEE publishes none of this publicly; the current default is a conservative guess, unverified against a real API key as of 2026-07-29

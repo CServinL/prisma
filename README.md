@@ -34,12 +34,15 @@
 - **🛡️ Academic Validation**: Filters out non-academic content with confidence scoring
 - **🌐 Multi-Source Search**: Combines premium APIs with structured data sources
 - **📖 Full-Text Analysis**: Processes PDFs, abstracts, and metadata across all document types
-- **🤖 AI-Powered Curation**: Uses local LLMs for intelligent research assessment and organization
+- **🤖 AI-Powered Curation**: Uses local or cloud-capable LLMs (Ollama, OpenRouter, llama.cpp) for intelligent research assessment and organization
 - **📊 Library Organization**: Generates structured research organization and enhanced library management
 - **🗂️ Vault Workspace**: A local, flat-Markdown second brain for notes, sources, and chats — `prisma serve` opens it as a web app, installable PWA, or native desktop shell
 - **💬 Chat**: Ask Prisma questions about your vault — grounded in ChromaDB semantic search + native knowledge-graph context, with tool-calling, citations, and a pinning/Excerpt model for managing context budget across local or cloud-capable LLM backends
 - **🕸️ Native Knowledge Graph**: Entity/relationship extraction (structured LLM output, no third-party dependency) stored in an embedded graph DB, re-ranking search results and answering "what connects to what" — with a live progress UI (sync status, extraction stats, failure inspection)
 - **🔍 Semantic Search**: ChromaDB embeddings + the knowledge graph re-rank results beyond keyword matching
+- **🧹 Deduplication**: Multi-level matching (DOI, exact title, year+author, NLTK stem overlap, LLM identity check) catches duplicates other tools miss, on demand or during stream refresh
+- **🔄 Vault Sync**: Server-orchestrated sync keeps the [desktop app](https://github.com/CServinL/prisma-desktop) and server vault in agreement, working offline and reconciling on reconnect
+- **⚡ Live Updates**: Vault changes and stream-refresh progress push to the UI over WebSocket in real time
 
 ## Research Library Management Process
 
@@ -143,8 +146,9 @@ Changes to source files are immediately active — no reinstall needed.
 - **⌨️ Click** for the command-line interface
 - **🗂️ Flat Markdown vault** — no database; notes, sources, chats, and streams are plain `.md`/`.yaml` files
 - **🔍 ChromaDB** for semantic search, running as its own supervised server process
+- **🕸️ Kùzu** — embedded graph DB backing the native knowledge graph (entity/relationship extraction via structured LLM output, no third-party `graphify` dependency)
 - **🌐 FastAPI + SvelteKit** — REST + WebSocket API, installable as a PWA on any platform, or wrapped in a native [Tauri desktop shell](https://github.com/CServinL/prisma-desktop)
-- **🛡️ Supervised processes** — `prisma serve` runs a small supervisor that isolates the API, UI, and ChromaDB into independent, crash-recoverable processes
+- **🛡️ Supervised processes** — `prisma serve` runs a small supervisor that isolates the API, Web UI, ChromaDB, and knowledge-graph module into independent, crash-recoverable processes
 
 See [Architecture Overview](docs/wiki/architecture.md) for complete technical details.
 

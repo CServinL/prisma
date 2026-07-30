@@ -432,7 +432,14 @@ class ConfigLoader:
         return self.config.kg
 
     def _get_config_path(self) -> Optional[Path]:
-        """Get configuration file path from environment or default location."""
+        """Get configuration file path from environment or default location.
+
+        This exact precedence is duplicated in prisma/server/supervisor.py's
+        _read_raw_config() -- that module can't import this class (stdlib-only,
+        see its module docstring) but must resolve the same file the workers
+        it spawns will read. If either side's precedence changes, change the
+        other to match, or the supervisor and the api/kg workers it starts
+        can silently disagree about vault_root/compute_pools."""
         # Check environment variable first
         env_config = os.getenv('PRISMA_CONFIG')
         if env_config:

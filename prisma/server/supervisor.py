@@ -62,12 +62,40 @@ from pathlib import Path
 log = logging.getLogger("prisma.supervisor")
 
 
+def _read_raw_config() -> dict:
+    """Read config.toml as a raw dict, stdlib-only (this module can't import
+    ConfigLoader -- see the module docstring). Mirrors
+    ConfigLoader._get_config_path's precedence exactly (prisma/utils/config.py)
+    -- $PRISMA_CONFIG, then ~/.config/prisma/config.toml, then ./config.toml,
+    then ./prisma-config.toml -- so the supervisor and the workers it spawns
+    never silently disagree about which file is "the" config. If either side
+    changes its precedence, change the other to match.
+
+    Returns {} if no config file is found or it fails to parse -- every
+    caller already treats a missing/empty section as "use defaults."
+    """
+    import tomllib
+    candidates = []
+    env_config = os.environ.get("PRISMA_CONFIG")
+    if env_config:
+        candidates.append(Path(env_config).expanduser())
+    candidates += [
+        Path.home() / ".config" / "prisma" / "config.toml",
+        Path("./config.toml"),
+        Path("./prisma-config.toml"),
+    ]
+    for path in candidates:
+        if path.exists():
+            try:
+                return tomllib.loads(path.read_text()) or {}
+            except Exception:
+                return {}
+    return {}
+
+
 def _resolve_vault_root() -> Path:
     try:
-        import tomllib
-        cfg_path = Path.home() / ".config" / "prisma" / "config.toml"
-        cfg = tomllib.loads(cfg_path.read_text()) or {}
-        root = cfg.get("vault_root", "").strip()
+        root = _read_raw_config().get("vault_root", "").strip()
         if root:
             return Path(root).expanduser().resolve()
     except Exception:
@@ -84,10 +112,7 @@ def _venv_bin(name: str) -> str:
 
 def _ollama_base_url() -> str:
     try:
-        import tomllib
-        cfg_path = Path.home() / ".config" / "prisma" / "config.toml"
-        cfg = tomllib.loads(cfg_path.read_text()) or {}
-        host = cfg.get("llm", {}).get("host", "localhost:11434")
+        host = _read_raw_config().get("llm", {}).get("host", "localhost:11434")
         return f"http://{host}"
     except Exception:
         return "http://localhost:11434"
@@ -373,9 +398,7 @@ def _load_compute_pools() -> tuple[
     assumption when nothing is configured.
     """
     try:
-        import tomllib
-        cfg_path = Path.home() / ".config" / "prisma" / "config.toml"
-        cfg = tomllib.loads(cfg_path.read_text()) or {}
+        cfg = _read_raw_config()
         pools = cfg.get("compute_pools")
         if pools:
             capacity = {p["name"]: int(p.get("max_concurrent", 1)) for p in pools}

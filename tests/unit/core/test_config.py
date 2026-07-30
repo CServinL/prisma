@@ -261,7 +261,33 @@ index_extensions = ["md", ".yaml"]
         with self.assertRaises(ValidationError):
             from prisma.utils.config import SearchConfig
             SearchConfig(default_limit=-1)
-    
+
+    def test_search_config_accepts_real_discovery_sources(self):
+        from prisma.utils.config import SearchConfig
+        cfg = SearchConfig(sources=['arxiv', 'pubmed', 'ieee_xplore'])
+        self.assertEqual(cfg.sources, ['arxiv', 'pubmed', 'ieee_xplore'])
+
+    def test_search_config_accepts_zotero_as_a_special_case(self):
+        # zotero isn't a discovery Source (not in build_sources()'s keys) --
+        # it's the bookmark layer, explicitly handled as a no-op in
+        # SearchAgent.search()'s dispatch. Must stay valid regardless.
+        from prisma.utils.config import SearchConfig
+        cfg = SearchConfig(sources=['arxiv', 'zotero'])
+        self.assertIn('zotero', cfg.sources)
+
+    def test_search_config_rejects_google_scholar(self):
+        # google_scholar has no source module and no special-case handling
+        # anywhere -- previously accepted then silently no-op'd via
+        # SearchAgent's "not yet implemented" warning branch.
+        from prisma.utils.config import SearchConfig
+        with self.assertRaises(ValidationError):
+            SearchConfig(sources=['google_scholar'])
+
+    def test_search_config_rejects_unknown_source(self):
+        from prisma.utils.config import SearchConfig
+        with self.assertRaises(ValidationError):
+            SearchConfig(sources=['not-a-real-source'])
+
     def test_zotero_credentials_check(self):
         """Test Zotero credentials validation."""
         # Test with a clean config loader (no config file)

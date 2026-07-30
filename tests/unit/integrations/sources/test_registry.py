@@ -1,9 +1,13 @@
-"""Consistency checks across the three places a source name has to agree:
-build_sources()'s registry, SOURCE_REGISTRY (quality metadata), and
-SearchConfig.valid_sources. A mismatch here silently degrades a source to
-the ONE_STAR default quality (get_source_quality's fallback) instead of
-raising -- this is exactly the class of bug the semanticscholar/
-semantic_scholar naming mismatch was (fixed 2026-07-29)."""
+"""Consistency checks across the two places a source name has to agree:
+build_sources()'s registry and SOURCE_REGISTRY (quality metadata).
+(SearchConfig.validate_sources used to be a third, hand-maintained copy of
+this same name list -- it now imports SOURCE_NAMES from
+integrations.sources instead, so it can't drift on its own; the third
+check below just confirms that wiring still holds.) A mismatch here
+silently degrades a source to the ONE_STAR default quality
+(get_source_quality's fallback) instead of raising -- this is exactly the
+class of bug the semanticscholar/semantic_scholar naming mismatch was
+(fixed 2026-07-29)."""
 
 from prisma.integrations.sources import build_sources
 from prisma.storage.models.source_quality import SOURCE_REGISTRY, SourceQuality, get_source_quality

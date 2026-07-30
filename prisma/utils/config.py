@@ -282,10 +282,17 @@ class SearchConfig(BaseModel):
     @field_validator('sources')
     @classmethod
     def validate_sources(cls, v):
-        valid_sources = ['arxiv', 'zotero', 'pubmed', 'google_scholar', 'semanticscholar', 'openlibrary', 'googlebooks', 'ieee_xplore']
+        # Deferred import -- integrations.sources imports SearchConfig itself
+        # (for build_sources()'s type hint), so this must stay a call-time
+        # import, not a module-level one, to avoid a circular import.
+        from ..integrations.sources import SOURCE_NAMES
+        # 'zotero' isn't a discovery Source (not in SOURCE_NAMES) -- it's the
+        # bookmark layer, explicitly handled as a no-op in
+        # SearchAgent.search()'s dispatch, not silently dropped.
+        valid_sources = SOURCE_NAMES | {"zotero"}
         for source in v:
             if source not in valid_sources:
-                raise ValueError(f'source "{source}" not in valid sources: {valid_sources}')
+                raise ValueError(f'source "{source}" not in valid sources: {sorted(valid_sources)}')
         return v
 
 

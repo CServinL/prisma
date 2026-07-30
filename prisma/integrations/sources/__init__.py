@@ -18,7 +18,18 @@ from .openlibrary import OpenLibrarySource
 from .pubmed import PubMedSource
 from .semantic_scholar import SemanticScholarSource
 
-__all__ = ["Source", "SourceSearchResult", "build_sources"]
+__all__ = ["Source", "SourceSearchResult", "SOURCE_NAMES", "build_sources"]
+
+# The set of names build_sources() actually returns -- kept beside it (not
+# derived by calling build_sources(), which constructs real Source
+# instances/rate limiters/resolves API keys, too heavy to run just to
+# validate a config string) so SearchConfig.validate_sources
+# (utils/config.py) has a single, lightweight source of truth instead of
+# its own hardcoded copy of this same name list. Update both together when
+# adding a source.
+SOURCE_NAMES: frozenset[str] = frozenset({
+    "arxiv", "semanticscholar", "openlibrary", "googlebooks", "pubmed", "ieee_xplore",
+})
 
 
 def _override(config: SearchConfig, name: str) -> SourceQuotaConfig:

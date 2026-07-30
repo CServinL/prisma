@@ -3,6 +3,7 @@ Prisma Coordinator - Main orchestration logic for literature reviews.
 MVP: Fast, simple, working implementation.
 """
 
+import logging
 from pathlib import Path
 from typing import Dict, List, Any
 import time
@@ -15,6 +16,8 @@ from .connectivity import monitor as connectivity
 from .storage.models.agent_models import CoordinatorResult, PipelineMetadata
 from .storage.pending_queue import PendingWriteQueue
 from .utils.config import config
+
+logger = logging.getLogger(__name__)
 
 
 class PrismaCoordinator:
@@ -36,6 +39,7 @@ class PrismaCoordinator:
                 if debug:
                     print("[DEBUG] Zotero agent initialized for auto-saving")
             except Exception as e:
+                logger.warning("failed to initialize Zotero agent, auto-save disabled: %s", e)
                 if debug:
                     print(f"[DEBUG] Failed to initialize Zotero agent: {e}")
 
@@ -138,6 +142,7 @@ class PrismaCoordinator:
                             
                 except Exception as e:
                     # If relevance assessment fails, keep the paper for safety
+                    logger.warning("relevance assessment failed for %r, keeping paper: %s", paper.title[:50], e)
                     relevant_papers.append(paper)
                     if self.debug:
                         print(f"[DEBUG] ⚠️ Relevance assessment failed for {paper.title[:50]}, keeping paper: {e}")
@@ -187,6 +192,7 @@ class PrismaCoordinator:
                                 print(f"[DEBUG] 📚 Duplicate found in Zotero: {paper.title[:50]}...")
                 except Exception as e:
                     # If duplicate checking fails, treat all as new for safety
+                    logger.warning("duplicate checking failed, treating all as new: %s", e)
                     new_papers = relevant_papers
                     if self.debug:
                         print(f"[DEBUG] ⚠️ Duplicate checking failed, treating all as new: {e}")
@@ -218,6 +224,7 @@ class PrismaCoordinator:
                     if self.debug and saved_papers_count > 0:
                         print(f"[DEBUG] Saved {saved_papers_count} high-quality papers to Zotero")
                 except Exception as e:
+                    logger.warning("failed to save papers to Zotero: %s", e)
                     warnings.append(f"Failed to save papers to Zotero: {str(e)}")
                     if self.debug:
                         print(f"[DEBUG] Zotero save error: {e}")
@@ -289,10 +296,11 @@ class PrismaCoordinator:
             )
             
         except Exception as e:
+            logger.exception("review pipeline failed")
             if self.debug:
                 import traceback
                 traceback.print_exc()
-            
+
             errors.append(str(e))
             return CoordinatorResult(
                 success=False,
@@ -357,6 +365,7 @@ class PrismaCoordinator:
             
         except Exception as e:
             # If search fails, assume no duplicate for safety
+            logger.warning("zotero duplicate check failed, assuming not a duplicate: %s", e)
             if self.debug:
                 print(f"[DEBUG] Error checking duplicate: {e}")
             return False
@@ -437,6 +446,7 @@ class PrismaCoordinator:
                     print(f"[DEBUG] Successfully saved {saved_count} items via unified interface")
                 return saved_count if saved_count is not None else len(zotero_items)
             except Exception as e:
+                logger.warning("failed to save items to Zotero via unified interface: %s", e)
                 if self.debug:
                     print(f"[DEBUG] Failed to save items to Zotero: {e}")
                 return 0

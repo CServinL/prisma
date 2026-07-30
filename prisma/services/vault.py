@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import re
 import threading
 from datetime import datetime
@@ -12,6 +13,8 @@ from prisma.storage.models.vault_models import (
     Chat, ChatMessage, ChatRole, Note, NodeType, Source, Stream, StreamStatus,
     RefreshFrequency, ToolCallRecord, VaultListing, VaultNodeMeta, VaultTreeNode,
 )
+
+_log = logging.getLogger("prisma.vault")
 
 # Recognised companion file extensions stored alongside a .md source node.
 COMPANION_EXTS = (".pdf", ".html", ".htm", ".svg", ".epub", ".docx")
@@ -601,7 +604,8 @@ class VaultService:
             _dc_render(source=html_path, format="md", output=tmp)
             md_content = tmp.read_text(encoding="utf-8")
             tmp.unlink(missing_ok=True)
-        except Exception:
+        except Exception as exc:
+            _log.warning("docu_craft render failed for %s, no .md companion generated: %s", html_path, exc)
             return False
         fm.setdefault("type", "note")
         companion.write_text(_render_frontmatter(fm) + md_content, encoding="utf-8")
@@ -712,8 +716,8 @@ class VaultService:
         for path in streams_dir.glob("*.yaml"):
             try:
                 result.append(self.get_stream(_file_slug(path.stem)))
-            except Exception:
-                pass
+            except Exception as exc:
+                _log.warning("skipping unreadable stream %s: %s", path, exc)
         result.sort(key=lambda s: s.modified_at, reverse=True)
         return result
 
@@ -816,8 +820,8 @@ class VaultService:
                         modified_at=datetime.fromtimestamp(path.stat().st_mtime),
                         stream_status=stream_status,
                     ))
-                except Exception:
-                    pass
+                except Exception as exc:
+                    _log.warning("skipping unreadable stream %s in vault tree: %s", entry.path, exc)
             elif name.endswith(".md") or name.endswith(".html"):
                 try:
                     path = Path(entry.path)
@@ -865,8 +869,8 @@ class VaultService:
                             modified_at=datetime.fromtimestamp(path.stat().st_mtime),
                             stream_status=stream_status,
                         ))
-                except Exception:
-                    pass
+                except Exception as exc:
+                    _log.warning("skipping unreadable file %s in vault tree: %s", entry.path, exc)
         return nodes
 
     # ── Node operations ───────────────────────────────────────────────────────

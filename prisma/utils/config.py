@@ -508,8 +508,8 @@ class ConfigLoader:
             config = PrismaConfig(**user_data)
             return config
         except Exception as e:
-            print(f"[ERROR] Configuration validation failed: {e}")
-            print("[WARNING] Using default configuration")
+            logger.error(f"Configuration validation failed: {e}")
+            logger.warning("Using default configuration")
             return PrismaConfig()
     
     def get(self, key_path: str, default: Any = None) -> Any:

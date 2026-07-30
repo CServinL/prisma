@@ -149,7 +149,8 @@ class ChromaIndexer:
         try:
             self._ensure_client()
             chunks = self._collection.count()
-        except Exception:
+        except Exception as exc:
+            _log.debug("chroma status: chunk count unavailable: %s", exc)
             chunks = -1
         with self._lock:
             files = len(self._manifest)
@@ -186,7 +187,8 @@ class ChromaIndexer:
             total = self._collection.count()
             if total == 0:
                 return []
-        except Exception:
+        except Exception as exc:
+            _log.warning("chroma query: collection unavailable, returning no results: %s", exc)
             return []
         with resource_lock.lease(self._supervisor_host, self._supervisor_port, holder=_RESOURCE_HOLDER, model=self._model) as granted:
             embeddings = _embed_texts([question], self._model, self._base_url, self._provider) if granted else None
@@ -236,7 +238,8 @@ class ChromaIndexer:
         if self._manifest_path.exists():
             try:
                 self._manifest = json.loads(self._manifest_path.read_text(encoding="utf-8"))
-            except Exception:
+            except Exception as exc:
+                _log.warning("failed to load chroma manifest, starting from empty (will re-embed): %s", exc)
                 self._manifest = {}
 
     def _loop(self) -> None:
@@ -386,5 +389,5 @@ class ChromaIndexer:
             data = dict(self._manifest)
         try:
             self._manifest_path.write_text(json.dumps(data), encoding="utf-8")
-        except Exception:
-            pass
+        except Exception as exc:
+            _log.warning("failed to save chroma manifest to %s (will re-embed unnecessarily on restart): %s", self._manifest_path, exc)

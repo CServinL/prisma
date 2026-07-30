@@ -6,6 +6,9 @@ def _ep_safe(**kw):
     try:
         return _ep_orig(**kw)
     except Exception:
+        # No logger yet -- this patch runs before `logging` (let alone this
+        # module's own imports) is even set up, and it's a narrow, known
+        # Python 3.14 bug workaround, not a real runtime failure path.
         return []
 _imeta.entry_points = _ep_safe
 
@@ -110,7 +113,8 @@ async def _ws_broadcast(event: dict, exclude_client_id: str | None = None) -> No
             continue
         try:
             await ws.send_text(msg)
-        except Exception:
+        except Exception as exc:
+            _log.debug("dropping disconnected ws client: %s", exc)
             dead.add(ws)
     if dead:
         with _ws_clients_lock:
@@ -297,7 +301,8 @@ def _resolve_vault_root() -> Path:
     from prisma.utils.config import ConfigLoader
     try:
         return ConfigLoader().get_vault_root()
-    except Exception:
+    except Exception as exc:
+        _log.warning("config load failed, falling back to ~/prisma-vault: %s", exc)
         return Path.home() / "prisma-vault"
 
 
@@ -305,10 +310,11 @@ def _build_zotero() -> ZoteroClient:
     from prisma.utils.config import ConfigLoader
     try:
         return ZoteroClient.from_config(ConfigLoader().config)
-    except Exception:
+    except Exception as exc:
         # Fall back to an unconfigured client rather than crashing startup --
         # is_available()/status() degrade gracefully on missing/bad credentials,
         # no separate "offline mode" construction path needed.
+        _log.warning("zotero client config failed, falling back to unconfigured client: %s", exc)
         from prisma.integrations.zotero.client import ZoteroAPIConfig
         return ZoteroClient(ZoteroAPIConfig(api_key="", library_id="", library_type="user"))
 
@@ -331,7 +337,8 @@ def _build_chroma(vault: "VaultService") -> ChromaIndexer:
         return ChromaIndexer(vault, embedding_model=rcfg.embedding_model,
                               ollama_base_url=rcfg.ollama_base_url, provider=rcfg.provider,
                               chroma_port=rcfg.chroma_port)
-    except Exception:
+    except Exception as exc:
+        _log.warning("retrieval config load failed, falling back to ChromaIndexer defaults: %s", exc)
         return ChromaIndexer(vault)
 
 
@@ -344,13 +351,13 @@ def _chat_blocked_reason(chroma: ChromaIndexer, kg: KnowledgeGraphClient) -> str
     try:
         if kg.status().state == "indexing":
             return "the knowledge graph is currently indexing your vault"
-    except Exception:
-        pass
+    except Exception as exc:
+        _log.debug("kg status probe failed, skipping this reason: %s", exc)
     try:
         if chroma.status().current_activity:
             return "the semantic search index is currently updating"
-    except Exception:
-        pass
+    except Exception as exc:
+        _log.debug("chroma status probe failed, skipping this reason: %s", exc)
     return None
 
 
@@ -572,8 +579,8 @@ def _run_review(job_id: str, req: ReviewRequest) -> None:
             try:
                 html, _, _ = vault_render(Path(result.output_file).read_text(encoding="utf-8"), _vault)
                 content_html = html
-            except Exception:
-                pass
+            except Exception as exc:
+                _log.warning("review job=%s: rendering output_file to HTML failed: %s", job_id, exc)
 
         _jobs[job_id].update(
             status="done" if result.success else "error",
@@ -584,6 +591,7 @@ def _run_review(job_id: str, req: ReviewRequest) -> None:
             errors=result.errors,
         )
     except Exception as exc:
+        _log.exception("review job=%s failed", job_id)
         _jobs[job_id].update(status="error", errors=[str(exc)])
 
 
@@ -804,8 +812,8 @@ async def websocket_endpoint(ws: WebSocket, client_id: str | None = Query(None))
         # the client) now always initiates this.
         try:
             await ws.send_text(json.dumps({"type": "request_manifest"}))
-        except Exception:
-            pass
+        except Exception as exc:
+            _log.debug("client_id=%s disconnected before request_manifest could be sent: %s", client_id, exc)
 
     try:
         while True:
@@ -889,14 +897,15 @@ def status():
             chats=len(listing.chats),
             streams=len(listing.streams),
         )
-    except Exception:
+    except Exception as exc:
+        _log.warning("vault.list_nodes() failed, reporting zeroed stats: %s", exc)
         vault_stats = VaultStats(root=str(_vault.root), notes=0, sources=0, chats=0, streams=0)
 
     zotero_info = None
     try:
         zotero_info = _zotero.status()
-    except Exception:
-        pass
+    except Exception as exc:
+        _log.debug("zotero status probe failed: %s", exc)
 
     return {
         "online": connectivity.is_online,

@@ -88,7 +88,8 @@ def _read_raw_config() -> dict:
         if path.exists():
             try:
                 return tomllib.loads(path.read_text()) or {}
-            except Exception:
+            except Exception as exc:
+                log.warning("failed to parse %s, falling back to defaults: %s", path, exc)
                 return {}
     return {}
 
@@ -98,8 +99,8 @@ def _resolve_vault_root() -> Path:
         root = _read_raw_config().get("vault_root", "").strip()
         if root:
             return Path(root).expanduser().resolve()
-    except Exception:
-        pass
+    except Exception as exc:
+        log.warning("vault_root resolution failed, falling back to ~/prisma-vault: %s", exc)
     return Path.home() / "prisma-vault"
 
 
@@ -114,7 +115,8 @@ def _ollama_base_url() -> str:
     try:
         host = _read_raw_config().get("llm", {}).get("host", "localhost:11434")
         return f"http://{host}"
-    except Exception:
+    except Exception as exc:
+        log.warning("llm.host resolution failed, falling back to localhost:11434: %s", exc)
         return "http://localhost:11434"
 
 
@@ -135,7 +137,8 @@ def _query_ollama_resident_mb(base_url: str, timeout: float = 2.0) -> dict[str, 
         with urllib.request.urlopen(f"{base_url}/api/ps", timeout=timeout) as resp:
             data = json.loads(resp.read())
         return {m["name"]: int(m.get("size_vram", 0)) // (1024 * 1024) for m in data.get("models", [])}
-    except Exception:
+    except Exception as exc:
+        log.debug("could not reach ollama %s/api/ps: %s", base_url, exc)
         return None
 
 
@@ -152,7 +155,8 @@ def _load_vram_profiles() -> dict[str, int]:
     try:
         path = _model_vram_profile_path()
         return json.loads(path.read_text()) if path.exists() else {}
-    except Exception:
+    except Exception as exc:
+        log.warning("failed to load vram profiles, starting from empty: %s", exc)
         return {}
 
 
@@ -437,8 +441,8 @@ def _load_compute_pools() -> tuple[
                 capacity, affinity, pool_models, model_concurrency, pool_vram_budget, model_vram,
                 model_background_limit, pool_provider,
             )
-    except Exception:
-        pass
+    except Exception as exc:
+        log.warning("compute_pools config parse failed, falling back to a single default pool: %s", exc)
     return (
         {"default": 1}, {"default"}, {"default": set()}, {"default": {}}, {"default": None}, {"default": {}},
         {"default": {}}, {"default": "ollama"},
@@ -462,8 +466,8 @@ def _die_with_parent() -> None:
         PR_SET_PDEATHSIG = 1
         libc = ctypes.CDLL("libc.so.6", use_errno=True)
         libc.prctl(PR_SET_PDEATHSIG, signal.SIGTERM)
-    except Exception:
-        pass  # non-Linux, or prctl unavailable — best effort only
+    except Exception as exc:
+        log.debug("PR_SET_PDEATHSIG unavailable (non-Linux, or prctl missing): %s", exc)
 
 
 class Worker:
@@ -543,7 +547,8 @@ def _pid_alive(pid: int) -> bool:
         return False
     except PermissionError:
         return True  # exists, just not ours to signal
-    except Exception:
+    except Exception as exc:
+        log.debug("pid=%s liveness check raised, assuming alive (fail safe): %s", pid, exc)
         return True  # unknown — fail safe, don't release something we're unsure about
 
 
@@ -1056,7 +1061,8 @@ def _make_handler(supervisor: Supervisor):
                 return {}
             try:
                 return json.loads(self.rfile.read(length))
-            except Exception:
+            except Exception as exc:
+                log.debug("malformed JSON body on control API request: %s", exc)
                 return {}
 
         def do_GET(self) -> None:

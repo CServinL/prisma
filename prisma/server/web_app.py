@@ -91,13 +91,16 @@ def _ui_watcher() -> None:
             with _ui_dev_lock:
                 _ui_dev_state["building"] = True
             _log.info("ui/src changed — rebuilding")
-            subprocess.run(["npm", "run", "build"], cwd=_ui_dir, capture_output=True)
-            with _ui_dev_lock:
-                _ui_dev_state["version"] += 1
-                _ui_dev_state["building"] = False
-            _log.info("ui rebuild done (version %d)", _ui_dev_state["version"])
-        except Exception:
-            pass
+            try:
+                subprocess.run(["npm", "run", "build"], cwd=_ui_dir, capture_output=True)
+                with _ui_dev_lock:
+                    _ui_dev_state["version"] += 1
+                _log.info("ui rebuild done (version %d)", _ui_dev_state["version"])
+            finally:
+                with _ui_dev_lock:
+                    _ui_dev_state["building"] = False
+        except Exception as exc:
+            _log.warning("ui watcher iteration failed: %s", exc)
 
 
 if _ui_src.exists():

@@ -194,7 +194,12 @@ class VaultService:
 
     # ── Internal traversal ────────────────────────────────────────────────────
 
-    def _all_md_files(self) -> Iterator[Path]:
+    def iter_files(self, *, extensions: tuple[str, ...] = (".md",)) -> Iterator[Path]:
+        """Walk the vault root once, yielding files whose name ends in one
+        of *extensions*, skipping VCS/build directories and hidden dirs.
+        This is the vault's only directory walk -- callers that need a
+        different extension set (KG indexing, Chroma indexing) filter this
+        same stream instead of re-walking the filesystem themselves."""
         if not self.root.exists():
             return
         import os
@@ -205,18 +210,18 @@ class VaultService:
                 if d not in _SKIP_DIRS and not d.startswith(".")
             ]
             for fname in filenames:
-                if fname.endswith(".md"):
+                if fname.endswith(extensions):
                     yield Path(dirpath) / fname
 
     def _find_md(self, slug: str) -> Path | None:
         """Find a .md file whose slug matches. Does NOT find .html files."""
         slug_norm = _file_slug(slug).lower()
-        for path in self._all_md_files():
+        for path in self.iter_files():
             if _file_slug(path.stem).lower() == slug_norm:
                 return path
         return None
 
-    def _find_file(self, slug: str) -> Path | None:
+    def find_file(self, slug: str) -> Path | None:
         """Find a .md or .html file whose slug matches."""
         md = self._find_md(slug)
         if md is not None:
@@ -227,17 +232,12 @@ class VaultService:
             if candidate.exists():
                 return candidate
         slug_norm = _file_slug(slug).lower()
-        import os
-        for dirpath, dirnames, filenames in os.walk(self.root, followlinks=True):
-            dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS and not d.startswith(".")]
-            for fname in filenames:
-                if fname.endswith(".html"):
-                    stem = fname[:-5]
-                    if _file_slug(stem).lower() == slug_norm:
-                        return Path(dirpath) / fname
+        for path in self.iter_files(extensions=(".html",)):
+            if _file_slug(path.stem).lower() == slug_norm:
+                return path
         return None
 
-    def _node_type_from_fm(self, fm: dict) -> NodeType:
+    def node_type_from_frontmatter(self, fm: dict) -> NodeType:
         raw = fm.get("type", "note")
         try:
             return NodeType(raw)
@@ -248,10 +248,10 @@ class VaultService:
 
     def list_nodes(self, node_type: NodeType | None = None) -> VaultListing:
         buckets: dict[NodeType, list[VaultNodeMeta]] = {t: [] for t in NodeType}
-        for path in self._all_md_files():
+        for path in self.iter_files():
             body = path.read_text(encoding="utf-8")
             fm, content = _parse_frontmatter(body)
-            nt = self._node_type_from_fm(fm)
+            nt = self.node_type_from_frontmatter(fm)
             if node_type and nt != node_type:
                 continue
             if nt == NodeType.stream:
@@ -363,6 +363,29 @@ class VaultService:
             modified_at=datetime.fromtimestamp(stat.st_mtime),
         )
 
+    def create_source_from_citekey(
+        self, citekey: str, title: str, body: str, *,
+        zotero_key: str, authors: list[str], tags: list[str],
+        year: int | None = None, doi: str | None = None, url: str | None = None,
+    ) -> Source:
+        """Create a source node from Zotero-derived metadata -- the
+        vault-side half of POST /zotero/import/{key}."""
+        self.ensure_dirs()
+        slug = self.unique_slug(citekey)
+        fm: dict = {
+            "type": "source", "title": title, "citekey": citekey,
+            "zotero_key": zotero_key, "authors": authors, "tags": tags,
+        }
+        if year:
+            fm["year"] = year
+        if doi:
+            fm["doi"] = doi
+        if url:
+            fm["url"] = url
+        path = self.default_dirs[NodeType.source] / f"{slug}.md"
+        path.write_text(_render_frontmatter(fm) + body, encoding="utf-8")
+        return self.get_source(slug)
+
     def get_chat(self, slug: str) -> Chat:
         path = self._find_md(slug)
         if path is None:
@@ -385,7 +408,7 @@ class VaultService:
 
     def create_chat(self, title: str, model: str = "llama3") -> Chat:
         self.ensure_dirs()
-        slug = self._unique_slug(_slugify(title))
+        slug = self.unique_slug(title)
         fm = {"type": "chat", "title": title, "model": model, "tags": ["chat"]}
         path = self.default_dirs[NodeType.chat] / f"{slug}.md"
         path.write_text(_render_frontmatter(fm), encoding="utf-8")
@@ -478,7 +501,7 @@ class VaultService:
             return note
 
     def get_any(self, slug: str) -> Note | Source | Chat | Stream:
-        path = self._find_file(slug)
+        path = self.find_file(slug)
         if path is None:
             # streams are stored as .yaml, not .md — _find_file won't find them
             try:
@@ -493,7 +516,7 @@ class VaultService:
             if companion_md.exists():
                 raw_md = companion_md.read_text(encoding="utf-8")
                 html_fm, _ = _parse_frontmatter(raw_md)
-            nt = self._node_type_from_fm(html_fm)
+            nt = self.node_type_from_frontmatter(html_fm)
             return Note(
                 slug=_file_slug(path.stem),
                 title=html_fm.get("title", path.stem),
@@ -506,7 +529,7 @@ class VaultService:
             )
         raw = path.read_text(encoding="utf-8")
         fm, _ = _parse_frontmatter(raw)
-        nt = self._node_type_from_fm(fm)
+        nt = self.node_type_from_frontmatter(fm)
         if nt == NodeType.source:
             return self.get_source(slug)
         if nt == NodeType.stream:
@@ -516,10 +539,10 @@ class VaultService:
         return self.get_note(slug)
 
     def slug_exists(self, slug: str) -> bool:
-        return self._find_file(slug) is not None
+        return self.find_file(slug) is not None
 
     def body_of(self, slug: str) -> str | None:
-        path = self._find_file(slug)
+        path = self.find_file(slug)
         if path is None:
             return None
         if path.suffix == ".html":
@@ -539,7 +562,7 @@ class VaultService:
 
     def set_node_type(self, slug: str, node_type: NodeType) -> None:
         """Update the type field for any node. For HTML files, creates/updates a companion .md."""
-        path = self._find_file(slug)
+        path = self.find_file(slug)
         if path is None:
             raise FileNotFoundError(f"node not found: {slug!r}")
         if path.suffix == ".html":
@@ -599,7 +622,7 @@ class VaultService:
         excerpt_of_chat: str | None = None,
     ) -> Note:
         self.ensure_dirs()
-        slug = self._unique_slug(_slugify(title))
+        slug = self.unique_slug(title)
         fm = {"type": "note", "title": title}
         if tags:
             fm["tags"] = tags
@@ -618,7 +641,10 @@ class VaultService:
         path.write_text(_render_frontmatter(fm) + body, encoding="utf-8")
         return self.get_note(slug)
 
-    def _unique_slug(self, base: str) -> str:
+    def unique_slug(self, title: str) -> str:
+        """Slugify *title* and disambiguate against existing .md files by
+        appending -1, -2, ... on collision."""
+        base = _slugify(title)
         slug = base
         n = 1
         while self._find_md(slug) is not None:
@@ -636,7 +662,7 @@ class VaultService:
 
     # ── Streams (stored as .yaml — the knowledge graph indexer skips non-.md files) ─
 
-    def _find_stream_path(self, slug: str) -> Path | None:
+    def find_stream_path(self, slug: str) -> Path | None:
         slug_norm = _file_slug(slug).lower()
         streams_dir = self.default_dirs[NodeType.stream]
         if not streams_dir.exists():
@@ -647,7 +673,7 @@ class VaultService:
         return None
 
     def get_stream(self, slug: str) -> Stream:
-        path = self._find_stream_path(slug)
+        path = self.find_stream_path(slug)
         if path is None:
             raise FileNotFoundError(f"stream not found: {slug!r}")
         fm = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
@@ -718,7 +744,7 @@ class VaultService:
         return self.get_stream(slug)
 
     def save_stream(self, slug: str, **updates: object) -> Stream:
-        path = self._find_stream_path(slug)
+        path = self.find_stream_path(slug)
         if path is None:
             raise FileNotFoundError(f"stream not found: {slug!r}")
         data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
@@ -731,7 +757,7 @@ class VaultService:
         return self.get_stream(slug)
 
     def append_stream_log(self, slug: str, entry: str) -> None:
-        path = self._find_stream_path(slug)
+        path = self.find_stream_path(slug)
         if path is None:
             return
         data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
@@ -808,7 +834,7 @@ class VaultService:
                         if companion_md.exists():
                             raw_md = companion_md.read_text(encoding="utf-8")
                             html_fm, _ = _parse_frontmatter(raw_md)
-                            html_nt = self._node_type_from_fm(html_fm)
+                            html_nt = self.node_type_from_frontmatter(html_fm)
                         nodes.append(VaultTreeNode(
                             name=name,
                             kind="file",
@@ -822,7 +848,7 @@ class VaultService:
                         fm, content = _parse_frontmatter(raw)
                         if fm.get("excerpt_of_chat"):
                             continue  # already shown in the chat's own Excerpt panel
-                        nt = self._node_type_from_fm(fm)
+                        nt = self.node_type_from_frontmatter(fm)
                         title = fm.get("title") or _first_heading(content) or path.stem
                         stream_status = None
                         if nt == NodeType.stream:
@@ -846,7 +872,7 @@ class VaultService:
     # ── Node operations ───────────────────────────────────────────────────────
 
     def move_node(self, slug: str, dest_dir: str) -> str:
-        path = self._find_file(slug)
+        path = self.find_file(slug)
         if path is None:
             raise FileNotFoundError(f"node not found: {slug!r}")
         # Normalise without resolving symlinks — resolve() follows them out of vault
@@ -882,7 +908,7 @@ class VaultService:
         return _file_slug(new_stem)
 
     def delete_node(self, slug: str) -> None:
-        path = self._find_file(slug)
+        path = self.find_file(slug)
         if path is None:
             raise FileNotFoundError(f"node not found: {slug!r}")
         path.unlink()
@@ -967,7 +993,7 @@ class VaultService:
         initial-reconciliation diffing. See _safe_sync_path for why streams/
         gets this one exception."""
         manifest = []
-        for path in self._all_md_files():
+        for path in self.iter_files():
             stat = path.stat()
             manifest.append((path.relative_to(self.root).as_posix(), stat.st_mtime, stat.st_size))
         streams_dir = self.default_dirs[NodeType.stream]
@@ -978,7 +1004,7 @@ class VaultService:
         return manifest
 
     def delete_stream(self, slug: str) -> None:
-        path = self._find_stream_path(slug)
+        path = self.find_stream_path(slug)
         if path is None:
             raise FileNotFoundError(f"stream not found: {slug!r}")
         path.unlink()

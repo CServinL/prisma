@@ -324,7 +324,7 @@ class ChromaIndexer:
             # filter by at query time, so this is the only place that can keep
             # chat transcripts out of search_vault's results.
             all_files = [
-                p for p in self._vault._all_md_files()
+                p for p in self._vault.iter_files()
                 if "chats" not in p.relative_to(self._vault.root).parts
             ]
             _log.info("chroma full index start: %d files total", len(all_files))

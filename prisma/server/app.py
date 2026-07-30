@@ -1347,7 +1347,7 @@ def taint_node(slug: str):
     targets a single file via both ChromaIndexer.taint_file and
     KnowledgeGraphService.taint_file (see their docstrings — both work by
     dropping the file's manifest entry and enqueuing it directly)."""
-    path = _vault._find_file(slug)
+    path = _vault.find_file(slug)
     if path is None:
         raise HTTPException(status_code=404, detail=f"node not found: {slug!r}")
     rel = str(path.relative_to(_vault.root))
@@ -1474,7 +1474,7 @@ def view_html(slug: str, request: Request):
     path = _vault.find_companion(slug)
     if path is None:
         # Standalone .html file (no .md companion)
-        found = _vault._find_file(slug)
+        found = _vault.find_file(slug)
         if found is not None and found.suffix == ".html":
             path = found
     if path is None:
@@ -1590,7 +1590,7 @@ _search_index_lock = threading.Lock()
 def _refresh_search_index() -> None:
     with _search_index_lock:
         seen: set[str] = set()
-        for path in _vault._all_md_files():
+        for path in _vault.iter_files():
             key = str(path)
             seen.add(key)
             try:
@@ -2008,7 +2008,7 @@ def zotero_import(key: str):
         raise HTTPException(status_code=404, detail=f"Zotero item not found: {key!r}")
 
     # Return existing import if already in vault
-    for path in _vault._all_md_files():
+    for path in _vault.iter_files():
         raw = path.read_text(encoding="utf-8")
         from prisma.services.vault import _parse_frontmatter
         fm, _ = _parse_frontmatter(raw)
@@ -2044,27 +2044,12 @@ def zotero_import(key: str):
         body = "\n".join(lines)
 
     citekey = make_citekey(item.authors, item.year, item.title)
-    from prisma.services.vault import _slugify, _render_frontmatter
-    slug = _vault._unique_slug(_slugify(citekey))
-    fm: dict = {
-        "type": "source",
-        "title": item.title,
-        "citekey": citekey,
-        "zotero_key": item.key,
-        "authors": item.authors,
-        "tags": [t.tag for t in item.tags],
-    }
-    if item.year:
-        fm["year"] = item.year
-    if item.doi:
-        fm["doi"] = item.doi
-    if item.url:
-        fm["url"] = item.url
-    path = _vault.default_dirs[NodeType.source] / f"{slug}.md"
-    _vault.ensure_dirs()
-    path.write_text(_render_frontmatter(fm) + body, encoding="utf-8")
+    source = _vault.create_source_from_citekey(
+        citekey, item.title, body,
+        zotero_key=item.key, authors=item.authors, tags=[t.tag for t in item.tags],
+        year=item.year, doi=item.doi, url=item.url,
+    )
     _indexer.mark_stale()
-    source = _vault.get_source(slug)
     _activity.info("action=import_zotero key=%s slug=%s title=%r", key, source.slug, source.title)
     html, broken_links, broken_citations = vault_render(source.body, _vault)
     return RenderedNode(

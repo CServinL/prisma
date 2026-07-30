@@ -22,7 +22,7 @@ MAX_TRANSCLUSION_DEPTH = 5
 def _build_citekey_index(vault: VaultService) -> dict[str, str]:
     from prisma.services.vault import _parse_frontmatter
     index: dict[str, str] = {}
-    for path in vault._all_md_files():
+    for path in vault.iter_files():
         body = path.read_text(encoding="utf-8")
         fm, _ = _parse_frontmatter(body)
         citekey = fm.get("citekey")

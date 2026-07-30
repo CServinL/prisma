@@ -29,9 +29,8 @@ _VERSION = 1
 
 class PendingAction(BaseModel):
     """One queued write, persisted to disk until flush() replays it against
-    a live Zotero client -- same "structured data <-> JSON file" need as
-    ResearchStream (research_stream_manager.py), modeled the same way
-    instead of as a raw dict."""
+    a live Zotero client -- structured with Pydantic instead of a raw dict
+    so the on-disk JSON is validated on load."""
     id: str
     type: str
     timestamp: str

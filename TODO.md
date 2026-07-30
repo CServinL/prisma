@@ -778,7 +778,7 @@ survey — `docs/wiki/adr/ADR-016-chunking-and-structured-extraction-tooling.md`
 has the full reasoning for these plus everything that was rejected outright.
 
 - [ ] Evaluate Crawl4AI for research-stream discovery beyond
-      arxiv/semanticscholar. `research_stream_manager.py` drives
+      arxiv/semanticscholar. `stream_runner.py` drives
       `search_agent.py`'s structured-API-only search (`search_sources`);
       Crawl4AI could extend discovery to journal pages, preprint mirrors,
       or lab pages that don't have a clean API, by crawling and extracting

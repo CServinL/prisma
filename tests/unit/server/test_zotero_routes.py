@@ -96,18 +96,11 @@ def test_sync_pending_online_flushes_queue(monkeypatch):
         def __init__(self, *a, **kw):
             self.pending_count = 2
 
-    class _FakeManager:
-        def __init__(self, *a, **kw):
-            pass
-
-        def sync_pending(self):
+        def flush(self, zotero_client):
             return (2, 0)
 
     monkeypatch.setattr("prisma.storage.pending_queue.PendingWriteQueue", _NonEmptyQueue)
     monkeypatch.setattr("prisma.server.app.connectivity.is_online", True)
-    monkeypatch.setattr(
-        "prisma.services.research_stream_manager.ResearchStreamManager", _FakeManager
-    )
 
     r = client.post("/zotero/sync-pending")
     assert r.status_code == 200

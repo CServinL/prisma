@@ -145,7 +145,7 @@ class TestAppendStreamLog:
         vault.append_stream_log("log-test", "found 1 paper")
 
         import yaml
-        path = vault._find_stream_path("log-test")
+        path = vault.find_stream_path("log-test")
         data = yaml.safe_load(path.read_text())
         assert len(data["log"]) == 2
         assert data["log"][0]["entry"] == "found 3 papers"

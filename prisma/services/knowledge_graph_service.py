@@ -1218,7 +1218,7 @@ class KnowledgeGraphService:
         except OSError:
             return "note"
         fm = _frontmatter(body)
-        node_type = self._vault._node_type_from_fm(fm)
+        node_type = self._vault.node_type_from_frontmatter(fm)
         return _TRUST_TIER_BY_NODE_TYPE.get(node_type, "note")
 
     # ── Background loop ───────────────────────────────────────────────────────
@@ -1321,7 +1321,7 @@ class KnowledgeGraphService:
             self._index_generation += 1
             generation = self._index_generation
         try:
-            all_files = [p for p in self._vault._all_md_files() if p.suffix in self.index_extensions]
+            all_files = list(self._vault.iter_files(extensions=self.index_extensions))
             _log.info("knowledge graph full index start: %d files total", len(all_files))
 
             # A fresh restart's full index still walks every file (a changed

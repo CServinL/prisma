@@ -28,7 +28,8 @@ prisma/                        # repo root
 │   │   ├── dedup.py               # Shared duplicate-detection logic (stream_runner + /maintenance/deduplicate)
 │   │   ├── knowledge_graph_service.py  # Native Kùzu-backed knowledge graph indexer (watchdog + Ollama, per-section) — runs inside kg_app.py
 │   │   ├── knowledge_graph_client.py   # Thin HTTP client app.py uses to reach kg_app.py
-│   │   └── chroma_service.py      # ChromaDB semantic index (watchdog + nomic-embed-text)
+│   │   ├── chroma_service.py      # ChromaDB semantic index (watchdog + nomic-embed-text)
+│   │   └── asset_rewrite.py       # Rewrites relative asset URLs to /vault/assets/... (used by notes/view routes)
 │   ├── storage/
 │   │   ├── models/
 │   │   │   ├── agent_models.py          # PaperMetadata, BookMetadata, SearchResult

@@ -1,12 +1,25 @@
 """Unit tests for the two API routes added when the CLI was minimized
 (2026-07-27): GET /zotero/stats and POST /zotero/sync-pending replace the
 old `prisma zotero stats` and `prisma sync` CLI commands.
+
+The tests below this point (isolated router section) instead build
+zotero_routes.py's router in isolation (bare FastAPI app + a tmp_path
+VaultService), same approach as test_notes_routes.py/test_streams_routes.py
+-- appropriate here since zotero_import writes real files, and this
+module-level `client` fixture talks to the full app.py singleton's real
+(potentially non-tmp) _vault.
 """
 
+from unittest.mock import MagicMock
+
+import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from prisma.server.app import app
-from prisma.storage.models.zotero_models import ZoteroItem, ZoteroCreator
+from prisma.server.zotero_routes import build_zotero_router
+from prisma.services.vault import VaultService
+from prisma.storage.models.zotero_models import ZoteroCreator, ZoteroItem, ZoteroTag
 
 client = TestClient(app, client=("127.0.0.1", 12345))
 
@@ -105,3 +118,108 @@ def test_sync_pending_online_flushes_queue(monkeypatch):
     r = client.post("/zotero/sync-pending")
     assert r.status_code == 200
     assert r.json() == {"synced": 2, "failed": 0, "pending_before": 2}
+
+
+# ── Isolated router tests (build_zotero_router directly) ─────────────────────
+# /zotero/status, /zotero/collections, and /zotero/import/{key} had zero test
+# coverage anywhere before this router extraction -- import in particular has
+# real branching logic (existing-import dedup, PDF-vs-abstract-fallback body,
+# citekey creation) worth covering now that it's isolable from the full app.
+
+@pytest.fixture
+def vault(tmp_path) -> VaultService:
+    v = VaultService(tmp_path)
+    v.ensure_dirs()
+    return v
+
+
+@pytest.fixture
+def zotero() -> MagicMock:
+    return MagicMock()
+
+
+@pytest.fixture
+def indexer() -> MagicMock:
+    return MagicMock()
+
+
+@pytest.fixture
+def isolated_client(vault, zotero, indexer) -> TestClient:
+    isolated_app = FastAPI()
+    isolated_app.include_router(build_zotero_router(
+        get_vault=lambda: vault,
+        get_zotero=lambda: zotero,
+        get_indexer=lambda: indexer,
+    ))
+    return TestClient(isolated_app)
+
+
+def _zotero_item(**overrides) -> ZoteroItem:
+    defaults = dict(
+        key="K1", title="A Great Paper", item_type="journalArticle",
+        creators=[ZoteroCreator(creator_type="author", name="Jane Smith")],
+        date="2024", abstract_note="an abstract", doi="10.1/xyz",
+        url="https://example.com/paper", publication_title="Journal of Things",
+        tags=[ZoteroTag(tag="ml")], collections=[],
+    )
+    defaults.update(overrides)
+    return ZoteroItem(**defaults)
+
+
+def test_zotero_status(isolated_client, zotero):
+    from prisma.integrations.zotero.client import ZoteroStatus
+    zotero.status.return_value = ZoteroStatus(mode="web_api", available=True, reachable=True)
+    r = isolated_client.get("/zotero/status")
+    assert r.status_code == 200
+    assert r.json() == {"mode": "web_api", "available": True, "reachable": True}
+
+
+def test_zotero_collections_success(isolated_client, zotero):
+    from prisma.storage.models.zotero_models import ZoteroCollection
+    zotero.get_collections.return_value = [ZoteroCollection(key="C1", name="My Collection")]
+    r = isolated_client.get("/zotero/collections")
+    assert r.status_code == 200
+    assert r.json()[0]["name"] == "My Collection"
+
+
+def test_zotero_collections_failure_returns_503(isolated_client, zotero):
+    zotero.get_collections.side_effect = RuntimeError("network down")
+    r = isolated_client.get("/zotero/collections")
+    assert r.status_code == 503
+
+
+def test_zotero_import_404_when_item_not_found(isolated_client, zotero):
+    zotero.get_item.return_value = None
+    r = isolated_client.post("/zotero/import/DOES-NOT-EXIST")
+    assert r.status_code == 404
+
+
+def test_zotero_import_returns_existing_source_if_already_imported(isolated_client, vault, zotero):
+    # Already in the vault (zotero_key frontmatter match) -- must not
+    # re-create, just render and return the existing source.
+    existing = vault.create_source_from_citekey(
+        "smith2024", "Already Here", "body text",
+        zotero_key="K1", authors=["Jane Smith"], tags=[],
+    )
+    zotero.get_item.return_value = _zotero_item(key="K1")
+
+    r = isolated_client.post("/zotero/import/K1")
+    assert r.status_code == 201
+    assert r.json()["slug"] == existing.slug
+    zotero.get_pdf_bytes.assert_not_called()
+
+
+def test_zotero_import_creates_source_from_abstract_when_no_pdf(isolated_client, vault, zotero, indexer):
+    zotero.get_item.return_value = _zotero_item(key="K2")
+    zotero.get_pdf_bytes.return_value = None
+
+    r = isolated_client.post("/zotero/import/K2")
+    assert r.status_code == 201
+    data = r.json()
+    assert data["slug"] == "smith2024"  # make_citekey: first author's last name + year
+    assert "an abstract" in data["html"]
+    indexer.mark_stale.assert_called_once()
+
+    source = vault.get_source(data["slug"])
+    assert source.zotero_key == "K2"
+    assert source.doi == "10.1/xyz"

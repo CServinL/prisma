@@ -75,7 +75,6 @@ _t("chroma_service ok")
 _t("importing zotero")
 from prisma.integrations.zotero import ZoteroClient
 from prisma.integrations.zotero.client import ZoteroStatus
-from prisma.storage.models.zotero_models import ZoteroCollection, ZoteroItem
 _t("zotero ok")
 
 _t("importing sync_orchestrator")
@@ -443,6 +442,7 @@ app.add_middleware(AccessLogMiddleware)
 from prisma.server.sync_routes import build_sync_router  # noqa: E402
 from prisma.server.notes_routes import build_notes_router  # noqa: E402
 from prisma.server.streams_routes import build_streams_router, StreamScheduler  # noqa: E402
+from prisma.server.zotero_routes import build_zotero_router  # noqa: E402
 def _update_client_baseline(client_id: str, path: str, content_hash: str, mtime: float) -> None:
     with _client_baseline_lock:
         _client_baseline.setdefault(client_id, {})[path] = (content_hash, mtime)
@@ -478,6 +478,12 @@ _scheduler = StreamScheduler(
     get_zotero=lambda: _zotero,
     broadcast_fn=broadcast,
 )
+
+app.include_router(build_zotero_router(
+    get_vault=lambda: _vault,
+    get_zotero=lambda: _zotero,
+    get_indexer=lambda: _indexer,
+))
 
 _executor = ThreadPoolExecutor(max_workers=2)
 _jobs: dict[str, object] = {}  # review jobs: dict (JobStatus-shaped); dedup jobs: DedupJobState instance
@@ -1528,206 +1534,6 @@ def deep_search(q: str = Query(..., min_length=1)) -> list[DeepSearchResult]:
     # Graph not built — text only
     return [DeepSearchResult(slug=r.slug, title=r.title, excerpt=r.excerpt, score=r.score)
             for r in _text_search(q, top_k=20)]
-
-
-# ── Zotero routes ─────────────────────────────────────────────────────────────
-
-@app.get("/zotero/status", response_model=ZoteroStatus)
-def zotero_status():
-    return _zotero.status()
-
-
-@app.get("/zotero/collections", response_model=list[ZoteroCollection])
-def zotero_collections():
-    try:
-        return _zotero.get_collections()
-    except Exception as e:
-        raise HTTPException(status_code=503, detail=str(e))
-
-
-class ZoteroStatsResponse(BaseModel):
-    total_items: int
-    item_type_counts: dict[str, int]
-    items_without_doi: int
-    items_without_abstract: int
-    items_without_authors: int
-    quality_score: float
-
-
-@app.get("/zotero/stats", response_model=ZoteroStatsResponse)
-def zotero_stats():
-    """Library-wide item-type breakdown and metadata-quality score, computed
-    over the same ZoteroClient.get_all_items() used elsewhere — not a
-    second, independent client (the old CLI's cleanup.py had its own)."""
-    try:
-        items = _zotero.get_all_items()
-    except Exception as e:
-        raise HTTPException(status_code=503, detail=str(e))
-
-    if not items:
-        return ZoteroStatsResponse(
-            total_items=0, item_type_counts={}, items_without_doi=0,
-            items_without_abstract=0, items_without_authors=0, quality_score=100.0,
-        )
-
-    item_type_counts: dict[str, int] = {}
-    items_without_doi = 0
-    items_without_abstract = 0
-    items_without_authors = 0
-    for item in items:
-        item_type_counts[item.item_type] = item_type_counts.get(item.item_type, 0) + 1
-        if not item.doi:
-            items_without_doi += 1
-        if not item.abstract_note:
-            items_without_abstract += 1
-        if not item.authors:
-            items_without_authors += 1
-
-    total = len(items)
-    quality_score = 100 - (
-        (items_without_doi + items_without_abstract + items_without_authors) / (total * 3) * 100
-    )
-    return ZoteroStatsResponse(
-        total_items=total,
-        item_type_counts=item_type_counts,
-        items_without_doi=items_without_doi,
-        items_without_abstract=items_without_abstract,
-        items_without_authors=items_without_authors,
-        quality_score=quality_score,
-    )
-
-
-class SyncPendingResponse(BaseModel):
-    synced: int
-    failed: int
-    pending_before: int
-
-
-@app.post("/zotero/sync-pending", response_model=SyncPendingResponse)
-def zotero_sync_pending():
-    """Flush the offline pending-write queue (data/pending_writes.json) —
-    the API equivalent of the old `prisma sync` CLI command. Actions are
-    queued here by the review pipeline (coordinator.py) when a Zotero write
-    fails while offline; nothing else populates this queue today."""
-    from prisma.storage.pending_queue import PendingWriteQueue
-
-    pending_before = PendingWriteQueue().pending_count
-    if pending_before == 0:
-        return SyncPendingResponse(synced=0, failed=0, pending_before=0)
-    if not connectivity.is_online:
-        raise HTTPException(status_code=503, detail="offline — cannot sync right now")
-
-    synced, failed = PendingWriteQueue().flush(_zotero)
-    return SyncPendingResponse(synced=synced, failed=failed, pending_before=pending_before)
-
-
-@app.get("/zotero/items", response_model=list[ZoteroItem])
-def zotero_items(collection: Optional[str] = Query(None), q: Optional[str] = Query(None)):
-    """When both are given, get_collection_items(key, query=q) passes q
-    straight through to Zotero's own server-side `q` search (matches across
-    title/creators/abstract/etc., not just a client-side title substring)
-    scoped to the collection in one API call."""
-    try:
-        if collection:
-            return _zotero.get_collection_items(collection, query=q or None)
-        if q:
-            return _zotero.search_items(q)
-        return _zotero.get_all_items()
-    except Exception as e:
-        raise HTTPException(status_code=503, detail=str(e))
-
-
-def _fetch_pdf_from_url(url: str | None, doi: str | None) -> bytes | None:
-    import re
-    import urllib.request
-
-    candidates: list[str] = []
-    if url:
-        if re.search(r"arxiv\.org/abs/(\S+)", url):
-            arxiv_id = re.search(r"arxiv\.org/abs/([^\s?#]+)", url).group(1)
-            candidates.append(f"https://arxiv.org/pdf/{arxiv_id}")
-        elif url.lower().endswith(".pdf"):
-            candidates.append(url)
-    if doi and "arxiv" in doi.lower():
-        arxiv_id = re.sub(r".*arxiv[./]", "", doi, flags=re.IGNORECASE)
-        candidates.append(f"https://arxiv.org/pdf/{arxiv_id}")
-
-    for pdf_url in candidates:
-        try:
-            req = urllib.request.Request(pdf_url, headers={"User-Agent": "Prisma/1.0"})
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                data = resp.read()
-            if data[:4] == b"%PDF":
-                return data
-        except Exception:
-            continue
-    return None
-
-
-def _pdf_bytes_to_md(data: bytes) -> str:
-    try:
-        from docu_craft.renderers.pdf_md import pdf_to_md
-        return pdf_to_md(data)
-    except Exception:
-        return ""
-
-
-@app.post("/zotero/import/{key}", response_model=RenderedNode, status_code=201)
-def zotero_import(key: str):
-    from prisma.utils.text import make_citekey
-    item = _zotero.get_item(key)
-    if item is None:
-        raise HTTPException(status_code=404, detail=f"Zotero item not found: {key!r}")
-
-    # Return existing import if already in vault
-    for path in _vault.iter_files():
-        raw = path.read_text(encoding="utf-8")
-        from prisma.services.vault import _parse_frontmatter
-        fm, _ = _parse_frontmatter(raw)
-        if fm.get("zotero_key") == key:
-            from prisma.services.vault import _file_slug
-            slug = _file_slug(path.stem)
-            source = _vault.get_source(slug)
-            html, broken_links, broken_citations = vault_render(source.body, _vault)
-            return RenderedNode(
-                slug=source.slug, title=source.title, node_type=source.node_type,
-                html=html, broken_links=broken_links, broken_citations=broken_citations,
-            )
-
-    pdf_bytes = _zotero.get_pdf_bytes(key)
-    if pdf_bytes is None:
-        pdf_bytes = _fetch_pdf_from_url(item.url, item.doi)
-
-    if pdf_bytes:
-        body = _pdf_bytes_to_md(pdf_bytes)
-    else:
-        lines = []
-        if item.abstract_note:
-            lines.append(item.abstract_note)
-            lines.append("")
-        if item.publication_title:
-            lines.append(f"**{item.publication_title}**")
-        if item.authors:
-            lines.append(", ".join(item.authors))
-        if item.doi:
-            lines.append(f"DOI: {item.doi}")
-        if item.url:
-            lines.append(f"URL: {item.url}")
-        body = "\n".join(lines)
-
-    citekey = make_citekey(item.authors, item.year, item.title)
-    source = _vault.create_source_from_citekey(
-        citekey, item.title, body,
-        zotero_key=item.key, authors=item.authors, tags=[t.tag for t in item.tags],
-        year=item.year, doi=item.doi, url=item.url,
-    )
-    _indexer.mark_stale()
-    _activity.info("action=import_zotero key=%s slug=%s title=%r", key, source.slug, source.title)
-    html, broken_links, broken_citations = vault_render(source.body, _vault)
-    return RenderedNode(
-        slug=source.slug, title=source.title, node_type=source.node_type,
-        html=html, broken_links=broken_links, broken_citations=broken_citations,
-    )
 
 
 class DeduplicateResult(BaseModel):

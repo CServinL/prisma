@@ -139,6 +139,27 @@ class LLMConfig(BaseModel):
             return "https://openrouter.ai/api/v1"
         return f"http://{self.host}"
 
+    def resolve_api_key(self) -> str:
+        """Effective API key for this LLM backend. Only meaningful for
+        provider="openrouter" -- ollama/llama_cpp's local OpenAI-compat
+        servers don't check the key at all, so those get the placeholder
+        "ollama" (kept non-empty for the openai SDK's requirement) without
+        even looking at api_key_env. For openrouter, raises if
+        api_key_env isn't set or the named env var is empty -- fail loud
+        on a misconfigured indirection, same contract as
+        ZoteroConfig.resolve_api_key/SourceQuotaConfig.resolve_api_key.
+        Callers that need to degrade instead of crash (kg_app.py, which
+        must still start with a partially-broken LLM config) catch this
+        themselves."""
+        if self.provider != "openrouter":
+            return "ollama"
+        if not self.api_key_env:
+            raise RuntimeError("llm.provider is 'openrouter' but llm.api_key_env is not set")
+        key = os.environ.get(self.api_key_env)
+        if not key:
+            raise RuntimeError(f"llm.api_key_env={self.api_key_env!r} is not set in the environment")
+        return key
+
 
 class ChatConfig(BaseModel):
     """Chat module LLM backend configuration (ADR-014: openai SDK, multi-base_url)."""

@@ -212,6 +212,32 @@ index_extensions = ["md", ".yaml"]
         with self.assertRaises(ValidationError):
             LLMConfig(provider='anthropic')
 
+    def test_llm_resolve_api_key_ollama_returns_placeholder_ignoring_api_key_env(self):
+        # Local OpenAI-compat servers don't check the key at all -- must not
+        # even look at api_key_env (or raise if it's unset) for this provider.
+        cfg = LLMConfig(provider='ollama')
+        self.assertEqual(cfg.resolve_api_key(), 'ollama')
+
+    def test_llm_resolve_api_key_llama_cpp_returns_placeholder(self):
+        cfg = LLMConfig(provider='llama_cpp')
+        self.assertEqual(cfg.resolve_api_key(), 'ollama')
+
+    def test_llm_resolve_api_key_openrouter_reads_named_env_var(self):
+        cfg = LLMConfig(provider='openrouter', api_key_env='LLM_TEST_KEY_VAR')
+        with patch.dict(os.environ, {'LLM_TEST_KEY_VAR': 'from-env'}):
+            self.assertEqual(cfg.resolve_api_key(), 'from-env')
+
+    def test_llm_resolve_api_key_openrouter_raises_when_api_key_env_unset(self):
+        cfg = LLMConfig(provider='openrouter')
+        with self.assertRaises(RuntimeError):
+            cfg.resolve_api_key()
+
+    def test_llm_resolve_api_key_openrouter_raises_when_env_var_missing(self):
+        cfg = LLMConfig(provider='openrouter', api_key_env='LLM_TEST_KEY_VAR_UNSET')
+        os.environ.pop('LLM_TEST_KEY_VAR_UNSET', None)
+        with self.assertRaises(RuntimeError):
+            cfg.resolve_api_key()
+
     def test_validation_errors(self):
         """Test that Pydantic validation catches invalid configurations."""
         # Test invalid output format

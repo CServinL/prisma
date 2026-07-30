@@ -79,6 +79,9 @@ require_academic_validation = true  # Apply academic content filters
 provider = "ollama"
 model = "llama3.1:8b"
 host = "localhost:11434"  # LLM service host
+# pool = "local-ollama"   # compute_pools entry to lease from; if provider = "openrouter", set this
+                           # explicitly to a dedicated pool -- otherwise a cloud call can be auto-routed
+                           # onto a model_affinity'd local-GPU pool and start denying real local calls
 
 # Chat module (ADR-014: backend-agnostic — ollama today, openrouter/anthropic-capable)
 [chat]

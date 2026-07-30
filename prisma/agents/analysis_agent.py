@@ -3,36 +3,26 @@ Analysis Agent - Analyzes and summarizes academic papers using LLM.
 """
 
 import logging
-import requests
 import threading
-from typing import Dict, List, Any
+from typing import List
 from datetime import datetime
 import time
 
 from ..utils.config import config
 from ..storage.models.agent_models import PaperMetadata, PaperSummary, AnalysisResult
-from ..storage.models.api_response_models import OllamaGenerateResponse, LLMRelevanceResult, LLMIdentityResult
+from ..storage.models.api_response_models import LLMRelevanceResult, LLMIdentityResult
 from ..services import resource_lock
+from ..services.chat_llm import ChatLLM
 
 _ollama_log = logging.getLogger("prisma.ollama")
 
+_CONFIDENCE_MAP = {"HIGH": 0.9, "MEDIUM": 0.6, "LOW": 0.3}
 
-class _NormalizedResponse:
-    """Duck-types the slice of requests.Response this module's callers
-    actually use (.status_code, .json()) — lets _call_ollama_generate return
-    a uniform Ollama-native-shaped payload ({"response": ...}, parseable by
-    OllamaGenerateResponse) regardless of which backend actually served the
-    call, so no downstream call site needs to know or care which provider
-    answered."""
 
-    def __init__(self, status_code: int, payload: dict) -> None:
-        self.status_code = status_code
-        self._payload = payload
-
-    def json(self) -> dict:
-        return self._payload
-
-_RESOURCE_HOLDER = "api"  # must match the worker name supervisor.py restarts, so a crash releases our leases
+def _parse_confidence(token: str) -> float:
+    """Maps the LLM's HIGH/MEDIUM/LOW confidence label to a float, matching
+    a mid-range 0.5 for anything unrecognized rather than failing."""
+    return _CONFIDENCE_MAP.get(token.strip().upper(), 0.5)
 
 
 class AnalysisAgent:
@@ -40,100 +30,66 @@ class AnalysisAgent:
 
     def __init__(self, supervisor_host: str = "127.0.0.1", supervisor_port: int | None = None):
         self.llm_config = config.get_llm_config()
-        self.base_url = self.llm_config.base_url
         self.model = self.llm_config.model
         self._inference_sem = threading.Semaphore(self.llm_config.max_concurrent_inferences)
-        self._supervisor_host = supervisor_host
-        self._supervisor_port = supervisor_port if supervisor_port is not None else resource_lock.default_port()
+        supervisor_port = supervisor_port if supervisor_port is not None else resource_lock.default_port()
+        self._chat_llm = ChatLLM.from_llm_config(
+            self.llm_config, priority="background",
+            supervisor_host=supervisor_host, supervisor_port=supervisor_port,
+        )
 
-    def _call_ollama_generate(
-        self, prompt: str, options: dict, timeout: float
-    ) -> "requests.Response | _NormalizedResponse | None":
-        """Single choke point for every LLM completion call in this agent
-        (Ollama's native /api/generate, or llama.cpp's OpenAI-compatible
-        /v1/chat/completions — provider from llm.provider in config).
-
-        Wraps the supervisor's compute-pool lease (ADR-012) around the existing
-        process-local concurrency semaphore, so this agent can't run concurrently
-        against the same GPU/LLM backend as Graphify or ChromaDB indexing.
-        Returns None if no compute pool is free right now — callers should
-        treat that the same as any other LLM failure. Always returns
-        something exposing .status_code/.json() shaped like Ollama's
-        {"response": ...} payload (see _NormalizedResponse) — callers don't
-        need their own provider branch.
+    def _call_llm(self, prompt: str, *, temperature: float, max_tokens: int, timeout: float) -> str | None:
+        """Single choke point for every LLM completion call in this agent,
+        via the shared ChatLLM abstraction (ADR-014) -- provider-agnostic
+        (ollama/llama_cpp/openrouter all just work through the openai SDK's
+        base_url swap), resource_lock-gated with background priority so
+        this agent's bulk work never queues ahead of a live chat request.
+        The process-local semaphore layers on top of ChatLLM's own
+        cross-process lease, preserving this agent's existing concurrency
+        cap for its own calls specifically.
         """
-        with resource_lock.lease(
-            self._supervisor_host, self._supervisor_port, holder=_RESOURCE_HOLDER, model=self.model,
-        ) as granted:
-            if not granted:
-                return None
-            with self._inference_sem:
-                if self.llm_config.provider == "llama_cpp":
-                    resp = requests.post(
-                        f"{self.base_url}/v1/chat/completions",
-                        json={
-                            "model": self.model,
-                            "messages": [{"role": "user", "content": prompt}],
-                            "temperature": options.get("temperature", 0.7),
-                            "max_tokens": options.get("num_predict"),
-                        },
-                        timeout=timeout,
-                    )
-                    if resp.status_code != 200:
-                        return _NormalizedResponse(resp.status_code, {})
-                    content = resp.json()["choices"][0]["message"]["content"]
-                    # OllamaGenerateResponse requires model/created_at/done —
-                    # synthesize them; llama.cpp's OpenAI-compatible response
-                    # has no equivalents (Ollama-specific fields, not part of
-                    # the shape being translated from).
-                    return _NormalizedResponse(resp.status_code, {
-                        "model": self.model,
-                        "created_at": datetime.utcnow().isoformat() + "Z",
-                        "response": content,
-                        "done": True,
-                    })
-                return requests.post(
-                    f"{self.base_url}/api/generate",
-                    json={"model": self.model, "prompt": prompt, "stream": False, "options": options},
-                    timeout=timeout,
-                )
-    
+        with self._inference_sem:
+            return self._chat_llm.complete(
+                [{"role": "user", "content": prompt}],
+                temperature=temperature, max_tokens=max_tokens, timeout=timeout,
+            )
+
     def analyze(self, papers: List[PaperMetadata]) -> AnalysisResult:
         """
         Analyze papers and generate summaries.
-        
+
         Args:
             papers: List of paper metadata from SearchAgent
-            
+
         Returns:
             AnalysisResult with summaries and metadata
         """
         summaries = []
         processing_times = []
-        
+
         for paper in papers:
             start_time = time.time()
             summary = self._summarize_paper(paper)
             processing_time = time.time() - start_time
-            
+
             processing_times.append(processing_time)
             summaries.append(summary)
-        
+
         # Extract unique authors
         all_authors = []
         for paper in papers:
             all_authors.extend(paper.authors)
         unique_authors = list(set(all_authors))
-        
+
         # Calculate average processing time
         avg_processing_time = sum(processing_times) / len(processing_times) if processing_times else 0
-        
+
         # Generate top authors (most frequent)
         author_counts = {}
         for author in all_authors:
             author_counts[author] = author_counts.get(author, 0) + 1
         top_authors = sorted(author_counts.keys(), key=lambda x: author_counts[x], reverse=True)[:10]
-        
+
         return AnalysisResult(
             summaries=summaries,
             author_count=len(unique_authors),
@@ -143,29 +99,29 @@ class AnalysisAgent:
             top_authors=top_authors,
             common_themes=[]  # TODO: Implement theme extraction
         )
-    
+
     def _summarize_paper(self, paper: PaperMetadata) -> PaperSummary:
         """
         Summarize a single paper using Ollama.
-        
+
         Args:
             paper: Paper metadata from SearchAgent
-            
+
         Returns:
             PaperSummary with key findings, methodology, results
         """
         start_time = time.time()
-        
+
         # Try to get enhanced summary from Ollama
         enhanced_summary = self._get_ollama_summary(paper.title, paper.abstract)
-        
+
         # Extract key findings and methodology
         summary_text = enhanced_summary or paper.abstract
         key_findings = self._extract_key_findings(summary_text)
         methodology = self._extract_methodology(summary_text)
-        
+
         processing_time = time.time() - start_time
-        
+
         return PaperSummary(
             title=paper.title,
             authors=paper.authors,
@@ -178,19 +134,15 @@ class AnalysisAgent:
             analysis_confidence=0.8 if enhanced_summary else 0.5,
             processing_time=processing_time
         )
-    
-    def _log_ollama(self, op: str, elapsed_ms: float, data: dict | None, error: str | None = None, **kw) -> None:
+
+    def _log_ollama(self, op: str, elapsed_ms: float, error: str | None = None, **kw) -> None:
         if error:
             _ollama_log.warning("op=%s model=%s elapsed_ms=%.0f error=%s", op, self.model, elapsed_ms, error)
             return
-        prompt_tokens = data.get("prompt_eval_count") if data else None
-        gen_tokens = data.get("eval_count") if data else None
         extra = " ".join(f"{k}={v}" for k, v in kw.items())
         _ollama_log.info(
-            "op=%s model=%s elapsed_ms=%.0f prompt_tokens=%s gen_tokens=%s%s",
-            op, self.model, elapsed_ms, prompt_tokens if prompt_tokens is not None else "?",
-            gen_tokens if gen_tokens is not None else "?",
-            f" {extra}" if extra else "",
+            "op=%s model=%s elapsed_ms=%.0f%s",
+            op, self.model, elapsed_ms, f" {extra}" if extra else "",
         )
 
     def _get_ollama_summary(self, title: str, abstract: str) -> str:
@@ -204,47 +156,41 @@ Provide a clear, academic summary focusing on the main contribution and signific
 
         t0 = time.monotonic()
         try:
-            response = self._call_ollama_generate(
-                prompt, options={"temperature": 0.3, "num_predict": 200}, timeout=30,
-            )
+            text = self._call_llm(prompt, temperature=0.3, max_tokens=200, timeout=30)
             elapsed_ms = (time.monotonic() - t0) * 1000
-            if response is not None and response.status_code == 200:
-                data = response.json()
-                self._log_ollama("summarize", elapsed_ms, data)
-                ollama_response = OllamaGenerateResponse.model_validate(data)
-                return ollama_response.response.strip()
-            else:
-                error = f"status={response.status_code}" if response is not None else "no compute lease available"
-                self._log_ollama("summarize", elapsed_ms, None, error=error)
-                return ""
+            if text is not None:
+                self._log_ollama("summarize", elapsed_ms)
+                return text.strip()
+            self._log_ollama("summarize", elapsed_ms, error="no answer from LLM")
+            return ""
         except Exception as e:
             elapsed_ms = (time.monotonic() - t0) * 1000
-            self._log_ollama("summarize", elapsed_ms, None, error=str(e))
+            self._log_ollama("summarize", elapsed_ms, error=str(e))
             return ""
-    
+
     def _extract_key_findings(self, text: str) -> List[str]:
         """Extract key findings from summary text."""
         # Simple extraction for MVP - could be enhanced with NLP
         if "findings" in text.lower() or "results" in text.lower():
             return [text.split('.')[0] + '.']
         return ['Key findings extracted from analysis']
-    
+
     def _extract_methodology(self, text: str) -> str:
         """Extract methodology information from summary text."""
         # Simple extraction for MVP - could be enhanced with NLP
         if "method" in text.lower() or "approach" in text.lower():
             return "Methodology identified in analysis"
         return "Methodology analysis from abstract"
-    
+
     def assess_relevance(self, paper_title: str, paper_abstract: str, topic: str) -> LLMRelevanceResult:
         """
         Assess if a paper is relevant to a topic using semantic understanding via LLM.
-        
+
         Args:
             paper_title: Title of the paper
             paper_abstract: Abstract of the paper
             topic: Research topic to assess relevance against
-            
+
         Returns:
             Dict with relevance assessment results
         """
@@ -270,30 +216,24 @@ RELEVANCE: [HIGHLY_RELEVANT/RELEVANT/SOMEWHAT_RELEVANT/NOT_RELEVANT]
 CONFIDENCE: [HIGH/MEDIUM/LOW]
 REASONING: [2-3 sentences explaining the semantic connection or lack thereof]"""
 
-            response = self._call_ollama_generate(
-                prompt, options={"temperature": 0.3, "num_predict": 250}, timeout=45,
-            )
+            text = self._call_llm(prompt, temperature=0.3, max_tokens=250, timeout=45)
             elapsed_ms = (time.monotonic() - t0) * 1000
 
-            if response is not None and response.status_code == 200:
-                data = response.json()
-                self._log_ollama("assess_relevance", elapsed_ms, data)
-                result = data.get('response', '').strip()
-                return self._parse_semantic_relevance(result)
-            else:
-                status = response.status_code if response is not None else "no compute lease available"
-                self._log_ollama("assess_relevance", elapsed_ms, None, error=str(status))
-                return LLMRelevanceResult(
-                    is_relevant=False,
-                    relevance_level="UNKNOWN",
-                    confidence=0.0,
-                    reasoning=f"LLM request failed with status {status}",
-                    semantic_score=0.0
-                )
+            if text is not None:
+                self._log_ollama("assess_relevance", elapsed_ms)
+                return self._parse_semantic_relevance(text.strip())
+            self._log_ollama("assess_relevance", elapsed_ms, error="no answer from LLM")
+            return LLMRelevanceResult(
+                is_relevant=False,
+                relevance_level="UNKNOWN",
+                confidence=0.0,
+                reasoning="LLM request failed: no answer from LLM",
+                semantic_score=0.0
+            )
 
         except Exception as e:
             elapsed_ms = (time.monotonic() - t0) * 1000
-            self._log_ollama("assess_relevance", elapsed_ms, None, error=str(e))
+            self._log_ollama("assess_relevance", elapsed_ms, error=str(e))
             return LLMRelevanceResult(
                 is_relevant=False,
                 relevance_level="UNKNOWN",
@@ -301,7 +241,7 @@ REASONING: [2-3 sentences explaining the semantic connection or lack thereof]"""
                 reasoning=f"Assessment failed due to error: {e}",
                 semantic_score=0.0
             )
-    
+
     def _parse_semantic_relevance(self, response: str) -> LLMRelevanceResult:
         """Parse LLM response for semantic relevance assessment."""
         try:
@@ -309,7 +249,7 @@ REASONING: [2-3 sentences explaining the semantic connection or lack thereof]"""
             relevance_level = "NOT_RELEVANT"
             confidence = "LOW"
             reasoning = "Unable to parse reasoning"
-            
+
             for line in lines:
                 if line.startswith("RELEVANCE:"):
                     relevance_level = line.split(":", 1)[1].strip()
@@ -317,10 +257,10 @@ REASONING: [2-3 sentences explaining the semantic connection or lack thereof]"""
                     confidence = line.split(":", 1)[1].strip()
                 elif line.startswith("REASONING:"):
                     reasoning = line.split(":", 1)[1].strip()
-            
+
             # Convert to boolean and numeric score
             is_relevant = relevance_level in ["HIGHLY_RELEVANT", "RELEVANT", "SOMEWHAT_RELEVANT"]
-            
+
             # Semantic score based on relevance level
             score_map = {
                 "HIGHLY_RELEVANT": 0.9,
@@ -329,13 +269,9 @@ REASONING: [2-3 sentences explaining the semantic connection or lack thereof]"""
                 "NOT_RELEVANT": 0.1
             }
             semantic_score = score_map.get(relevance_level, 0.0)
-            
-            # Convert confidence to float
-            confidence_value = 0.5  # Default
-            if confidence.upper() in ["LOW", "MEDIUM", "HIGH"]:
-                confidence_map = {"LOW": 0.3, "MEDIUM": 0.6, "HIGH": 0.9}
-                confidence_value = confidence_map[confidence.upper()]
-            
+
+            confidence_value = _parse_confidence(confidence)
+
             return LLMRelevanceResult(
                 is_relevant=is_relevant,
                 relevance_level=relevance_level,
@@ -343,16 +279,16 @@ REASONING: [2-3 sentences explaining the semantic connection or lack thereof]"""
                 reasoning=reasoning,
                 semantic_score=semantic_score
             )
-            
+
         except Exception as e:
             return LLMRelevanceResult(
                 is_relevant=False,
                 relevance_level="NOT_RELEVANT",
-                confidence=0.3, 
+                confidence=0.3,
                 reasoning=f"Failed to parse LLM response: {e}",
                 semantic_score=0.0
             )
-    
+
     _RELEVANCE_BATCH_SIZE = 50  # items per LLM call — stays within 7B context window
 
     def batch_relevance_check(
@@ -404,17 +340,13 @@ REASONING: [2-3 sentences explaining the semantic connection or lack thereof]"""
 
         t0 = time.monotonic()
         try:
-            response = self._call_ollama_generate(
-                prompt, options={"temperature": 0.1, "num_predict": 60}, timeout=30,
-            )
+            text = self._call_llm(prompt, temperature=0.1, max_tokens=60, timeout=30)
             elapsed_ms = (time.monotonic() - t0) * 1000
-            if response is None or response.status_code != 200:
-                error = f"status={response.status_code}" if response is not None else "no compute lease available"
-                self._log_ollama("batch_relevance", elapsed_ms, None, error=error, n=len(candidates))
+            if text is None:
+                self._log_ollama("batch_relevance", elapsed_ms, error="no answer from LLM", n=len(candidates))
                 return [True] * len(candidates)
-            data = response.json()
-            self._log_ollama("batch_relevance", elapsed_ms, data, n=len(candidates))
-            text = data.get("response", "").strip().lower()
+            self._log_ollama("batch_relevance", elapsed_ms, n=len(candidates))
+            text = text.strip().lower()
             if "none" in text and not any(ch.isdigit() for ch in text):
                 return [False] * len(candidates)
             import re
@@ -422,7 +354,7 @@ REASONING: [2-3 sentences explaining the semantic connection or lack thereof]"""
             return [i + 1 in selected for i in range(len(candidates))]
         except Exception as exc:
             elapsed_ms = (time.monotonic() - t0) * 1000
-            self._log_ollama("batch_relevance", elapsed_ms, None, error=str(exc), n=len(candidates))
+            self._log_ollama("batch_relevance", elapsed_ms, error=str(exc), n=len(candidates))
             return [True] * len(candidates)
 
     _IDENTITY_THRESHOLD = 8  # candidates per incoming paper; above this, switch to parallel
@@ -481,20 +413,18 @@ Respond with exactly one line per candidate:
 
         t0 = time.monotonic()
         try:
-            response = self._call_ollama_generate(
-                prompt, options={"temperature": 0.1, "num_predict": 30 * len(candidates)}, timeout=10 + 15 * len(candidates),
+            text = self._call_llm(
+                prompt, temperature=0.1, max_tokens=30 * len(candidates), timeout=10 + 15 * len(candidates),
             )
             elapsed_ms = (time.monotonic() - t0) * 1000
-            if response is None or response.status_code != 200:
-                error = f"status={response.status_code}" if response is not None else "no compute lease available"
-                self._log_ollama("check_identity_batch", elapsed_ms, None, error=error, n=len(candidates))
+            if text is None:
+                self._log_ollama("check_identity_batch", elapsed_ms, error="no answer from LLM", n=len(candidates))
                 return [LLMIdentityResult(are_same=False, confidence=0.0, reason="LLM unavailable")] * len(candidates)
-            data = response.json()
-            self._log_ollama("check_identity_batch", elapsed_ms, data, n=len(candidates))
-            return self._parse_batch_response(data.get("response", "").strip(), len(candidates))
+            self._log_ollama("check_identity_batch", elapsed_ms, n=len(candidates))
+            return self._parse_batch_response(text.strip(), len(candidates))
         except Exception as exc:
             elapsed_ms = (time.monotonic() - t0) * 1000
-            self._log_ollama("check_identity_batch", elapsed_ms, None, error=str(exc), n=len(candidates))
+            self._log_ollama("check_identity_batch", elapsed_ms, error=str(exc), n=len(candidates))
             return [LLMIdentityResult(are_same=False, confidence=0.0, reason=f"error: {exc}")] * len(candidates)
 
     def _parse_batch_response(self, text: str, n: int) -> list[LLMIdentityResult]:
@@ -517,16 +447,13 @@ Respond with exactly one line per candidate:
         reason = ""
         if not line:
             return LLMIdentityResult(are_same=False, confidence=0.0, reason="no response")
-        upper = line.upper()
-        # Check for YES/NO after the colon
         after_colon = line.split(":", 1)[-1] if ":" in line else line
         are_same = "YES" in after_colon.upper().split("|")[0]
         parts = [p.strip() for p in after_colon.split("|")]
         for part in parts:
             pupper = part.upper()
             if pupper.startswith("CONFIDENCE:"):
-                val = part.split(":", 1)[1].strip().upper()
-                confidence = {"HIGH": 0.9, "MEDIUM": 0.6, "LOW": 0.3}.get(val, 0.5)
+                confidence = _parse_confidence(part.split(":", 1)[1])
             elif pupper.startswith("REASON:"):
                 reason = part.split(":", 1)[1].strip()
         return LLMIdentityResult(are_same=are_same, confidence=confidence, reason=reason)
@@ -580,17 +507,13 @@ CONFIDENCE: [HIGH/MEDIUM/LOW]
 REASON: [one sentence]"""
         t0 = time.monotonic()
         try:
-            response = self._call_ollama_generate(
-                prompt, options={"temperature": 0.1, "num_predict": 60}, timeout=20,
-            )
+            text = self._call_llm(prompt, temperature=0.1, max_tokens=60, timeout=20)
             elapsed_ms = (time.monotonic() - t0) * 1000
-            if response is None or response.status_code != 200:
-                error = f"status={response.status_code}" if response is not None else "no compute lease available"
-                self._log_ollama("check_identity_single", elapsed_ms, None, error=error)
+            if text is None:
+                self._log_ollama("check_identity_single", elapsed_ms, error="no answer from LLM")
                 return LLMIdentityResult(are_same=False, confidence=0.0, reason="LLM unavailable")
-            data = response.json()
-            self._log_ollama("check_identity_single", elapsed_ms, data)
-            text = data.get("response", "").strip()
+            self._log_ollama("check_identity_single", elapsed_ms)
+            text = text.strip()
             are_same = False
             confidence = 0.5
             reason = ""
@@ -599,27 +522,11 @@ REASON: [one sentence]"""
                 if upper.startswith("SAME:"):
                     are_same = "YES" in upper
                 elif upper.startswith("CONFIDENCE:"):
-                    val = line.split(":", 1)[1].strip().upper()
-                    confidence = {"HIGH": 0.9, "MEDIUM": 0.6, "LOW": 0.3}.get(val, 0.5)
+                    confidence = _parse_confidence(line.split(":", 1)[1])
                 elif upper.startswith("REASON:"):
                     reason = line.split(":", 1)[1].strip()
             return LLMIdentityResult(are_same=are_same, confidence=confidence, reason=reason)
         except Exception as exc:
             elapsed_ms = (time.monotonic() - t0) * 1000
-            self._log_ollama("check_identity_single", elapsed_ms, None, error=str(exc))
+            self._log_ollama("check_identity_single", elapsed_ms, error=str(exc))
             return LLMIdentityResult(are_same=False, confidence=0.0, reason=f"error: {exc}")
-
-    def _simple_relevance_check(self, title: str, abstract: str, topic: str) -> LLMRelevanceResult:
-        """This method is deprecated - semantic evaluation should be used instead."""
-        return LLMRelevanceResult(
-            is_relevant=False,
-            relevance_level="NOT_RELEVANT",
-            confidence=0.0,
-            reasoning="Fallback method - semantic evaluation unavailable",
-            semantic_score=0.0,
-        )
-
-    def _fetch_full_text(self, paper: PaperMetadata) -> str:
-        """Fetch full text of paper if available."""
-        # TODO: Implement paper fetching from various sources
-        return ""

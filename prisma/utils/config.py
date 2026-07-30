@@ -110,6 +110,18 @@ class LLMConfig(BaseModel):
             "(see KnowledgeGraphService._resolve_context_window) and ignore this field."
         ),
     )
+    pool: Optional[str] = Field(
+        None,
+        description=(
+            "compute_pools entry this backend's calls lease from — must match a name "
+            "in compute_pools. None lets the lease land on whichever pool has free "
+            "capacity, which is fine for local providers (ollama/llama_cpp) but risks "
+            "misattribution for provider=openrouter: without a dedicated pool, a cloud "
+            "call can be auto-routed onto a model_affinity'd local-GPU pool and start "
+            "denying real local calls for no hardware reason (see resource_lock.lease's "
+            "docstring). Set this explicitly when provider=openrouter."
+        ),
+    )
 
     @field_validator('provider')
     @classmethod

@@ -66,7 +66,8 @@ def check_web_api_reachable(
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return resp.status == 200
-    except Exception:
+    except Exception as exc:
+        logger.debug("zotero web API reachability check failed: %s", exc)
         return False
 
 

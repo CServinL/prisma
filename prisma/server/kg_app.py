@@ -52,7 +52,8 @@ def _load_config():
     try:
         loader = ConfigLoader()
         return loader, loader.config
-    except Exception:
+    except Exception as exc:
+        _log.warning("config load failed, falling back to in-memory defaults: %s", exc)
         return None, PrismaConfig()
 
 
@@ -60,8 +61,8 @@ def _resolve_vault_root(loader) -> Path:
     if loader is not None:
         try:
             return loader.get_vault_root()
-        except Exception:
-            pass
+        except Exception as exc:
+            _log.warning("get_vault_root() failed, falling back to ~/prisma-vault: %s", exc)
     return Path.home() / "prisma-vault"
 
 

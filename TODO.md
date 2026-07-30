@@ -958,19 +958,44 @@ to be one legitimate use case) turned out to make the fix "delete three of them,
 "reconcile four of them" -- worth checking whether apparent duplication is actually
 convergent-on-purpose before planning a refactor around keeping all of it.
 
-## 2. Inconsistent exception handling (medium — needs a policy, then a sweep)
+## 2. Inconsistent exception handling — RESOLVED 2026-07-30
 
-`prisma/` (core package only) has **220** `except Exception` blocks, of which **27**
-are bare `except Exception: pass` with no logging at all — e.g.
-`server/app.py:125`, `:174`, `:179`, `:496`. Others in the same file log properly with
-context (`server/app.py:239`, `:257`, `:714` — `_log.warning("...: %s", exc)`). No
-visible policy for which failures are safe to swallow silently vs. which need at
-least a log line; this looks like different sessions handling errors differently
-rather than a deliberate design.
+Was: `prisma/` (core package only) had **220** `except Exception` blocks (150 by
+2026-07-30, after F1/F2/F4's deletions/consolidation shrank the total independently),
+of which several were bare `except Exception: pass` with no logging at all, or used
+raw `print()` instead of the module's own logger right next to sibling blocks that
+did it correctly. No visible policy for which failures are safe to swallow silently
+vs. which need at least a log line; this looked like different sessions handling
+errors differently rather than a deliberate design.
 
-**Fix size:** medium. Needs a decision first (e.g. "swallow only for known-optional
-best-effort paths, and even then log at debug level") then a mechanical sweep — not
-a redesign, but touches most files in the package.
+**Policy adopted:** every `except Exception` block must do one of — (a) re-raise/
+propagate, (b) log with context at a level matching real impact (`warning`/`error`
+for anything masking a real failure — a broken config silently falling back to
+defaults, a file vanishing from a listing, a save silently not persisting — `debug`
+for genuinely optional best-effort paths where the fallback value itself is the
+answer, e.g. a reachability probe, a nice-to-have status hint), or (c) stay silent
+only where a comment explains why logging doesn't apply (e.g. a bootstrap patch that
+runs before `logging` itself is even importable) or where the failure is already
+surfaced to the caller through a different channel (an API response field, a job's
+own `errors` list) and a duplicate operator-facing log would just be noise.
+
+**Sweep result:** of 150 `except Exception` blocks, 15 already re-raised and 76
+already logged properly (both left untouched); 15 bare `except: pass` and 7
+`print()`-only blocks were converted to real logging; ~30 more that swallowed with
+no logging at all (returned a silent default, appended to a list with no log line,
+etc.) also got a logging call added, mostly `_log.warning`. `coordinator.py` kept
+its existing `self.debug`-gated `print()` calls as-is (a distinct, deliberate,
+pervasive convention throughout that file — converting it to `logging` wholesale
+would be a bigger, separate cleanup) but gained an unconditional `logger.warning`/
+`logger.exception` alongside each swallow, so failures are visible in real logs even
+with `debug=False`, not just in interactive/debug mode. 3 sites stayed silent on
+purpose, each with a comment explaining why (the pre-logging-setup `entry_points`
+patch in `server/app.py`; the CLI's `_wsl_windows_ip()` best-effort fallback, where
+the placeholder return value is itself the visible signal, printed straight to the
+user; and `/status`'s config-error probe, whose error is already returned in the API
+response body). 7 `analysis_agent.py` sites that looked silent by a naive grep
+already route through `self._log_ollama(..., error=...)`, which logs internally —
+false positives, left untouched.
 
 ## 3. Duplicated test suites — RESOLVED 2026-07-26, opposite direction than originally planned
 
@@ -1015,16 +1040,22 @@ true from when the note was written — the intended migration direction and the
 silently diverge. And "no byte-identical match" isn't the same as "not a duplicate" — near-duplicates
 written in a different style still count and are easy to miss with a pure `diff`/`md5sum` sweep.
 
-## 4. `server/app.py` is oversized for what the architecture doc describes (real refactor, lower priority)
+## 4. `server/app.py` is oversized for what the architecture doc describes — RESOLVED 2026-07-30
 
-1,692 lines, ~48 routes. The architecture doc describes `app.py` as "API process —
-REST + WebSocket, no UI mount," implying a thin routing layer, but route handlers
-appear to carry business logic inline rather than delegating to `services/`
-(spot-checked; not exhaustively verified line-by-line — worth a follow-up pass
-specifically diffing route-handler bodies against what `services/` already exposes).
-Also contains a startup-timing helper using a mutable-default-arg static-variable
-trick (`_t(label, _t0=[0.0])`, line 30) — works, but is the kind of clever-but-obscure
-pattern a future contributor will trip over.
+Was 1,692 lines (2,308 by the time this was actually tackled, having grown further
+in the meantime), ~48 routes, route handlers carrying business logic inline instead
+of a thin routing layer. Fixed as part of the 2026-07-30 modularization re-audit's F4
+finding: extracted `notes_routes.py`, `streams_routes.py`, `zotero_routes.py`,
+`admin_routes.py`, `search_routes.py` (5 separate PRs, #59-63), each a
+`build_*_router(deps) -> APIRouter` factory matching the pre-existing
+`sync_routes.py` convention, taking getter callables so `/reload/*` endpoints
+rebinding `_vault`/`_indexer`/`_chroma` module globals don't leave a router talking
+to a stale instance. `app.py`: 2,308 → 1,493 lines (~35%). Every extraction got
+dedicated isolated-router tests (bare FastAPI app + the factory + tmp_path
+`VaultService`/mocks) for routes that had zero prior coverage.
+
+The `_t(label, _t0=[0.0])` mutable-default-arg startup-timing trick mentioned in the
+original note is still there — cosmetic, not touched by this pass.
 
 **Fix size:** real refactor, but lower priority than #1–#3 — it's a maintainability
 smell, not something a demo audience will see directly.
@@ -1143,12 +1174,13 @@ Recommended order (each is independently shippable):
    direction than originally planned — see #3's own resolved note above).
 2. ~~Consolidate the Zotero client hierarchy (#1)~~ — **done 2026-07-27**, by removal
    rather than the originally-planned refactor — see #1's own resolved note above.
-3. Establish and sweep an exception-handling policy (#2) — mechanical once decided.
-4. `app.py` route/service-boundary cleanup (#4) — do last, lower external visibility.
+3. ~~Establish and sweep an exception-handling policy (#2)~~ — **done 2026-07-30** —
+   see #2's own resolved note above.
+4. ~~`app.py` route/service-boundary cleanup (#4)~~ — **done 2026-07-30**, as part of
+   the same re-audit's F4 finding — see #4's own resolved note above.
 
-This does **not** require "a good programmer to come in and rewrite it" — it needs 3-4
-focused cleanup passes in the order above. #1 and #3 are now both done; #2 and #4
-remain.
+This does **not** require "a good programmer to come in and rewrite it" — it needed
+4 focused cleanup passes in the order above. All four are now done.
 
 ## Deferred feature: vault unlock over LAN instead of an at-rest key (2026-07-22)
 

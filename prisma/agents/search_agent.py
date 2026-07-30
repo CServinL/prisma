@@ -41,7 +41,8 @@ class SearchAgent:
             self.prefer_high_quality: bool = cfg.prefer_high_quality
             self.require_academic_validation: bool = cfg.require_academic_validation
             self._sources: Dict[str, Source] = build_sources(cfg)
-        except Exception:
+        except Exception as exc:
+            logger.warning("search config load failed, falling back to hardcoded defaults: %s", exc)
             self.default_sources = ["semanticscholar", "arxiv"]
             self.min_confidence_score = 0.5
             self.prefer_high_quality = True

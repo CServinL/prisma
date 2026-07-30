@@ -51,7 +51,7 @@ def _wsl_windows_ip() -> str:
             if line.startswith('default'):
                 return line.split()[2]
     except Exception:
-        pass
+        pass  # best-effort only -- the '<windows-host-ip>' placeholder below is itself the visible fallback signal, printed straight to the user
     return '<windows-host-ip>'
 
 

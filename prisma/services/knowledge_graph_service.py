@@ -1504,7 +1504,8 @@ def _frontmatter(body: str) -> dict:
     import yaml
     try:
         return yaml.safe_load(body[3:end]) or {}
-    except Exception:
+    except Exception as exc:
+        _log.debug("malformed frontmatter, treating as empty: %s", exc)
         return {}
 
 

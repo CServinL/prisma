@@ -9,6 +9,7 @@ after a reload.
 """
 from __future__ import annotations
 
+import logging
 import threading
 from pathlib import Path
 from typing import Callable
@@ -21,6 +22,8 @@ from prisma.services.knowledge_graph_client import KnowledgeGraphClient
 from prisma.services.vault import VaultService
 from prisma.storage.models.search_models import DeepSearchCandidate
 from prisma.utils.text import significant_words as _significant_words
+
+_log = logging.getLogger("prisma.search")
 
 
 class SearchResult(BaseModel):
@@ -71,8 +74,8 @@ class _SearchIndex:
                 try:
                     node = vault.get_any(slug)
                     title = node.title
-                except Exception:
-                    pass
+                except Exception as exc:
+                    _log.debug("falling back to slug as title for %s: %s", slug, exc)
                 self._entries[key] = (mtime, slug, title, text.lower(), text.splitlines())
             # Drop deleted files
             for key in list(self._entries):
@@ -154,7 +157,8 @@ def build_search_router(
                 node = vault.get_any(slug)
                 title = node.title
                 body = node.body if hasattr(node, "body") else ""
-            except Exception:
+            except Exception as exc:
+                _log.debug("falling back to slug as title for %s: %s", slug, exc)
                 title = slug
                 body = ""
             excerpt = body[:200].replace("\n", " ").strip() if body else ""

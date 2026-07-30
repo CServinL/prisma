@@ -25,6 +25,7 @@ from prisma.storage.models.vault_models import RenderedNode
 from prisma.storage.models.zotero_models import ZoteroCollection, ZoteroItem
 
 _activity = logging.getLogger("prisma.activity")
+_log = logging.getLogger("prisma.zotero_routes")
 
 
 class ZoteroStatsResponse(BaseModel):
@@ -64,7 +65,8 @@ def _fetch_pdf_from_url(url: str | None, doi: str | None) -> bytes | None:
                 data = resp.read()
             if data[:4] == b"%PDF":
                 return data
-        except Exception:
+        except Exception as exc:
+            _log.debug("pdf candidate %s failed, trying next: %s", pdf_url, exc)
             continue
     return None
 
@@ -73,7 +75,8 @@ def _pdf_bytes_to_md(data: bytes) -> str:
     try:
         from docu_craft.renderers.pdf_md import pdf_to_md
         return pdf_to_md(data)
-    except Exception:
+    except Exception as exc:
+        _log.warning("pdf_to_md conversion failed, importing with empty body: %s", exc)
         return ""
 
 

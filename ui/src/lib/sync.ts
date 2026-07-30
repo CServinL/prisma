@@ -18,6 +18,12 @@ export interface SyncStatusInfo {
   server_url: string | null;
   vault_path: string | null;
   tracked_files: number;
+  // True when the running engine's WS connection is being rejected as
+  // unauthorized (expired/invalid token) — distinct from an ordinary
+  // outage, which looked identical before this field existed. No UI
+  // consumes this yet; exposing it here first so a future "please log in
+  // again" affordance doesn't also need a Rust-side change.
+  needs_reauth: boolean;
 }
 
 export interface SyncDiffInfo {
@@ -30,7 +36,9 @@ export interface SyncDiffInfo {
   reachable: boolean;
 }
 
-const EMPTY_STATUS: SyncStatusInfo = { running: false, server_url: null, vault_path: null, tracked_files: 0 };
+const EMPTY_STATUS: SyncStatusInfo = {
+  running: false, server_url: null, vault_path: null, tracked_files: 0, needs_reauth: false,
+};
 const EMPTY_DIFF: SyncDiffInfo = {
   push_new: 0, pull_new: 0, push_delete: 0, pull_delete: 0,
   pull_update: 0, push_recreate: 0, reachable: false,

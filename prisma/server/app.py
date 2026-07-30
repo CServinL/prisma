@@ -57,6 +57,7 @@ _t("vault ok")
 
 _t("importing renderer")
 from prisma.services.renderer import render as vault_render
+from prisma.services.asset_rewrite import asset_prefix, rewrite_html
 _t("renderer ok")
 
 _t("importing knowledge_graph_client")
@@ -1406,21 +1407,10 @@ def get_note(slug: str, request: Request, format: str = "html"):
             has_md = bool(_vault.get_md_body(html_path))
 
         if format == "md" and html_path is not None and has_md:
-            import re as _re
             md_body = _vault.get_md_body(html_path) or ""
             html, broken_links, broken_citations = vault_render(md_body, _vault)
-            try:
-                html_dir = html_path.parent.relative_to(_vault.root)
-                base = str(html_dir).replace("\\", "/").rstrip("/")
-                prefix = f"{request.base_url}vault/assets/{base}/" if base else f"{request.base_url}vault/assets/"
-                _ASSET_EXT = r'\.(?:png|jpg|jpeg|gif|webp|svg|ico|woff2?|ttf|eot|css|js|map)'
-                html = _re.sub(
-                    rf'(?<![:\w])(src)="(?!\s*(?:https?|data|javascript):|//|#|/)([^"]+{_ASSET_EXT})"',
-                    lambda mo: f'{mo.group(1)}="{prefix}{mo.group(2)}"',
-                    html,
-                )
-            except ValueError:
-                pass
+            prefix = asset_prefix(_vault.root, html_path, str(request.base_url))
+            html = rewrite_html(html, prefix, mode="markdown")
             original_ext = None  # render as plain markdown, no iframe
         else:
             import re as _re
@@ -1430,17 +1420,8 @@ def get_note(slug: str, request: Request, format: str = "html"):
             m = _re.search(r"<body[^>]*>(.*?)</body>", body, _re.DOTALL | _re.IGNORECASE)
             html = (styles + "\n" + m.group(1).strip()) if m else body
             if html_path is not None:
-                try:
-                    html_dir = html_path.parent.relative_to(_vault.root)
-                    base = str(html_dir).replace("\\", "/").rstrip("/")
-                    prefix = f"{request.base_url}vault/assets/{base}/" if base else f"{request.base_url}vault/assets/"
-                    html = _re.sub(
-                        r'(?<![:\w])(src|href)="(?!\s*(?:https?|data|javascript|mailto|tel):|//|#|/)([^"]+)"',
-                        lambda mo: f'{mo.group(1)}="{prefix}{mo.group(2)}"',
-                        html,
-                    )
-                except ValueError:
-                    pass
+                prefix = asset_prefix(_vault.root, html_path, str(request.base_url))
+                html = rewrite_html(html, prefix, mode="fragment")
             broken_links, broken_citations = [], []
     else:
         html, broken_links, broken_citations = vault_render(body, _vault)
@@ -1499,58 +1480,8 @@ def view_html(slug: str, request: Request):
     if path is None:
         raise HTTPException(status_code=404, detail=f"no HTML file for {slug!r}")
     body = path.read_text(encoding="utf-8")
-    try:
-        html_dir = path.parent.relative_to(_vault.root)
-        base = str(html_dir).replace("\\", "/").rstrip("/")
-        prefix = f"{request.base_url}vault/assets/{base}/" if base else f"{request.base_url}vault/assets/"
-    except ValueError:
-        prefix = str(request.base_url) + "vault/assets/"
-    import re as _re
-
-    _ABS = r'(?:https?|data|javascript|mailto|tel):|//'
-    _SKIP = rf'(?!\s*(?:{_ABS}|#|/))'
-
-    def _rewrite(val: str) -> str:
-        if _re.match(rf'\s*(?:{_ABS}|#|/)', val):
-            return val
-        return prefix + val
-
-    # 1. WebKitGTK resolves xlink:href="data:..." as a relative URL — convert to SVG 2 href.
-    body = _re.sub(r'xlink:href="(data:[^"]*)"', r'href="\1"', body)
-
-    # 2. Standard HTML attributes: src, href, action, poster, data (object)
-    body = _re.sub(
-        rf'(?<![:\w])(src|href|action|poster|data)="{_SKIP}([^"]*)"',
-        lambda m: f'{m.group(1)}="{_rewrite(m.group(2))}"',
-        body,
-    )
-
-    # 3. srcset — comma-separated list of "url [descriptor]" entries
-    def _rewrite_srcset(m: _re.Match) -> str:
-        parts = []
-        for entry in m.group(1).split(","):
-            entry = entry.strip()
-            if not entry:
-                continue
-            tokens = entry.split()
-            tokens[0] = _rewrite(tokens[0])
-            parts.append(" ".join(tokens))
-        return f'srcset="{", ".join(parts)}"'
-    body = _re.sub(r'srcset="([^"]*)"', _rewrite_srcset, body)
-
-    # 4. CSS url() — covers both inline styles and <style> blocks
-    body = _re.sub(
-        rf"""url\(\s*(['"]?){_SKIP}([^'"\)]+)\1\s*\)""",
-        lambda m: f'url({m.group(1)}{_rewrite(m.group(2))}{m.group(1)})',
-        body,
-    )
-
-    # 5. JSON string values that are relative file paths (e.g. in data-* attributes or inline JS)
-    body = _re.sub(
-        rf'"({_SKIP}[^"]+\.(?:png|jpg|jpeg|gif|webp|svg|woff2?|ttf|eot|css|js))"',
-        lambda m: f'"{_rewrite(m.group(1))}"',
-        body,
-    )
+    prefix = asset_prefix(_vault.root, path, str(request.base_url))
+    body = rewrite_html(body, prefix, mode="full")
     interceptor = (
         "<script>"
         "document.addEventListener('click',function(e){"

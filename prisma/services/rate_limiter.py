@@ -4,8 +4,8 @@ Every source in `prisma/integrations/sources/` owns one instance of this,
 configured with that source's real published quota. This is intentionally
 NOT the supervisor's resource_lock.py/ResourceManager pattern (HTTP-based
 cross-process leasing for the GPU compute pools) — every caller of
-SearchAgent (coordinator.py, stream_runner.py, research_stream_manager.py)
-only ever runs inside the single `api` worker process, so there's no
+SearchAgent (coordinator.py, stream_runner.py) only ever runs inside the
+single `api` worker process, so there's no
 cross-process contention to arbitrate, only two same-process call paths
 (the background stream scheduler thread and on-demand API requests)
 sharing one quota. A thread-safe token bucket is sufficient and avoids

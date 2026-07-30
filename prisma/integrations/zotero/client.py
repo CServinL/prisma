@@ -14,7 +14,7 @@ this one for its richer, more Zotero-API-faithful data model
 handling is more robust than 3 copies of a hand-rolled loop.
 
 Public method names/signatures are kept stable for existing callers
-(ResearchStreamManager, PendingWriteQueue) -- this used to be split across
+(app.py routes, PendingWriteQueue) -- this used to be split across
 this file (pyzotero calls, raw dicts) and unified_client.py (a facade
 converting to typed models via hasattr-based capability dispatch). That
 dispatch was already ceremonial before this merge -- there was only ever

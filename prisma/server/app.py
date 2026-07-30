@@ -2006,7 +2006,6 @@ def zotero_sync_pending():
     the API equivalent of the old `prisma sync` CLI command. Actions are
     queued here by the review pipeline (coordinator.py) when a Zotero write
     fails while offline; nothing else populates this queue today."""
-    from prisma.services.research_stream_manager import ResearchStreamManager
     from prisma.storage.pending_queue import PendingWriteQueue
 
     pending_before = PendingWriteQueue().pending_count
@@ -2015,8 +2014,7 @@ def zotero_sync_pending():
     if not connectivity.is_online:
         raise HTTPException(status_code=503, detail="offline — cannot sync right now")
 
-    manager = ResearchStreamManager()
-    synced, failed = manager.sync_pending()
+    synced, failed = PendingWriteQueue().flush(_zotero)
     return SyncPendingResponse(synced=synced, failed=failed, pending_before=pending_before)
 
 

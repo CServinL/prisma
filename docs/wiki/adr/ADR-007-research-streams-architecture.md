@@ -2,7 +2,13 @@
 
 **Date:** 2025-09-15  
 **Author:** CServinL  
-**Status:** Accepted
+**Status:** Superseded (implementation) — the Research Streams *concept* described below is
+still live, but `ResearchStreamManager` (the JSON-file + Zotero-Collection-object
+implementation this ADR specifies) was deleted 2026-07-29 as dead code with zero
+production callers. The live implementation stores each Stream as a vault Markdown
+node (`storage/models/vault_models.py::Stream`) and refreshes it via
+`services/stream_runner.py::run_stream()`, invoked from `POST /streams/{slug}/run`.
+See `docs/diagrams/03_stream_update_flow.html` for the current flow.
 
 ## Context
 

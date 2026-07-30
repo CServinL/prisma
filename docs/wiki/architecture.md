@@ -28,12 +28,10 @@ prisma/                        # repo root
 │   │   ├── dedup.py               # Shared duplicate-detection logic (stream_runner + /maintenance/deduplicate)
 │   │   ├── knowledge_graph_service.py  # Native Kùzu-backed knowledge graph indexer (watchdog + Ollama, per-section) — runs inside kg_app.py
 │   │   ├── knowledge_graph_client.py   # Thin HTTP client app.py uses to reach kg_app.py
-│   │   ├── chroma_service.py      # ChromaDB semantic index (watchdog + nomic-embed-text)
-│   │   └── research_stream_manager.py  # Stream lifecycle management
+│   │   └── chroma_service.py      # ChromaDB semantic index (watchdog + nomic-embed-text)
 │   ├── storage/
 │   │   ├── models/
 │   │   │   ├── agent_models.py          # PaperMetadata, BookMetadata, SearchResult
-│   │   │   ├── research_stream_models.py  # ResearchStream, StreamStatus, RefreshFrequency
 │   │   │   ├── vault_models.py          # VaultNode, RenderedNode, VaultListing, StreamStatus
 │   │   │   ├── zotero_models.py         # ZoteroItem, ZoteroCollection
 │   │   │   ├── api_response_models.py   # Typed API response models (Pydantic)

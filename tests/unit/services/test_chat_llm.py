@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from prisma.services.chat_llm import ChatLLM
-from prisma.utils.config import ChatConfig
+from prisma.utils.config import ChatConfig, LLMConfig
 
 
 def _llm(**overrides) -> ChatLLM:
@@ -92,3 +92,74 @@ def test_complete_returns_none_on_client_exception():
          patch.object(llm._client.chat.completions, "create", side_effect=RuntimeError("boom")):
         result = llm.complete([{"role": "user", "content": "hi"}])
     assert result is None
+
+
+def test_complete_uses_config_max_tokens_by_default():
+    llm = _llm(max_tokens=2000)
+    mock_resp = MagicMock()
+    mock_resp.choices = [MagicMock(message=MagicMock(content="ok"))]
+    with patch("prisma.services.chat_llm.resource_lock.acquire", return_value=(True, "local-ollama", "req-1")), \
+         patch("prisma.services.chat_llm.resource_lock.release"), \
+         patch.object(llm._client.chat.completions, "create", return_value=mock_resp) as mock_create:
+        llm.complete([{"role": "user", "content": "hi"}])
+    assert mock_create.call_args.kwargs["max_tokens"] == 2000
+    assert "timeout" not in mock_create.call_args.kwargs
+
+
+def test_complete_per_call_max_tokens_and_timeout_override_config():
+    # AnalysisAgent needs a short cap for a yes/no prompt and a long one for
+    # a full summary, from the same ChatLLM instance -- confirm overrides
+    # actually reach the underlying client call.
+    llm = _llm(max_tokens=2000)
+    mock_resp = MagicMock()
+    mock_resp.choices = [MagicMock(message=MagicMock(content="ok"))]
+    with patch("prisma.services.chat_llm.resource_lock.acquire", return_value=(True, "local-ollama", "req-1")), \
+         patch("prisma.services.chat_llm.resource_lock.release"), \
+         patch.object(llm._client.chat.completions, "create", return_value=mock_resp) as mock_create:
+        llm.complete([{"role": "user", "content": "hi"}], max_tokens=42, timeout=7)
+    assert mock_create.call_args.kwargs["max_tokens"] == 42
+    assert mock_create.call_args.kwargs["timeout"] == 7
+
+
+def test_default_priority_is_interactive():
+    # Preserves chat's original behavior — a live chat request must never
+    # queue behind bulk background work.
+    assert _llm()._priority == "interactive"
+
+
+def test_explicit_priority_is_honored_in_lease():
+    llm = ChatLLM(ChatConfig(), ollama_host="localhost:11434", priority="background")
+    mock_resp = MagicMock()
+    mock_resp.choices = [MagicMock(message=MagicMock(content="ok"))]
+    with patch("prisma.services.chat_llm.resource_lock.acquire", return_value=(True, "local-ollama", "req-1")) as mock_acquire, \
+         patch("prisma.services.chat_llm.resource_lock.release"), \
+         patch("prisma.services.chat_llm.resource_lock.backoff.retry_with_backoff",
+               side_effect=lambda attempt, is_success, **kw: attempt()), \
+         patch.object(llm._client.chat.completions, "create", return_value=mock_resp):
+        llm.complete([{"role": "user", "content": "hi"}])
+    assert mock_acquire.call_args.kwargs["priority"] == "background"
+
+
+class TestFromLlmConfig:
+    def test_adapts_fields_and_defaults_priority_to_background(self):
+        llm_config = LLMConfig(provider="ollama", model="qwen2.5:7b-32k", host="localhost:11434")
+        llm = ChatLLM.from_llm_config(llm_config)
+        assert llm._config.provider == "ollama"
+        assert llm._config.model == "qwen2.5:7b-32k"
+        assert llm._priority == "background"
+        assert llm._resolve_base_url() == "http://localhost:11434/v1"
+
+    def test_pool_passed_through_when_set(self):
+        llm_config = LLMConfig(provider="openrouter", model="x", pool="cloud-openrouter")
+        llm = ChatLLM.from_llm_config(llm_config)
+        assert llm._config.pool == "cloud-openrouter"
+
+    def test_pool_falls_back_to_chat_config_default_when_unset(self):
+        llm_config = LLMConfig(provider="ollama", model="x")
+        llm = ChatLLM.from_llm_config(llm_config)
+        assert llm._config.pool == ChatConfig().pool
+
+    def test_explicit_priority_override(self):
+        llm_config = LLMConfig(provider="ollama", model="x")
+        llm = ChatLLM.from_llm_config(llm_config, priority="interactive")
+        assert llm._priority == "interactive"

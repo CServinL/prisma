@@ -14,9 +14,12 @@ from prisma.server.supervisor import (
     _check_pool_vram_fit,
     _load_compute_pools,
     _load_vram_profiles,
+    _ollama_base_url,
     _probe_model_vram,
     _process_memory_mb,
     _profile_missing_models,
+    _read_raw_config,
+    _resolve_vault_root,
     _save_vram_profile,
     _system_info,
 )
@@ -263,6 +266,99 @@ def test_load_compute_pools_type_field_is_authoritative_over_model_affinity(tmp_
         "local-ollama": {"prisma-kg:7b", "prisma-chat:7b"},
         "cloud_api": {"anthropic/claude-3.5-sonnet"},
     }
+
+
+# _read_raw_config's precedence mirrors ConfigLoader._get_config_path
+# (prisma/utils/config.py) exactly: $PRISMA_CONFIG, then
+# ~/.config/prisma/config.toml, then ./config.toml, then ./prisma-config.toml.
+# These tests pin that order down at this (stdlib-only) side too.
+
+def test_read_raw_config_returns_empty_dict_when_nothing_found(tmp_path, monkeypatch):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.delenv("PRISMA_CONFIG", raising=False)
+    monkeypatch.chdir(tmp_path)  # no ./config.toml or ./prisma-config.toml here either
+
+    assert _read_raw_config() == {}
+
+
+def test_read_raw_config_finds_home_config(tmp_path, monkeypatch):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.delenv("PRISMA_CONFIG", raising=False)
+    monkeypatch.chdir(tmp_path)
+    cfg_dir = tmp_path / ".config" / "prisma"
+    cfg_dir.mkdir(parents=True)
+    (cfg_dir / "config.toml").write_text('vault_root = "/home-config-vault"\n')
+
+    assert _read_raw_config() == {"vault_root": "/home-config-vault"}
+
+
+def test_read_raw_config_env_var_wins_over_home_config(tmp_path, monkeypatch):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.chdir(tmp_path)
+    cfg_dir = tmp_path / ".config" / "prisma"
+    cfg_dir.mkdir(parents=True)
+    (cfg_dir / "config.toml").write_text('vault_root = "/home-config-vault"\n')
+    env_cfg = tmp_path / "custom.toml"
+    env_cfg.write_text('vault_root = "/env-config-vault"\n')
+    monkeypatch.setenv("PRISMA_CONFIG", str(env_cfg))
+
+    assert _read_raw_config() == {"vault_root": "/env-config-vault"}
+
+
+def test_read_raw_config_falls_back_to_cwd_config_toml(tmp_path, monkeypatch):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)  # no ~/.config/prisma/config.toml
+    monkeypatch.delenv("PRISMA_CONFIG", raising=False)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "config.toml").write_text('vault_root = "/cwd-config-vault"\n')
+
+    assert _read_raw_config() == {"vault_root": "/cwd-config-vault"}
+
+
+def test_read_raw_config_falls_back_to_cwd_prisma_config_toml(tmp_path, monkeypatch):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.delenv("PRISMA_CONFIG", raising=False)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "prisma-config.toml").write_text('vault_root = "/cwd-prisma-config-vault"\n')
+
+    assert _read_raw_config() == {"vault_root": "/cwd-prisma-config-vault"}
+
+
+def test_resolve_vault_root_reads_from_config(tmp_path, monkeypatch):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.delenv("PRISMA_CONFIG", raising=False)
+    monkeypatch.chdir(tmp_path)
+    cfg_dir = tmp_path / ".config" / "prisma"
+    cfg_dir.mkdir(parents=True)
+    (cfg_dir / "config.toml").write_text(f'vault_root = "{tmp_path / "my-vault"}"\n')
+
+    assert _resolve_vault_root() == (tmp_path / "my-vault").resolve()
+
+
+def test_resolve_vault_root_defaults_when_config_missing(tmp_path, monkeypatch):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.delenv("PRISMA_CONFIG", raising=False)
+    monkeypatch.chdir(tmp_path)
+
+    assert _resolve_vault_root() == tmp_path / "prisma-vault"
+
+
+def test_ollama_base_url_reads_llm_host_from_config(tmp_path, monkeypatch):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.delenv("PRISMA_CONFIG", raising=False)
+    monkeypatch.chdir(tmp_path)
+    cfg_dir = tmp_path / ".config" / "prisma"
+    cfg_dir.mkdir(parents=True)
+    (cfg_dir / "config.toml").write_text('[llm]\nhost = "gpu-box:11434"\n')
+
+    assert _ollama_base_url() == "http://gpu-box:11434"
+
+
+def test_ollama_base_url_defaults_when_config_missing(tmp_path, monkeypatch):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.delenv("PRISMA_CONFIG", raising=False)
+    monkeypatch.chdir(tmp_path)
+
+    assert _ollama_base_url() == "http://localhost:11434"
 
 
 # ── contention stats: "why is the server busy" without grepping logs ────────

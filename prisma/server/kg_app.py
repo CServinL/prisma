@@ -12,7 +12,6 @@ place `KnowledgeGraphService` may run.
 from __future__ import annotations
 
 import logging
-import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -39,146 +38,64 @@ _LOG_PATHS = _log_setup.configure()
 _log = logging.getLogger("prisma.knowledge_graph")
 
 
-# ── Vault root / config helpers — vault_root and the kg: section both go
-# through ConfigLoader/KGConfig (utils/config.py) now; supervisor.py keeps
-# its own separate, deliberately stdlib-only resolver (see its module
-# docstring's "stdlib + yaml only" constraint) since it can't depend on
-# Pydantic. ───────────────────────────────────────────────────────────────
+# ── Config — loaded once here; supervisor.py keeps its own separate,
+# deliberately stdlib-only resolver (see its module docstring's "stdlib
+# only" constraint) since it can't depend on Pydantic. ─────────────────────
 
-def _resolve_vault_root() -> Path:
-    from prisma.utils.config import ConfigLoader
+def _load_config():
+    """Returns (ConfigLoader-or-None, PrismaConfig). A broken/unreadable
+    config.toml falls back to an in-memory default PrismaConfig() rather
+    than stopping this process from starting at all -- every field below
+    already has a sensible default in the Pydantic model, so a load
+    failure and "config.toml not present" should behave identically."""
+    from prisma.utils.config import ConfigLoader, PrismaConfig
     try:
-        return ConfigLoader().get_vault_root()
+        loader = ConfigLoader()
+        return loader, loader.config
     except Exception:
-        return Path.home() / "prisma-vault"
+        return None, PrismaConfig()
 
 
-def _ollama_model() -> str:
+def _resolve_vault_root(loader) -> Path:
+    if loader is not None:
+        try:
+            return loader.get_vault_root()
+        except Exception:
+            pass
+    return Path.home() / "prisma-vault"
+
+
+def _resolve_kg_api_key(llm_config) -> str:
     try:
-        from prisma.utils.config import ConfigLoader
-        return ConfigLoader().get_llm_config().model
+        return llm_config.resolve_api_key()
     except Exception:
-        return "qwen2.5:7b-32k"
-
-
-def _llm_base_url() -> str:
-    # Delegates to LLMConfig.base_url (utils/config.py) rather than
-    # re-deriving the per-provider URL shape here — that property already
-    # knows ollama/llama_cpp are OpenAI-compatible on {host}/v1 while
-    # openrouter's is the fixed https://openrouter.ai/api/v1, so this stays
-    # correct as providers are added instead of drifting from it.
-    try:
-        from prisma.utils.config import ConfigLoader
-        return ConfigLoader().get_llm_config().base_url
-    except Exception:
-        return "http://localhost:11434"
-
-
-def _llm_provider() -> str:
-    try:
-        from prisma.utils.config import ConfigLoader
-        return ConfigLoader().get_llm_config().provider
-    except Exception:
+        _log.warning("could not resolve openrouter API key for KG extraction", exc_info=True)
         return "ollama"
 
 
-def _llm_api_key() -> str:
-    # Only meaningful for provider=openrouter — ollama/llama_cpp's local
-    # OpenAI-compat servers don't check the key at all (dummy value kept for
-    # API compatibility with the openai SDK, which requires a non-empty
-    # string). Mirrors ChatLLM._resolve_api_key's same env-var-by-name
-    # pattern (ADR-014) — the real key never lives in config.toml itself.
-    try:
-        from prisma.utils.config import ConfigLoader
-        cfg = ConfigLoader().get_llm_config()
-        if cfg.provider == "openrouter":
-            if not cfg.api_key_env:
-                raise RuntimeError("llm.provider is 'openrouter' but llm.api_key_env is not set")
-            key = os.environ.get(cfg.api_key_env)
-            if not key:
-                raise RuntimeError(f"llm.api_key_env={cfg.api_key_env!r} is not set in the environment")
-            return key
-    except Exception:
-        _log.warning("could not resolve openrouter API key for KG extraction", exc_info=True)
-    return "ollama"
-
-
-def _llm_context_window() -> int | None:
-    # Static override for providers with no live-queryable endpoint
-    # (openrouter) — see LLMConfig.context_window's own docstring.
-    try:
-        from prisma.utils.config import ConfigLoader
-        return ConfigLoader().get_llm_config().context_window
-    except Exception:
-        return None
-
-
-def _max_output_fraction() -> float:
-    from prisma.utils.config import ConfigLoader
-    try:
-        return ConfigLoader().get_kg_config().max_output_fraction
-    except Exception:
-        return 0.25
-
-
-def _max_entities() -> int:
-    from prisma.utils.config import ConfigLoader
-    try:
-        return ConfigLoader().get_kg_config().max_entities
-    except Exception:
-        return 15
-
-
-def _max_relationships() -> int:
-    from prisma.utils.config import ConfigLoader
-    try:
-        return ConfigLoader().get_kg_config().max_relationships
-    except Exception:
-        return 20
-
-
-def _index_extensions() -> tuple[str, ...]:
+def _normalize_index_extensions(exts: list[str]) -> tuple[str, ...]:
     from prisma.services.knowledge_graph_service import DEFAULT_INDEX_EXTENSIONS
-    from prisma.utils.config import ConfigLoader
-    try:
-        exts = ConfigLoader().get_kg_config().index_extensions
-        if exts:
-            return tuple(e if e.startswith(".") else f".{e}" for e in exts)
-    except Exception:
-        pass
-    return DEFAULT_INDEX_EXTENSIONS
+    if not exts:
+        return DEFAULT_INDEX_EXTENSIONS
+    return tuple(e if e.startswith(".") else f".{e}" for e in exts)
 
 
-def _extraction_concurrency() -> int:
-    from prisma.utils.config import ConfigLoader
-    try:
-        return ConfigLoader().get_kg_config().extraction_concurrency
-    except Exception:
-        return 3
+_loader, _cfg = _load_config()
 
-
-def _token_budget() -> int:
-    from prisma.utils.config import ConfigLoader
-    try:
-        return ConfigLoader().get_kg_config().token_budget
-    except Exception:
-        return 1000
-
-
-_vault = VaultService(vault_root=_resolve_vault_root())
+_vault = VaultService(vault_root=_resolve_vault_root(_loader))
 _kg = KnowledgeGraphService(
     _vault,
-    ollama_model=_ollama_model(),
-    ollama_base_url=_llm_base_url(),
-    provider=_llm_provider(),
-    api_key=_llm_api_key(),
-    context_window_override=_llm_context_window(),
-    max_output_fraction=_max_output_fraction(),
-    index_extensions=_index_extensions(),
-    extraction_concurrency=_extraction_concurrency(),
-    token_budget=_token_budget(),
-    max_entities=_max_entities(),
-    max_relationships=_max_relationships(),
+    ollama_model=_cfg.llm.model,
+    ollama_base_url=_cfg.llm.base_url,
+    provider=_cfg.llm.provider,
+    api_key=_resolve_kg_api_key(_cfg.llm),
+    context_window_override=_cfg.llm.context_window,
+    max_output_fraction=_cfg.kg.max_output_fraction,
+    index_extensions=_normalize_index_extensions(_cfg.kg.index_extensions),
+    extraction_concurrency=_cfg.kg.extraction_concurrency,
+    token_budget=_cfg.kg.token_budget,
+    max_entities=_cfg.kg.max_entities,
+    max_relationships=_cfg.kg.max_relationships,
 )
 
 

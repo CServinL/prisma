@@ -57,7 +57,6 @@ _t("vault ok")
 
 _t("importing renderer")
 from prisma.services.renderer import render as vault_render
-from prisma.services.asset_rewrite import asset_prefix, rewrite_html
 _t("renderer ok")
 
 _t("importing knowledge_graph_client")
@@ -87,7 +86,7 @@ _t("sync_orchestrator ok")
 _t("importing vault_models")
 from prisma.storage.models.vault_models import (
     Chat, ChatMessage, ChatRole, NodeType, RenderedNode, StreamRunResult, ToolCallRecord,
-    VaultListing, VaultTreeNode,
+    VaultTreeNode,
 )
 _t("vault_models ok")
 
@@ -495,6 +494,7 @@ app.add_middleware(AccessLogMiddleware)
 # value at include_router() time would keep talking to a stale, replaced
 # instance after a reload.
 from prisma.server.sync_routes import build_sync_router  # noqa: E402
+from prisma.server.notes_routes import build_notes_router, render_note  # noqa: E402
 def _update_client_baseline(client_id: str, path: str, content_hash: str, mtime: float) -> None:
     with _client_baseline_lock:
         _client_baseline.setdefault(client_id, {})[path] = (content_hash, mtime)
@@ -511,6 +511,12 @@ app.include_router(build_sync_router(
     mark_stale_fn=lambda path: _indexer.mark_stale(path),
     update_baseline_fn=_update_client_baseline,
     clear_baseline_fn=_clear_client_baseline,
+))
+
+app.include_router(build_notes_router(
+    get_vault=lambda: _vault,
+    mark_stale_fn=lambda: _indexer.mark_stale(),
+    broadcast_fn=broadcast,
 ))
 
 _executor = ThreadPoolExecutor(max_workers=2)
@@ -1379,74 +1385,6 @@ def create_dir(req: CreateDirRequest):
         raise HTTPException(status_code=400, detail=str(e))
 
 
-@app.get("/notes", response_model=VaultListing)
-def list_notes(node_type: Optional[NodeType] = Query(None)):
-    return _vault.list_nodes(node_type)
-
-
-@app.get("/notes/{slug}", response_model=RenderedNode)
-def get_note(slug: str, request: Request, format: str = "html"):
-    from prisma.storage.models.vault_models import Stream
-    try:
-        node = _vault.get_any(slug)
-    except FileNotFoundError:
-        raise HTTPException(status_code=404, detail=f"node not found: {slug!r}")
-    body = node.body if hasattr(node, "body") else ""
-    original_ext = getattr(node, "original_ext", None)
-    node_path = getattr(node, "path", None)
-    has_md = False
-
-    if original_ext == ".html":
-        html_path = node_path if (node_path and node_path.suffix == ".html") else None
-        if html_path is None and node_path is not None:
-            companion = node_path.with_suffix(".html")
-            if companion.exists():
-                html_path = companion
-
-        if html_path is not None:
-            has_md = bool(_vault.get_md_body(html_path))
-
-        if format == "md" and html_path is not None and has_md:
-            md_body = _vault.get_md_body(html_path) or ""
-            html, broken_links, broken_citations = vault_render(md_body, _vault)
-            prefix = asset_prefix(_vault.root, html_path, str(request.base_url))
-            html = rewrite_html(html, prefix, mode="markdown")
-            original_ext = None  # render as plain markdown, no iframe
-        else:
-            import re as _re
-            if html_path is not None and node_path and node_path.suffix != ".html":
-                body = html_path.read_text(encoding="utf-8")
-            styles = "".join(_re.findall(r"<style[^>]*>.*?</style>", body, _re.DOTALL | _re.IGNORECASE))
-            m = _re.search(r"<body[^>]*>(.*?)</body>", body, _re.DOTALL | _re.IGNORECASE)
-            html = (styles + "\n" + m.group(1).strip()) if m else body
-            if html_path is not None:
-                prefix = asset_prefix(_vault.root, html_path, str(request.base_url))
-                html = rewrite_html(html, prefix, mode="fragment")
-            broken_links, broken_citations = [], []
-    else:
-        html, broken_links, broken_citations = vault_render(body, _vault)
-
-    rn = RenderedNode(
-        slug=slug,
-        title=node.title,
-        node_type=node.node_type,
-        html=html,
-        broken_links=broken_links,
-        broken_citations=broken_citations,
-        original_ext=original_ext,
-        has_md=has_md,
-    )
-    if isinstance(node, Stream):
-        rn.stream_status = node.status
-        rn.refresh_frequency = node.refresh_frequency
-        rn.total_papers = node.total_papers
-        rn.last_updated = node.last_updated
-        rn.next_update = node.next_update
-        rn.query = node.query
-        rn.collection_key = node.collection_key
-    return rn
-
-
 _ALLOWED_ASSET_EXTS = {
     ".css", ".js", ".map",
     ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".ico",
@@ -1466,111 +1404,6 @@ def vault_asset(asset_path: str):
     if not candidate_path.is_file():
         raise HTTPException(status_code=404, detail="not found")
     return FileResponse(candidate_path)
-
-
-@app.get("/notes/{slug}/view")
-def view_html(slug: str, request: Request):
-    from fastapi.responses import HTMLResponse
-    path = _vault.find_companion(slug)
-    if path is None:
-        # Standalone .html file (no .md companion)
-        found = _vault.find_file(slug)
-        if found is not None and found.suffix == ".html":
-            path = found
-    if path is None:
-        raise HTTPException(status_code=404, detail=f"no HTML file for {slug!r}")
-    body = path.read_text(encoding="utf-8")
-    prefix = asset_prefix(_vault.root, path, str(request.base_url))
-    body = rewrite_html(body, prefix, mode="full")
-    interceptor = (
-        "<script>"
-        "document.addEventListener('click',function(e){"
-        "var a=e.target.closest('a');if(!a)return;"
-        "var h=a.getAttribute('href')||'';"
-        "if(h.startsWith('http://')||h.startsWith('https://')){"
-        "e.preventDefault();"
-        "window.parent.postMessage({type:'open-url',url:h},'*');"
-        "}"
-        "});"
-        "</script>"
-    )
-    body = body.replace("</body>", interceptor + "</body>", 1)
-    if "</body>" not in body:
-        body += interceptor
-    return HTMLResponse(content=body)
-
-
-class GenerateMdResponse(BaseModel):
-    generated: bool
-    slug: str
-
-
-@app.post("/notes/{slug}/md", status_code=202, response_model=GenerateMdResponse)
-def generate_md_format(slug: str):
-    try:
-        node = _vault.get_any(slug)
-    except FileNotFoundError:
-        raise HTTPException(status_code=404, detail=f"node not found: {slug!r}")
-    html_path = getattr(node, "path", None)
-    if html_path is None or html_path.suffix != ".html":
-        raise HTTPException(status_code=400, detail="node has no HTML format")
-    generated = _vault.ensure_md_format(html_path)
-    return {"generated": generated, "slug": slug}
-
-
-class SetTypeRequest(BaseModel):
-    node_type: NodeType
-
-@app.patch("/notes/{slug}/type")
-def set_note_type(slug: str, body: SetTypeRequest):
-    try:
-        _vault.set_node_type(slug, body.node_type)
-    except FileNotFoundError:
-        raise HTTPException(status_code=404, detail=f"node not found: {slug!r}")
-    return {"slug": slug, "node_type": body.node_type.value}
-
-
-@app.get("/notes/{slug}/original")
-def get_original(slug: str):
-    from fastapi.responses import FileResponse
-    path = _vault.find_companion(slug)
-    if path is None:
-        raise HTTPException(status_code=404, detail=f"no companion file for source {slug!r}")
-    return FileResponse(str(path))
-
-
-class NoteCreateRequest(BaseModel):
-    title: str
-    body: str = ""
-    tags: Optional[list[str]] = None
-
-
-@app.post("/notes", response_model=RenderedNode, status_code=201)
-def create_note(req: NoteCreateRequest):
-    note = _vault.create_note(req.title, req.body, req.tags)
-    _indexer.mark_stale()
-    _activity.info("action=create_note slug=%s title=%r", note.slug, note.title)
-    broadcast({"type": "vault_change", "action": "create", "slug": note.slug})
-    html, broken_links, broken_citations = vault_render(note.body, _vault)
-    return RenderedNode(slug=note.slug, title=note.title, node_type=note.node_type,
-                        html=html, broken_links=broken_links, broken_citations=broken_citations)
-
-
-class NoteSaveRequest(BaseModel):
-    body: str
-
-
-@app.put("/notes/{slug}", response_model=RenderedNode)
-def save_note(slug: str, req: NoteSaveRequest):
-    try:
-        note = _vault.save_note(slug, req.body)
-    except FileNotFoundError:
-        raise HTTPException(status_code=404, detail=f"note not found: {slug!r}")
-    _indexer.mark_stale()
-    broadcast({"type": "vault_change", "action": "save", "slug": slug})
-    html, broken_links, broken_citations = vault_render(note.body, _vault)
-    return RenderedNode(slug=note.slug, title=note.title, node_type=note.node_type,
-                        html=html, broken_links=broken_links, broken_citations=broken_citations)
 
 
 class SearchResult(BaseModel):
@@ -1780,7 +1613,7 @@ def get_stream(slug: str):
 
 @app.get("/streams/{slug}/view", response_model=RenderedNode)
 def get_stream_view(slug: str, request: Request, format: str = "html"):
-    return get_note(slug, request, format)
+    return render_note(_vault, slug, request, format)
 
 
 class StreamCreateRequest(BaseModel):

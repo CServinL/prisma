@@ -24,7 +24,6 @@ from typing import Optional
 from prisma.server import log_setup as _log_setup
 _LOG_PATHS = _log_setup.configure()
 _log = logging.getLogger("prisma.server")
-_maint_log = logging.getLogger("prisma.maintenance")
 _activity = logging.getLogger("prisma.activity")
 
 def _t(label: str, _t0=[0.0]):
@@ -85,7 +84,7 @@ _t("sync_orchestrator ok")
 
 _t("importing vault_models")
 from prisma.storage.models.vault_models import (
-    Chat, ChatMessage, ChatRole, NodeType, RenderedNode, StreamRunResult, ToolCallRecord,
+    Chat, ChatMessage, ChatRole, NodeType, RenderedNode, ToolCallRecord,
     VaultTreeNode,
 )
 _t("vault_models ok")
@@ -397,58 +396,6 @@ Kept in sync by every reload path (targeted or smart), not just the smart
 one, so a mix of `/reload/zotero` then `/reload` still diffs correctly."""
 
 
-class _StreamScheduler:
-    """Background thread that runs streams when their next_update is past."""
-
-    _CHECK_INTERVAL = 5 * 60  # seconds between scans
-
-    def __init__(self) -> None:
-        self._stop_event = threading.Event()
-        self._thread: threading.Thread | None = None
-
-    def start(self) -> None:
-        self._thread = threading.Thread(target=self._loop, daemon=True, name="stream-scheduler")
-        self._thread.start()
-
-    def stop(self) -> None:
-        self._stop_event.set()
-
-    def _loop(self) -> None:
-        self._stop_event.wait(timeout=30)  # let server finish starting up
-        while not self._stop_event.is_set():
-            self._tick()
-            self._stop_event.wait(timeout=self._CHECK_INTERVAL)
-
-    def _tick(self) -> None:
-        from datetime import datetime
-        from prisma.storage.models.vault_models import StreamStatus
-        try:
-            streams = _vault.list_streams()
-        except Exception as exc:
-            _maint_log.warning("stream-scheduler: list_streams failed: %s", exc)
-            return
-        now = datetime.now()
-        due = [s for s in streams if s.status == StreamStatus.active
-               and s.refresh_frequency.value != "manual"
-               and (s.next_update is None or s.next_update <= now)]
-        _maint_log.info("stream-scheduler: tick — %d streams checked, %d due", len(streams), len(due))
-        for stream in due:
-            _maint_log.info("stream-scheduler: running %r", stream.slug)
-            try:
-                t0 = time.monotonic()
-                result = _run_stream(stream.slug, force=False)
-                elapsed_ms = (time.monotonic() - t0) * 1000
-                _maint_log.info(
-                    "stream-scheduler: %r done — found=%d saved=%d elapsed_ms=%.0f",
-                    stream.slug, result.papers_found, result.papers_saved, elapsed_ms,
-                )
-            except Exception as exc:
-                _maint_log.warning("stream-scheduler: %r failed: %s", stream.slug, exc)
-
-
-_scheduler = _StreamScheduler()
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _ws_loop
@@ -494,7 +441,8 @@ app.add_middleware(AccessLogMiddleware)
 # value at include_router() time would keep talking to a stale, replaced
 # instance after a reload.
 from prisma.server.sync_routes import build_sync_router  # noqa: E402
-from prisma.server.notes_routes import build_notes_router, render_note  # noqa: E402
+from prisma.server.notes_routes import build_notes_router  # noqa: E402
+from prisma.server.streams_routes import build_streams_router, StreamScheduler  # noqa: E402
 def _update_client_baseline(client_id: str, path: str, content_hash: str, mtime: float) -> None:
     with _client_baseline_lock:
         _client_baseline.setdefault(client_id, {})[path] = (content_hash, mtime)
@@ -518,6 +466,18 @@ app.include_router(build_notes_router(
     mark_stale_fn=lambda: _indexer.mark_stale(),
     broadcast_fn=broadcast,
 ))
+
+app.include_router(build_streams_router(
+    get_vault=lambda: _vault,
+    get_zotero=lambda: _zotero,
+    broadcast_fn=broadcast,
+))
+
+_scheduler = StreamScheduler(
+    get_vault=lambda: _vault,
+    get_zotero=lambda: _zotero,
+    broadcast_fn=broadcast,
+)
 
 _executor = ThreadPoolExecutor(max_workers=2)
 _jobs: dict[str, object] = {}  # review jobs: dict (JobStatus-shaped); dedup jobs: DedupJobState instance
@@ -1568,127 +1528,6 @@ def deep_search(q: str = Query(..., min_length=1)) -> list[DeepSearchResult]:
     # Graph not built — text only
     return [DeepSearchResult(slug=r.slug, title=r.title, excerpt=r.excerpt, score=r.score)
             for r in _text_search(q, top_k=20)]
-
-
-class StreamMeta(BaseModel):
-    slug: str
-    title: str
-    description: Optional[str] = None
-    query: str
-    status: str
-    refresh_frequency: str
-    total_papers: int = 0
-    last_updated: Optional[str] = None
-    next_update: Optional[str] = None
-    tags: list[str] = Field(default_factory=list)
-
-
-def _stream_meta(s) -> StreamMeta:
-    return StreamMeta(
-        slug=s.slug,
-        title=s.title,
-        description=s.description,
-        query=s.query,
-        status=s.status.value,
-        refresh_frequency=s.refresh_frequency.value,
-        total_papers=s.total_papers,
-        last_updated=s.last_updated.isoformat() if s.last_updated else None,
-        next_update=s.next_update.isoformat() if s.next_update else None,
-        tags=s.tags,
-    )
-
-
-@app.get("/streams", response_model=list[StreamMeta])
-def list_streams():
-    return [_stream_meta(s) for s in _vault.list_streams()]
-
-
-@app.get("/streams/{slug}", response_model=StreamMeta)
-def get_stream(slug: str):
-    try:
-        return _stream_meta(_vault.get_stream(slug))
-    except FileNotFoundError:
-        raise HTTPException(status_code=404, detail=f"stream not found: {slug!r}")
-
-
-@app.get("/streams/{slug}/view", response_model=RenderedNode)
-def get_stream_view(slug: str, request: Request, format: str = "html"):
-    return render_note(_vault, slug, request, format)
-
-
-class StreamCreateRequest(BaseModel):
-    title: str
-    query: str
-    description: Optional[str] = None
-    refresh_frequency: str = "weekly"
-    tags: Optional[list[str]] = None
-
-
-@app.post("/streams", response_model=StreamMeta, status_code=201)
-def create_stream(req: StreamCreateRequest):
-    s = _vault.create_stream(
-        title=req.title,
-        query=req.query,
-        description=req.description,
-        refresh_frequency=req.refresh_frequency,
-        tags=req.tags,
-    )
-    # No mark_stale() -- streams/*.yaml is never KG-indexable content (see
-    # KnowledgeGraphService.is_relevant_path), so it would just set "stale"
-    # with nothing ever able to clear it.
-    _activity.info("action=create_stream slug=%s query=%r freq=%s", s.slug, req.query, req.refresh_frequency)
-    return _stream_meta(s)
-
-
-class StreamPatchRequest(BaseModel):
-    title: Optional[str] = None
-    query: Optional[str] = None
-    description: Optional[str] = None
-    status: Optional[str] = None
-    refresh_frequency: Optional[str] = None
-    tags: Optional[list[str]] = None
-
-
-@app.patch("/streams/{slug}", response_model=StreamMeta)
-def patch_stream(slug: str, req: StreamPatchRequest):
-    updates = {k: v for k, v in req.model_dump().items() if v is not None}
-    try:
-        s = _vault.save_stream(slug, **updates)
-    except FileNotFoundError:
-        raise HTTPException(status_code=404, detail=f"stream not found: {slug!r}")
-    return _stream_meta(s)
-
-
-@app.delete("/streams/{slug}", status_code=204)
-def delete_stream(slug: str):
-    try:
-        _vault.delete_stream(slug)
-    except FileNotFoundError:
-        raise HTTPException(status_code=404, detail=f"stream not found: {slug!r}")
-    # No mark_stale() -- see create_stream's comment above.
-    _activity.info("action=delete_stream slug=%s", slug)
-
-
-def _run_stream(slug: str, force: bool = False) -> StreamRunResult:
-    from prisma.services.stream_runner import run_stream as _runner
-    try:
-        _vault.get_stream(slug)
-    except FileNotFoundError:
-        raise HTTPException(status_code=404, detail=f"stream not found: {slug!r}")
-    broadcast({"type": "stream_progress", "slug": slug, "status": "running"})
-    result = _runner(slug, _vault, _zotero, force=force, get_stream_logger=_log_setup.get_stream_logger)
-    _activity.info(
-        "action=run_stream slug=%s found=%d saved=%d skipped_llm=%d errors=%d",
-        slug, result.papers_found, result.papers_saved, result.papers_skipped_llm, len(result.errors),
-    )
-    broadcast({"type": "stream_progress", "slug": slug, "status": "done",
-               "found": result.papers_found, "saved": result.papers_saved})
-    return result
-
-
-@app.post("/streams/{slug}/run", response_model=StreamRunResult)
-def run_stream(slug: str, force: bool = Query(False)):
-    return _run_stream(slug, force=force)
 
 
 # ── Zotero routes ─────────────────────────────────────────────────────────────

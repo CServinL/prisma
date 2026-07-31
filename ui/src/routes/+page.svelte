@@ -79,11 +79,25 @@
     args: Record<string, unknown>;
   }
 
+  // ADR-017: per-claim attribution. `sources` are vault slugs; empty only
+  // when relation is "ai-inference". Rendered as an inline [^N] marker in
+  // the turn's content plus a list at the end of the turn — see
+  // renderFootnoteSegments() below.
+  type FootnoteRelation = "citation" | "attribution" | "relational" | "ai-inference";
+
+  interface FootnoteOut {
+    index: number;
+    relation: FootnoteRelation;
+    sources: string[];
+    claim_text: string | null;
+    faithfulness_checked: boolean | null;
+  }
+
   interface ChatTurn {
     role: "user" | "assistant";
     content: string;
     timestamp: string;
-    sources_cited: string[];
+    footnotes: FootnoteOut[];
     tool_calls: ToolCallOut[];
   }
 
@@ -173,6 +187,36 @@
     if (n >= 1000) return (n / 1000).toFixed(n % 1000 === 0 ? 0 : 1) + "k";
     return String(n);
   }
+
+  // ADR-017: split a turn's raw content (containing literal "[^1]", "[^2]"
+  // markers ChatAgent left in place) into plain-text and marker segments,
+  // for the template to render as text / <sup> respectively. Deliberately
+  // NOT using {@html} on model-generated text — this codebase treats tool
+  // results as untrusted (services/injection_defense.py); the model's own
+  // final reply gets the same caution, so segments stay plain strings
+  // Svelte auto-escapes rather than becoming raw HTML.
+  type ContentSegment = { text: string } | { footnoteIndex: number };
+
+  const FOOTNOTE_MARKER_RE = /\[\^(\d+)\]/g;
+
+  function renderContentSegments(content: string): ContentSegment[] {
+    const segments: ContentSegment[] = [];
+    let lastEnd = 0;
+    for (const m of content.matchAll(FOOTNOTE_MARKER_RE)) {
+      if (m.index! > lastEnd) segments.push({ text: content.slice(lastEnd, m.index) });
+      segments.push({ footnoteIndex: Number(m[1]) });
+      lastEnd = m.index! + m[0].length;
+    }
+    if (lastEnd < content.length) segments.push({ text: content.slice(lastEnd) });
+    return segments;
+  }
+
+  const FOOTNOTE_RELATION_LABEL: Record<FootnoteRelation, string> = {
+    citation: "citation",
+    attribution: "attribution",
+    relational: "relational",
+    "ai-inference": "AI inference",
+  };
 
   function _defaultApiBase(): string {
     if (typeof window === "undefined") return DEFAULT_API;
@@ -603,7 +647,7 @@
     chatSending = true;
     activeChat.messages = [
       ...activeChat.messages,
-      { role: "user", content: text, timestamp: new Date().toISOString(), sources_cited: [], tool_calls: [] },
+      { role: "user", content: text, timestamp: new Date().toISOString(), footnotes: [], tool_calls: [] },
     ];
     try {
       const r = await apiFetch(`${apiBase}/chat`, {
@@ -614,7 +658,7 @@
         const data = await r.json();
         activeChat.messages = [
           ...activeChat.messages,
-          { role: "assistant", content: data.reply, timestamp: new Date().toISOString(), sources_cited: [], tool_calls: data.tool_calls ?? [] },
+          { role: "assistant", content: data.reply, timestamp: new Date().toISOString(), footnotes: data.footnotes ?? [], tool_calls: data.tool_calls ?? [] },
         ];
       }
     } finally {
@@ -1797,7 +1841,23 @@
                       {/each}
                     </div>
                   {/if}
-                  <div class="chat-turn-content text-body">{msg.content}</div>
+                  <div class="chat-turn-content text-body">
+                    {#each renderContentSegments(msg.content) as seg}
+                      {#if "text" in seg}{seg.text}{:else}<sup class="footnote-ref">{seg.footnoteIndex}</sup>{/if}
+                    {/each}
+                  </div>
+                  {#if msg.footnotes?.length}
+                    <ol class="chat-footnotes">
+                      {#each msg.footnotes as fn}
+                        <li id="chat-turn-{i}-footnote-{fn.index}">
+                          <span class="footnote-relation footnote-relation-{fn.relation}">{FOOTNOTE_RELATION_LABEL[fn.relation]}</span>
+                          {#if fn.sources.length}
+                            {#each fn.sources as slug, si}{#if si > 0}, {/if}<button class="footnote-source-link" onclick={() => openNode(slug)}>{slug}</button>{/each}
+                          {/if}
+                        </li>
+                      {/each}
+                    </ol>
+                  {/if}
                 </div>
               {/each}
               {#if chatSending}
@@ -3662,6 +3722,57 @@
     line-height: 1.6;
     white-space: pre-wrap;
     overflow-wrap: anywhere;
+  }
+  .footnote-ref {
+    color: #7fd4c8;
+    font-weight: 600;
+    margin-left: 1px;
+  }
+  .chat-footnotes {
+    margin: 8px 0 0;
+    padding-left: 18px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 11px;
+    color: #8ba3c0;
+  }
+  .footnote-relation {
+    display: inline-block;
+    margin-right: 6px;
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.02em;
+  }
+  .footnote-relation-citation {
+    background: rgba(127, 212, 200, 0.15);
+    color: #7fd4c8;
+  }
+  .footnote-relation-attribution {
+    background: rgba(96, 165, 250, 0.15);
+    color: #60a5fa;
+  }
+  .footnote-relation-relational {
+    background: rgba(192, 132, 252, 0.15);
+    color: #c084fc;
+  }
+  .footnote-relation-ai-inference {
+    background: rgba(148, 163, 184, 0.15);
+    color: #94a3b8;
+  }
+  .footnote-source-link {
+    background: none;
+    border: none;
+    padding: 0;
+    color: #8ba3c0;
+    text-decoration: underline dotted;
+    cursor: pointer;
+    font-size: 11px;
+  }
+  .footnote-source-link:hover {
+    color: #c8ddf0;
   }
   .chat-input-row {
     display: flex;

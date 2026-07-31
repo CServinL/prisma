@@ -2,12 +2,31 @@
 
 **Date:** 2026-07-27
 **Author:** CServinL
-**Status:** Proposed — data model built (`Footnote`/`FootnoteRelation` in
-`storage/models/vault_models.py`), ontology settled (Axiom 16,
-`docs/concepts/footnote.md`). `ChatAgent` does not yet segment its own
-output into per-claim spans or self-report `relation`/`sources` at
-generation time — see `TODO.md`'s "Chat claim attribution / footnotes"
-section for the remaining implementation checklist.
+**Status:** Implemented (2026-07-31) — data model, ontology (Axiom 16,
+`docs/concepts/footnote.md`), `ChatAgent` self-segmentation/self-report,
+`ChatToolbox._graph_context` wiring, and UI rendering are all built. Only
+`faithfulness_checked` verification remains unbuilt, per this ADR's own
+"Negative consequences" section below — deliberately deferred as a
+separate, harder problem, not an oversight.
+
+### Implementation notes (added 2026-07-31, not part of the original decision)
+
+- The self-report mechanism reuses ADR-014's tool-marker convention rather
+  than inventing something new: the model writes `[^N]` inline at each
+  claim, then a single trailing `FOOTNOTES_JSON: [...]` line with each
+  marker's `relation`/`sources`. Parsing is defensive throughout (bad JSON,
+  an unknown `relation`, or a missing line all degrade to "no footnotes,"
+  never break the turn) — a self-report is inherently less reliable than a
+  tool-call marker, since nothing forces the model to emit it correctly.
+- `GraphQueryResult` gained a `sources: list[str]` field so `relational`
+  footnotes have real data to draw from — the underlying per-document
+  `source_file`s already existed inside `KnowledgeGraphService.query()`,
+  they were just being flattened into prose text and discarded before
+  reaching the caller.
+- UI content is split into text/marker segments and rendered without
+  `{@html}`, even for the model's own final reply — consistent with this
+  codebase already treating tool results as untrusted content
+  (`services/injection_defense.py`).
 
 ## Context
 
@@ -118,9 +137,16 @@ actual source).
   `faithfulness_checked` is the intended (currently unbuilt) hook for
   eventually catching it — a real, harder, separately-deferred problem, not
   a guarantee this design provides today.
-- `ChatMessage.sources_cited`'s shape is replaced, not extended — acceptable
-  here since Chat API routes aren't implemented yet (per `docs/ontologia.md`'s
-  "Not yet implemented" section), so there is no live caller to migrate.
+- `ChatMessage.sources_cited`'s shape is replaced, not extended — this was
+  written assuming there was no live caller to migrate (Chat API routes
+  were believed not yet implemented, per `docs/ontologia.md`'s stale "Not
+  yet implemented" claim at the time). **Correction, 2026-07-31**: by the
+  time this was actually built, `/chat` was live and `ui/src/routes/
+  +page.svelte` already had a working chat UI using the old
+  `sources_cited: string[]` field name — so there *was* a live caller,
+  just not one anyone had gone back to check for. Migrated as part of this
+  same implementation pass (`ChatTurn.sources_cited` → `ChatTurn.footnotes`
+  in the frontend), not a separate follow-up.
 
 ## Related
 

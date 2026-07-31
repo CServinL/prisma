@@ -14,6 +14,7 @@ god_nodes, surprising_connections, suggest_questions, deferred for later.
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
 from pydantic import BaseModel
 
@@ -60,6 +61,14 @@ TOOL_CALL_RE = re.compile(
     re.MULTILINE,
 )
 
+# ADR-017 claim attribution. Same pattern-based convention as tool calls
+# (ADR-014's appendix found free-text markers more reliable than native
+# function-calling on today's local model) -- a single trailing line rather
+# than a new per-line marker, since footnote data is naturally a list, not
+# a single value. Only the *last* match is used (ChatAgent.respond) in case
+# the model discusses the format itself earlier in its answer.
+FOOTNOTES_LINE_RE = re.compile(r"^FOOTNOTES_JSON:\s*(.+)$", re.MULTILINE)
+
 
 def system_prompt_tool_section() -> str:
     lines = [
@@ -77,6 +86,54 @@ def system_prompt_tool_section() -> str:
         "any tool line."
     )
     return "\n".join(lines)
+
+
+def system_prompt_footnote_section() -> str:
+    """ADR-017: mark, per claim, whether it's traceable to a specific vault
+    document or is the model's own inference -- mirroring academic citation
+    practice. See docs/concepts/footnote.md for the full field reference;
+    this is the operational instruction, not the design rationale."""
+    return "\n".join([
+        "For every substantive claim in your answer (not filler like "
+        '"Sure, here\'s what I found"), mark where it came from, so the '
+        "reader can tell what traces to a document vs. what is your own "
+        "reasoning:",
+        "",
+        "- Right after a claim that traces to a document, write an inline "
+        "marker in this exact format: [^N] where N is the next unused "
+        "number, starting at 1 (e.g. \"...uses self-attention[^1].\"). Do "
+        "this whether it's a direct quote, a paraphrase of one document, "
+        "or a claim that connects/synthesizes two or more documents.",
+        "- Right after a claim that is your own reasoning, generalization, "
+        "or general knowledge -- NOT traceable to any specific document "
+        "you were given -- also mark it with the next [^N], but it will "
+        "get relation \"ai-inference\" below. You do not need to mark "
+        "filler or purely conversational sentences, only actual claims.",
+        "- Only cite documents you actually saw in a tool result in this "
+        "conversation (their exact slug, shown as the `path=` of an "
+        "<untrusted_source> block, or in a GRAPH_CONTEXT tool result's "
+        "\"Sources:\" line). Never invent a slug.",
+        "",
+        "After your answer, on its own final line, list every [^N] marker "
+        "you used as a single-line JSON array, exactly in this format:",
+        "",
+        'FOOTNOTES_JSON: [{"index": 1, "relation": "citation", '
+        '"sources": ["slug-a"]}, {"index": 2, "relation": "relational", '
+        '"sources": ["slug-b", "slug-c"]}, {"index": 3, '
+        '"relation": "ai-inference", "sources": []}]',
+        "",
+        "relation is one of:",
+        "- citation — direct quote or close paraphrase, exactly one source",
+        "- attribution — paraphrased/synthesized from one source, exactly "
+        "one source",
+        "- relational — connects or synthesizes across sources, two or "
+        "more sources (this is what a GRAPH_CONTEXT result usually is)",
+        "- ai-inference — your own reasoning, no document behind it, "
+        "sources must be an empty list",
+        "",
+        "If you added no [^N] markers at all, still write "
+        '"FOOTNOTES_JSON: []" as the last line -- do not omit it.',
+    ])
 
 
 class ChatToolbox:
@@ -106,13 +163,26 @@ class ChatToolbox:
             except OSError:
                 excerpt = ""
             items.append({"source_file": h.source_file, "score": h.score, "text": excerpt})
+        # Wrapped under the vault slug (not the raw source_file path) --
+        # this is exactly the identifier a footnote's `sources` list
+        # expects (ADR-017), so the model can copy it verbatim rather than
+        # having to derive a slug from a path itself.
         wrapped = "\n\n".join(
-            wrap_untrusted(i["source_file"], i["text"]) for i in items if i["text"]
+            wrap_untrusted(Path(i["source_file"]).stem, i["text"]) for i in items if i["text"]
         )
         return ToolResult(text=wrapped, raw=items)
 
     def _graph_context(self, query: str, budget: int = 1500) -> ToolResult:
         results = self._kg.query(query, budget=budget)
         text = results[0].text if results else ""
-        wrapped = wrap_untrusted("knowledge-graph", text) if text else ""
+        sources = results[0].sources if results else []
+        if text:
+            # `relational` footnotes need 2+ sources (see FootnoteRelation
+            # docs) -- listing them explicitly, not just relying on the
+            # slugs already mentioned in `text`'s prose lines, gives the
+            # model an unambiguous list to copy into FOOTNOTES_JSON.
+            header = f"Sources: {', '.join(sources)}\n\n" if sources else ""
+            wrapped = wrap_untrusted("knowledge-graph", header + text)
+        else:
+            wrapped = ""
         return ToolResult(text=wrapped, raw=[r.model_dump() for r in results])

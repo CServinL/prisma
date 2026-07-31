@@ -2,7 +2,7 @@
 from pathlib import Path
 from unittest.mock import MagicMock
 
-from prisma.agents.chat_agent import MAX_TOOL_ITERATIONS, ChatAgent
+from prisma.agents.chat_agent import MAX_TOOL_ITERATIONS, ChatAgent, _extract_footnotes
 from prisma.services.chat_tools import ToolResult
 from prisma.storage.models.vault_models import ChatMessage, ChatRole, Note
 
@@ -300,3 +300,117 @@ def test_context_usage_includes_excerpt_notes_in_the_count():
     without_excerpt, _ = agent.context_usage(history=[])
 
     assert with_excerpt > without_excerpt
+
+
+# ── _extract_footnotes() — ADR-017 claim attribution self-report ─────────────
+
+def test_extract_footnotes_parses_a_well_formed_report():
+    reply = (
+        'Transformers use self-attention[^1].\n'
+        'FOOTNOTES_JSON: [{"index": 1, "relation": "citation", "sources": ["attention-paper"]}]'
+    )
+
+    content, footnotes = _extract_footnotes(reply)
+
+    assert content == "Transformers use self-attention[^1]."
+    assert len(footnotes) == 1
+    assert footnotes[0].index == 1
+    assert footnotes[0].relation == "citation"
+    assert footnotes[0].sources == ["attention-paper"]
+
+
+def test_extract_footnotes_strips_the_line_even_when_list_is_empty():
+    reply = "Just chatting, no claims here.\nFOOTNOTES_JSON: []"
+
+    content, footnotes = _extract_footnotes(reply)
+
+    assert content == "Just chatting, no claims here."
+    assert footnotes == []
+
+
+def test_extract_footnotes_returns_unchanged_when_line_missing():
+    # A model that ignores the instruction entirely must not lose its
+    # answer -- this is the single most important fallback in the whole
+    # feature, since footnoting is new prompting complexity layered on an
+    # existing, already-working chat loop.
+    reply = "No footnote line at all here."
+
+    content, footnotes = _extract_footnotes(reply)
+
+    assert content == "No footnote line at all here."
+    assert footnotes == []
+
+
+def test_extract_footnotes_drops_all_on_malformed_json_but_keeps_content():
+    reply = "Some answer.\nFOOTNOTES_JSON: {not valid json"
+
+    content, footnotes = _extract_footnotes(reply)
+
+    assert content == "Some answer."
+    assert footnotes == []
+
+
+def test_extract_footnotes_skips_only_the_malformed_entry():
+    reply = (
+        "Two claims here.\n"
+        'FOOTNOTES_JSON: [{"index": 1, "relation": "citation", "sources": ["a"]}, '
+        '{"index": 2, "relation": "not-a-real-relation", "sources": ["b"]}]'
+    )
+
+    content, footnotes = _extract_footnotes(reply)
+
+    assert content == "Two claims here."
+    assert len(footnotes) == 1
+    assert footnotes[0].index == 1
+
+
+def test_extract_footnotes_uses_the_last_match_if_model_discusses_format_first():
+    reply = (
+        'I will use FOOTNOTES_JSON: [] as my format.\n'
+        "The actual answer[^1].\n"
+        'FOOTNOTES_JSON: [{"index": 1, "relation": "ai-inference", "sources": []}]'
+    )
+
+    content, footnotes = _extract_footnotes(reply)
+
+    assert "The actual answer[^1]." in content
+    assert len(footnotes) == 1
+    assert footnotes[0].relation == "ai-inference"
+
+
+def test_respond_final_answer_populates_footnotes():
+    llm = MagicMock()
+    llm.complete.return_value = (
+        'Kùzu was chosen for its embedded mode[^1].\n'
+        'FOOTNOTES_JSON: [{"index": 1, "relation": "attribution", "sources": ["kg-decision"]}]'
+    )
+    agent = _agent(llm=llm)
+
+    reply = agent.respond(history=[], user_text="why Kùzu?")
+
+    assert reply.content == "Kùzu was chosen for its embedded mode[^1]."
+    assert len(reply.footnotes) == 1
+    assert reply.footnotes[0].sources == ["kg-decision"]
+
+
+def test_respond_final_answer_with_no_footnotes_line_has_empty_footnotes():
+    llm = MagicMock()
+    llm.complete.return_value = "A plain answer with no sourcing."
+    agent = _agent(llm=llm)
+
+    reply = agent.respond(history=[], user_text="hello")
+
+    assert reply.footnotes == []
+
+
+def test_system_prompt_includes_footnote_instructions():
+    llm = MagicMock()
+    llm.complete.return_value = "ok"
+    agent = _agent(llm=llm)
+
+    agent.respond(history=[], user_text="hello")
+
+    sent_messages = llm.complete.call_args[0][0]
+    system_content = sent_messages[0]["content"]
+    assert "FOOTNOTES_JSON" in system_content
+    assert "ai-inference" in system_content

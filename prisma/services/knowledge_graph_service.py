@@ -1476,7 +1476,17 @@ class KnowledgeGraphService:
         if not results:
             return []
         text = "\n".join(f"- {r.source_file} (score={r.score:.1f})" for r in results)
-        return [GraphQueryResult(text=text[: budget * 4])]
+        # Dedup while preserving rank order -- multiple entities from the
+        # same document are common, but a footnote's `sources` list should
+        # name each document once.
+        sources: list[str] = []
+        seen: set[str] = set()
+        for r in results:
+            slug = Path(r.source_file).stem
+            if slug not in seen:
+                seen.add(slug)
+                sources.append(slug)
+        return [GraphQueryResult(text=text[: budget * 4], sources=sources)]
 
     def ollama_deep_search(self, question: str, top_k: int = 10, chroma=None) -> list[DeepSearchCandidate]:
         relevant_nodes = self.ranked_nodes(question, top_k=30)

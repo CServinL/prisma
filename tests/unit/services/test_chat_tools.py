@@ -53,7 +53,9 @@ def test_toolbox_search_vault_returns_wrapped_text_and_raw(vault):
 
     assert result.raw == [{"source_file": "notes/attention.md", "score": 0.9,
                             "text": "Attention mechanisms let models weigh input tokens."}]
-    assert 'path="notes/attention.md"' in result.text
+    # Wrapped under the slug (ADR-017: what a footnote's `sources` expects),
+    # not the raw vault-relative path.
+    assert 'path="attention"' in result.text
     assert "Attention mechanisms" in result.text
 
 
@@ -72,14 +74,28 @@ def test_toolbox_search_vault_skips_unreadable_files(vault):
 def test_toolbox_graph_context_returns_wrapped_text(vault):
     chroma = MagicMock()
     kg = MagicMock()
-    kg.query.return_value = [GraphQueryResult(text="- notes/a.md (score=0.8)")]
+    kg.query.return_value = [GraphQueryResult(text="- notes/a.md (score=0.8)", sources=["a", "b"])]
 
     toolbox = ChatToolbox(chroma, kg, vault)
     result = toolbox.call("GRAPH_CONTEXT", "how do these relate")
 
     assert "notes/a.md" in result.text
     assert 'path="knowledge-graph"' in result.text
-    assert result.raw == [{"text": "- notes/a.md (score=0.8)"}]
+    # ADR-017: sources listed explicitly so the model has an unambiguous
+    # list to copy into FOOTNOTES_JSON, not just slugs buried in prose.
+    assert "Sources: a, b" in result.text
+    assert result.raw == [{"text": "- notes/a.md (score=0.8)", "sources": ["a", "b"]}]
+
+
+def test_toolbox_graph_context_omits_sources_header_when_none(vault):
+    chroma = MagicMock()
+    kg = MagicMock()
+    kg.query.return_value = [GraphQueryResult(text="- notes/a.md (score=0.8)")]
+
+    toolbox = ChatToolbox(chroma, kg, vault)
+    result = toolbox.call("GRAPH_CONTEXT", "how do these relate")
+
+    assert "Sources:" not in result.text
 
 
 def test_toolbox_graph_context_empty_when_no_results(vault):

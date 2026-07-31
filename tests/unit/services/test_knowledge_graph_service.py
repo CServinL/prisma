@@ -1105,3 +1105,36 @@ def test_query_returns_text_summary_of_matching_entities(kg, vault):
 
 def test_query_returns_empty_when_no_matches(kg):
     assert kg.query("nothing indexed matches this") == []
+
+
+def test_query_sources_are_slugs_not_raw_paths(kg, vault):
+    # ADR-017: `sources` must be vault slugs (what a Footnote's `sources`
+    # list expects), not the raw source_file path `text` embeds.
+    f = vault.root / "notes" / "test.md"
+    f.write_text("---\ntype: note\n---\nContent about quantum computing.", encoding="utf-8")
+    result = _extraction(nodes=[{"id": "quantum_computing", "label": "Quantum Computing"}])
+
+    with _patch_create(kg, return_value=result), \
+         patch("prisma.services.resource_lock.acquire", return_value=(True, "local-ollama", "req-1")):
+        kg._extract_file(f, "note")
+
+    results = kg.query("quantum")
+
+    assert results[0].sources == ["test"]
+
+
+def test_query_sources_dedup_multiple_entities_from_same_file(kg, vault):
+    f = vault.root / "notes" / "test.md"
+    f.write_text("---\ntype: note\n---\nQuantum computing and quantum entanglement.", encoding="utf-8")
+    result = _extraction(nodes=[
+        {"id": "quantum_computing", "label": "Quantum Computing"},
+        {"id": "quantum_entanglement", "label": "Quantum Entanglement"},
+    ])
+
+    with _patch_create(kg, return_value=result), \
+         patch("prisma.services.resource_lock.acquire", return_value=(True, "local-ollama", "req-1")):
+        kg._extract_file(f, "note")
+
+    results = kg.query("quantum")
+
+    assert results[0].sources == ["test"]

@@ -212,7 +212,7 @@ def test_query_passes_params_and_returns_results():
     with patch("prisma.services.knowledge_graph_client.requests.get",
                return_value=_mock_response([{"text": "some context"}])) as mock_get:
         result = client.query("neural networks", budget=500)
-    assert [r.model_dump() for r in result] == [{"text": "some context"}]
+    assert [r.model_dump() for r in result] == [{"text": "some context", "sources": []}]
     assert mock_get.call_args.kwargs["params"] == {"q": "neural networks", "budget": 500}
 
 

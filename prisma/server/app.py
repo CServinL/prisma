@@ -83,7 +83,7 @@ _t("sync_orchestrator ok")
 
 _t("importing vault_models")
 from prisma.storage.models.vault_models import (
-    Chat, ChatMessage, ChatRole, NodeType, RenderedNode, ToolCallRecord,
+    Chat, ChatMessage, ChatRole, Footnote, NodeType, RenderedNode, ToolCallRecord,
     VaultTreeNode,
 )
 _t("vault_models ok")
@@ -530,6 +530,7 @@ class ChatResponse(BaseModel):
     chat_slug: str
     reply: str
     tool_calls: list[ToolCallRecord]
+    footnotes: list[Footnote] = []
 
 
 class CreateChatRequest(BaseModel):
@@ -1073,6 +1074,7 @@ def chat(req: ChatRequest):
     _activity.info("action=chat slug=%s tool_calls=%d", chat_node.slug, len(assistant_msg.tool_calls))
     return ChatResponse(
         chat_slug=chat_node.slug, reply=assistant_msg.content, tool_calls=assistant_msg.tool_calls,
+        footnotes=assistant_msg.footnotes,
     )
 
 

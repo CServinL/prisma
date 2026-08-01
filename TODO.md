@@ -1373,34 +1373,41 @@ has tray/background OS-integration via Tauri, which this can build on.
   at-rest is still deferred to a future session (as of 2026-07-24), so a
   locked/encrypted vault's interaction with sync is still unresolved.
 
-## Chat claim attribution / footnotes (2026-07-26, see ADR-017)
+## Chat claim attribution / footnotes (2026-07-26, see ADR-017) — 1-3 done 2026-07-31
 
 Design settled: distinguishing which claims in an assistant turn are traceable to a specific
 vault document vs. the model's own inference — mirroring academic citation practice ("what is
 self-made is not confused with what belongs to others"). Ontology done
 (`docs/ontologia.md` Axiom 16, `docs/concepts/footnote.md`); data model done
 (`FootnoteRelation`, `Footnote`, `ChatMessage.footnotes` in `storage/models/vault_models.py`,
-replacing the unused `sources_cited` field). Rendering convention: inline superscript marker
-in the turn's text (`word¹`), footnote list appended at the end of the turn.
+replacing the unused `sources_cited` field).
 
-**Not yet built — remaining checklist:**
+**Point 5 turned out to be a stale-doc false alarm, not a real blocker**: `docs/ontologia.md`
+said Chat API routes weren't implemented yet, but `POST /chat` (and the rest of `/chats/*`) was
+already live and working by the time this was picked back up — the doc just hadn't been updated
+since ADR-017 was written. Fixed alongside this.
 
-- [ ] `ChatAgent` prompting: get the model to self-segment its own response into per-claim
-  spans and self-report `relation` (`citation` / `attribution` / `relational` / `ai-inference`)
-  and `sources` at generation time. No prompting strategy designed yet — this is the actual
-  hard part; ADR-014's tool-marker convention (`SEARCH_VAULT:`/`GRAPH_CONTEXT:` in
-  `chat_tools.py`) is the closest existing precedent for getting this model to reliably emit a
-  structured side-channel, worth evaluating as a starting point rather than inventing a new
-  mechanism.
-- [ ] Wire `relation = relational` footnotes to actually originate from
-  `ChatToolbox._graph_context`'s results specifically (currently no connection between tool
-  output and footnote generation exists — the tool returns `ToolResult.raw`, but nothing maps
-  that into a `Footnote`).
-- [ ] UI rendering: superscript markers in message content, footnote list at the end of each
-  assistant turn, each entry showing `relation` + linked `Note`/`Source` title (not yet
-  designed — no mockup, no component).
-- [ ] `faithfulness_checked` verification — checking a footnoted claim against what its
-  `sources` actually say. Explicitly deferred as a separate, harder problem in ADR-017; not
-  scoped yet (could be a background job, could be synchronous at generation time — undecided).
-- [ ] Depends on Chat API routes existing at all (`docs/ontologia.md`'s "Not yet implemented"
-  still lists these as unbuilt) — this can't be wired end-to-end until that lands.
+- [x] `ChatAgent` prompting (`services/chat_tools.py::system_prompt_footnote_section`,
+  `agents/chat_agent.py::_extract_footnotes`): reused the existing tool-marker convention
+  (ADR-014) rather than inventing something new — the model writes `[^N]` inline at the point of
+  each claim, then a single trailing `FOOTNOTES_JSON: [...]` line listing each marker's
+  `relation`/`sources`. Only the *last* `FOOTNOTES_JSON:` match is used (in case the model
+  discusses the format itself), and a missing/malformed line degrades to "no footnotes" rather
+  than breaking the turn — self-reports are less reliable than a tool-call marker, so this had
+  to be defensive in a way the tool loop didn't need to be.
+- [x] `relation=relational` wired to `ChatToolbox._graph_context`: `GraphQueryResult` gained a
+  `sources: list[str]` field (`knowledge_graph_service.py::query()` already had the per-result
+  `source_file`s internally, just flattened into prose text and discarded before — now also
+  slugified and kept). `_graph_context`'s tool-result text now prepends an explicit
+  `Sources: slug-a, slug-b` line so the model has an unambiguous list to copy rather than having
+  to parse slugs back out of prose.
+- [x] UI rendering (`ui/src/routes/+page.svelte`): `renderContentSegments()` splits a turn's
+  content on `[^N]` into text/marker segments rendered as plain text / `<sup>` — deliberately
+  NOT `{@html}` on model-generated text, consistent with this codebase already treating tool
+  results as untrusted (`services/injection_defense.py`). A footnote list renders below the
+  turn, each entry showing the `relation` (colored badge) and its `sources` (as buttons that
+  call the existing `openNode()`). No live-LLM-in-browser verification done — `npm run build`
+  and `svelte-check` are clean, but nobody's actually watched a real model produce `[^N]`
+  markers in this UI yet.
+- [ ] `faithfulness_checked` verification — still explicitly deferred as a separate, harder
+  problem (ADR-017's own stance, not scoped here). Not part of this pass.

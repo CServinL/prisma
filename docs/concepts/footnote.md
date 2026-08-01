@@ -55,7 +55,12 @@ linked [Note](note.md)/[Source](source.md)(s).
 
 ## Not yet implemented
 
-The data model (`Footnote`, `FootnoteRelation`) is defined; `ChatAgent` does not yet segment
-its own output into per-claim spans or self-report `relation`/`sources` at generation time.
+Built (2026-07-31): the data model, `ChatAgent` self-segmenting its output into per-claim `[^N]`
+markers and self-reporting `relation`/`sources` via a trailing `FOOTNOTES_JSON:` line,
+`relation=relational` sourcing from `ChatToolbox._graph_context`, and UI rendering.
+
 Automated `faithfulness_checked` verification (checking a footnoted claim against what its
 source(s) actually say) is a further, harder, and separately deferred problem — see ADR-017.
+Also unaddressed: an LLM can mis-self-report (e.g. label something `citation` that isn't one) —
+`faithfulness_checked` is the intended future hook for eventually catching that, not something
+this build guarantees today.

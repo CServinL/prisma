@@ -10,12 +10,22 @@ same spirit as Graphify's old max_retry_depth.
 """
 from __future__ import annotations
 
+import json
 import logging
 from typing import Callable, Literal
 
+from pydantic import ValidationError
+
 from prisma.services.chat_llm import ChatLLM
-from prisma.services.chat_tools import TOOL_CALL_RE, TOOLS, ChatToolbox, system_prompt_tool_section
-from prisma.storage.models.vault_models import ChatMessage, ChatRole, Note, ToolCallRecord
+from prisma.services.chat_tools import (
+    FOOTNOTES_LINE_RE,
+    TOOL_CALL_RE,
+    TOOLS,
+    ChatToolbox,
+    system_prompt_footnote_section,
+    system_prompt_tool_section,
+)
+from prisma.storage.models.vault_models import ChatMessage, ChatRole, Footnote, Note, ToolCallRecord
 
 _log = logging.getLogger("prisma.chat_agent")
 
@@ -50,6 +60,35 @@ _TOOL_NAME_BY_MARKER = {t.marker: t.name for t in TOOLS}
 
 def _estimate_tokens(text: str) -> int:
     return len(text) // 4  # same rough char/4 heuristic used by semchunk elsewhere in this codebase
+
+
+def _extract_footnotes(reply: str) -> tuple[str, list[Footnote]]:
+    """ADR-017: split the model's FOOTNOTES_JSON self-report off the visible
+    reply text. Defensive throughout -- an LLM self-report can be malformed
+    (invalid JSON, an unknown relation value, a non-list) in ways a tool
+    call marker can't be, and a bad self-report must degrade to "no
+    footnotes," never break the turn. Only the *last* match is used, in
+    case the model discusses the format itself earlier in its answer."""
+    matches = list(FOOTNOTES_LINE_RE.finditer(reply))
+    if not matches:
+        return reply.strip(), []
+    last = matches[-1]
+    content = (reply[: last.start()] + reply[last.end():]).strip()
+    try:
+        raw_items = json.loads(last.group(1))
+    except (json.JSONDecodeError, ValueError) as exc:
+        _log.warning("chat footnotes: malformed FOOTNOTES_JSON, dropping: %s", exc)
+        return content, []
+    if not isinstance(raw_items, list):
+        _log.warning("chat footnotes: FOOTNOTES_JSON was not a JSON array, dropping")
+        return content, []
+    footnotes: list[Footnote] = []
+    for item in raw_items:
+        try:
+            footnotes.append(Footnote.model_validate(item))
+        except ValidationError as exc:
+            _log.warning("chat footnotes: skipping malformed entry %r: %s", item, exc)
+    return content, footnotes
 
 
 class ChatAgent:
@@ -140,7 +179,10 @@ class ChatAgent:
                 )
             match = TOOL_CALL_RE.search(reply)
             if not match:
-                return ChatMessage(role=ChatRole.assistant, content=reply.strip(), tool_calls=tool_calls)
+                content, footnotes = _extract_footnotes(reply)
+                return ChatMessage(
+                    role=ChatRole.assistant, content=content, tool_calls=tool_calls, footnotes=footnotes,
+                )
 
             marker, query = match.group(1), match.group(2).strip()
             tool_calls.append(ToolCallRecord(tool=_TOOL_NAME_BY_MARKER[marker], args={"query": query}))
@@ -171,7 +213,7 @@ class ChatAgent:
         return used, self._max_history_tokens
 
     def _full_system_prompt(self, excerpt_notes: list[Note]) -> str:
-        parts = [self._system_prompt, system_prompt_tool_section()]
+        parts = [self._system_prompt, system_prompt_tool_section(), system_prompt_footnote_section()]
         if excerpt_notes:
             parts.append(self._excerpt_context_block(excerpt_notes))
         return "\n\n".join(parts)

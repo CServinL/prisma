@@ -98,6 +98,11 @@ class RankedNode(BaseModel):
 
 class GraphQueryResult(BaseModel):
     text: str
+    # Vault node slugs the answer synthesizes across -- surfaced so chat's
+    # footnote attribution (ADR-017) can label GRAPH_CONTEXT-derived claims
+    # `relation=relational` with the real documents involved, instead of
+    # having no source list for cross-document graph answers at all.
+    sources: list[str] = []
 
 
 class OllamaReadyResponse(BaseModel):

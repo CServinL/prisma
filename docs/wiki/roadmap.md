@@ -8,16 +8,15 @@ active feature work, not "is this usable yet." Core pipeline:
 | Feature | Status |
 |---------|--------|
 | arXiv, Semantic Scholar, OpenLibrary, Google Books search | ✅ Done |
+| PubMed, IEEE Xplore search | ✅ Done |
 | Academic validation + confidence scoring | ✅ Done |
 | LLM relevance assessment (Ollama) | ✅ Done |
 | Duplicate detection | ✅ Done |
 | Literature review report generation | ✅ Done |
 | Research Streams | ✅ Done |
-| Zotero hybrid client (read local / write web) | ✅ Done |
+| Zotero Web API client (Web API only, everywhere — no local Desktop API path) | ✅ Done |
 | Offline write queue | ✅ Done |
-| PubMed search | ❌ Not started |
-| Academia.edu search | ⚠️ Stub only |
-| ResearchGate search | ❌ Not started |
+| Academia.edu, ResearchGate, JSTOR/Web of Science, grey literature | 🚫 Not planned — no reliable API for any of them, see Phase 3 |
 
 ---
 
@@ -126,11 +125,18 @@ Platform matrix:
 | Target | Client |
 |--------|--------|
 | Linux | Tauri desktop (primary) |
-| Windows (WSL2) | Tauri desktop — server runs in WSL2, UI is native Windows |
-| macOS / iOS / iPadOS / Android | Web client — browser points at a Linux/WSL2 host |
+| Windows / macOS | Planned, native Tauri builds once I've got hardware to test on — not started |
+| iOS / iPadOS / Android | Web client — browser points at a Linux host |
 
-- **Server** (`prisma serve`) — Linux only, including WSL2. No macOS or Windows native server planned.
-- **Tauri desktop** — Linux and Windows only. No native Mac/iOS build planned.
+`prisma-desktop` briefly supported WSL2 as a stopgap before native Linux hardware was
+available, then dropped it (2026-07-30) once that stopgap was no longer needed — Linux-only
+for now. That was never a real multi-platform story (WSL2 just runs the same Linux binary
+under Windows), so it isn't a step toward this Phase; genuine native Windows/macOS builds
+are separate, not-yet-started work.
+
+- **Server** (`prisma serve`) — Linux only. No macOS or Windows native server planned.
+- **Tauri desktop** — Linux only today. Native Windows/macOS builds planned once hardware
+  exists to build/test them on — not a port of the old WSL2-aware code.
 - **Web client (PWA)** — ✅ Done. SvelteKit static build with `@vite-pwa/sveltekit` (manifest + Workbox service worker), served alongside `prisma serve` at `/app`. On Android, iOS, and macOS, users install it from the browser ("Add to home screen") and it runs as a standalone app — own icon, no browser chrome, appears in the app launcher. No store, no fee, no review. Remote access (outside the home LAN) is covered by the zone-based deployment model — see [deployment-models.md](deployment-models.md) and ADR-011 — rather than Tailscale specifically.
 - Shared research projects and multi-user Zotero group support
 - Distributed processing for large-scale reviews

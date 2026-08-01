@@ -221,19 +221,18 @@ see ADR-012. Clients differ only in how they wrap the page.
 | Platform | Client | How UI is delivered |
 |----------|--------|---------------------|
 | Linux | Tauri shell (`prisma-desktop`) | Native window → `http://127.0.0.1:8766/app` |
-| Windows / WSL2 | Tauri shell (`prisma-desktop`) | Native window → `http://127.0.0.1:8766/app` |
 | macOS / iOS / Android | Browser PWA | `http://<host>:8766/app` → install via browser |
 
-> **Follow-up needed:** `prisma-desktop`'s window URL is currently configured
-> against the old single-port assumption (`:8765/app`). It needs updating to
-> point at the Web process's port (`8766`) now that UI serving and the API
-> are separate processes. Out of scope for this (Python-side) change —
-> tracked as a `prisma-desktop` repo follow-up.
+> WSL2 support existed in `prisma-desktop` as a stopgap before native Linux
+> hardware was available, and was dropped 2026-07-30 — Linux-only for now.
+> Native Windows/macOS Tauri builds are planned once I've got hardware to test on,
+> but aren't a port of the old WSL2-aware code (see `prisma-desktop`'s own
+> `.claude/CLAUDE.md` and its CI workflow comments for the current state).
 
 **Tauri shell** (`prisma-desktop/src-tauri/`) is thin — Rust handles only:
 - Window lifecycle (create, resize, minimize, maximize, close, drag)
 - Settings persistence (`~/.config/prisma-desktop/settings.json`) — server URL, zoom scale, window state
-- WSL2-aware URL opener (`open_url` command)
+- URL opener (`open_url` command) — `xdg-open`, Linux-only for now
 
 The SvelteKit app detects its runtime via `"__TAURI_INTERNALS__" in window`:
 - **Tauri**: uses `@tauri-apps/api` for window commands and settings; `apiBase` from `localStorage` (defaults to the API port, `8765`)

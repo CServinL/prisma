@@ -31,7 +31,7 @@
 - **🔗 Zotero Bookmarking**: Saves discovered papers into your existing Zotero library via its Web API — Zotero stays the library, Prisma adds to it
 - **🌊 Research Streams**: Persistent topic monitoring — scheduled searches automatically discover, deduplicate, and file new papers into a dedicated Zotero collection per stream
 - **⭐ Quality-Rated Sources**: Each search source is rated 1-5 stars by API reliability/structure, prioritizing curated academic APIs over scraping-dependent ones
-- **🛡️ Academic Validation**: Filters out non-academic content (blogs, ads, spam) via keyword/structure heuristics plus LLM confidence scoring
+- **🛡️ Academic Validation**: Filters out non-academic content (blogs, ads, spam) via keyword/structure heuristics plus a weighted confidence score
 - **📖 Abstract-Level Relevance**: LLM assessment runs on title + abstract, not full PDF text — importing a paper into your vault separately converts its PDF to readable Markdown
 - **🤖 AI-Powered Curation**: Local or cloud-capable LLMs (Ollama, OpenRouter, llama.cpp) assess relevance, score confidence, and summarize what's found
 - **🏷️ Smart Tagging (Streams only)**: Papers saved via a Research Stream are auto-tagged with confidence score, source, topic, and stream ID
@@ -140,7 +140,7 @@ Changes to source files are immediately active — no reinstall needed.
 ## Technology Stack
 
 - **🐍 Python 3.12+** — pip/setuptools, no Poetry
-- **🤖 Ollama** for local LLM backend (analysis, chat, and knowledge-graph extraction)
+- **🤖 Ollama / llama.cpp** for local LLM backend (analysis, chat, knowledge-graph extraction, and ChromaDB embeddings) — interchangeable providers, configurable per-service; OpenRouter for cloud-capable chat
 - **🔗 Zotero** for reference management — the bookmark layer; the vault is the second brain
 - **⌨️ Click** for the command-line interface
 - **🗂️ Flat Markdown vault** — no database; notes, sources, chats, and streams are plain `.md`/`.yaml` files

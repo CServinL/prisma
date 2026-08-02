@@ -73,7 +73,7 @@ The Report Agent synthesizes all summaries into a Markdown report with:
 - Individual paper summaries
 - Thematic analysis: trends, conflicts, research gaps
 - Research recommendations
-- Optional author analysis (key researchers, affiliation)
+- Optional author analysis (research directory: paper count, specialization keywords, key publications per author — no institutional affiliation, no search source captures it)
 - Pipeline metadata (timing, source breakdown, paper counts)
 
 Reports are saved to the configured output directory.

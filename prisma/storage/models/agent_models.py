@@ -169,6 +169,39 @@ class AnalysisResult(BaseModel):
         return v
 
 
+class AuthorPublication(BaseModel):
+    """One paper by an author, as shown in their research-directory entry."""
+    model_config = ConfigDict(populate_by_name=True)
+
+    title: str
+    url: str
+
+
+class AuthorProfile(BaseModel):
+    """Per-author profile built from a corpus's PaperSummary list.
+
+    Deliberately has no institutional-affiliation field -- no search source
+    Prisma indexes captures author affiliation anywhere in the pipeline
+    (PaperMetadata/PaperSummary don't have it either), and guessing it from
+    an LLM reading the abstract would risk fabricating exactly the kind of
+    detail an academic tool shouldn't invent. Left out rather than faked."""
+    model_config = ConfigDict(populate_by_name=True)
+
+    name: str
+    paper_count: int = Field(..., ge=0)
+    specializations: List[str] = Field(default_factory=list, description="Frequent keywords across this author's titles/key findings in the corpus, most common first")
+    key_publications: List[AuthorPublication] = Field(default_factory=list, description="This author's papers in the corpus, highest analysis_confidence first, capped")
+
+
+class AuthorAnalysis(BaseModel):
+    """Corpus-wide author analysis -- ReportAgent.analyze_authors()'s result,
+    consumed by create_research_directory()."""
+    model_config = ConfigDict(populate_by_name=True)
+
+    authors: List[AuthorProfile] = Field(default_factory=list, description="Sorted by paper_count descending")
+    total_unique_authors: int = Field(..., ge=0)
+
+
 class ReportMetadata(BaseModel):
     """Report generation metadata"""
     model_config = ConfigDict(populate_by_name=True)

@@ -97,19 +97,19 @@ integration path exists.
 
 ## Phase 5 — Analytics & Visualization
 
-- **⚠️ Author Analysis / Research Directory — advertised, not implemented.** The
-  README lists this under Key Features ("Identifies key researchers and
-  creates academic contact directory"), but `ReportAgent.analyze_authors()`,
-  `.create_research_directory()`, and `.map_collaboration_networks()` in
-  `prisma/agents/report_agent.py` are all literal `pass` stubs — nothing has
-  ever been implemented. This has been silently dropped across multiple past
-  sessions; calling it out explicitly here so it isn't missed again. Scope:
-  extract unique authors from a corpus of paper summaries, build per-author
-  profiles (institutional affiliation, specializations, key publications),
-  and render a Markdown "research directory" — the co-authorship/network
-  and trajectory analysis below can come later as a separate increment. Not
-  meant to be a standalone report — it's an enrichment step feeding the
-  stream newsletter in Phase 4.
+- **✅ Author Analysis / Research Directory — done 2026-08-02.**
+  `ReportAgent.analyze_authors()`/`.create_research_directory()` build a
+  per-author profile (paper count, specialization keywords from titles/key
+  findings, key publications ranked by `analysis_confidence`) and render it
+  as a Markdown section, opt-in via `POST /review`'s `include_authors`
+  flag. Scope cut deliberately from the original sketch: **no institutional
+  affiliation** — no search source Prisma indexes captures it anywhere in
+  the pipeline (`PaperMetadata`/`PaperSummary` both lack it), and guessing
+  it from an LLM reading the abstract risked fabricating exactly the kind
+  of detail an academic tool shouldn't invent. `map_collaboration_networks`
+  (co-authorship/network analysis) stays unbuilt, a separate increment —
+  see below. Not meant to be a standalone report — it's an enrichment step
+  that could feed the stream newsletter in Phase 4, once that exists.
 - **ConnectedPapers integration** — auto-generate links using DOI/arXiv ID/Semantic Scholar URL for citation network visualization. ConnectedPapers has no public API, but direct URL construction works
 - Citation network analysis
 - Author intelligence (extended): collaboration networks, research trajectories, institution mapping — builds on the author-analysis MVP above

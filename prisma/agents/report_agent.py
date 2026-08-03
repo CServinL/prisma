@@ -2,10 +2,41 @@
 Report Agent - Generates final literature review reports.
 """
 
+from collections import Counter
 from typing import List, Optional
 from datetime import datetime
 
-from ..storage.models.agent_models import LiteratureReviewReport, ReportMetadata, AnalysisResult
+from ..storage.models.agent_models import (
+    LiteratureReviewReport, ReportMetadata, AnalysisResult,
+    AuthorAnalysis, AuthorProfile, AuthorPublication, PaperSummary,
+)
+
+_MAX_KEY_PUBLICATIONS_PER_AUTHOR = 5
+_MAX_SPECIALIZATIONS_PER_AUTHOR = 5
+
+
+def _keywords(text: str, limit: int) -> list[str]:
+    """Most frequent content words in `text`, original (non-stemmed) form,
+    most common first. Same NLTK stopword/tokenize approach as
+    `utils.text.significant_words`, but keeping the real word instead of a
+    Porter stem -- these are shown directly to a human in the research
+    directory, and a stem like "quantiz" reads worse than "quantization"."""
+    try:
+        from nltk.tokenize import word_tokenize
+        from nltk.corpus import stopwords as _sw
+        tokens = word_tokenize(text.lower())
+        stop = set(_sw.words("english"))
+    except LookupError:
+        import nltk as _nltk
+        _nltk.download("punkt_tab", quiet=True)
+        _nltk.download("stopwords", quiet=True)
+        from nltk.tokenize import word_tokenize
+        from nltk.corpus import stopwords as _sw
+        tokens = word_tokenize(text.lower())
+        stop = set(_sw.words("english"))
+
+    words = [t for t in tokens if t.isalpha() and t not in stop and len(t) > 2]
+    return [word for word, _count in Counter(words).most_common(limit)]
 
 
 class ReportAgent:
@@ -38,7 +69,14 @@ class ReportAgent:
         
         # Generate main content
         content = self._generate_content(analysis_result, config)
-        
+
+        # Optional author analysis / research directory (docs/wiki/features.md's
+        # "Optional author analysis" report section) -- off by default, since
+        # not every review wants a per-author breakdown appended.
+        if config.get('include_authors'):
+            author_analysis = self.analyze_authors(analysis_result.summaries)
+            content += "\n" + self.create_research_directory(author_analysis)
+
         # Generate bibliography
         bibliography = self._generate_bibliography(analysis_result.summaries)
         
@@ -140,42 +178,67 @@ This review analyzed **{analysis_result.total_papers} papers** on the topic of "
         # TODO: Future: Include ConnectedPapers integration links
         pass
     
-    def analyze_authors(self, summaries: list) -> dict:
-        """
-        Analyze authors across the literature corpus for research directory.
-        
-        Args:
-            summaries: List of paper summaries with author information
-            
-        Returns:
-            Author analysis including profiles, trajectories, and networks
-        """
-        # TODO: Extract unique authors from all papers
-        # TODO: Build comprehensive author profiles
-        # TODO: Track research evolution over time
-        # TODO: Identify collaboration patterns
-        # TODO: Map institutional affiliations
-        # TODO: Classify expertise areas
-        pass
-    
-    def create_research_directory(self, author_analysis: dict) -> str:
-        """
-        Create academic 'telephone guide' of researchers in the field.
-        
-        Args:
-            author_analysis: Results from analyze_authors()
-            
-        Returns:
-            Formatted markdown directory of researchers
-        """
-        # TODO: Generate researcher profiles with:
-        # - Contact information (institutional emails)
-        # - Research specializations and keywords
-        # - Key publications and contributions
-        # - Current institutional affiliation
-        # - Research trajectory and evolution
-        # - Collaboration patterns
-        pass
+    def analyze_authors(self, summaries: List[PaperSummary]) -> AuthorAnalysis:
+        """Build a per-author profile for every author appearing in this
+        corpus of paper summaries: paper count, specialization keywords
+        (frequent words across their titles/key findings), and key
+        publications (highest analysis_confidence first, capped).
+
+        No institutional affiliation, research trajectory, or collaboration
+        mapping -- see AuthorProfile's docstring for why affiliation is
+        left out; trajectory/collaboration are map_collaboration_networks's
+        job (unbuilt, a separate increment per docs/wiki/roadmap.md)."""
+        by_author: dict[str, list[PaperSummary]] = {}
+        for paper in summaries:
+            for author in paper.authors:
+                by_author.setdefault(author, []).append(paper)
+
+        profiles = []
+        for name, papers in by_author.items():
+            corpus_text = " ".join(
+                p.title + " " + " ".join(p.key_findings) for p in papers
+            )
+            ranked_papers = sorted(
+                papers, key=lambda p: p.analysis_confidence or 0.0, reverse=True,
+            )
+            profiles.append(AuthorProfile(
+                name=name,
+                paper_count=len(papers),
+                specializations=_keywords(corpus_text, _MAX_SPECIALIZATIONS_PER_AUTHOR),
+                key_publications=[
+                    AuthorPublication(title=p.title, url=p.url)
+                    for p in ranked_papers[:_MAX_KEY_PUBLICATIONS_PER_AUTHOR]
+                ],
+            ))
+        profiles.sort(key=lambda p: p.paper_count, reverse=True)
+        return AuthorAnalysis(authors=profiles, total_unique_authors=len(profiles))
+
+    def create_research_directory(self, author_analysis: AuthorAnalysis) -> str:
+        """Render `analyze_authors()`'s result as a Markdown directory --
+        one section per author, most prolific (in this corpus) first."""
+        lines = [
+            "## Research Directory",
+            "",
+            f"{author_analysis.total_unique_authors} unique author"
+            f"{'s' if author_analysis.total_unique_authors != 1 else ''} "
+            "in this corpus.",
+            "",
+            "*Institutional affiliation isn't shown -- no search source Prisma "
+            "indexes captures it, and guessing from an abstract risks "
+            "fabricating a detail that matters for an academic tool.*",
+            "",
+        ]
+        for profile in author_analysis.authors:
+            lines.append(f"### {profile.name}")
+            lines.append(f"**Papers in this corpus:** {profile.paper_count}")
+            if profile.specializations:
+                lines.append(f"**Specializations:** {', '.join(profile.specializations)}")
+            if profile.key_publications:
+                lines.append("**Key publications:**")
+                for pub in profile.key_publications:
+                    lines.append(f"- [{pub.title}]({pub.url})")
+            lines.append("")
+        return "\n".join(lines)
     
     def map_collaboration_networks(self, summaries: list) -> dict:
         """

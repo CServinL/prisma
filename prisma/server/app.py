@@ -511,6 +511,7 @@ class ReviewRequest(BaseModel):
     sources: Optional[list[str]] = None
     limit: Optional[int] = None
     zotero_only: bool = False
+    include_authors: bool = False  # appends a per-author research-directory section
 
 
 class RenderRequest(BaseModel):
@@ -568,7 +569,7 @@ def _run_review(job_id: str, req: ReviewRequest) -> None:
             "limit": req.limit or search_cfg.default_limit,
             "output_file": f"{output_cfg.directory}/literature_review_{topic_safe}.md",
             "stream_name": None,
-            "include_authors": False,
+            "include_authors": req.include_authors,
             "zotero_collections": None,
             "zotero_recent_years": None,
         }

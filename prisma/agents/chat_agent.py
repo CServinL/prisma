@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Callable, Literal
 
 from pydantic import ValidationError
@@ -62,6 +63,26 @@ def _estimate_tokens(text: str) -> int:
     return len(text) // 4  # same rough char/4 heuristic used by semchunk elsewhere in this codebase
 
 
+_FOOTNOTE_MARKER_RE = re.compile(r"\[\^(\d+)\]")
+
+
+def _extract_claim_texts(content: str) -> dict[int, str]:
+    """Best-effort span extraction: the sentence immediately preceding each
+    [^N] marker in the model's rendered reply, keyed by N. Deliberately NOT
+    part of the model's FOOTNOTES_JSON self-report (ADR-017 keeps that
+    self-report minimal/less error-prone) -- this is derived deterministically
+    from text that's already there, used as faithfulness_checked's input
+    (ChatAgent._verify_footnote)."""
+    claims: dict[int, str] = {}
+    cursor = 0
+    for m in _FOOTNOTE_MARKER_RE.finditer(content):
+        preceding = content[cursor:m.start()].strip()
+        sentences = re.split(r"(?<=[.!?])\s+", preceding)
+        claims[int(m.group(1))] = (sentences[-1] if sentences else preceding).strip()
+        cursor = m.end()
+    return claims
+
+
 def _extract_footnotes(reply: str) -> tuple[str, list[Footnote]]:
     """ADR-017: split the model's FOOTNOTES_JSON self-report off the visible
     reply text. Defensive throughout -- an LLM self-report can be malformed
@@ -82,13 +103,49 @@ def _extract_footnotes(reply: str) -> tuple[str, list[Footnote]]:
     if not isinstance(raw_items, list):
         _log.warning("chat footnotes: FOOTNOTES_JSON was not a JSON array, dropping")
         return content, []
+    claim_texts = _extract_claim_texts(content)
     footnotes: list[Footnote] = []
     for item in raw_items:
         try:
-            footnotes.append(Footnote.model_validate(item))
+            fn = Footnote.model_validate(item)
         except ValidationError as exc:
             _log.warning("chat footnotes: skipping malformed entry %r: %s", item, exc)
+            continue
+        if fn.claim_text is None and fn.index in claim_texts:
+            fn = fn.model_copy(update={"claim_text": claim_texts[fn.index]})
+        footnotes.append(fn)
     return content, footnotes
+
+
+# ADR-017's faithfulness_checked hook: is a sourced footnote's claim_text
+# actually supported by the vault content it cites? Same "cheap prefilter,
+# LLM call only when it matters" spirit as services/dedup.py's level 4→5
+# cascade, just without a cheap prefilter here -- there's no NLTK-stem-style
+# shortcut for entailment, so every sourced footnote gets the LLM call.
+_FAITHFULNESS_SOURCE_CHARS = 3000
+
+_FAITHFULNESS_SYSTEM_PROMPT = (
+    "You are a fact-checker. You will be given a CLAIM and one or more SOURCE "
+    "excerpts. Reply with exactly one word: YES if the claim is accurately "
+    "supported by the source(s), NO if it is unsupported, contradicted, or "
+    "not addressed by the source(s) at all."
+)
+
+
+def _build_faithfulness_prompt(claim_text: str, source_texts: list[str]) -> tuple[str, str]:
+    joined = "\n\n---\n\n".join(t[:_FAITHFULNESS_SOURCE_CHARS] for t in source_texts)
+    return _FAITHFULNESS_SYSTEM_PROMPT, f"CLAIM:\n{claim_text}\n\nSOURCE(S):\n{joined}"
+
+
+def _parse_faithfulness_verdict(reply: str | None) -> bool | None:
+    if reply is None:
+        return None
+    verdict = reply.strip().upper()
+    if verdict.startswith("YES"):
+        return True
+    if verdict.startswith("NO"):
+        return False
+    return None  # unparseable -- don't guess, leave faithfulness_checked at None
 
 
 class ChatAgent:
@@ -147,16 +204,33 @@ class ChatAgent:
         raw_tokens = _estimate_tokens(pinned_raw_text)
         return "verbatim" if raw_tokens <= self.context_window * VERBATIM_MODE_MAX_RATIO else "compressed"
 
-    def summarize(self, system_prompt: str, content: str) -> str | None:
-        """One-shot completion, bypassing the tool loop entirely — used for
-        Excerpt summary regeneration (ADR-015), not a conversational turn.
-        Returns None on the same conditions `complete()` does (lease denied,
-        backend unreachable) — caller decides the fallback text."""
+    def complete_once(self, system_prompt: str, content: str) -> str | None:
+        """One-shot completion, bypassing the tool loop entirely -- shared by
+        Excerpt summary regeneration (ADR-015) and faithfulness_checked
+        verification (ADR-017, `_verify_footnote` below), neither of which
+        is a conversational turn. Returns None on the same conditions
+        `complete()` does (lease denied, backend unreachable) — caller
+        decides the fallback."""
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": content},
         ]
         return self._llm.complete(messages)
+
+    def _verify_footnote(self, footnote: Footnote) -> Footnote:
+        """ADR-017's faithfulness_checked hook: does claim_text actually say
+        what the cited source(s) say? Left at None (not False) when there's
+        nothing to check against -- an ai-inference footnote has no source
+        by design, and a missing claim_text or unresolvable source slug is a
+        "couldn't check," not a "checked and failed.\""""
+        if not footnote.sources or not footnote.claim_text:
+            return footnote
+        source_texts = [t for t in (self._toolbox.get_node_text(s) for s in footnote.sources) if t]
+        if not source_texts:
+            return footnote
+        system_prompt, content = _build_faithfulness_prompt(footnote.claim_text, source_texts)
+        verdict = _parse_faithfulness_verdict(self.complete_once(system_prompt, content))
+        return footnote.model_copy(update={"faithfulness_checked": verdict})
 
     def respond(
         self, history: list[ChatMessage], user_text: str, excerpt_notes: list[Note] | None = None,
@@ -180,6 +254,7 @@ class ChatAgent:
             match = TOOL_CALL_RE.search(reply)
             if not match:
                 content, footnotes = _extract_footnotes(reply)
+                footnotes = [self._verify_footnote(fn) for fn in footnotes]
                 return ChatMessage(
                     role=ChatRole.assistant, content=content, tool_calls=tool_calls, footnotes=footnotes,
                 )

@@ -174,7 +174,7 @@ Concepts that belong to the domain and are defined here, but whose code support 
 
 - **SmartTag** — defined in ontology; not yet applied during stream runs or import.
 - **PaperSummary per stream item** — produced during `prisma review`; not yet generated per-item during stream runs.
-- **Footnote / claim attribution** — data model defined (`Footnote`, `FootnoteRelation`), Axiom 16 and ADR-017 written; `ChatAgent` self-segmentation, `ChatToolbox._graph_context` wiring, and UI rendering are built (2026-07-31, see ADR-017). `faithfulness_checked` verification is still unbuilt, deliberately deferred as a separate problem.
+- **Footnote / claim attribution** — data model defined (`Footnote`, `FootnoteRelation`), Axiom 16 and ADR-017 written; `ChatAgent` self-segmentation, `ChatToolbox._graph_context` wiring, UI rendering, and automated `faithfulness_checked` verification are all built (2026-07-31 / 2026-08-03, see ADR-017).
 - **ChromaDB / semantic search** — integrated (ADR-009); see `services/chroma_service.py`, wired into `/search/deep`.
 - **Async rewrite** — `PrismaCoordinator` and agents are synchronous; `ThreadPoolExecutor` offloads blocking I/O. Full async rewrite deferred.
 - **Encryption at rest** — vault files are plaintext. `fscrypt` / `gocryptfs` / `age` deferred.

@@ -1389,7 +1389,7 @@ has tray/background OS-integration via Tauri, which this can build on.
   at-rest is still deferred to a future session (as of 2026-07-24), so a
   locked/encrypted vault's interaction with sync is still unresolved.
 
-## Chat claim attribution / footnotes (2026-07-26, see ADR-017) — 1-3 done 2026-07-31
+## Chat claim attribution / footnotes (2026-07-26, see ADR-017) — done (1-3: 2026-07-31, faithfulness_checked: 2026-08-03)
 
 Design settled: distinguishing which claims in an assistant turn are traceable to a specific
 vault document vs. the model's own inference — mirroring academic citation practice ("what is
@@ -1425,5 +1425,14 @@ since ADR-017 was written. Fixed alongside this.
   call the existing `openNode()`). No live-LLM-in-browser verification done — `npm run build`
   and `svelte-check` are clean, but nobody's actually watched a real model produce `[^N]`
   markers in this UI yet.
-- [ ] `faithfulness_checked` verification — still explicitly deferred as a separate, harder
-  problem (ADR-017's own stance, not scoped here). Not part of this pass.
+- [x] `faithfulness_checked` verification (done 2026-08-03) — automatic every turn (user's
+  choice over an on-demand "Verify" button, accepting the extra LLM call per sourced footnote on
+  the shared compute pool). `claim_text` extracted deterministically from the rendered reply
+  (`ChatAgent._extract_claim_texts`, not model self-reported), then checked against its cited
+  source(s) via a one-shot LLM-judge call (`ChatAgent._verify_footnote`/`complete_once`, the
+  latter renamed from `summarize` now that it serves two callers). New
+  `ChatToolbox.get_node_text(slug)` resolves a source slug to text (Note/Source body, or a
+  Chat's joined transcript). `None` (not `False`) whenever there's nothing to check —
+  `ai-inference`, missing `claim_text`, unresolvable slug, or verifier-unreachable all count as
+  "not checked." UI: a ✓ verified / ⚠ unsupported badge next to each footnote's relation badge,
+  shown only when a check actually ran. See ADR-017's implementation notes for the full design.

@@ -114,3 +114,41 @@ def test_toolbox_call_unknown_marker_raises(vault):
     toolbox = ChatToolbox(MagicMock(), MagicMock(), vault)
     with pytest.raises(ValueError, match="unknown tool marker"):
         toolbox.call("NOT_A_TOOL", "query")
+
+
+# ── get_node_text() — ADR-017 faithfulness_checked's source-text resolver ────
+
+def test_get_node_text_returns_note_body(vault):
+    note = vault.create_note("Attention", body="Attention mechanisms let models weigh tokens.")
+    toolbox = ChatToolbox(MagicMock(), MagicMock(), vault)
+
+    assert toolbox.get_node_text(note.slug) == "Attention mechanisms let models weigh tokens."
+
+
+def test_get_node_text_joins_chat_messages(vault):
+    from prisma.storage.models.vault_models import ChatMessage, ChatRole
+
+    chat = vault.create_chat(title="Kùzu decision")
+    vault.save_chat(chat.slug, [
+        ChatMessage(role=ChatRole.user, content="Why Kùzu over Neo4j?"),
+        ChatMessage(role=ChatRole.assistant, content="Kùzu is embedded, no JVM needed."),
+    ])
+    toolbox = ChatToolbox(MagicMock(), MagicMock(), vault)
+
+    text = toolbox.get_node_text(chat.slug)
+
+    assert "Why Kùzu over Neo4j?" in text
+    assert "Kùzu is embedded, no JVM needed." in text
+
+
+def test_get_node_text_returns_none_for_missing_slug(vault):
+    toolbox = ChatToolbox(MagicMock(), MagicMock(), vault)
+
+    assert toolbox.get_node_text("does-not-exist") is None
+
+
+def test_get_node_text_returns_none_for_empty_body(vault):
+    note = vault.create_note("Empty", body="")
+    toolbox = ChatToolbox(MagicMock(), MagicMock(), vault)
+
+    assert toolbox.get_node_text(note.slug) is None

@@ -1888,6 +1888,14 @@
                       {#each msg.footnotes as fn}
                         <li id="chat-turn-{i}-footnote-{fn.index}">
                           <span class="footnote-relation footnote-relation-{fn.relation}">{FOOTNOTE_RELATION_LABEL[fn.relation]}</span>
+                          {#if fn.faithfulness_checked !== null}
+                            <span
+                              class="footnote-faithfulness"
+                              class:faithful={fn.faithfulness_checked}
+                              class:unfaithful={!fn.faithfulness_checked}
+                              title={fn.faithfulness_checked ? "Automated check: claim is supported by the cited source(s)" : "Automated check: claim does NOT appear to be supported by the cited source(s)"}
+                            >{fn.faithfulness_checked ? "✓ verified" : "⚠ unsupported"}</span>
+                          {/if}
                           {#if fn.sources.length}
                             {#each fn.sources as slug, si}{#if si > 0}, {/if}<button class="footnote-source-link" onclick={() => openNode(slug)}>{slug}</button>{/each}
                           {/if}
@@ -3825,6 +3833,12 @@
     background: rgba(148, 163, 184, 0.15);
     color: #94a3b8;
   }
+  .footnote-faithfulness {
+    margin-right: 6px;
+    font-size: 10px;
+  }
+  .footnote-faithfulness.faithful { color: #4ade80; }
+  .footnote-faithfulness.unfaithful { color: #f87171; }
   .footnote-source-link {
     background: none;
     border: none;

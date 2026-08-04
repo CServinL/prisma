@@ -136,17 +136,33 @@ design, not just a prompt-phrasing caveat:
       vault file) *and*, once the graph store exists, any nodes/edges
       extracted from that chat.
 
-### Deferred: user-fact extraction from chat (not now — noted for later)
+### User preferences for chat (done 2026-08-03 — manual, CLAUDE.md-style)
 
-Gemini-style pattern: extract small, durable *user-stated facts* from chat
-(e.g. "lives in Aguascalientes," "interested in starting a carwash
-business") into their own curated memory, separate from the raw transcript.
-This is a different case from the self-citation risk above — safe
-specifically because the user is the authoritative source for facts about
-*themselves*, unlike citing the model's own past inference as if it were
-external fact. Likely its own trust tier (arguably higher than "chat" for
-self-facts specifically, since the user is ground truth here) — design when
-actually picked up, not now.
+- [x] A user-editable file the chat assistant always reads — standing
+      preferences and instructions ("always answer in Spanish," tone,
+      things to always/never do), not one-off requests. **Turned out to
+      already half-exist**: `chat_prompts.py`'s `~/.config/prisma/chat_system_prompt.md`
+      was already the ChatAgent's system prompt source, just undiscoverable
+      (no docs, no UI — editing meant knowing the dotfile existed and
+      curling `POST /reload/chat` by hand). Closed the gap: `GET`/`PUT
+      /chat/system-prompt` (`save_system_prompt()` + PUT triggers the
+      existing reload) and a "Chat instructions" panel in the Settings
+      page (`ui/src/routes/+page.svelte`) — a textarea, Save button,
+      applies immediately, no restart.
+- [x] Default prompt now says explicitly that retrieval covers past chat
+      transcripts too, not just notes/sources — true today (`search_vault`'s
+      ChromaDB query has no folder-type filter yet, see "Chat trust tiers"
+      below), so the model should know it, not just legal/architectural
+      docs.
+
+Deliberately **manual only** — the user picked this over a semi-automatic
+"propose then confirm" flow. A separate, still-unbuilt idea stays out of
+scope here: automatically extracting durable *user-stated facts* from the
+chat transcript itself (Gemini-style — "lives in Aguascalientes," "interested
+in starting a carwash business") into their own curated memory. That's a
+different mechanism (write path is the model, not the user typing into a
+box) and was intentionally not what got built today; pick up separately if
+ever wanted, under a name that doesn't read as chat surveillance.
 
 ## Storage
 

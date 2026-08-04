@@ -108,6 +108,16 @@ All vault operations go through the REST API (`GET /notes`, `PUT /notes/{slug}`,
 
 ---
 
+## Chat
+
+The chat assistant (see `ADR-014-chat-llm-backend-interface.md`) has retrieval access to the whole vault — notes, sources, and **past chat transcripts**, not just the current conversation — via `search_vault` (ChromaDB semantic search) and `graph_context` (knowledge graph traversal), both called on demand as the model needs them. Claims it makes are self-reported with footnotes back to the source vault item (see `docs/concepts/footnote.md` / ADR-017).
+
+### Chat instructions
+
+Settings → **Chat instructions** is a standing, user-edited system prompt — CLAUDE.md-style: preferences and rules that apply to every chat, every turn ("always answer in Spanish," tone, things to always/never do), not one-off requests (those belong in the chat itself). Manual only — the assistant never writes to it. Backed by `GET`/`PUT /chat/system-prompt`, which persists to `~/.config/prisma/chat_system_prompt.md` and applies immediately (no restart).
+
+---
+
 ## Search
 
 ### Regular Search

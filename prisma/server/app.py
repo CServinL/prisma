@@ -91,7 +91,7 @@ _t("vault_models ok")
 _t("importing chat")
 from prisma.agents.chat_agent import ChatAgent
 from prisma.services.chat_llm import ChatLLM
-from prisma.services.chat_prompts import load_excerpt_summary_prompt, load_system_prompt
+from prisma.services.chat_prompts import load_excerpt_summary_prompt, load_system_prompt, save_system_prompt
 from prisma.services.chat_tools import ChatToolbox
 _t("chat ok")
 
@@ -688,6 +688,29 @@ def reload_chat():
     with no prior way to pick up a change short of a full process restart."""
     _reload_chat()
     return {"status": "reloaded"}
+
+
+class ChatSystemPromptResponse(BaseModel):
+    content: str
+
+
+class UpdateChatSystemPromptRequest(BaseModel):
+    content: str
+
+
+@app.get("/chat/system-prompt", response_model=ChatSystemPromptResponse)
+def get_chat_system_prompt():
+    """Settings page's "Chat instructions" panel — same file `chat_prompts.py`
+    materializes at ~/.config/prisma/chat_system_prompt.md and ChatAgent is
+    built from; this just makes it readable/editable without shelling in."""
+    return {"content": load_system_prompt()}
+
+
+@app.put("/chat/system-prompt", response_model=ChatSystemPromptResponse)
+def update_chat_system_prompt(req: UpdateChatSystemPromptRequest):
+    save_system_prompt(req.content)
+    _reload_chat()  # so the running ChatAgent picks up the edit immediately
+    return {"content": load_system_prompt()}
 
 
 @app.post("/supervisor/restart/{name}")

@@ -12,10 +12,13 @@ from pathlib import Path
 DEFAULT_CHAT_SYSTEM_PROMPT = """\
 You are Prisma, a research assistant with access to the user's personal \
 knowledge vault: notes, saved papers, and a knowledge graph of concepts \
-extracted from them. Ground your answers in the user's own material when \
-it's relevant, and say so explicitly when you're answering from general \
-knowledge instead. When you use retrieved content, mention which source \
-file it came from.
+extracted from them, all searchable through a semantic index (ChromaDB) \
+and the knowledge graph. This includes past chat transcripts, not just \
+notes and sources -- you may pull in relevant information from earlier \
+conversations the same way you would from any other vault content. Ground \
+your answers in the user's own material when it's relevant, and say so \
+explicitly when you're answering from general knowledge instead. When you \
+use retrieved content, mention which source file it came from.
 """
 
 # Used by compressed-mode Excerpt regeneration (ADR-015): condenses the
@@ -59,6 +62,16 @@ def load_system_prompt() -> str:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(DEFAULT_CHAT_SYSTEM_PROMPT, encoding="utf-8")
     return DEFAULT_CHAT_SYSTEM_PROMPT.strip()
+
+
+def save_system_prompt(content: str) -> None:
+    """User-facing edit path (Settings page's "Chat instructions" panel) --
+    caller is still responsible for calling POST /reload/chat afterwards so
+    the running ChatAgent picks it up, same as any manual edit of this file
+    always required."""
+    path = _prompt_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content.strip() + "\n", encoding="utf-8")
 
 
 def load_excerpt_summary_prompt() -> str:

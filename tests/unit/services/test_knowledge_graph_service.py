@@ -646,7 +646,7 @@ def test_mark_stale_ignores_stream_paths(kg, vault):
     # from the KG's own file watcher (_VaultChangeHandler never adds it to
     # _pending), so calling mark_stale() for a stream write set "stale" with
     # nothing ever able to clear it -- stuck forever. Confirmed live on
-    # Forge right after the vault-sync engine pushed a stream file.
+    # a test server right after the vault-sync engine pushed a stream file.
     with kg._lock:
         kg._state = "idle"
     kg.mark_stale(vault.root / "streams" / "my-topic.yaml")

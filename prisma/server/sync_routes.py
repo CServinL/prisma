@@ -119,7 +119,7 @@ def build_sync_router(
         # is_relevant_path) -- streams/*.yaml (the one other synced type,
         # see _safe_sync_path) is excluded from the KG's own file watcher,
         # so a bare unconditional mark_stale() here would set "stale" with
-        # nothing ever able to clear it (confirmed live 2026-07-25 on Forge,
+        # nothing ever able to clear it (confirmed live 2026-07-25 on a test server,
         # right after the vault-sync engine pushed a stream file).
         mark_stale_fn(req.path)
         client_id = request.headers.get(_CLIENT_ID_HEADER)

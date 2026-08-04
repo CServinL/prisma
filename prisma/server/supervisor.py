@@ -279,7 +279,7 @@ def _profile_missing_models(
     load via Ollama's native /api/generate, which llama-server/llama-swap
     don't implement. Those pools must have `vram_mb` set explicitly in
     config for every model (no auto-profiling fallback) — see
-    docs/llamacpp-vulkan-forge-vs-anvil-benchmark.md in this repo for real
+    docs/llamacpp-vulkan-home-server-vs-desktop-client-benchmark.md in this repo for real
     measured numbers to use as a starting point.
     """
     saved_profiles = _load_vram_profiles()

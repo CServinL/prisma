@@ -800,7 +800,7 @@ class KnowledgeGraphService:
         # Migration: CREATE TABLE IF NOT EXISTS is a no-op against a Kùzu DB
         # that already has an IndexedFile table from before extracted_by
         # existed (true for any pre-2026-07-24 database, including whatever
-        # ends up on forge) — the column never gets added for those without
+        # ends up on a test server) — the column never gets added for those without
         # this explicit ALTER. Kùzu has no "ADD COLUMN IF NOT EXISTS", so
         # just swallow the one error it raises when the column is already
         # there (a fresh DB created by the statement above already has it).

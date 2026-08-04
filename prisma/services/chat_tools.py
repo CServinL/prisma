@@ -22,6 +22,7 @@ from prisma.services.chroma_service import ChromaIndexer
 from prisma.services.injection_defense import wrap_untrusted
 from prisma.services.knowledge_graph_client import KnowledgeGraphClient
 from prisma.services.vault import VaultService
+from prisma.storage.models.vault_models import Chat
 
 _EXCERPT_CHARS = 800
 
@@ -152,6 +153,22 @@ class ChatToolbox:
         if marker == "GRAPH_CONTEXT":
             return self._graph_context(query)
         raise ValueError(f"unknown tool marker: {marker!r}")
+
+    def get_node_text(self, slug: str) -> str | None:
+        """Resolves a footnote's `sources` slug back to plain text, for
+        ADR-017's faithfulness_checked verification (ChatAgent._verify_footnote).
+        Covers the same node types footnotes/wiki-links can point to --
+        Note/Source's `body`, or a Chat's full message transcript joined.
+        Returns None on a missing/unresolvable slug rather than raising, so
+        one stale or hallucinated slug doesn't break verification for the
+        other footnotes in the same turn."""
+        try:
+            node = self._vault.get_any(slug)
+        except FileNotFoundError:
+            return None
+        if isinstance(node, Chat):
+            return "\n\n".join(m.content for m in node.messages) or None
+        return getattr(node, "body", None) or None
 
     def _search_vault(self, query: str, top_k: int = 5) -> ToolResult:
         hits = self._chroma.query(query, top_k=top_k)

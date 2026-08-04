@@ -26,8 +26,8 @@ linked [Note](note.md)/[Source](source.md)(s).
 | `index` | int | Sequential per message, 1-based — the superscript number shown inline |
 | `relation` | `FootnoteRelation` | What kind of sourcing this claim has — see below |
 | `sources` | list[str] | Vault node slugs (`Note`/`Source`) this claim ties to. Empty only when `relation == ai-inference` |
-| `claim_text` | str \| None | The specific span of `content` this footnote covers (anchor for tooling; not necessarily rendered) |
-| `faithfulness_checked` | bool \| None | Whether an automated/manual check confirmed the claim accurately represents the cited source(s). Only meaningful when `sources` is non-empty — orthogonal to `relation`, not a relation type itself |
+| `claim_text` | str \| None | The specific span of `content` this footnote covers — extracted deterministically (the sentence preceding the `[^N]` marker), not model self-reported. Used as `faithfulness_checked`'s verification input; not separately rendered |
+| `faithfulness_checked` | bool \| None | Whether an automated check confirmed the claim accurately represents the cited source(s): `True`/`False` from an LLM-judge verification call run automatically every turn, `None` when there was nothing to check (`ai-inference`, no `claim_text`, or an unresolvable source slug). Only meaningful when `sources` is non-empty — orthogonal to `relation`, not a relation type itself |
 
 ### FootnoteRelation
 
@@ -53,14 +53,16 @@ linked [Note](note.md)/[Source](source.md)(s).
 > (chat-wide context scope, [Axiom 5](../ontologia.md)) and from faithfulness (accuracy of
 > representation, tracked per-footnote via `faithfulness_checked`, not a `relation` value).
 
-## Not yet implemented
+## Build status
 
 Built (2026-07-31): the data model, `ChatAgent` self-segmenting its output into per-claim `[^N]`
 markers and self-reporting `relation`/`sources` via a trailing `FOOTNOTES_JSON:` line,
 `relation=relational` sourcing from `ChatToolbox._graph_context`, and UI rendering.
 
-Automated `faithfulness_checked` verification (checking a footnoted claim against what its
-source(s) actually say) is a further, harder, and separately deferred problem — see ADR-017.
-Also unaddressed: an LLM can mis-self-report (e.g. label something `citation` that isn't one) —
-`faithfulness_checked` is the intended future hook for eventually catching that, not something
-this build guarantees today.
+Built (2026-08-03): `faithfulness_checked` verification — see ADR-017. `claim_text` is extracted
+deterministically from the rendered reply (not model self-reported), then every sourced footnote
+is checked against its cited source(s) via a one-shot LLM-judge call
+(`ChatAgent._verify_footnote`), run automatically after every turn. This is a heuristic check,
+not a guarantee: an LLM judge can itself be wrong, so a `True` doesn't certify accuracy the way a
+citekey resolving to a real document does — it catches the common, egregious cases (a claim that
+plainly contradicts or isn't addressed by its cited source), not subtle misrepresentation.

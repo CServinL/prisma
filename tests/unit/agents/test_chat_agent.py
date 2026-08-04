@@ -8,9 +8,18 @@ from prisma.storage.models.vault_models import ChatMessage, ChatRole, Note
 
 
 def _agent(llm=None, toolbox=None, max_history_tokens=16000):
+    if toolbox is None:
+        # Unconfigured MagicMock.get_node_text() would return a truthy
+        # MagicMock, not real text or None -- _verify_footnote would then
+        # try to slice/join it and blow up. None means "can't resolve this
+        # source," which _verify_footnote already handles by skipping the
+        # check, so tests that don't care about faithfulness_checked (most
+        # of them) aren't forced to configure this explicitly.
+        toolbox = MagicMock()
+        toolbox.get_node_text.return_value = None
     return ChatAgent(
         llm=llm or MagicMock(),
-        toolbox=toolbox or MagicMock(),
+        toolbox=toolbox,
         max_history_tokens=max_history_tokens,
         system_prompt="You are a test assistant.",
     )
@@ -204,14 +213,15 @@ def test_respond_excerpt_notes_survive_history_truncation():
     assert "x" * 400 not in contents
 
 
-# ── summarize() — Excerpt summary regeneration (ADR-015) ──────────────────────
+# ── complete_once() — one-shot completions (ADR-015 excerpt summary, ─────────
+# ── ADR-017 faithfulness verification), bypassing the tool loop ──────────────
 
-def test_summarize_sends_system_and_user_content_bypassing_tool_loop():
+def test_complete_once_sends_system_and_user_content_bypassing_tool_loop():
     llm = MagicMock()
     llm.complete.return_value = "Condensed summary."
     agent = _agent(llm=llm)
 
-    result = agent.summarize("Summarize these turns.", "user: hi\nassistant: hello")
+    result = agent.complete_once("Summarize these turns.", "user: hi\nassistant: hello")
 
     assert result == "Condensed summary."
     sent_messages = llm.complete.call_args[0][0]
@@ -221,12 +231,12 @@ def test_summarize_sends_system_and_user_content_bypassing_tool_loop():
     ]
 
 
-def test_summarize_returns_none_when_llm_unreachable():
+def test_complete_once_returns_none_when_llm_unreachable():
     llm = MagicMock()
     llm.complete.return_value = None
     agent = _agent(llm=llm)
 
-    assert agent.summarize("sys", "content") is None
+    assert agent.complete_once("sys", "content") is None
 
 
 # ── excerpt_mode() — ADR-015's compressed-vs-verbatim threshold ───────────────
@@ -414,3 +424,118 @@ def test_system_prompt_includes_footnote_instructions():
     system_content = sent_messages[0]["content"]
     assert "FOOTNOTES_JSON" in system_content
     assert "ai-inference" in system_content
+
+
+# ── claim_text extraction (ADR-017's faithfulness_checked input) ─────────────
+
+def test_extract_footnotes_populates_claim_text_from_preceding_sentence():
+    reply = (
+        'Kùzu has no server process. It was chosen for its embedded mode[^1]. '
+        'Neo4j needs a JVM[^2].\n'
+        'FOOTNOTES_JSON: [{"index": 1, "relation": "attribution", "sources": ["a"]}, '
+        '{"index": 2, "relation": "attribution", "sources": ["b"]}]'
+    )
+
+    _, footnotes = _extract_footnotes(reply)
+
+    assert footnotes[0].claim_text == "It was chosen for its embedded mode"
+    assert footnotes[1].claim_text == "Neo4j needs a JVM"
+
+
+def test_extract_footnotes_claim_text_none_when_no_markers_in_content():
+    # Malformed input the model never actually produces (a FOOTNOTES_JSON
+    # entry with no matching [^N] in the text) -- must degrade gracefully,
+    # not raise a KeyError.
+    reply = 'No markers here.\nFOOTNOTES_JSON: [{"index": 1, "relation": "ai-inference", "sources": []}]'
+
+    _, footnotes = _extract_footnotes(reply)
+
+    assert footnotes[0].claim_text is None
+
+
+# ── faithfulness_checked verification (ADR-017, automatic every turn) ────────
+
+def test_respond_faithfulness_checked_true_when_verifier_says_yes():
+    llm = MagicMock()
+    llm.complete.side_effect = [
+        'Kùzu is embedded, no server process[^1].\n'
+        'FOOTNOTES_JSON: [{"index": 1, "relation": "attribution", "sources": ["kg-decision"]}]',
+        "YES",
+    ]
+    toolbox = MagicMock()
+    toolbox.get_node_text.return_value = "Kùzu runs embedded in-process, with no separate server."
+    agent = _agent(llm=llm, toolbox=toolbox)
+
+    reply = agent.respond(history=[], user_text="why Kùzu?")
+
+    assert reply.footnotes[0].faithfulness_checked is True
+    toolbox.get_node_text.assert_called_once_with("kg-decision")
+    # Second complete() call is the verification prompt, not another chat turn.
+    verify_messages = llm.complete.call_args_list[1][0][0]
+    assert verify_messages[0]["role"] == "system"
+    assert "fact-checker" in verify_messages[0]["content"].lower()
+    assert "Kùzu is embedded, no server process" in verify_messages[1]["content"]
+
+
+def test_respond_faithfulness_checked_false_when_verifier_says_no():
+    llm = MagicMock()
+    llm.complete.side_effect = [
+        'Kùzu requires a JVM[^1].\n'
+        'FOOTNOTES_JSON: [{"index": 1, "relation": "attribution", "sources": ["kg-decision"]}]',
+        "NO",
+    ]
+    toolbox = MagicMock()
+    toolbox.get_node_text.return_value = "Kùzu is embedded and needs no JVM."
+    agent = _agent(llm=llm, toolbox=toolbox)
+
+    reply = agent.respond(history=[], user_text="why Kùzu?")
+
+    assert reply.footnotes[0].faithfulness_checked is False
+
+
+def test_respond_faithfulness_checked_none_when_source_unresolvable():
+    llm = MagicMock()
+    llm.complete.return_value = (
+        'A claim[^1].\n'
+        'FOOTNOTES_JSON: [{"index": 1, "relation": "attribution", "sources": ["missing-slug"]}]'
+    )
+    toolbox = MagicMock()
+    toolbox.get_node_text.return_value = None  # stale/hallucinated slug
+    agent = _agent(llm=llm, toolbox=toolbox)
+
+    reply = agent.respond(history=[], user_text="hello")
+
+    assert reply.footnotes[0].faithfulness_checked is None
+    assert llm.complete.call_count == 1  # no verification call made
+
+
+def test_respond_faithfulness_checked_none_when_verifier_unreachable():
+    llm = MagicMock()
+    llm.complete.side_effect = [
+        'A claim[^1].\n'
+        'FOOTNOTES_JSON: [{"index": 1, "relation": "attribution", "sources": ["a"]}]',
+        None,  # verification call fails
+    ]
+    toolbox = MagicMock()
+    toolbox.get_node_text.return_value = "some source text"
+    agent = _agent(llm=llm, toolbox=toolbox)
+
+    reply = agent.respond(history=[], user_text="hello")
+
+    assert reply.footnotes[0].faithfulness_checked is None
+
+
+def test_respond_ai_inference_footnote_never_triggers_verification():
+    llm = MagicMock()
+    llm.complete.return_value = (
+        'Just my own reasoning[^1].\n'
+        'FOOTNOTES_JSON: [{"index": 1, "relation": "ai-inference", "sources": []}]'
+    )
+    toolbox = MagicMock()
+    agent = _agent(llm=llm, toolbox=toolbox)
+
+    reply = agent.respond(history=[], user_text="hello")
+
+    assert reply.footnotes[0].faithfulness_checked is None
+    toolbox.get_node_text.assert_not_called()
+    assert llm.complete.call_count == 1

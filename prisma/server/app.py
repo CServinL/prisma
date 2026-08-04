@@ -1106,7 +1106,7 @@ def _regenerate_excerpt_now(slug: str, pinned_indices: list[int], generation: in
     """ADR-015: regenerates the chat's single Excerpt note from whatever's
     currently pinned, in whichever mode currently applies
     (ChatAgent.excerpt_mode(), budget-driven) — compressed (LLM-condensed
-    Summary via ChatAgent.summarize() + load_excerpt_summary_prompt()) or
+    Summary via ChatAgent.complete_once() + load_excerpt_summary_prompt()) or
     verbatim (no LLM call, no Summary section, pinned turns kept exactly as
     written). Synchronous — call via _regenerate_excerpt_async unless
     already off the request thread.
@@ -1114,7 +1114,7 @@ def _regenerate_excerpt_now(slug: str, pinned_indices: list[int], generation: in
     `generation` is checked immediately before the actual write: if a newer
     pin/unpin has since been dispatched for this chat, this call's result is
     stale (it was likely computed from an older pinned set, possibly after a
-    slow summarize() call) and is discarded rather than overwriting the
+    slow complete_once() call) and is discarded rather than overwriting the
     newer request's — eventual — result."""
     chat_node = _vault.get_chat(slug)
     pinned_turns = [chat_node.messages[i] for i in pinned_indices]
@@ -1126,7 +1126,7 @@ def _regenerate_excerpt_now(slug: str, pinned_indices: list[int], generation: in
         if _chat_agent.excerpt_mode(turns_text) == "verbatim":
             summary = None
         else:
-            summary = _chat_agent.summarize(load_excerpt_summary_prompt(), turns_text)
+            summary = _chat_agent.complete_once(load_excerpt_summary_prompt(), turns_text)
             if summary is None:
                 summary = "(summary unavailable — the language model couldn't be reached; raw pinned turns below are still current)"
     with _excerpt_regenerating_lock:

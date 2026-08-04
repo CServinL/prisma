@@ -2,12 +2,10 @@
 
 **Date:** 2026-07-27
 **Author:** CServinL
-**Status:** Implemented (2026-07-31) — data model, ontology (Axiom 16,
-`docs/concepts/footnote.md`), `ChatAgent` self-segmentation/self-report,
-`ChatToolbox._graph_context` wiring, and UI rendering are all built. Only
-`faithfulness_checked` verification remains unbuilt, per this ADR's own
-"Negative consequences" section below — deliberately deferred as a
-separate, harder problem, not an oversight.
+**Status:** Implemented (2026-07-31, `faithfulness_checked` added 2026-08-03) —
+data model, ontology (Axiom 16, `docs/concepts/footnote.md`), `ChatAgent`
+self-segmentation/self-report, `ChatToolbox._graph_context` wiring, UI
+rendering, and automated `faithfulness_checked` verification are all built.
 
 ### Implementation notes (added 2026-07-31, not part of the original decision)
 
@@ -27,6 +25,40 @@ separate, harder problem, not an oversight.
   `{@html}`, even for the model's own final reply — consistent with this
   codebase already treating tool results as untrusted content
   (`services/injection_defense.py`).
+
+### `faithfulness_checked` implementation notes (added 2026-08-03)
+
+- **Trigger: automatic, every turn** (user decision) — every footnote with
+  a non-empty `sources` list gets a verification call right after
+  `_extract_footnotes`, not gated behind a UI action. Accepted cost: on the
+  shared compute pool (ADR-014/016), a turn with N sourced footnotes makes
+  N additional sequential LLM calls before the turn is considered done.
+- `claim_text` (previously always `None` — nothing populated it) is now
+  filled deterministically: the sentence immediately preceding each `[^N]`
+  marker in the rendered reply (`_extract_claim_texts`), not a model
+  self-report. Keeps the self-report JSON minimal (still just
+  `index`/`relation`/`sources`), same reasoning as everywhere else in this
+  ADR that a self-report is less reliable than something derived from text
+  that's already there.
+- Verification method: LLM-as-judge, one-shot (`ChatAgent.complete_once`,
+  renamed from `summarize` since it now serves two callers — ADR-015's
+  Excerpt regeneration and this). Same spirit as `services/dedup.py`'s
+  level 4→5 cascade (cheap check first, LLM only when it actually needs
+  judgment) — except there's no cheap prefilter for entailment the way
+  NLTK stem-overlap works as one for duplicate detection, so every sourced
+  footnote gets the LLM call, not just ambiguous ones.
+- Source text resolution: `ChatToolbox.get_node_text(slug)`, new — resolves
+  a footnote's source slug the same way a wiki-link would (`VaultService.
+  get_any`), covering Note/Source body and Chat message transcripts (the
+  same past-chat retrieval this session's chat-instructions change made
+  explicit in the system prompt). Returns `None` on a missing slug rather
+  than raising, so one hallucinated slug doesn't break verification for the
+  turn's other footnotes.
+- Result stays `None` (not `False`) whenever there's nothing to check:
+  `ai-inference` footnotes (no source by design), a `claim_text` that
+  failed to extract, an unresolvable source slug, or the verifier LLM call
+  itself failing. `None` means "not checked," never conflated with "checked
+  and failed."
 
 ## Context
 
@@ -129,14 +161,16 @@ actual source).
   `faithfulness_checked == True`.
 
 ### Negative
-- Requires `ChatAgent` to self-segment its own output into per-claim spans
+- Required `ChatAgent` to self-segment its own output into per-claim spans
   and self-report `relation`/`sources` at generation time — new prompting
-  complexity, not yet designed or built (see `TODO.md`).
+  complexity (built 2026-07-31, see the implementation notes above).
 - An LLM can mis-self-report — e.g. label a fabricated/misremembered
-  "quote" as `citation` when it isn't one. This ADR does not solve that.
-  `faithfulness_checked` is the intended (currently unbuilt) hook for
-  eventually catching it — a real, harder, separately-deferred problem, not
-  a guarantee this design provides today.
+  "quote" as `citation` when it isn't one. `faithfulness_checked` (built
+  2026-08-03, see its implementation notes above) catches *some* of this —
+  an LLM-judge call comparing `claim_text` against the cited source(s) — but
+  it's a heuristic, not a guarantee: the judge is itself an LLM call and can
+  be wrong, particularly on subtle misrepresentation rather than outright
+  contradiction.
 - `ChatMessage.sources_cited`'s shape is replaced, not extended — this was
   written assuming there was no live caller to migrate (Chat API routes
   were believed not yet implemented, per `docs/ontologia.md`'s stale "Not

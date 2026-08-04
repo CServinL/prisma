@@ -1436,3 +1436,40 @@ since ADR-017 was written. Fixed alongside this.
   `ai-inference`, missing `claim_text`, unresolvable slug, or verifier-unreachable all count as
   "not checked." UI: a ✓ verified / ⚠ unsupported badge next to each footnote's relation badge,
   shown only when a check actually ran. See ADR-017's implementation notes for the full design.
+
+## Container image build/publish (2026-08-04)
+
+Discovered while trying to update the Test Prisma Server's `prisma-dev` deployment after today's PRs: the UI
+has **never** actually been shipped there. `web_app.py` serves `ui/build`, but `ui/build` is
+gitignored (never committed), the chart's `git-sync`/`pip-install` initContainers never touch
+node/npm, and there was no CI, no Dockerfile, no scp/rsync history anywhere — the `ui` port has
+been declared in the chart since day one but never had anything behind it. Not a regression, a
+gap that was never closed.
+
+Fixed the *build/publish* half:
+- [x] `VERSION` file at repo root — single source of truth. `pyproject.toml`'s `version` is now
+  `dynamic`, read from it via `[tool.setuptools.dynamic]` (setuptools' own supported mechanism,
+  no extra tooling). `prisma --version` (via `click.version_option()`, already reading installed
+  package metadata) picks it up with no code change.
+- [x] `Dockerfile` — multi-stage: `node:22-slim` builds the UI (the *only* place node ever
+  runs), copied as static files into a `python:3.12-slim` runtime stage alongside an editable
+  `pip install -e .` (keeps `web_app.py`'s existing `Path(__file__).parent.parent.parent /
+  "ui" / "build"` resolution working unchanged — same relative layout as dev-mode's git clone,
+  just baked into the image instead of cloned at runtime).
+- [x] `.github/workflows/build-image.yml` — builds and pushes `ghcr.io/cservinl/prisma:{latest,
+  <VERSION>,<sha>}` on every push to `main`, via Podman/buildah (`redhat-actions/buildah-build` +
+  `redhat-actions/push-to-registry`) — user's explicit call over `docker/build-push-action`,
+  daemonless/rootless by design, no Docker Desktop licensing question even though it doesn't
+  actually apply to GitHub-hosted runners either way.
+- [ ] **Not done, not verified**: the Dockerfile has never actually been built (no
+  docker/podman available locally on anvil to test) — the workflow's first real run on GitHub
+  is the first real test of it.
+- [ ] **Chart-side follow-up, in `CServinL/charts` (separate repo — ask before touching, another
+  session may have in-flight work there)**: `prisma-dev`'s chart still needs to switch from
+  dev-mode (git-clone + pip-install initContainers) to pulling this new image, once a version
+  has actually been built and confirmed working. Also found along the way: `pending_queue.py`'s
+  `_DEFAULT_FILE = Path("./data/pending_writes.json")` is CWD-relative — dev-mode's
+  `workingDir: /data/repo` happened to put this on the PVC; the new image's `WORKDIR /app` does
+  not, since nothing mounts the PVC over `/app`. Needs an explicit fix (env override, absolute
+  path under `HOME`, or a PVC mount at `/app/data`) before switching the chart over, or this
+  queue silently stops persisting across pod restarts.

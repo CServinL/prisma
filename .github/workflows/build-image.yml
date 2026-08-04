@@ -1,0 +1,42 @@
+name: Build and publish image
+
+# Podman/buildah, not Docker -- daemonless, rootless by design, no root
+# process needed to build (see docs/wiki for the rationale). Builds and
+# pushes prisma:VERSION / prisma:latest / prisma:<sha> to ghcr.io on every
+# push to main. This is the *only* place the UI ever gets compiled --
+# never inside a running deployment.
+on:
+  push:
+    branches: [main]
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Read version
+        id: version
+        run: echo "value=$(cat VERSION)" >> "$GITHUB_OUTPUT"
+
+      - name: Build image
+        id: build
+        uses: redhat-actions/buildah-build@v3
+        with:
+          image: prisma
+          tags: latest ${{ steps.version.outputs.value }} ${{ github.sha }}
+          containerfiles: |
+            ./Dockerfile
+
+      - name: Push to GHCR
+        uses: redhat-actions/push-to-registry@v3
+        with:
+          image: ${{ steps.build.outputs.image }}
+          tags: ${{ steps.build.outputs.tags }}
+          registry: ghcr.io/${{ github.repository_owner }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}

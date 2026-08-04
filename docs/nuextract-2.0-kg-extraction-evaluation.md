@@ -5,7 +5,7 @@ Closes a gap flagged in `docs/kg-extraction-context-length.md` and
 instruct-tuned chat models (qwen2.5:3b/7b, qwen3 family) prompted for
 extraction — neither ever tested a model actually specialized for structured
 extraction. NuExtract-2.0 (NuMind, built on Qwen2.5) is exactly that. Run
-2026-07-24 on Anvil (Radeon 840M, Vulkan), `NuExtract-2.0-4B-Q4_K_M` served
+2026-07-24 on the desktop client (Radeon 840M, Vulkan), `NuExtract-2.0-4B-Q4_K_M` served
 via `llama-swap`.
 
 ## Method

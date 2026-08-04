@@ -190,7 +190,7 @@ The Local-API-primary architecture (`ZoteroHybridClient` → `ZoteroLocalAPIClie
 prompted this reversal — the server (`prisma serve`) never actually selected it,
 because the assumption underlying this whole ADR (the process reading from Zotero
 Desktop's local HTTP server is *also* the process running on the user's machine) broke
-once prisma split into a server (running on a dedicated machine, "forge") and a
+once prisma split into a server (running on a dedicated machine) and a
 desktop client (running on the user's own machine, "prisma-desktop"). The local API at
 `localhost:23119` is, definitionally, only reachable from whatever machine Zotero
 Desktop itself runs on — the server has no guarantee of being that machine.
@@ -239,7 +239,7 @@ pyzotero-backed, richer Zotero-API-faithful models in
 `storage/models/zotero_models.py`). `services/zotero.py` also still carried a
 genuine local-Zotero-Desktop-SQLite-reading fallback path
 (`ZoteroMode.offline` → `_detect_db_path()` scanning `~/Zotero/zotero.sqlite`
-and its WSL2 equivalent) — dead on forge, but a real contradiction of this
+and its WSL2 equivalent) — dead on a server deployment, but a real contradiction of this
 ADR's own "Web API only, everywhere" follow-up above.
 
 **Decision: consolidate onto `integrations/zotero/client.py`** — pyzotero

@@ -15,9 +15,9 @@ export interface SavedServer {
 // kept in sync manually since the two aren't generated from one schema.
 export const DEFAULT_SAVED_SERVERS: SavedServer[] = [
   { name: "Local", url: "http://127.0.0.1:8765" },
-  // Generic label — "Forge" is this maintainer's own private server name,
-  // not a sensible default for other users of this software.
-  { name: "Remote", url: "https://prisma.forge.internal" },
+  // Generic placeholder — never a real maintainer server name/hostname,
+  // see docs/wiki/deployment-models.md for real-world examples.
+  { name: "Remote", url: "https://prisma.yourdomain.com" },
 ];
 
 export interface AppSettings {

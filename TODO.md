@@ -1136,7 +1136,7 @@ no dual-format support, no auto-migration script: only two call sites ever
 read this file at all (`ConfigLoader._load_config()`,
 `supervisor.py`'s 3 `cfg_path` reads for `compute_pools`), and nothing
 writes it programmatically — it's hand-edited, and the one real instance of
-it (the user's own forge deployment) gets converted by hand once this
+it (the user's own test server deployment) gets converted by hand once this
 ships. `ConfigLoader`/`supervisor.py` now use stdlib `tomllib` (Python 3.11+,
 already this project's floor) — `supervisor.py` in particular drops its only
 third-party import (`yaml`) as a result, going one step further into the
@@ -1201,7 +1201,7 @@ This does **not** require "a good programmer to come in and rewrite it" — it n
 ## Deferred feature: vault unlock over LAN instead of an at-rest key (2026-07-22)
 
 Follows up on the "Encryption at rest ... deferred" line in `docs/ontologia.md`.
-Context: the vault is planned to live on a Longhorn-backed volume (Forge/k3s), with
+Context: the vault is planned to live on a Longhorn-backed volume (Test Prisma Server/k3s), with
 an app-level encrypted overlay (gocryptfs, chosen for portability — the encrypted
 directory doesn't care what storage backend sits under it, same reasoning as the
 existing rclone-crypt setup used elsewhere) instead of Longhorn's native
@@ -1241,11 +1241,11 @@ reboots unattended) and for gdrive-crypt (key saved, not re-typed).
 
 Raised, not started — user has higher-priority work right now. `flatpak` +
 `org.gnome.Platform//50` (matching webkit2gtk-4.1, same as the host) are
-already installed on Anvil; `flatpak-builder` is not. Two approaches
+already installed on the desktop client; `flatpak-builder` is not. Two approaches
 discussed, decision not yet made:
 1. **Pragmatic**: `cargo build --release` outside the sandbox, manifest just
    packages the binary + assets + `.desktop` file. Fast, fine for personal
-   use on Anvil, not Flathub-submittable as-is (Flathub requires sandboxed,
+   use on the desktop client, not Flathub-submittable as-is (Flathub requires sandboxed,
    network-free builds).
 2. **Flathub-correct**: build the Rust binary *inside* the sandbox with no
    network access, which needs `flatpak-cargo-generator` to vendor every
@@ -1255,7 +1255,7 @@ discussed, decision not yet made:
 ## Desktop↔server sync via prisma-api, not OS-level file sync (2026-07-22, revised 2026-07-24, implemented 2026-07-25)
 
 Corrects an assumption made earlier in the same planning session: prisma-desktop
-(local, anvil) and a server-side Prisma instance (Forge/k3s) do **not** share one
+(local, desktop client) and a server-side Prisma instance (Test Prisma Server/k3s) do **not** share one
 vault folder at the OS/filesystem level. Options considered and rejected for the
 desktop↔server link specifically: NFS (not practical/safe to expose to the
 internet — no real auth story for that), Syncthing, rclone (crypt + `bisync`).
@@ -1299,7 +1299,7 @@ sync": both directions go through Prisma's own API/WS, never a shared mount.
 well-understood way to expose functionality across the open internet safely
 (proper auth, already need TLS regardless per the ClusterIssuer/Ingress work
 done alongside this). It also means prisma-desktop can reach the server from
-**any** network, not just when on the same LAN/WireGuard as Forge — file-sync-
+**any** network, not just when on the same LAN/WireGuard as the test server — file-sync-
 based approaches were implicitly LAN-bound.
 
 **Where this lives:** inside `prisma-desktop` itself (extending it well beyond

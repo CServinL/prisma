@@ -103,6 +103,26 @@ when away from home.
 
 ---
 
+## Container image (Kubernetes / any OCI runtime)
+
+`ghcr.io/cservinl/prisma:<tag>` — built and published automatically by
+`.github/workflows/build-image.yml` on every push to `main`, via Podman/buildah
+(daemonless, rootless — no Docker Desktop, no root daemon on the build runner).
+Tags: `latest`, the repo-root `VERSION` file's contents (single source of
+truth — `pyproject.toml` reads its own `version` from the same file via
+`[tool.setuptools.dynamic]`), and the commit SHA.
+
+The `ui-build` stage is the *only* place node/npm ever runs — the compiled
+SvelteKit output is baked into the final image as static files (served at
+`/app`). A server never compiles anything; there is no build step at
+deploy/runtime, unlike this repo's own "dev mode" Helm chart pattern
+(`CServinL/charts/charts/prisma-dev`), which instead git-clones and
+`pip install -e`s on every pod start and has no image build at all. Bumping
+`VERSION` and merging to `main` is what produces a new pinned tag for a chart
+to move to — `:latest` always exists too, for anyone who wants to float.
+
+---
+
 ## Recommended reverse proxy: Caddy
 
 Caddy handles TLS automatically (Let's Encrypt). No manual cert management.

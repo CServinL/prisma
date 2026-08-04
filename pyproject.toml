@@ -1,6 +1,6 @@
 [project]
 name = "prisma"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Automated Literature Review Tool"
 authors = [
     {name = "CServinL", email = "8943596+CServinL@users.noreply.github.com"}
@@ -42,6 +42,9 @@ prisma = "prisma.cli.prisma_cli:cli"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["prisma*"]
+
+[tool.setuptools.dynamic]
+version = {file = "VERSION"}
 
 [project.urls]
 Homepage   = "https://github.com/CServinL/prisma"

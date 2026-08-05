@@ -256,23 +256,27 @@ cloud-backed deployment that could just use a reasoning model directly.
 
 A graph of addressable nodes only solves half of this — something still has
 to decide, per turn, *which* nodes to load. cservinl's naming for that role:
-a **MasterAI / orchestrator / harness** — a distinct component responsible
-for per-turn context assembly, replacing `ChatAgent`'s current fixed,
-uniform policy (`_full_system_prompt()`/`_bounded_history()`: system prompt
-+ tool section + Excerpt always, raw history by token budget, oldest first,
-regardless of relevance) with an actual selection decision over the graph.
-Not the same thing as `ChatAgent` itself, which today conflates "decide
-what context to send" with "run the tool-calling loop" — those may need to
-separate once selection is a real decision rather than a fixed formula.
+a **MasterAI / orchestrator / harness**. Resolved (2026-08-05, corrected
+from an earlier algorithmic-only framing this same day): it isn't a
+one-shot pre-filter gating what the model sees — a pure algorithmic
+threshold can't be semantically correct, and the model itself is often in
+the best position to know it's missing something, so the orchestrator
+feeds and takes from both the LLM and the user turn, the same circular
+shape `ChatAgent`'s existing `SEARCH_VAULT`/`GRAPH_CONTEXT` tool loop
+already is — a cheap algorithmic default assembly (main line + Excerpt +
+the current turn's own branches, no LLM call) plus a `RECALL:` marker tool
+in that same loop for anything the model decides is missing. Full writeup,
+kept current: [Chat session graph](../../concepts/chat-session-graph.md).
 
-**Not scoped or designed here.** This is a second, breaking redesign of the
-same `.sess` shape this ADR just landed — node/edge shape, whether tool
-results become persisted content (raw tool text can be large — a policy
-question, not just a schema one), how `alternates` folds into a general
-edge type, how `ChatAgent` vs. the orchestrator divide responsibility, and
-how this interacts with Excerpt/`context_slugs` loading. Flagged as the
-next major design pass once the current cutover is confirmed solid in real
-use, not started.
+**Not scoped or designed here** — this page states the resolved direction,
+the concept doc is where the taxonomy/algorithm actually live and get
+revised. This is a second, breaking redesign of the same `.sess` shape this
+ADR just landed — node/edge shape, whether tool results become persisted
+content, `RECALL`'s search implementation, how `ChatAgent` vs. the
+orchestrator divide responsibility, and how this interacts with
+Excerpt/`context_slugs` loading are all still open. Flagged as the next
+major design pass once the current cutover is confirmed solid in real use,
+not started.
 
 ## Related
 

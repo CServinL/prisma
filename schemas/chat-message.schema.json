@@ -1,5 +1,59 @@
 {
   "$defs": {
+    "ChatMessage": {
+      "properties": {
+        "alternates": {
+          "items": {
+            "$ref": "#/$defs/ChatMessage"
+          },
+          "title": "Alternates",
+          "type": "array"
+        },
+        "content": {
+          "$ref": "#/$defs/RichContent"
+        },
+        "footnotes": {
+          "items": {
+            "$ref": "#/$defs/Footnote"
+          },
+          "title": "Footnotes",
+          "type": "array"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model"
+        },
+        "role": {
+          "$ref": "#/$defs/ChatRole"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "title": "Timestamp",
+          "type": "string"
+        },
+        "tool_calls": {
+          "items": {
+            "$ref": "#/$defs/ToolCallRecord"
+          },
+          "title": "Tool Calls",
+          "type": "array"
+        }
+      },
+      "required": [
+        "role",
+        "content"
+      ],
+      "title": "ChatMessage",
+      "type": "object"
+    },
     "ChatRole": {
       "enum": [
         "user",
@@ -105,60 +159,6 @@
       "title": "RichContent",
       "type": "object"
     },
-    "SessionMessage": {
-      "properties": {
-        "alternates": {
-          "items": {
-            "$ref": "#/$defs/SessionMessage"
-          },
-          "title": "Alternates",
-          "type": "array"
-        },
-        "content": {
-          "$ref": "#/$defs/RichContent"
-        },
-        "footnotes": {
-          "items": {
-            "$ref": "#/$defs/Footnote"
-          },
-          "title": "Footnotes",
-          "type": "array"
-        },
-        "model": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Model"
-        },
-        "role": {
-          "$ref": "#/$defs/ChatRole"
-        },
-        "timestamp": {
-          "format": "date-time",
-          "title": "Timestamp",
-          "type": "string"
-        },
-        "tool_calls": {
-          "items": {
-            "$ref": "#/$defs/ToolCallRecord"
-          },
-          "title": "Tool Calls",
-          "type": "array"
-        }
-      },
-      "required": [
-        "role",
-        "content"
-      ],
-      "title": "SessionMessage",
-      "type": "object"
-    },
     "ToolCallRecord": {
       "properties": {
         "args": {
@@ -178,5 +178,5 @@
       "type": "object"
     }
   },
-  "$ref": "#/$defs/SessionMessage"
+  "$ref": "#/$defs/ChatMessage"
 }

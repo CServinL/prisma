@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import re
 import threading
@@ -10,7 +11,7 @@ from typing import Iterator
 import yaml
 
 from prisma.storage.models.vault_models import (
-    Chat, ChatMessage, ChatRole, Note, NodeType, Source, Stream, StreamStatus,
+    Chat, ChatMessage, ChatRole, ChatSession, Footnote, Note, NodeType, Source, Stream, StreamStatus,
     RefreshFrequency, ToolCallRecord, VaultListing, VaultNodeMeta, VaultTreeNode,
 )
 
@@ -93,6 +94,44 @@ _CHAT_ROLE_HEADING = {ChatRole.user: "You", ChatRole.assistant: "Prisma"}
 _CHAT_HEADING_ROLE = {v: k for k, v in _CHAT_ROLE_HEADING.items()}
 _CHAT_TURN_RE = re.compile(r"^### (You|Prisma)\s*$\n(.*?)(?=^### (?:You|Prisma)\s*$|\Z)", re.MULTILINE | re.DOTALL)
 _CHAT_TOOL_LINE_RE = re.compile(r"^>\s*(?:🔧\s*)?used\s*`([a-zA-Z0-9_]+)`:\s*(.*)$", re.MULTILINE)
+# model/footnotes as one JSON blob rather than a per-field line like
+# _CHAT_TOOL_LINE_RE -- footnotes is a nested list of objects, awkward to
+# spread across single-line fields the way one tool call's marker+query is.
+# An HTML comment keeps it invisible in a plain markdown viewer, same as the
+# existing convention's own intent (readable transcript first).
+_CHAT_META_LINE_RE = re.compile(r"^<!--\s*prisma:meta\s+(.+?)\s*-->\s*$", re.MULTILINE)
+
+# ADR-019: governance for the prisma:meta blob's own shape, independent of
+# Pydantic's per-field defaults on ChatMessage/Footnote themselves (which
+# only handle *adding* an optional field, not a rename or a meaning change).
+CHAT_META_SCHEMA_VERSION = 1
+
+
+def _migrate_chat_meta(raw: dict) -> dict:
+    """Upgrades a raw prisma:meta dict to the current shape before its
+    contents are used. Absent schema_version means "written before this
+    field existed" (2026-08-04 same-day code) -- already shape v1, the
+    version this blob was introduced at, so it's treated as v1 rather than
+    rejected. Raises ValueError for a version newer than this build knows
+    (an older binary reading a file a newer one wrote) -- the caller
+    already catches ValueError around the whole meta-comment parse and
+    degrades to "no metadata for this turn," so this composes for free
+    with the existing defensive-parsing contract, no new handling needed
+    here or at the call site.
+
+    Next format change adds a step here, e.g.:
+        if version == 1:
+            raw = {...upgraded...}
+            version = 2
+    Never rewrite an existing step once shipped -- each version's upgrade
+    path must stay correct for a file frozen at that version, however old."""
+    version = raw.get("schema_version", 1)
+    if version > CHAT_META_SCHEMA_VERSION:
+        raise ValueError(
+            f"prisma:meta schema_version {version} is newer than this build "
+            f"supports ({CHAT_META_SCHEMA_VERSION})"
+        )
+    return raw
 
 
 def _render_chat_body(messages: list[ChatMessage]) -> str:
@@ -104,6 +143,13 @@ def _render_chat_body(messages: list[ChatMessage]) -> str:
             parts.append(f"> used `{tc.tool}`: {tc.args.get('query', '')}\n")
         if msg.tool_calls:
             parts.append("\n")
+        if msg.model is not None or msg.footnotes:
+            meta = {"schema_version": CHAT_META_SCHEMA_VERSION}
+            if msg.model is not None:
+                meta["model"] = msg.model
+            if msg.footnotes:
+                meta["footnotes"] = [fn.model_dump(mode="json") for fn in msg.footnotes]
+            parts.append(f"<!-- prisma:meta {json.dumps(meta)} -->\n")
         parts.append(f"{msg.content}\n\n")
     return "".join(parts)
 
@@ -131,9 +177,43 @@ def _parse_chat_body(body: str) -> list[ChatMessage]:
             ToolCallRecord(tool=tool, args={"query": query})
             for tool, query in _CHAT_TOOL_LINE_RE.findall(turn_body)
         ]
-        content = _CHAT_TOOL_LINE_RE.sub("", turn_body).strip()
-        messages.append(ChatMessage(role=role, content=content, tool_calls=tool_calls))
+        model: str | None = None
+        footnotes: list[Footnote] = []
+        meta_match = _CHAT_META_LINE_RE.search(turn_body)
+        if meta_match:
+            try:
+                meta = _migrate_chat_meta(json.loads(meta_match.group(1)))
+                model = meta.get("model")
+                footnotes = [Footnote.model_validate(fn) for fn in meta.get("footnotes", [])]
+            except (json.JSONDecodeError, TypeError, ValueError) as exc:
+                # A hand-edited or corrupted meta line degrades to "no
+                # metadata," never breaks loading the rest of the chat --
+                # same defensive posture ADR-017's FOOTNOTES_JSON parsing
+                # already takes on the model's own self-report.
+                _log.warning("chat turn: malformed prisma:meta comment, dropping: %s", exc)
+        content = _CHAT_TOOL_LINE_RE.sub("", turn_body)
+        content = _CHAT_META_LINE_RE.sub("", content).strip()
+        messages.append(ChatMessage(role=role, content=content, tool_calls=tool_calls, model=model, footnotes=footnotes))
     return messages
+
+
+# ── ChatSession (ADR-019): pure-JSON `.sess` files ──────────────────────────
+# Additive alongside the markdown _parse_chat_body/_render_chat_body pair
+# above -- not yet wired into VaultService/app.py (that's the API/frontend
+# wiring phase). `path` is excluded from the file's own JSON content and
+# re-injected from the actual file location on load, same convention the
+# markdown side already follows (VaultNodeBase.path is a computed field,
+# derived from where a file was found, never round-tripped through the
+# file's own content).
+
+def load_chat_session(path: Path) -> ChatSession:
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    return ChatSession.model_validate({**raw, "path": path})
+
+
+def save_chat_session(session: ChatSession, path: Path) -> None:
+    data = session.model_dump(mode="json", exclude={"path"})
+    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
 
 def _first_heading(body: str) -> str | None:

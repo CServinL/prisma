@@ -32,6 +32,26 @@ def test_resolve_base_url_anthropic_has_no_default_yet():
         _llm(provider="anthropic")
 
 
+def test_reachable_false_when_port_unreachable():
+    # Port 1 is privileged/never listening in any test environment -- a
+    # real connection-refused case.
+    llm = ChatLLM(ChatConfig(provider="ollama", base_url="http://127.0.0.1:1/v1"))
+    assert llm.reachable(timeout=1.0) is False
+
+
+def test_reachable_true_when_port_is_open():
+    import socket
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+    port = server.getsockname()[1]
+    try:
+        llm = ChatLLM(ChatConfig(provider="llama_cpp", base_url=f"http://127.0.0.1:{port}/v1"))
+        assert llm.reachable(timeout=1.0) is True
+    finally:
+        server.close()
+
+
 def test_resolve_api_key_defaults_to_placeholder_for_ollama():
     llm = _llm(provider="ollama")
     assert llm._resolve_api_key() == "ollama"

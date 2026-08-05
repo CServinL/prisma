@@ -7,6 +7,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
+from prisma.schema_gov import RichContent, VersionedModel
+
 
 class NodeType(str, Enum):
     note = "note"
@@ -132,6 +134,18 @@ class ChatMessage(BaseModel):
     timestamp: datetime = Field(default_factory=datetime.utcnow)
     footnotes: list[Footnote] = Field(default_factory=list)
     tool_calls: list[ToolCallRecord] = Field(default_factory=list)
+    # The model that actually generated this message -- None for user
+    # messages. Distinct from Chat.model (the chat's *current* configured
+    # model, overwritten on every turn, see VaultService.save_chat's
+    # docstring): that field alone can't answer "which model produced THIS
+    # specific historical reply" once the config changes mid-chat, which
+    # matters when comparing model quality across a test session.
+    model: str | None = None
+    # Populated only in API responses (app.py), never persisted -- same
+    # "computed at read time" convention as Chat.context_tokens_used. Sanitized
+    # HTML rendering of `content` (markdown, tables, code blocks, footnote
+    # markers as clickable spans) via services/renderer.py + html_sanitize.py.
+    html: str | None = None
 
 
 class Chat(VaultNodeBase):
@@ -166,6 +180,44 @@ class Chat(VaultNodeBase):
     # "Pinned turns" section — clicking an item scrolls/highlights that
     # turn in the rolling conversation instead of duplicating its text.
     excerpt_summary_html: str | None = None
+
+
+# ── Chat session (ADR-019): pure-JSON `.sess` replacement for the Chat/
+# ChatMessage markdown-with-embedded-JSON-comment shape above ──────────────────
+# Named SessionMessage rather than reusing ChatMessage during this transition
+# -- ChatMessage's flat `content: str` shape is still load-bearing for
+# ChatAgent/app.py/vault.py's existing _parse_chat_body/_render_chat_body
+# (the migration path, not yet cut over). Renaming onto ChatMessage/Chat
+# happens at cutover once those call sites move to ChatSession, not before --
+# two classes with the same name and different shapes coexisting silently
+# would be worse than a temporary, clearly-transitional name.
+
+CHAT_SESSION_SCHEMA_VERSION = 1
+
+
+class SessionMessage(BaseModel):
+    role: ChatRole
+    content: RichContent
+    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    footnotes: list[Footnote] = Field(default_factory=list)
+    tool_calls: list[ToolCallRecord] = Field(default_factory=list)
+    model: str | None = None
+    # Preserved previous attempts when this turn was regenerated (2026-08-04
+    # decision: preserve, don't discard) -- each alternate is a full
+    # historical SessionMessage, own `model` included, so different models'
+    # answers to the same prompt stay comparable, not just the current one.
+    alternates: list["SessionMessage"] = Field(default_factory=list)
+
+
+class ChatSession(VaultNodeBase, VersionedModel):
+    SCHEMA_VERSION = CHAT_SESSION_SCHEMA_VERSION
+
+    node_type: Literal[NodeType.chat] = NodeType.chat
+    messages: list[SessionMessage] = Field(default_factory=list)
+    context_slugs: list[str] = Field(default_factory=list)
+    model: str = "llama3"
+    pinned_turns: list[int] = Field(default_factory=list)
+    excerpt_slug: str | None = None
 
 
 class Stream(VaultNodeBase):

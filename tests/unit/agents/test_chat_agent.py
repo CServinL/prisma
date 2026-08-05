@@ -8,6 +8,13 @@ from prisma.storage.models.vault_models import ChatMessage, ChatRole, Note
 
 
 def _agent(llm=None, toolbox=None, max_history_tokens=16000):
+    if llm is None:
+        # Unconfigured MagicMock.model would be a MagicMock, not a real
+        # string -- ChatMessage.model (str | None) rejects that at
+        # construction time, in every respond() return path.
+        llm = MagicMock()
+        llm.model = "test-model"
+        llm.context_window = 1_000_000
     if toolbox is None:
         # Unconfigured MagicMock.get_node_text() would return a truthy
         # MagicMock, not real text or None -- _verify_footnote would then
@@ -18,15 +25,28 @@ def _agent(llm=None, toolbox=None, max_history_tokens=16000):
         toolbox = MagicMock()
         toolbox.get_node_text.return_value = None
     return ChatAgent(
-        llm=llm or MagicMock(),
+        llm=llm,
         toolbox=toolbox,
         max_history_tokens=max_history_tokens,
         system_prompt="You are a test assistant.",
     )
 
 
+def test_reachable_proxies_to_llm():
+    llm = MagicMock()
+    llm.model = "test-model"
+    llm.context_window = 1_000_000
+    llm.reachable.return_value = True
+    agent = _agent(llm=llm)
+
+    assert agent.reachable() is True
+    llm.reachable.assert_called_once_with()
+
+
 def test_respond_returns_direct_answer_with_no_tool_call():
     llm = MagicMock()
+    llm.model = "test-model"
+    llm.context_window = 1_000_000
     llm.complete.return_value = "LLM stands for Large Language Model."
     agent = _agent(llm=llm)
 
@@ -39,6 +59,8 @@ def test_respond_returns_direct_answer_with_no_tool_call():
 
 def test_respond_calls_tool_then_returns_final_answer():
     llm = MagicMock()
+    llm.model = "test-model"
+    llm.context_window = 1_000_000
     llm.complete.side_effect = [
         "SEARCH_VAULT: attention mechanisms",
         "Based on your notes, attention mechanisms let models weigh tokens.",
@@ -58,6 +80,8 @@ def test_respond_calls_tool_then_returns_final_answer():
 
 def test_respond_returns_fallback_when_llm_unreachable():
     llm = MagicMock()
+    llm.model = "test-model"
+    llm.context_window = 1_000_000
     llm.complete.return_value = None
     agent = _agent(llm=llm)
 
@@ -68,6 +92,8 @@ def test_respond_returns_fallback_when_llm_unreachable():
 
 def test_respond_includes_blocked_reason_when_provided():
     llm = MagicMock()
+    llm.model = "test-model"
+    llm.context_window = 1_000_000
     llm.complete.return_value = None
     agent = ChatAgent(
         llm=llm,
@@ -83,6 +109,8 @@ def test_respond_includes_blocked_reason_when_provided():
 
 def test_respond_fallback_has_no_extra_detail_when_reason_is_none():
     llm = MagicMock()
+    llm.model = "test-model"
+    llm.context_window = 1_000_000
     llm.complete.return_value = None
     agent = ChatAgent(
         llm=llm, toolbox=MagicMock(), system_prompt="You are a test assistant.",
@@ -97,6 +125,8 @@ def test_respond_fallback_has_no_extra_detail_when_reason_is_none():
 
 def test_respond_stops_after_max_tool_iterations():
     llm = MagicMock()
+    llm.model = "test-model"
+    llm.context_window = 1_000_000
     llm.complete.return_value = "SEARCH_VAULT: something"  # never stops calling tools
     toolbox = MagicMock()
     toolbox.call.return_value = ToolResult(text="some result", raw=[])
@@ -109,8 +139,44 @@ def test_respond_stops_after_max_tool_iterations():
     assert "wasn't able to reach a final answer" in reply.content
 
 
+def test_respond_returns_overflow_message_without_calling_llm_when_assembly_exceeds_context_window():
+    llm = MagicMock()
+    llm.model = "test-model"
+    llm.context_window = 100  # ~400 chars -- trivially small
+    agent = _agent(llm=llm)
+
+    reply = agent.respond(history=[], user_text="x" * 1000)  # ~250 tokens, over the 100-token window
+
+    llm.complete.assert_not_called()
+    assert "context window" in reply.content
+    assert "test-model" in reply.content
+    assert "Remove some pinned turns" in reply.content
+    assert reply.model == "test-model"
+
+
+def test_respond_checks_context_window_again_after_a_tool_result_grows_the_assembly():
+    llm = MagicMock()
+    llm.model = "test-model"
+    # Fits the initial system+history+user assembly (~680 estimated tokens
+    # for this agent's system prompt), but not once a big tool result's
+    # text gets appended to messages for the second completion call.
+    llm.context_window = 1000
+    llm.complete.return_value = "SEARCH_VAULT: something"
+    toolbox = MagicMock()
+    toolbox.call.return_value = ToolResult(text="y" * 4000, raw=[])
+    agent = _agent(llm=llm, toolbox=toolbox)
+
+    reply = agent.respond(history=[], user_text="short question")
+
+    assert llm.complete.call_count == 1  # only the call that triggered the tool call
+    assert "context window" in reply.content
+    assert len(reply.tool_calls) == 1
+
+
 def test_respond_includes_prior_history_in_messages():
     llm = MagicMock()
+    llm.model = "test-model"
+    llm.context_window = 1_000_000
     llm.complete.return_value = "sure, following up on that"
     agent = _agent(llm=llm)
     history = [
@@ -129,6 +195,8 @@ def test_respond_includes_prior_history_in_messages():
 
 def test_respond_drops_oldest_history_once_token_budget_exceeded():
     llm = MagicMock()
+    llm.model = "test-model"
+    llm.context_window = 1_000_000
     llm.complete.return_value = "ok"
     # Budget for ~40 tokens (160 chars at the len//4 heuristic) — enough for
     # only the most recent message, not the oldest one.
@@ -148,6 +216,8 @@ def test_respond_drops_oldest_history_once_token_budget_exceeded():
 
 def test_respond_keeps_all_history_within_budget():
     llm = MagicMock()
+    llm.model = "test-model"
+    llm.context_window = 1_000_000
     llm.complete.return_value = "ok"
     agent = _agent(llm=llm, max_history_tokens=16000)
     history = [
@@ -169,6 +239,8 @@ def _note(title: str, body: str) -> Note:
 
 def test_respond_injects_excerpt_notes_into_system_prompt():
     llm = MagicMock()
+    llm.model = "test-model"
+    llm.context_window = 1_000_000
     llm.complete.return_value = "ok"
     agent = _agent(llm=llm)
     excerpt = [_note("Key Decision", "We agreed to use Kùzu, not Neo4j.")]
@@ -184,6 +256,8 @@ def test_respond_injects_excerpt_notes_into_system_prompt():
 
 def test_respond_with_no_excerpt_notes_has_no_established_block():
     llm = MagicMock()
+    llm.model = "test-model"
+    llm.context_window = 1_000_000
     llm.complete.return_value = "ok"
     agent = _agent(llm=llm)
 
@@ -199,6 +273,8 @@ def test_respond_excerpt_notes_survive_history_truncation():
     # must stay in context even when max_history_tokens forces the raw
     # turns that produced them to be dropped.
     llm = MagicMock()
+    llm.model = "test-model"
+    llm.context_window = 1_000_000
     llm.complete.return_value = "ok"
     agent = _agent(llm=llm, max_history_tokens=1)  # drops virtually all raw history
     excerpt = [_note("Settled Point", "The answer was 42.")]
@@ -218,6 +294,8 @@ def test_respond_excerpt_notes_survive_history_truncation():
 
 def test_complete_once_sends_system_and_user_content_bypassing_tool_loop():
     llm = MagicMock()
+    llm.model = "test-model"
+    llm.context_window = 1_000_000
     llm.complete.return_value = "Condensed summary."
     agent = _agent(llm=llm)
 
@@ -233,6 +311,8 @@ def test_complete_once_sends_system_and_user_content_bypassing_tool_loop():
 
 def test_complete_once_returns_none_when_llm_unreachable():
     llm = MagicMock()
+    llm.model = "test-model"
+    llm.context_window = 1_000_000
     llm.complete.return_value = None
     agent = _agent(llm=llm)
 
@@ -248,6 +328,7 @@ def test_excerpt_mode_always_compressed_on_a_small_context_window_regardless_of_
     # window must never produce verbatim mode, no matter how tiny the
     # pinned content is.
     llm = MagicMock()
+    llm.model = "test-model"
     llm.context_window = 32768  # today's local qwen2.5:7b-32k
     agent = _agent(llm=llm)
 
@@ -258,6 +339,7 @@ def test_excerpt_mode_always_compressed_on_a_small_context_window_regardless_of_
 
 def test_excerpt_mode_compressed_when_pinned_content_large_relative_to_a_large_window():
     llm = MagicMock()
+    llm.model = "test-model"
     llm.context_window = 1_000_000  # a future large-context cloud backend
     agent = _agent(llm=llm)
 
@@ -268,6 +350,7 @@ def test_excerpt_mode_compressed_when_pinned_content_large_relative_to_a_large_w
 
 def test_excerpt_mode_verbatim_on_a_large_context_window_with_small_pinned_set():
     llm = MagicMock()
+    llm.model = "test-model"
     llm.context_window = 1_000_000  # a future large-context cloud backend
     agent = _agent(llm=llm)
 
@@ -280,6 +363,8 @@ def test_excerpt_mode_verbatim_on_a_large_context_window_with_small_pinned_set()
 
 def test_context_usage_returns_max_history_tokens_as_the_denominator():
     llm = MagicMock()
+    llm.model = "test-model"
+    llm.context_window = 1_000_000
     llm.complete.return_value = "ok"
     agent = _agent(llm=llm, max_history_tokens=16000)
 
@@ -290,6 +375,8 @@ def test_context_usage_returns_max_history_tokens_as_the_denominator():
 
 def test_context_usage_counts_system_prompt_and_bounded_history():
     llm = MagicMock()
+    llm.model = "test-model"
+    llm.context_window = 1_000_000
     agent = _agent(llm=llm, max_history_tokens=16000)
     history = [ChatMessage(role=ChatRole.user, content="x" * 400)]
 
@@ -303,6 +390,8 @@ def test_context_usage_counts_system_prompt_and_bounded_history():
 
 def test_context_usage_includes_excerpt_notes_in_the_count():
     llm = MagicMock()
+    llm.model = "test-model"
+    llm.context_window = 1_000_000
     agent = _agent(llm=llm, max_history_tokens=16000)
     excerpt = [_note("Excerpt", "x" * 4000)]
 
@@ -390,6 +479,8 @@ def test_extract_footnotes_uses_the_last_match_if_model_discusses_format_first()
 
 def test_respond_final_answer_populates_footnotes():
     llm = MagicMock()
+    llm.model = "test-model"
+    llm.context_window = 1_000_000
     llm.complete.return_value = (
         'Kùzu was chosen for its embedded mode[^1].\n'
         'FOOTNOTES_JSON: [{"index": 1, "relation": "attribution", "sources": ["kg-decision"]}]'
@@ -405,6 +496,8 @@ def test_respond_final_answer_populates_footnotes():
 
 def test_respond_final_answer_with_no_footnotes_line_has_empty_footnotes():
     llm = MagicMock()
+    llm.model = "test-model"
+    llm.context_window = 1_000_000
     llm.complete.return_value = "A plain answer with no sourcing."
     agent = _agent(llm=llm)
 
@@ -415,6 +508,8 @@ def test_respond_final_answer_with_no_footnotes_line_has_empty_footnotes():
 
 def test_system_prompt_includes_footnote_instructions():
     llm = MagicMock()
+    llm.model = "test-model"
+    llm.context_window = 1_000_000
     llm.complete.return_value = "ok"
     agent = _agent(llm=llm)
 
@@ -457,6 +552,8 @@ def test_extract_footnotes_claim_text_none_when_no_markers_in_content():
 
 def test_respond_faithfulness_checked_true_when_verifier_says_yes():
     llm = MagicMock()
+    llm.model = "test-model"
+    llm.context_window = 1_000_000
     llm.complete.side_effect = [
         'Kùzu is embedded, no server process[^1].\n'
         'FOOTNOTES_JSON: [{"index": 1, "relation": "attribution", "sources": ["kg-decision"]}]',
@@ -479,6 +576,8 @@ def test_respond_faithfulness_checked_true_when_verifier_says_yes():
 
 def test_respond_faithfulness_checked_false_when_verifier_says_no():
     llm = MagicMock()
+    llm.model = "test-model"
+    llm.context_window = 1_000_000
     llm.complete.side_effect = [
         'Kùzu requires a JVM[^1].\n'
         'FOOTNOTES_JSON: [{"index": 1, "relation": "attribution", "sources": ["kg-decision"]}]',
@@ -495,6 +594,8 @@ def test_respond_faithfulness_checked_false_when_verifier_says_no():
 
 def test_respond_faithfulness_checked_none_when_source_unresolvable():
     llm = MagicMock()
+    llm.model = "test-model"
+    llm.context_window = 1_000_000
     llm.complete.return_value = (
         'A claim[^1].\n'
         'FOOTNOTES_JSON: [{"index": 1, "relation": "attribution", "sources": ["missing-slug"]}]'
@@ -511,6 +612,8 @@ def test_respond_faithfulness_checked_none_when_source_unresolvable():
 
 def test_respond_faithfulness_checked_none_when_verifier_unreachable():
     llm = MagicMock()
+    llm.model = "test-model"
+    llm.context_window = 1_000_000
     llm.complete.side_effect = [
         'A claim[^1].\n'
         'FOOTNOTES_JSON: [{"index": 1, "relation": "attribution", "sources": ["a"]}]',
@@ -527,6 +630,8 @@ def test_respond_faithfulness_checked_none_when_verifier_unreachable():
 
 def test_respond_ai_inference_footnote_never_triggers_verification():
     llm = MagicMock()
+    llm.model = "test-model"
+    llm.context_window = 1_000_000
     llm.complete.return_value = (
         'Just my own reasoning[^1].\n'
         'FOOTNOTES_JSON: [{"index": 1, "relation": "ai-inference", "sources": []}]'

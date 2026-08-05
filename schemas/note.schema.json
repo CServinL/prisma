@@ -1,0 +1,98 @@
+{
+  "$defs": {
+    "NodeType": {
+      "enum": [
+        "note",
+        "source",
+        "chat",
+        "stream"
+      ],
+      "title": "NodeType",
+      "type": "string"
+    },
+    "NoteStatus": {
+      "enum": [
+        "draft",
+        "active",
+        "archived"
+      ],
+      "title": "NoteStatus",
+      "type": "string"
+    }
+  },
+  "properties": {
+    "body": {
+      "default": "",
+      "title": "Body",
+      "type": "string"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "excerpt_of_chat": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Excerpt Of Chat"
+    },
+    "modified_at": {
+      "format": "date-time",
+      "title": "Modified At",
+      "type": "string"
+    },
+    "node_type": {
+      "$ref": "#/$defs/NodeType",
+      "default": "note"
+    },
+    "original_ext": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Original Ext"
+    },
+    "path": {
+      "format": "path",
+      "title": "Path",
+      "type": "string"
+    },
+    "slug": {
+      "title": "Slug",
+      "type": "string"
+    },
+    "status": {
+      "$ref": "#/$defs/NoteStatus",
+      "default": "active"
+    },
+    "tags": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Tags",
+      "type": "array"
+    },
+    "title": {
+      "title": "Title",
+      "type": "string"
+    }
+  },
+  "required": [
+    "slug",
+    "title"
+  ],
+  "title": "Note",
+  "type": "object"
+}

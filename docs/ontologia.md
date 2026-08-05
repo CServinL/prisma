@@ -91,7 +91,7 @@ The key separation:
 | **Note promotion** | chat excerpt selected by user → new `Note` (back-linked via `promoted_from_chat`) |
 | **Stream scheduling** | `_StreamScheduler` daemon checks every 5 min; runs any `Stream` where `next_update ≤ now` and `status == active` and `refresh_frequency != manual` |
 | **docu-craft conversion** | companion file (PDF, HTML, …) → docu-craft → `.md` body for the knowledge graph indexer + HTML view for UI |
-| **Footnote rendering** | assistant turn generated → each claim needing attribution gets a sequential superscript marker (`word¹`) inline in `ChatMessage.content` → a footnote list is appended at the end of the turn, each entry showing `Footnote.relation` + the linked `Note`/`Source`(s) |
+| **Footnote rendering** | assistant turn generated → each claim needing attribution gets a sequential `[^N]` marker inline in `ChatMessage.content` (clickable, colored by `relation`) → a footnote list is appended at the end of the turn, each entry showing `Footnote.relation` + the linked `Note`/`Source`(s) → persisted per turn alongside the transcript so it survives reload |
 
 ### Stream run — per-candidate pipeline (detailed)
 

@@ -1,0 +1,140 @@
+{
+  "$defs": {
+    "RefreshFrequency": {
+      "enum": [
+        "daily",
+        "weekly",
+        "monthly",
+        "manual"
+      ],
+      "title": "RefreshFrequency",
+      "type": "string"
+    },
+    "StreamStatus": {
+      "enum": [
+        "active",
+        "paused",
+        "archived"
+      ],
+      "title": "StreamStatus",
+      "type": "string"
+    }
+  },
+  "properties": {
+    "body": {
+      "default": "",
+      "title": "Body",
+      "type": "string"
+    },
+    "collection_key": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Collection Key"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "description": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Description"
+    },
+    "last_updated": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Last Updated"
+    },
+    "modified_at": {
+      "format": "date-time",
+      "title": "Modified At",
+      "type": "string"
+    },
+    "next_update": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Next Update"
+    },
+    "node_type": {
+      "const": "stream",
+      "default": "stream",
+      "title": "Node Type",
+      "type": "string"
+    },
+    "path": {
+      "format": "path",
+      "title": "Path",
+      "type": "string"
+    },
+    "query": {
+      "title": "Query",
+      "type": "string"
+    },
+    "refresh_frequency": {
+      "$ref": "#/$defs/RefreshFrequency",
+      "default": "weekly"
+    },
+    "slug": {
+      "title": "Slug",
+      "type": "string"
+    },
+    "status": {
+      "$ref": "#/$defs/StreamStatus",
+      "default": "active"
+    },
+    "tags": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Tags",
+      "type": "array"
+    },
+    "title": {
+      "title": "Title",
+      "type": "string"
+    },
+    "total_papers": {
+      "default": 0,
+      "title": "Total Papers",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "slug",
+    "title",
+    "query"
+  ],
+  "title": "Stream",
+  "type": "object"
+}

@@ -44,9 +44,19 @@ const EMPTY_DIFF: SyncDiffInfo = {
   pull_update: 0, push_recreate: 0, reachable: false,
 };
 
-export async function syncStart(): Promise<void> {
-  if (!isTauri) return;
-  try { await invoke("sync_start"); } catch { /* already running — fine, status reflects reality */ }
+/// Returns null on success (or a no-op "already running" — status already
+/// reflects that). A non-null string is a real reason sync did NOT start
+/// (e.g. the same-filesystem collision guard in prisma-desktop's
+/// sync::sync_start) worth surfacing to the user, not just discarding.
+export async function syncStart(): Promise<string | null> {
+  if (!isTauri) return null;
+  try {
+    await invoke("sync_start");
+    return null;
+  } catch (e) {
+    const msg = String(e);
+    return msg.includes("already running") ? null : msg;
+  }
 }
 
 export async function syncStop(): Promise<void> {
@@ -69,10 +79,11 @@ export async function syncDiff(): Promise<SyncDiffInfo> {
 /// Always stops first (idempotent even if not already running) so
 /// switching between two different remote servers doesn't leave the old
 /// one's engine running against the new server_url.
-export async function applySyncPolicy(serverUrl: string): Promise<void> {
-  if (!isTauri) return;
+export async function applySyncPolicy(serverUrl: string): Promise<string | null> {
+  if (!isTauri) return null;
   await syncStop();
   if (!isLoopbackUrl(serverUrl)) {
-    await syncStart();
+    return await syncStart();
   }
+  return null;
 }

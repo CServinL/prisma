@@ -1,0 +1,41 @@
+{
+  "$defs": {
+    "ContentFormat": {
+      "enum": [
+        "md",
+        "html",
+        "svg",
+        "latex"
+      ],
+      "title": "ContentFormat",
+      "type": "string"
+    }
+  },
+  "properties": {
+    "format": {
+      "$ref": "#/$defs/ContentFormat",
+      "default": "md"
+    },
+    "rendered_html": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Rendered Html"
+    },
+    "value": {
+      "title": "Value",
+      "type": "string"
+    }
+  },
+  "required": [
+    "value"
+  ],
+  "title": "RichContent",
+  "type": "object"
+}

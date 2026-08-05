@@ -45,14 +45,21 @@ TOOLS: list[ToolSpec] = [
     ToolSpec(
         name="search_vault",
         marker="SEARCH_VAULT",
-        description="Default first step for almost any question about the user's notes/papers.",
+        description=(
+            "Semantic search over the vault's ChromaDB embedding index — finds "
+            "notes/sources/chats by meaning, not just keyword match. Default "
+            "first step for almost any question about the user's notes/papers."
+        ),
     ),
     ToolSpec(
         name="graph_context",
         marker="GRAPH_CONTEXT",
         description=(
-            "Call when the question is about how things relate to each other, "
-            "or a vault search alone would likely be scattered/incomplete."
+            "Traverses the Knowledge Graph (KG) — entities and relationships "
+            "extracted across the whole vault — to answer questions about how "
+            "things connect. Call when the question is about how things relate "
+            "to each other, or a vault search alone would likely be "
+            "scattered/incomplete."
         ),
     ),
 ]

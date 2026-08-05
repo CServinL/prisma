@@ -1,0 +1,268 @@
+{
+  "$defs": {
+    "ChatRole": {
+      "enum": [
+        "user",
+        "assistant"
+      ],
+      "title": "ChatRole",
+      "type": "string"
+    },
+    "ContentFormat": {
+      "enum": [
+        "md",
+        "html",
+        "svg",
+        "latex"
+      ],
+      "title": "ContentFormat",
+      "type": "string"
+    },
+    "Footnote": {
+      "properties": {
+        "claim_text": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Claim Text"
+        },
+        "faithfulness_checked": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Faithfulness Checked"
+        },
+        "index": {
+          "title": "Index",
+          "type": "integer"
+        },
+        "relation": {
+          "$ref": "#/$defs/FootnoteRelation"
+        },
+        "sources": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Sources",
+          "type": "array"
+        }
+      },
+      "required": [
+        "index",
+        "relation"
+      ],
+      "title": "Footnote",
+      "type": "object"
+    },
+    "FootnoteRelation": {
+      "enum": [
+        "citation",
+        "attribution",
+        "relational",
+        "ai-inference"
+      ],
+      "title": "FootnoteRelation",
+      "type": "string"
+    },
+    "RichContent": {
+      "properties": {
+        "format": {
+          "$ref": "#/$defs/ContentFormat",
+          "default": "md"
+        },
+        "rendered_html": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Rendered Html"
+        },
+        "value": {
+          "title": "Value",
+          "type": "string"
+        }
+      },
+      "required": [
+        "value"
+      ],
+      "title": "RichContent",
+      "type": "object"
+    },
+    "SessionMessage": {
+      "properties": {
+        "alternates": {
+          "items": {
+            "$ref": "#/$defs/SessionMessage"
+          },
+          "title": "Alternates",
+          "type": "array"
+        },
+        "content": {
+          "$ref": "#/$defs/RichContent"
+        },
+        "footnotes": {
+          "items": {
+            "$ref": "#/$defs/Footnote"
+          },
+          "title": "Footnotes",
+          "type": "array"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model"
+        },
+        "role": {
+          "$ref": "#/$defs/ChatRole"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "title": "Timestamp",
+          "type": "string"
+        },
+        "tool_calls": {
+          "items": {
+            "$ref": "#/$defs/ToolCallRecord"
+          },
+          "title": "Tool Calls",
+          "type": "array"
+        }
+      },
+      "required": [
+        "role",
+        "content"
+      ],
+      "title": "SessionMessage",
+      "type": "object"
+    },
+    "ToolCallRecord": {
+      "properties": {
+        "args": {
+          "additionalProperties": true,
+          "title": "Args",
+          "type": "object"
+        },
+        "tool": {
+          "title": "Tool",
+          "type": "string"
+        }
+      },
+      "required": [
+        "tool"
+      ],
+      "title": "ToolCallRecord",
+      "type": "object"
+    }
+  },
+  "properties": {
+    "context_slugs": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Context Slugs",
+      "type": "array"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "excerpt_slug": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Excerpt Slug"
+    },
+    "messages": {
+      "items": {
+        "$ref": "#/$defs/SessionMessage"
+      },
+      "title": "Messages",
+      "type": "array"
+    },
+    "model": {
+      "default": "llama3",
+      "title": "Model",
+      "type": "string"
+    },
+    "modified_at": {
+      "format": "date-time",
+      "title": "Modified At",
+      "type": "string"
+    },
+    "node_type": {
+      "const": "chat",
+      "default": "chat",
+      "title": "Node Type",
+      "type": "string"
+    },
+    "path": {
+      "format": "path",
+      "title": "Path",
+      "type": "string"
+    },
+    "pinned_turns": {
+      "items": {
+        "type": "integer"
+      },
+      "title": "Pinned Turns",
+      "type": "array"
+    },
+    "schema_version": {
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "slug": {
+      "title": "Slug",
+      "type": "string"
+    },
+    "tags": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Tags",
+      "type": "array"
+    },
+    "title": {
+      "title": "Title",
+      "type": "string"
+    }
+  },
+  "required": [
+    "slug",
+    "title"
+  ],
+  "title": "ChatSession",
+  "type": "object"
+}

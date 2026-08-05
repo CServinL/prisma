@@ -6,6 +6,7 @@ import docu_craft.renderers  # registers all format transformers on the workflow
 from docu_craft.themes import ThemeManager
 from docu_craft.workflow import graph as _workflow
 
+from prisma.services.html_sanitize import sanitize_html
 from prisma.services.vault import VaultService
 
 # Load once at import time — avoids yaml._yaml C-extension crash on repeated calls
@@ -116,5 +117,12 @@ def render(markdown: str, vault: VaultService) -> tuple[str, list[str], list[str
     # injecting via {@html} doesn't create a nested <html> in the DOM.
     m = re.search(r"<body[^>]*>(.*?)</body>", full_html, re.DOTALL)
     html = m.group(1).strip() if m else full_html
+
+    # Python-Markdown (docu-craft's own transformer) does not sanitize
+    # embedded raw HTML -- every caller gets this for free rather than
+    # needing to remember it, whether the source is trusted-authorship
+    # (this render() call, Notes/Sources) or semi-trusted (chat replies,
+    # which reuse this same function -- see ADR-017's 2026-08-04 addendum).
+    html = sanitize_html(html)
 
     return html, broken_links, broken_citations

@@ -2,8 +2,10 @@
 markdown storage, role-heading convention, tool-call lines."""
 import pytest
 
-from prisma.services.vault import VaultService, _parse_chat_body, _render_chat_body
-from prisma.storage.models.vault_models import ChatMessage, ChatRole, ToolCallRecord
+from prisma.services.vault import (
+    CHAT_META_SCHEMA_VERSION, VaultService, _migrate_chat_meta, _parse_chat_body, _render_chat_body,
+)
+from prisma.storage.models.vault_models import ChatMessage, ChatRole, Footnote, FootnoteRelation, ToolCallRecord
 
 
 @pytest.fixture
@@ -64,6 +66,79 @@ def test_parse_chat_body_message_with_no_tool_calls():
     parsed = _parse_chat_body(body)
     assert parsed[0].tool_calls == []
     assert parsed[1].tool_calls == []
+
+
+def test_render_parse_roundtrip_preserves_model_and_footnotes():
+    footnote = Footnote(
+        index=1, relation=FootnoteRelation.citation, sources=["attention-is-all-you-need"],
+        claim_text="The Transformer achieves 28.4 BLEU.", faithfulness_checked=False,
+    )
+    messages = [
+        ChatMessage(role=ChatRole.user, content="Summarize the paper."),
+        ChatMessage(
+            role=ChatRole.assistant, content="It achieves 28.4 BLEU.[^1]",
+            model="qwen2.5-3b", footnotes=[footnote],
+        ),
+    ]
+    body = _render_chat_body(messages)
+    parsed = _parse_chat_body(body)
+
+    assert parsed[0].model is None
+    assert parsed[0].footnotes == []
+    assert parsed[1].model == "qwen2.5-3b"
+    assert parsed[1].footnotes == [footnote]
+    assert "It achieves 28.4 BLEU.[^1]" in parsed[1].content
+    assert "prisma:meta" not in parsed[1].content
+
+
+def test_render_chat_body_omits_meta_comment_when_no_model_or_footnotes():
+    body = _render_chat_body([ChatMessage(role=ChatRole.user, content="hi")])
+    assert "prisma:meta" not in body
+
+
+def test_parse_chat_body_ignores_malformed_meta_comment():
+    body = "### Prisma\n\n<!-- prisma:meta {not valid json} -->\nstill here\n\n"
+    parsed = _parse_chat_body(body)
+    assert parsed[0].model is None
+    assert parsed[0].footnotes == []
+    assert "still here" in parsed[0].content
+
+
+def test_render_chat_body_writes_current_schema_version():
+    messages = [ChatMessage(role=ChatRole.assistant, content="hi", model="test-model")]
+    body = _render_chat_body(messages)
+    assert f'"schema_version": {CHAT_META_SCHEMA_VERSION}' in body
+
+
+def test_migrate_chat_meta_treats_absent_schema_version_as_v1():
+    # Pre-governance meta blobs (written the same day this field was added,
+    # before it existed) already match v1's shape -- must still load, not
+    # be rejected as "no version, therefore invalid."
+    migrated = _migrate_chat_meta({"model": "test-model"})
+    assert migrated == {"model": "test-model"}
+
+
+def test_migrate_chat_meta_passes_through_current_version_unchanged():
+    raw = {"schema_version": CHAT_META_SCHEMA_VERSION, "model": "test-model"}
+    assert _migrate_chat_meta(raw) == raw
+
+
+def test_migrate_chat_meta_raises_for_a_version_newer_than_this_build_supports():
+    with pytest.raises(ValueError, match="newer than this build supports"):
+        _migrate_chat_meta({"schema_version": CHAT_META_SCHEMA_VERSION + 1})
+
+
+def test_parse_chat_body_degrades_gracefully_for_a_too_new_schema_version():
+    # _migrate_chat_meta's ValueError falls into the same try/except that
+    # already handles a malformed/hand-edited meta comment (composes for
+    # free, no new handling needed) -- an older binary reading a file a
+    # newer one wrote loses that turn's metadata, not the whole chat.
+    too_new = CHAT_META_SCHEMA_VERSION + 1
+    body = f'### Prisma\n\n<!-- prisma:meta {{"schema_version": {too_new}}} -->\nstill here\n\n'
+    parsed = _parse_chat_body(body)
+    assert parsed[0].model is None
+    assert parsed[0].footnotes == []
+    assert "still here" in parsed[0].content
 
 
 def test_create_chat_writes_type_chat_frontmatter(vault):

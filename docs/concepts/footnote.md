@@ -8,16 +8,19 @@ makes visible, per claim, *what kind* of sourcing backs it and *which* document(
 academic citation practice: what is self-made is never left indistinguishable from what
 belongs to someone else.
 
-Rendered as a superscript marker inline in the turn's text (`word¹`), with a footnote list
-appended at the end of the turn — one entry per index, each showing its `relation` and the
-linked [Note](note.md)/[Source](source.md)(s).
+Rendered as a superscript marker inline in the turn's text (`...prior work[^1]`), with a
+footnote list appended at the end of the turn — one entry per index, each showing its
+`relation` and the linked [Note](note.md)/[Source](source.md)(s). The inline marker is
+clickable (jumps to its list entry) and colored by `relation`, using the same palette as the
+list's relation badge, so a claim's sourcing is visible where it's actually read, not only
+after scrolling to the end.
 
 ## Notation
 
 | Rendered | Meaning |
 |---|---|
-| `...prior work¹` | Superscript marker — the claim ending here has footnote 1 |
-| `1. [citation] Smith 2024, "Attention..."` | Footnote list entry — relation type + linked document |
+| `...prior work[^1]` | Inline marker — the claim ending here has footnote 1, colored by its `relation` |
+| `1. [citation] Smith 2024, "Attention..."` | Footnote list entry — relation type + linked document (clickable, opens the source) |
 
 ## Fields
 
@@ -66,3 +69,10 @@ is checked against its cited source(s) via a one-shot LLM-judge call
 not a guarantee: an LLM judge can itself be wrong, so a `True` doesn't certify accuracy the way a
 citekey resolving to a real document does — it catches the common, egregious cases (a claim that
 plainly contradicts or isn't addressed by its cited source), not subtle misrepresentation.
+
+Fixed (2026-08-04): footnotes were being computed correctly per-turn but never actually
+persisted — `VaultService`'s chat markdown serialization only round-tripped `role`/`content`/
+`tool_calls`, so every reload silently dropped every historical message's footnotes back to
+empty. Now stored as a `<!-- prisma:meta {...} -->` JSON comment per turn (see
+[Chat](chat.md#persistence)). Also fixed the same day: the inline marker was previously dead,
+uncolored text (see "What it is" above for the current, clickable/colored behavior).

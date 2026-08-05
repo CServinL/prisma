@@ -59,6 +59,7 @@ _t("vault ok")
 
 _t("importing renderer")
 from prisma.services.renderer import render as vault_render
+from prisma.services.chat_render import render_chat_message
 _t("renderer ok")
 
 _t("importing knowledge_graph_client")
@@ -361,6 +362,18 @@ def _chat_blocked_reason(chroma: ChromaIndexer, kg: KnowledgeGraphClient) -> str
     return None
 
 
+def _render_chat_html(content: str) -> str:
+    """Best-effort sanitized HTML for a chat message -- a rendering bug must
+    never break the chat response itself (same "degrade, don't 500" posture
+    as vault_stats/zotero_info in status() below); the UI still has the raw
+    `content` to fall back to."""
+    try:
+        return render_chat_message(content, _vault)
+    except Exception as exc:
+        _log.warning("chat message render failed, falling back to empty html: %s", exc)
+        return ""
+
+
 def _build_chat_agent(vault: "VaultService", chroma: ChromaIndexer, kg: KnowledgeGraphClient) -> ChatAgent:
     from prisma.utils.config import ConfigLoader
     cfg = ConfigLoader()
@@ -532,6 +545,7 @@ class ChatResponse(BaseModel):
     reply: str
     tool_calls: list[ToolCallRecord]
     footnotes: list[Footnote] = []
+    html: str = ""
 
 
 class CreateChatRequest(BaseModel):
@@ -873,7 +887,8 @@ class VaultStats(BaseModel):
     streams: int
 
 
-class OllamaStatus(BaseModel):
+class LLMBackendStatus(BaseModel):
+    provider: str
     reachable: bool
 
 
@@ -891,7 +906,10 @@ class SystemStatusResponse(BaseModel):
     chroma: ChromaStatus
     vault: VaultStats
     zotero: Optional[ZoteroStatus] = None
-    ollama: OllamaStatus
+    # None for a cloud chat provider (openrouter/anthropic) -- there's no
+    # single "is it up" host to probe for those, so the field is just
+    # absent rather than a misleading always-false reachable.
+    llm_backend: Optional[LLMBackendStatus] = None
     # resources/processes are proxied verbatim from the supervisor's own
     # stdlib-only control API (see resource_lock.py's module docstring and
     # ADR-012's finding #6 -- supervisor.py deliberately can't import
@@ -932,6 +950,14 @@ def status():
     except Exception as exc:
         _log.debug("zotero status probe failed: %s", exc)
 
+    llm_backend = None
+    if _chat_agent.provider in ("ollama", "llama_cpp"):
+        try:
+            llm_backend = {"provider": _chat_agent.provider, "reachable": _chat_agent.reachable()}
+        except Exception as exc:
+            _log.debug("llm backend reachability probe failed: %s", exc)
+            llm_backend = {"provider": _chat_agent.provider, "reachable": False}
+
     return {
         "online": connectivity.is_online,
         "config": {"ok": config_ok, "error": config_error},
@@ -943,7 +969,7 @@ def status():
         "chroma": _chroma.status(),
         "vault": vault_stats,
         "zotero": zotero_info,
-        "ollama": {"reachable": _indexer._ollama_ready()},
+        "llm_backend": llm_backend,
         "resources": resource_lock.status("127.0.0.1", resource_lock.default_port()),
         "processes": resource_lock.process_status("127.0.0.1", resource_lock.default_port()),
         # The chat.model/pool actually configured right now — the UI shows
@@ -1047,6 +1073,12 @@ def _with_context_usage(chat_node: Chat) -> Chat:
     """Attaches response-only fields (ADR-015) — not persisted, computed
     fresh on every response since they depend on the live-configured
     ChatAgent / in-memory regeneration state, not stored chat data."""
+    # Assistant messages only -- a user message is the user's own plain
+    # typed text, nothing to render (no markdown formatting expected, no
+    # footnote markers, which only ever appear in a generated reply).
+    for msg in chat_node.messages:
+        if msg.role == ChatRole.assistant:
+            msg.html = _render_chat_html(msg.content)
     excerpt_notes = []
     if chat_node.excerpt_slug:
         try:
@@ -1098,7 +1130,7 @@ def chat(req: ChatRequest):
     _activity.info("action=chat slug=%s tool_calls=%d", chat_node.slug, len(assistant_msg.tool_calls))
     return ChatResponse(
         chat_slug=chat_node.slug, reply=assistant_msg.content, tool_calls=assistant_msg.tool_calls,
-        footnotes=assistant_msg.footnotes,
+        footnotes=assistant_msg.footnotes, html=_render_chat_html(assistant_msg.content),
     )
 
 

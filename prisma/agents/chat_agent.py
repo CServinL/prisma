@@ -186,6 +186,9 @@ class ChatAgent:
     def context_window(self) -> int:
         return self._llm.context_window
 
+    def reachable(self) -> bool:
+        return self._llm.reachable()
+
     def excerpt_mode(self, pinned_raw_text: str) -> Literal["compressed", "verbatim"]:
         """ADR-015's mode switch. Two checks, both required for verbatim:
         (1) the backend's context window must itself be genuinely large
@@ -242,6 +245,30 @@ class ChatAgent:
 
         tool_calls: list[ToolCallRecord] = []
         for _ in range(MAX_TOOL_ITERATIONS):
+            # Checked before every completion call, not just the first --
+            # _bounded_history() caps prior history against
+            # max_history_tokens (a soft session budget, deliberately larger
+            # than any one backend's real ceiling, see DEFAULT_MAX_HISTORY_
+            # TOKENS/ADR-015's "Resolved" section), and the Excerpt block is
+            # NEVER subject to that trim at all -- neither guards the
+            # backend's actual context_window. A tool result injected mid-
+            # loop can also push an initially-fitting assembly over the
+            # edge. Failing fast here, before ever calling the backend, beats
+            # a confusing generic "couldn't reach the model" once it 400s.
+            estimated = sum(_estimate_tokens(m["content"]) for m in messages)
+            if estimated > self.context_window:
+                return ChatMessage(
+                    role=ChatRole.assistant,
+                    content=(
+                        f"This chat's history and Excerpt exceed {self.model}'s context "
+                        f"window (~{estimated} tokens estimated vs. a {self.context_window}-"
+                        "token limit) -- I can't continue. Remove some pinned turns to free "
+                        "up context from Excerpt buildup, or switch this chat to a model "
+                        "with a bigger context window."
+                    ),
+                    tool_calls=tool_calls,
+                    model=self.model,
+                )
             reply = self._llm.complete(messages)
             if reply is None:
                 reason = self._blocked_reason()
@@ -250,6 +277,7 @@ class ChatAgent:
                     role=ChatRole.assistant,
                     content=f"Sorry, I couldn't reach the language model just now{detail}. Please try again shortly.",
                     tool_calls=tool_calls,
+                    model=self.model,
                 )
             match = TOOL_CALL_RE.search(reply)
             if not match:
@@ -257,6 +285,7 @@ class ChatAgent:
                 footnotes = [self._verify_footnote(fn) for fn in footnotes]
                 return ChatMessage(
                     role=ChatRole.assistant, content=content, tool_calls=tool_calls, footnotes=footnotes,
+                    model=self.model,
                 )
 
             marker, query = match.group(1), match.group(2).strip()
@@ -273,6 +302,7 @@ class ChatAgent:
             role=ChatRole.assistant,
             content="I wasn't able to reach a final answer after checking several sources — could you rephrase?",
             tool_calls=tool_calls,
+            model=self.model,
         )
 
     def context_usage(self, history: list[ChatMessage], excerpt_notes: list[Note] | None = None) -> tuple[int, int]:

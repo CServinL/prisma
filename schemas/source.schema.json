@@ -1,0 +1,164 @@
+{
+  "$defs": {
+    "SourceKind": {
+      "enum": [
+        "paper",
+        "document",
+        "web",
+        "media"
+      ],
+      "title": "SourceKind",
+      "type": "string"
+    },
+    "SourceOrigin": {
+      "enum": [
+        "zotero",
+        "upload",
+        "url"
+      ],
+      "title": "SourceOrigin",
+      "type": "string"
+    }
+  },
+  "properties": {
+    "abstract": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Abstract"
+    },
+    "authors": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Authors",
+      "type": "array"
+    },
+    "body": {
+      "default": "",
+      "title": "Body",
+      "type": "string"
+    },
+    "citekey": {
+      "title": "Citekey",
+      "type": "string"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "doi": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Doi"
+    },
+    "modified_at": {
+      "format": "date-time",
+      "title": "Modified At",
+      "type": "string"
+    },
+    "node_type": {
+      "const": "source",
+      "default": "source",
+      "title": "Node Type",
+      "type": "string"
+    },
+    "origin": {
+      "$ref": "#/$defs/SourceOrigin",
+      "default": "zotero"
+    },
+    "original_ext": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Original Ext"
+    },
+    "path": {
+      "format": "path",
+      "title": "Path",
+      "type": "string"
+    },
+    "slug": {
+      "title": "Slug",
+      "type": "string"
+    },
+    "source_kind": {
+      "$ref": "#/$defs/SourceKind",
+      "default": "paper"
+    },
+    "stream_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Stream Id"
+    },
+    "tags": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Tags",
+      "type": "array"
+    },
+    "title": {
+      "title": "Title",
+      "type": "string"
+    },
+    "year": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Year"
+    },
+    "zotero_key": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Zotero Key"
+    }
+  },
+  "required": [
+    "slug",
+    "title",
+    "citekey"
+  ],
+  "title": "Source",
+  "type": "object"
+}

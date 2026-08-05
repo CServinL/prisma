@@ -6,29 +6,27 @@ import { invoke } from "@tauri-apps/api/core";
 
 export const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
-export interface SavedServer {
-  name: string;
-  url: string;
-}
-
-// Same defaults as prisma-desktop's own Rust-side Settings::default() —
-// kept in sync manually since the two aren't generated from one schema.
-export const DEFAULT_SAVED_SERVERS: SavedServer[] = [
-  { name: "Local", url: "http://127.0.0.1:8765" },
-  // Generic placeholder — never a real maintainer server name/hostname,
-  // see docs/wiki/deployment-models.md for real-world examples.
-  { name: "Remote", url: "https://prisma.yourdomain.com" },
-];
-
 export interface AppSettings {
   scale: number;
-  server_url: string;
-  saved_servers: SavedServer[];
+  hostname: string;
+  tls: boolean;
+  api_port: number;
+  web_port: number;
   // Tauri-only — where the vault-sync engine's local .md mirror lives.
   // null/empty means "use the default location" (see prisma-desktop's
   // settings::resolve_vault_path). Not meaningful in browser/PWA mode,
   // which has no local vault mirror at all.
   vault_path: string | null;
+  // Width in px of the resizable split between the nav pane and the main
+  // viewport. Round-tripped through this same store (settings.json in
+  // Tauri, the "prisma-settings" localStorage key in browser/PWA) rather
+  // than its own ad hoc key, same as every other layout preference here.
+  sidebar_width: number;
+}
+
+// Same derivation as prisma-desktop's own Rust-side Settings::api_url().
+export function apiUrl(cfg: Pick<AppSettings, "hostname" | "tls" | "api_port">): string {
+  return `${cfg.tls ? "https" : "http"}://${cfg.hostname}:${cfg.api_port}`;
 }
 
 // 1x reads as uncomfortably small on today's typical high-density
@@ -37,21 +35,21 @@ export interface AppSettings {
 // default; users can still dial it from 1x-5x in Settings.
 export const DEFAULT_SCALE = 1.5;
 
+// Same default as prisma-desktop's own Rust-side default_sidebar_width().
+export const DEFAULT_SIDEBAR_WIDTH = 220;
+
 export async function loadSettings(): Promise<AppSettings> {
   if (isTauri) {
     return invoke<AppSettings>("get_settings");
   }
   const stored = localStorage.getItem("prisma-settings");
   if (stored) {
-    const parsed = JSON.parse(stored);
-    // Isolated fallback, not a full merge: a browser/PWA install that
-    // saved settings before saved_servers existed shouldn't lose its
-    // other fields, but also shouldn't silently keep an empty/missing
-    // server list forever.
-    if (!parsed.saved_servers) parsed.saved_servers = DEFAULT_SAVED_SERVERS;
-    return parsed;
+    return JSON.parse(stored);
   }
-  return { scale: DEFAULT_SCALE, server_url: "", saved_servers: DEFAULT_SAVED_SERVERS, vault_path: null };
+  return {
+    scale: DEFAULT_SCALE, hostname: "", tls: false, api_port: 0, web_port: 0,
+    vault_path: null, sidebar_width: DEFAULT_SIDEBAR_WIDTH,
+  };
 }
 
 export async function saveSettings(cfg: AppSettings): Promise<void> {
@@ -83,10 +81,6 @@ export async function applyScale(scale: number): Promise<void> {
 export function shellOpen(url: string): void | Promise<unknown> {
   if (isTauri) return invoke("open_url", { url });
   window.open(url, "_blank");
-}
-
-export function winDrag(): void {
-  if (isTauri) invoke("window_start_drag");
 }
 
 /// Opens a native folder picker for the vault-sync engine's local .md

@@ -1,0 +1,60 @@
+{
+  "$defs": {
+    "FootnoteRelation": {
+      "enum": [
+        "citation",
+        "attribution",
+        "relational",
+        "ai-inference"
+      ],
+      "title": "FootnoteRelation",
+      "type": "string"
+    }
+  },
+  "properties": {
+    "claim_text": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Claim Text"
+    },
+    "faithfulness_checked": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Faithfulness Checked"
+    },
+    "index": {
+      "title": "Index",
+      "type": "integer"
+    },
+    "relation": {
+      "$ref": "#/$defs/FootnoteRelation"
+    },
+    "sources": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Sources",
+      "type": "array"
+    }
+  },
+  "required": [
+    "index",
+    "relation"
+  ],
+  "title": "Footnote",
+  "type": "object"
+}

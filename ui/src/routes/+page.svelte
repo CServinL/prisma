@@ -1,9 +1,7 @@
 <script lang="ts">
-  import { isTauri, DEFAULT_SCALE, DEFAULT_SAVED_SERVERS, applyScale, loadSettings as loadPlatformSettings, saveSettings as savePlatformSettings, shellOpen, winDrag, pickVaultFolder, type AppSettings } from "$lib/platform";
+  import { isTauri, DEFAULT_SCALE, applyScale, loadSettings as loadPlatformSettings, saveSettings as savePlatformSettings, shellOpen, pickVaultFolder, apiUrl, type AppSettings } from "$lib/platform";
   import { apiFetch, restoreSession, setAuthRequiredHandler, getToken } from "$lib/auth";
   import { applySyncPolicy, syncEngineStatus, syncDiff, syncStart, syncStop, type SyncStatusInfo, type SyncDiffInfo } from "$lib/sync";
-  import TauriResizeGrips from "$lib/components/TauriResizeGrips.svelte";
-  import TauriWindowControls from "$lib/components/TauriWindowControls.svelte";
   import LoginScreen from "$lib/components/LoginScreen.svelte";
 
   type NodeType = "note" | "source" | "chat" | "stream";
@@ -26,7 +24,9 @@
     chroma?: { chunks: number; files_indexed: number; model: string; provider?: string; current_activity?: string | null } | null;
     vault?: { root: string; notes: number; sources: number; chats: number; streams: number };
     zotero?: { mode: string; available: boolean; reachable?: boolean } | null;
-    ollama?: { reachable: boolean } | null;
+    // Absent for a cloud chat provider (openrouter/anthropic) -- there's
+    // no single "is it up" host to probe for those.
+    llm_backend?: { provider: string; reachable: boolean } | null;
     processes?: {
       [worker: string]: { pid: number | null; alive: boolean; restart_count: number; memory_mb: number | null };
     } & {
@@ -175,7 +175,13 @@
 
   const DEFAULT_API = "http://127.0.0.1:8765";
   const DEFAULT_API_PORT = 8765;
+  const DEFAULT_WEB_PORT = 8766;
   const DEFAULT_SUPERVISOR_PORT = 8760;
+
+  // serverStatus.llm_backend.provider values -> display label (see app.py's
+  // /status: only ever "ollama" or "llama_cpp", the two local providers it
+  // probes for reachability).
+  const LLM_BACKEND_LABELS: Record<string, string> = { ollama: "Ollama", llama_cpp: "llama.cpp" };
 
   // The Web process (serving this page at /app) and the API process are
   // independent processes/ports (see ADR-012) — the page's own origin is no
@@ -225,7 +231,7 @@
     return url.origin;
   }
 
-  // Real persisted value arrives async via loadSettings() -> cfg.server_url
+  // Real persisted value arrives async via loadSettings() -> apiUrl(cfg)
   // (platform.ts's own loadSettings: Tauri reads settings.json via the Rust
   // side, browser/PWA reads a "prisma-settings" localStorage key) -- this
   // is just the synchronous placeholder $state needs at declaration time.
@@ -251,7 +257,7 @@
   // mirror against the same machine is pointless) — reruns on every
   // apiBase change (initial load AND switching servers in Settings), so
   // this one effect is the single place that policy lives.
-  $effect(() => { applySyncPolicy(apiBase); });
+  $effect(() => { applySyncPolicy(apiBase).then(r => syncBlockedReason = r); });
 
   // ── WebSocket — API-process push events (vault_change, stream_progress) ──────
   // Hot-reload is handled separately below, by polling the Web process directly —
@@ -319,11 +325,10 @@
   const SIDEBAR_MIN_WIDTH = 160;
   const SIDEBAR_MAX_WIDTH = 480;
   const SIDEBAR_DEFAULT_WIDTH = 220;
-  let sidebarWidth = $state(
-    typeof window !== "undefined"
-      ? Number(localStorage.getItem("prisma.sidebarWidth")) || SIDEBAR_DEFAULT_WIDTH
-      : SIDEBAR_DEFAULT_WIDTH
-  );
+  // Real persisted value arrives async via loadSettings() -> cfg.sidebar_width
+  // (see bootstrap() below) -- this is just the synchronous placeholder
+  // $state needs at declaration time, same convention as apiBase/cfg.scale.
+  let sidebarWidth = $state(SIDEBAR_DEFAULT_WIDTH);
   let sidebarCollapsed = $state(
     typeof window !== "undefined" && localStorage.getItem("prisma.sidebarCollapsed") === "1"
   );
@@ -338,15 +343,15 @@
     e.preventDefault();
     sidebarResizing = true;
     // Measure from the sidebar's own left edge rather than assuming it sits
-    // at viewport x=0 — Tauri's .shell has a 20px margin around it (see
-    // :global(.tauri) .shell), so clientX alone would be off by that much.
+    // at viewport x=0.
     const sidebarLeft = sidebarAsideEl?.getBoundingClientRect().left ?? 0;
     const onMove = (ev: MouseEvent) => {
       sidebarWidth = Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, ev.clientX - sidebarLeft));
     };
     const onUp = () => {
       sidebarResizing = false;
-      localStorage.setItem("prisma.sidebarWidth", String(sidebarWidth));
+      cfg.sidebar_width = sidebarWidth;
+      savePlatformSettings(cfg).catch(() => {});
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseup", onUp);
     };
@@ -1037,8 +1042,6 @@
 
   import { untrack } from "svelte";
 
-  let isMaximized = $state(false);
-
   function handleIframeMessage(e: MessageEvent) {
     if (e.data?.type === "open-url" && typeof e.data.url === "string") {
       shellOpen(e.data.url);
@@ -1051,8 +1054,28 @@
   const SCALE_STEP = 0.05;
 
   let showSettings = $state(false);
-  let cfg = $state<AppSettings>({ scale: DEFAULT_SCALE, server_url: untrack(() => apiBase), saved_servers: DEFAULT_SAVED_SERVERS, vault_path: null });
-  let syncStatus = $state<SyncStatusInfo>({ running: false, server_url: null, vault_path: null, tracked_files: 0 });
+  // Real persisted value arrives async via loadSettings() below -- this is
+  // just the synchronous placeholder $state needs at declaration time,
+  // parsed from apiBase's own placeholder (see _defaultApiBase()) so it's
+  // at least self-consistent until then.
+  let cfg = $state<AppSettings>(untrack(() => {
+    const url = new URL(apiBase);
+    return {
+      scale: DEFAULT_SCALE,
+      hostname: url.hostname,
+      tls: url.protocol === "https:",
+      api_port: Number(url.port) || (url.protocol === "https:" ? 443 : 80),
+      web_port: DEFAULT_WEB_PORT,
+      vault_path: null,
+      sidebar_width: SIDEBAR_DEFAULT_WIDTH,
+    };
+  }));
+  let syncStatus = $state<SyncStatusInfo>({ running: false, server_url: null, vault_path: null, tracked_files: 0, needs_reauth: false });
+  // Non-null only when the last applySyncPolicy()/syncStart() call actively
+  // refused to start (e.g. prisma-desktop's same-filesystem collision
+  // guard) -- distinct from the ordinary "stopped because Local" case,
+  // which needs no explanation.
+  let syncBlockedReason = $state<string | null>(null);
   let syncDiffInfo = $state<SyncDiffInfo | null>(null);
   let syncDiffLoading = $state(false);
 
@@ -1101,7 +1124,7 @@
     // Restart (not just leave running) so the engine picks up the new
     // vault_path immediately instead of on next app launch.
     await syncStop();
-    await applySyncPolicy(apiBase);
+    syncBlockedReason = await applySyncPolicy(apiBase);
     await refreshSyncInfo();
   }
 
@@ -1129,7 +1152,8 @@
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
         cfg = await loadPlatformSettings();
-        apiBase = cfg.server_url || apiBase;
+        apiBase = cfg.hostname ? apiUrl(cfg) : apiBase;
+        sidebarWidth = cfg.sidebar_width || SIDEBAR_DEFAULT_WIDTH;
         break;
       } catch (err) {
         console.error(`loadSettings: attempt ${attempt}/3 failed`, err);
@@ -1147,30 +1171,18 @@
   }
 
   async function saveAndApply() {
-    cfg.server_url = apiBase;
+    // The hostname/TLS/port fields only exist in the Tauri Settings card
+    // (isTauri-gated, see the "Server" resource-card below) -- in
+    // browser/PWA mode cfg.hostname is never populated by the user, so
+    // deriving apiBase from cfg here would overwrite the real, working
+    // apiBase with the empty "http://:0" placeholder on every single save.
+    if (isTauri) apiBase = apiUrl(cfg);
     try {
       await savePlatformSettings(cfg);
       await applyScale(cfg.scale);
     } catch {}
     showSettings = false;
     bootstrap();
-  }
-
-  /// One-click switch between saved_servers entries — deliberately does
-  /// NOT call bootstrap()/loadHome() (which reset showSettings to false,
-  /// see their own bodies) so the user stays on the Settings page and can
-  /// see which server is now active, instead of being bounced to Home
-  /// right after switching.
-  async function switchServer(url: string) {
-    apiBase = url;
-    cfg.server_url = url;
-    try { await savePlatformSettings(cfg); } catch {}
-    serverOnline = await ping();
-    if (serverOnline) {
-      await Promise.all([loadTree(), loadStreams(), loadChats(), loadZoteroStatus()]);
-      pollStatus();
-    }
-    connectWS();
   }
 
   // ── Stream form ─────────────────────────────────────────────────────────────
@@ -1241,204 +1253,7 @@
   <LoginScreen serverUrl={apiBase} onLoggedIn={() => { showLoginScreen = false; loadTree(); connectWS(); }} />
 {/if}
 
-{#if isTauri}
-  <!-- Sibling of .shell, not a descendant — see TauriResizeGrips.svelte. -->
-  <TauriResizeGrips bind:isMaximized />
-{/if}
-
-<div class="shell" class:maximized={isMaximized}>
-
-  <!-- Titlebar (CSD) -->
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="titlebar" onmousedown={winDrag}>
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div class="drag-area">
-      <span class="logo">Prisma</span>
-    </div>
-
-    <div class="search-wrap" onmousedown={e => e.stopPropagation()}>
-      <input
-        class="search-input"
-        bind:value={searchQuery}
-        placeholder="Search vault…"
-        oninput={onSearchInput}
-        onkeydown={e => { if (e.key === "Enter") openDeepSearch(); }}
-      />
-      {#if searchQuery}
-        <button class="clear-btn" onclick={clearSearch} title="Clear">✕</button>
-      {/if}
-      {#if searching}
-        <span class="spinner-sm"></span>
-      {/if}
-      <button class="deep-btn" onclick={openDeepSearch} title="Deep search (graph + semantic)">⌕</button>
-    </div>
-
-    <button
-      class="icon-btn"
-      onmousedown={e => e.stopPropagation()}
-      onclick={() => { activeNode = null; activeChat = null; showResourcesPage = false; showKgProgressPage = false; showSettings = !showSettings; }}
-      title="Settings"
-    >⚙</button>
-
-    <!-- Status dot + popover -->
-    <div class="status-anchor" onmousedown={e => e.stopPropagation()}>
-      <button
-        class="gdot-btn"
-        class:offline={!serverOnline}
-        class:error={serverOnline && !serverStatus?.config?.ok}
-        class:indexing={serverOnline && serverStatus?.config?.ok && kgState === "indexing"}
-        class:stale={serverOnline && serverStatus?.config?.ok && kgState === "stale"}
-        class:idle={serverOnline && serverStatus?.config?.ok && kgState === "idle"}
-        onclick={() => statusPopoverOpen = !statusPopoverOpen}
-        title="System status"
-      ></button>
-      {#if statusPopoverOpen}
-        <button class="status-backdrop" aria-label="Close" onclick={() => statusPopoverOpen = false}></button>
-        <div class="status-popover">
-          <div class="sp-header">System status</div>
-
-          <div class="sp-section">
-            <span class="sp-label">Server</span>
-            <span class="sp-val" class:ok={serverOnline} class:bad={!serverOnline}>
-              {serverOnline ? "online" : "offline"}
-            </span>
-          </div>
-
-          {#if serverStatus}
-            <div class="sp-section">
-              <span class="sp-label">Config</span>
-              <span class="sp-val" class:ok={serverStatus.config.ok} class:bad={!serverStatus.config.ok}>
-                {serverStatus.config.ok ? "ok" : serverStatus.config.error ?? "error"}
-              </span>
-            </div>
-
-            <div class="sp-section">
-              <span class="sp-label">Internet</span>
-              <span class="sp-val" class:ok={serverStatus.online} class:warn={!serverStatus.online}>
-                {serverStatus.online ? "reachable" : "offline"}
-              </span>
-            </div>
-
-            {#if serverStatus.chat_config}
-              <div class="sp-section">
-                <span class="sp-label">Chat</span>
-                <span class="sp-val ok">{serverStatus.chat_config.provider} / {serverStatus.chat_config.model}</span>
-              </div>
-            {/if}
-
-            {#if serverStatus.ollama != null && serverStatus.chat_config?.provider === "ollama"}
-              <div class="sp-section">
-                <span class="sp-label">Ollama</span>
-                <span class="sp-val" class:ok={serverStatus.ollama.reachable} class:bad={!serverStatus.ollama.reachable}>
-                  {serverStatus.ollama.reachable ? "reachable" : "offline"}
-                </span>
-              </div>
-            {/if}
-
-            {#if serverStatus.vault}
-              <div class="sp-section">
-                <span class="sp-label">Vault</span>
-                <span class="sp-val ok">
-                  {serverStatus.vault.notes}n · {serverStatus.vault.sources}s · {serverStatus.vault.chats}c · {serverStatus.vault.streams}st
-                </span>
-              </div>
-              <div class="sp-vault-root">{serverStatus.vault.root}</div>
-            {/if}
-
-            <div class="sp-section">
-              <span class="sp-label">Knowledge graph</span>
-              <span class="sp-val"
-                class:ok={kgState === "idle"}
-                class:warn={kgState === "stale"}
-                class:info={kgState === "indexing"}
-              >
-                {kgState ?? "—"}
-                {#if kgLastIndexed && kgState === "idle"}
-                  · {new Date(kgLastIndexed).toLocaleTimeString()}
-                {/if}
-              </span>
-            </div>
-            {#if serverStatus.knowledge_graph?.last_error}
-              <div class="sp-error">{serverStatus.knowledge_graph.last_error}</div>
-            {/if}
-            {#if serverStatus.knowledge_graph?.current_activity}
-              <div class="sp-vault-root">{serverStatus.knowledge_graph.current_activity}</div>
-            {/if}
-
-            {#if serverStatus.chroma}
-              <div class="sp-section">
-                <span class="sp-label">Chroma</span>
-                <span class="sp-val" class:ok={serverStatus.chroma.chunks > 0} class:warn={serverStatus.chroma.chunks === 0}>
-                  {serverStatus.chroma.chunks} chunks · {serverStatus.chroma.files_indexed} files
-                </span>
-              </div>
-              <div class="sp-vault-root">{serverStatus.chroma.model}{serverStatus.chroma.provider ? ` (${serverStatus.chroma.provider})` : ""}</div>
-              {#if serverStatus.chroma.current_activity}
-                <div class="sp-vault-root">{serverStatus.chroma.current_activity}</div>
-              {/if}
-            {/if}
-
-            {#if serverStatus.zotero}
-              <div class="sp-section">
-                <span class="sp-label">Zotero</span>
-                <span class="sp-val"
-                  class:ok={serverStatus.zotero.available}
-                  class:warn={!serverStatus.zotero.available}
-                >
-                  {serverStatus.zotero.mode} · {serverStatus.zotero.available ? "available" : "unavailable"}
-                </span>
-              </div>
-              {#if serverStatus.zotero.available && serverStatus.zotero.reachable !== undefined}
-                <div class="sp-vault-root">
-                  Web API:
-                  <span class:ok={serverStatus.zotero.reachable} class:warn={!serverStatus.zotero.reachable}>
-                    {serverStatus.zotero.reachable ? "reachable" : "unreachable"}
-                  </span>
-                </div>
-              {/if}
-            {/if}
-
-            {#if serverStatus.pending_jobs > 0}
-              <div class="sp-section">
-                <span class="sp-label">Jobs</span>
-                <span class="sp-val warn">{serverStatus.pending_jobs} pending</span>
-              </div>
-            {/if}
-
-            {#if serverStatus.processes}
-              <div class="sp-section">
-                <span class="sp-label">Processes</span>
-                <span class="sp-val">
-                  {#if serverStatus.processes.system}
-                    {serverStatus.processes.system.cpu_count} cores
-                    {#if serverStatus.processes.system.memory_available_mb != null}
-                      · {Math.round(serverStatus.processes.system.memory_available_mb / 1024 * 10) / 10}GB free
-                      / {Math.round((serverStatus.processes.system.memory_total_mb ?? 0) / 1024 * 10) / 10}GB
-                    {/if}
-                  {/if}
-                </span>
-              </div>
-              {#each Object.entries(serverStatus.processes).filter(([k]) => k !== "system") as [name, proc]}
-                {#if proc && typeof proc === "object" && "pid" in proc}
-                  <div class="sp-proc-row">
-                    <span class="sp-proc-name" class:bad={!proc.alive}>{name}</span>
-                    <span class="sp-proc-mem">{proc.memory_mb != null ? `${proc.memory_mb}MB` : "—"}</span>
-                  </div>
-                {/if}
-              {/each}
-            {/if}
-          {/if}
-        </div>
-      {/if}
-    </div>
-
-
-    {#if isTauri}
-      <TauriWindowControls />
-    {/if}
-  </div>
-
-  <div class="accent-divider"></div>
+<div class="shell">
 
   <!-- Workspace -->
   <div class="workspace">
@@ -1451,6 +1266,27 @@
       style={sidebarCollapsed ? "" : `width: ${sidebarWidth}px`}
     >
       {#if !sidebarCollapsed}
+      <button class="home-btn" class:active={activeNode?.slug === "home"} onclick={loadHome}>
+        Home
+      </button>
+      <div class="sidebar-search">
+        <div class="search-wrap">
+          <input
+            class="search-input"
+            bind:value={searchQuery}
+            placeholder="Search vault…"
+            oninput={onSearchInput}
+            onkeydown={e => { if (e.key === "Enter") openDeepSearch(); }}
+          />
+          {#if searchQuery}
+            <button class="clear-btn" onclick={clearSearch} title="Clear">✕</button>
+          {/if}
+          {#if searching}
+            <span class="spinner-sm"></span>
+          {/if}
+          <button class="deep-btn" onclick={openDeepSearch} title="Deep search (graph + semantic)">⌕</button>
+        </div>
+      </div>
       {#if !serverOnline}
         <div class="sidebar-offline">
           Server offline<br/>
@@ -1521,11 +1357,6 @@
             </button>
           {/if}
         {/snippet}
-
-        <!-- Home -->
-        <button class="home-btn" class:active={activeNode?.slug === "home"} onclick={loadHome}>
-          Home
-        </button>
 
         <!-- Vault section -->
         <div class="section-header">
@@ -1711,6 +1542,165 @@
           </div>
         {/if}
       {/if}
+
+      <div class="sidebar-footer">
+        <button
+          class="icon-btn"
+          onclick={() => { activeNode = null; activeChat = null; showResourcesPage = false; showKgProgressPage = false; showSettings = !showSettings; }}
+          title="Settings"
+        >⚙</button>
+
+        <div class="status-anchor">
+          <button
+            class="gdot-btn"
+            class:offline={!serverOnline}
+            class:error={serverOnline && !serverStatus?.config?.ok}
+            class:indexing={serverOnline && serverStatus?.config?.ok && kgState === "indexing"}
+            class:stale={serverOnline && serverStatus?.config?.ok && kgState === "stale"}
+            class:idle={serverOnline && serverStatus?.config?.ok && kgState === "idle"}
+            onclick={() => statusPopoverOpen = !statusPopoverOpen}
+            title="System status"
+          ></button>
+          {#if statusPopoverOpen}
+            <button class="status-backdrop" aria-label="Close" onclick={() => statusPopoverOpen = false}></button>
+            <div class="status-popover">
+              <div class="sp-header">System status</div>
+
+              <div class="sp-section">
+                <span class="sp-label">Server</span>
+                <span class="sp-val" class:ok={serverOnline} class:bad={!serverOnline}>
+                  {serverOnline ? "online" : "offline"}
+                </span>
+              </div>
+
+              {#if serverStatus}
+                <div class="sp-section">
+                  <span class="sp-label">Config</span>
+                  <span class="sp-val" class:ok={serverStatus.config.ok} class:bad={!serverStatus.config.ok}>
+                    {serverStatus.config.ok ? "ok" : serverStatus.config.error ?? "error"}
+                  </span>
+                </div>
+
+                <div class="sp-section">
+                  <span class="sp-label">Internet</span>
+                  <span class="sp-val" class:ok={serverStatus.online} class:warn={!serverStatus.online}>
+                    {serverStatus.online ? "reachable" : "offline"}
+                  </span>
+                </div>
+
+                {#if serverStatus.chat_config}
+                  <div class="sp-section">
+                    <span class="sp-label">Chat</span>
+                    <span class="sp-val ok">{serverStatus.chat_config.provider} / {serverStatus.chat_config.model}</span>
+                  </div>
+                {/if}
+
+                {#if serverStatus.llm_backend}
+                  <div class="sp-section">
+                    <span class="sp-label">{LLM_BACKEND_LABELS[serverStatus.llm_backend.provider] ?? serverStatus.llm_backend.provider}</span>
+                    <span class="sp-val" class:ok={serverStatus.llm_backend.reachable} class:bad={!serverStatus.llm_backend.reachable}>
+                      {serverStatus.llm_backend.reachable ? "reachable" : "offline"}
+                    </span>
+                  </div>
+                {/if}
+
+                {#if serverStatus.vault}
+                  <div class="sp-section">
+                    <span class="sp-label">Vault</span>
+                    <span class="sp-val ok">
+                      {serverStatus.vault.notes}n · {serverStatus.vault.sources}s · {serverStatus.vault.chats}c · {serverStatus.vault.streams}st
+                    </span>
+                  </div>
+                  <div class="sp-vault-root">{serverStatus.vault.root}</div>
+                {/if}
+
+                <div class="sp-section">
+                  <span class="sp-label">Knowledge graph</span>
+                  <span class="sp-val"
+                    class:ok={kgState === "idle"}
+                    class:warn={kgState === "stale"}
+                    class:info={kgState === "indexing"}
+                  >
+                    {kgState ?? "—"}
+                    {#if kgLastIndexed && kgState === "idle"}
+                      · {new Date(kgLastIndexed).toLocaleTimeString()}
+                    {/if}
+                  </span>
+                </div>
+                {#if serverStatus.knowledge_graph?.last_error}
+                  <div class="sp-error">{serverStatus.knowledge_graph.last_error}</div>
+                {/if}
+                {#if serverStatus.knowledge_graph?.current_activity}
+                  <div class="sp-vault-root">{serverStatus.knowledge_graph.current_activity}</div>
+                {/if}
+
+                {#if serverStatus.chroma}
+                  <div class="sp-section">
+                    <span class="sp-label">Chroma</span>
+                    <span class="sp-val" class:ok={serverStatus.chroma.chunks > 0} class:warn={serverStatus.chroma.chunks === 0}>
+                      {serverStatus.chroma.chunks} chunks · {serverStatus.chroma.files_indexed} files
+                    </span>
+                  </div>
+                  <div class="sp-vault-root">{serverStatus.chroma.model}{serverStatus.chroma.provider ? ` (${serverStatus.chroma.provider})` : ""}</div>
+                  {#if serverStatus.chroma.current_activity}
+                    <div class="sp-vault-root">{serverStatus.chroma.current_activity}</div>
+                  {/if}
+                {/if}
+
+                {#if serverStatus.zotero}
+                  <div class="sp-section">
+                    <span class="sp-label">Zotero</span>
+                    <span class="sp-val"
+                      class:ok={serverStatus.zotero.available}
+                      class:warn={!serverStatus.zotero.available}
+                    >
+                      {serverStatus.zotero.mode} · {serverStatus.zotero.available ? "available" : "unavailable"}
+                    </span>
+                  </div>
+                  {#if serverStatus.zotero.available && serverStatus.zotero.reachable !== undefined}
+                    <div class="sp-vault-root">
+                      Web API:
+                      <span class:ok={serverStatus.zotero.reachable} class:warn={!serverStatus.zotero.reachable}>
+                        {serverStatus.zotero.reachable ? "reachable" : "unreachable"}
+                      </span>
+                    </div>
+                  {/if}
+                {/if}
+
+                {#if serverStatus.pending_jobs > 0}
+                  <div class="sp-section">
+                    <span class="sp-label">Jobs</span>
+                    <span class="sp-val warn">{serverStatus.pending_jobs} pending</span>
+                  </div>
+                {/if}
+
+                {#if serverStatus.processes}
+                  <div class="sp-section">
+                    <span class="sp-label">Processes</span>
+                    <span class="sp-val">
+                      {#if serverStatus.processes.system}
+                        {serverStatus.processes.system.cpu_count} cores
+                        {#if serverStatus.processes.system.memory_available_mb != null}
+                          · {Math.round(serverStatus.processes.system.memory_available_mb / 1024 * 10) / 10}GB free
+                          / {Math.round((serverStatus.processes.system.memory_total_mb ?? 0) / 1024 * 10) / 10}GB
+                        {/if}
+                      {/if}
+                    </span>
+                  </div>
+                  {#each Object.entries(serverStatus.processes).filter(([k]) => k !== "system") as [name, proc]}
+                    {#if proc && typeof proc === "object" && "pid" in proc}
+                      <div class="sp-proc-row">
+                        <span class="sp-proc-name" class:bad={!proc.alive}>{name}</span>
+                        <span class="sp-proc-mem">{proc.memory_mb != null ? `${proc.memory_mb}MB` : "—"}</span>
+                      </div>
+                    {/if}
+                  {/each}
+                {/if}
+              {/if}
+            </div>
+          {/if}
+        </div>
+      </div>
       {/if}
     </aside>
     {#if !sidebarCollapsed}
@@ -1880,7 +1870,14 @@
                   {/if}
                   <div class="chat-turn-content text-body">
                     {#each renderContentSegments(msg.content) as seg}
-                      {#if "text" in seg}{seg.text}{:else}<sup class="footnote-ref">{seg.footnoteIndex}</sup>{/if}
+                      {#if "text" in seg}{seg.text}{:else}
+                        {@const fnRelation = msg.footnotes?.find(f => f.index === seg.footnoteIndex)?.relation}
+                        <button
+                          class="footnote-ref footnote-ref-{fnRelation}"
+                          title="Jump to footnote {seg.footnoteIndex}"
+                          onclick={() => document.getElementById(`chat-turn-${i}-footnote-${seg.footnoteIndex}`)?.scrollIntoView({ behavior: "smooth", block: "nearest" })}
+                        >{seg.footnoteIndex}</button>
+                      {/if}
                     {/each}
                   </div>
                   {#if msg.footnotes?.length}
@@ -2276,23 +2273,25 @@
                 <div class="resource-card-header">
                   <span class="resource-pool-name">Server</span>
                 </div>
-                <div class="server-switcher">
-                  {#each cfg.saved_servers as server (server.url)}
-                    <button
-                      class="server-switch-btn"
-                      class:active={apiBase === server.url}
-                      onclick={() => switchServer(server.url)}
-                    >
-                      <span class="server-switch-name">{server.name}</span>
-                      <span class="server-switch-url">{server.url}</span>
-                    </button>
-                  {/each}
-                </div>
                 <label class="setting-row">
-                  <span class="setting-label">Custom URL</span>
-                  <input bind:value={apiBase} placeholder="http://127.0.0.1:8765" />
-                  <span class="setting-hint">URL of the running <code>prisma serve</code> process — click Save to apply a custom value.</span>
+                  <span class="setting-label">Hostname</span>
+                  <input bind:value={cfg.hostname} placeholder="127.0.0.1" />
                 </label>
+                <label class="setting-row" style="flex-direction:row; align-items:center; gap:6px;">
+                  <input type="checkbox" bind:checked={cfg.tls} style="width:auto" />
+                  <span class="setting-label" style="margin:0">TLS / SSL (https)</span>
+                </label>
+                <div class="server-switcher" style="flex-direction:row; gap:8px;">
+                  <label class="setting-row" style="flex:1">
+                    <span class="setting-label">API port</span>
+                    <input type="number" min="1" max="65535" bind:value={cfg.api_port} />
+                  </label>
+                  <label class="setting-row" style="flex:1">
+                    <span class="setting-label">Web port</span>
+                    <input type="number" min="1" max="65535" bind:value={cfg.web_port} />
+                  </label>
+                </div>
+                <span class="setting-hint">Host/ports of the running <code>prisma serve</code> process — click Save to apply.</span>
               </div>
 
               <div class="resource-card">
@@ -2313,8 +2312,10 @@
                       <span class="resource-fact-val">{syncStatus.tracked_files}</span>
                     </div>
                   </div>
+                {:else if syncBlockedReason}
+                  <div class="setting-hint setting-hint-error">{syncBlockedReason}</div>
                 {:else}
-                  <div class="setting-hint">Only runs against a non-Local server (see above) — syncing against the same machine is a no-op.</div>
+                  <div class="setting-hint">Only runs when the hostname above isn't a loopback address (127.0.0.1/localhost) — syncing a local vault against the same machine is a no-op.</div>
                 {/if}
 
                 <label class="setting-row">
@@ -2353,7 +2354,7 @@
                   {#if syncStatus.running}
                     <button class="btn-secondary" onclick={async () => { await syncStop(); await refreshSyncInfo(); }}>Stop</button>
                   {:else}
-                    <button class="btn-secondary" onclick={async () => { await syncStart(); await refreshSyncInfo(); }}>Start</button>
+                    <button class="btn-secondary" onclick={async () => { syncBlockedReason = await syncStart(); await refreshSyncInfo(); }}>Start</button>
                   {/if}
                 </div>
               </div>
@@ -2599,73 +2600,14 @@
     height: calc(100vh / var(--ui-scale, 1));
   }
 
-  :global(.tauri) .shell {
-    margin: 20px;
-    height: calc(100vh - 40px);
-    border: 2px solid #1e3558;
-    border-radius: 6px;
-    box-shadow:
-      0 0 0 1px rgba(0, 0, 0, 0.5),
-      0 0 6px rgba(0, 0, 0, 0.6),
-      0 0 14px rgba(0, 0, 0, 0.4),
-      0 0 20px rgba(0, 0, 0, 0.2);
-    overflow: hidden;
-  }
 
-  :global(.tauri) .shell.maximized {
-    margin: 0;
-    height: 100vh;
-    border: none;
-    border-radius: 0;
-    box-shadow: none;
-  }
-
-  /* ── Titlebar (CSD) ────────────────────────────────────────────────────── */
-  .titlebar {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 0 0 0 14px;
-    background: #080c16;
+  .sidebar-search {
     flex-shrink: 0;
-    height: 38px;
-    user-select: none;
-  }
-
-  /* A restrained accent seam between the title bar and the workspace.
-     Same crimson/orange/tan/navy set as before, but blended into a smooth
-     gradient rather than hard-stopped stripes — stacked flat bands read as
-     a UI glitch at this height, a blend reads as a deliberate accent. This
-     palette is reserved for very highlighted elements only — not the
-     note/source/chat/stream semantic palette used elsewhere. */
-  .accent-divider {
-    height: 12px;
-    flex-shrink: 0;
-    background: linear-gradient(180deg, #c8203a 0%, #dd6b3a 33%, #ddb066 66%, #2c4d75 100%);
-  }
-
-  .drag-area {
-    display: flex;
-    align-items: center;
-    padding: 0 8px;
-    flex-shrink: 0;
-    height: 100%;
-    cursor: move;
-    min-width: 80px;
-  }
-
-  .logo {
-    font-size: 14px;
-    font-weight: 700;
-    color: #4a9eff;
-    letter-spacing: 0.06em;
-    white-space: nowrap;
-    pointer-events: none;
-    user-select: none;
+    padding: 10px 12px;
   }
 
   .search-wrap {
-    flex: 1;
+    width: 100%;
     position: relative;
     display: flex;
     align-items: center;
@@ -2709,18 +2651,22 @@
     animation: spin 0.7s linear infinite;
   }
 
+  .sidebar-footer {
+    flex-shrink: 0;
+    margin-top: auto;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 12px;
+    border-top: 1px solid #1a2d4a;
+  }
+
   /* Status dot + popover */
   .status-anchor {
     position: relative;
     flex-shrink: 0;
     display: flex;
     align-items: center;
-  }
-  /* In Tauri, .window-controls follows this and provides its own right-side
-     buffer against the window edge. In web mode nothing renders after it,
-     so without this the status dot sits flush against the browser edge. */
-  .status-anchor:last-child {
-    margin-right: 14px;
   }
 
   .gdot-btn {
@@ -2752,10 +2698,15 @@
     cursor: default;
   }
 
+  /* position: fixed, not absolute -- .status-anchor now lives inside
+     .sidebar-footer, a descendant of .sidebar, which has overflow-x: hidden
+     (for its tree/search content); an absolutely-positioned popover would
+     get clipped to the sidebar's own bounds instead of floating over the
+     rest of the window. */
   .status-popover {
-    position: absolute;
-    top: calc(100% + 10px);
-    right: 0;
+    position: fixed;
+    left: 12px;
+    bottom: 46px;
     width: 280px;
     background: #080c16;
     border: 1px solid #1a2d4a;
@@ -3795,10 +3746,22 @@
     overflow-wrap: anywhere;
   }
   .footnote-ref {
+    background: none;
+    border: none;
+    padding: 0;
+    cursor: pointer;
+    font: inherit;
+    vertical-align: super;
+    font-size: 0.7em;
     color: #7fd4c8;
     font-weight: 600;
     margin-left: 1px;
   }
+  .footnote-ref:hover { text-decoration: underline; }
+  .footnote-ref-citation { color: #7fd4c8; }
+  .footnote-ref-attribution { color: #60a5fa; }
+  .footnote-ref-relational { color: #c084fc; }
+  .footnote-ref-ai-inference { color: #94a3b8; }
   .chat-footnotes {
     margin: 8px 0 0;
     padding-left: 18px;
@@ -4184,22 +4147,6 @@
     gap: 6px;
     margin-bottom: 10px;
   }
-  .server-switch-btn {
-    display: flex;
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 2px;
-    padding: 8px 10px;
-    background: #0d1320;
-    border: 1px solid #1c2b40;
-    border-radius: 6px;
-    color: #e8edf8;
-    cursor: pointer;
-    text-align: left;
-  }
-  .server-switch-btn:hover { border-color: #2a4060; }
-  .server-switch-btn.active { border-color: #4a9eff; background: #10233a; }
-  .server-switch-name { font-size: 13px; font-weight: 600; }
   .server-switch-url { font-size: 11px; color: #6a8aa8; }
 
   .scale-slider-row {
@@ -4245,6 +4192,7 @@
     color: #2a4060;
     line-height: 1.5;
   }
+  .setting-hint-error { color: #f87171; }
   .chat-system-prompt-input + .setting-hint {
     display: block;
     margin-bottom: 10px;

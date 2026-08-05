@@ -72,6 +72,7 @@ The key separation:
 | [Transclusion](concepts/transclusion.md) | `![[slug]]` DSL — embed node content inline | concepts/transclusion.md |
 | [Citation](concepts/citation.md) | `[[@citekey]]` DSL — reference a Source | concepts/citation.md |
 | [Footnote](concepts/footnote.md) | Per-claim attribution marker on a Chat turn — what kind of sourcing backs this claim, and which document(s) | concepts/footnote.md |
+| [Chat session graph](concepts/chat-session-graph.md) | Proposed: a Chat's own internal flow as nodes/edges (turns, tool calls, thinking steps) rather than a flat message list — distinct from the knowledge graph below | concepts/chat-session-graph.md |
 | [GraphNode](concepts/graph-node.md) | Vault node as a vertex in the knowledge graph | concepts/graph-node.md |
 | [Job](concepts/job.md) | Async literature review task (server-side) | concepts/job.md |
 
@@ -179,3 +180,9 @@ Concepts that belong to the domain and are defined here, but whose code support 
 - **Async rewrite** — `PrismaCoordinator` and agents are synchronous; `ThreadPoolExecutor` offloads blocking I/O. Full async rewrite deferred.
 - **Encryption at rest** — vault files are plaintext. `fscrypt` / `gocryptfs` / `age` deferred.
 - **`AnalysisAgent` confidence persistence** — `confidence_score` is computed during search; not saved to `ZoteroItem` or `Source` frontmatter.
+- **Chat session graph** — design-only (raised 2026-08-05, see concepts/chat-session-graph.md and
+  ADR-019's "Open direction" section): a real node/edge graph generalizing `ChatMessage.tool_calls`
+  (today a flat, resultless summary) and `alternates` (today's one informal branch edge), plus
+  new thinking-step nodes (motivated by MCP's `sequentialthinking` reference server) and a
+  MasterAI/orchestrator component for per-turn selective context loading. A second, breaking
+  redesign of the `.sess` format shipped 2026-08-05 — needs its own plan-mode pass, not started.

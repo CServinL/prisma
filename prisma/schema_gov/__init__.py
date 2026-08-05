@@ -5,7 +5,7 @@ multi-format content wrapper.
 Nothing under this package imports from `prisma.storage`, `prisma.services`,
 or any other prisma-domain module -- see docs/wiki/adr/ADR-019-persisted-
 format-governance-and-migrations.md. Prisma's own domain models (Note,
-Source, ChatSession, ...) depend on this package and register themselves
+Source, Chat, ...) depend on this package and register themselves
 into it; this package never depends back. That one-way boundary is what
 would let this package move to its own repo for reuse across future
 projects without disentangling prisma-specific references first.

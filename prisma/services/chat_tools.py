@@ -174,7 +174,7 @@ class ChatToolbox:
         except FileNotFoundError:
             return None
         if isinstance(node, Chat):
-            return "\n\n".join(m.content for m in node.messages) or None
+            return "\n\n".join(m.content.value for m in node.messages) or None
         return getattr(node, "body", None) or None
 
     def _search_vault(self, query: str, top_k: int = 5) -> ToolResult:

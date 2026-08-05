@@ -93,12 +93,27 @@
     faithfulness_checked: boolean | null;
   }
 
+  // ADR-019: chat message content is a typed, format-tagged wrapper
+  // (schema_gov.RichContent) rather than a flat string -- `format` is
+  // always "md" today (svg/latex are schema-forward-compatible, not
+  // rendered anywhere yet); `rendered_html` is server-sanitized markdown
+  // HTML, computed but deliberately unused for chat turns here (see
+  // renderContentSegments below) -- model-generated text stays untrusted,
+  // rendered as plain escaped segments client-side, same as before ADR-019.
+  interface RichContent {
+    format: "md" | "html" | "svg" | "latex";
+    value: string;
+    rendered_html: string | null;
+  }
+
   interface ChatTurn {
     role: "user" | "assistant";
-    content: string;
+    content: RichContent;
     timestamp: string;
     footnotes: FootnoteOut[];
     tool_calls: ToolCallOut[];
+    model?: string | null;
+    alternates?: ChatTurn[];
   }
 
   interface ChatDetail {
@@ -652,7 +667,10 @@
     chatSending = true;
     activeChat.messages = [
       ...activeChat.messages,
-      { role: "user", content: text, timestamp: new Date().toISOString(), footnotes: [], tool_calls: [] },
+      {
+        role: "user", content: { format: "md", value: text, rendered_html: null },
+        timestamp: new Date().toISOString(), footnotes: [], tool_calls: [],
+      },
     ];
     try {
       const r = await apiFetch(`${apiBase}/chat`, {
@@ -663,9 +681,27 @@
         const data = await r.json();
         activeChat.messages = [
           ...activeChat.messages,
-          { role: "assistant", content: data.reply, timestamp: new Date().toISOString(), footnotes: data.footnotes ?? [], tool_calls: data.tool_calls ?? [] },
+          {
+            role: "assistant", content: { format: "md", value: data.reply, rendered_html: data.html ?? null },
+            timestamp: new Date().toISOString(), footnotes: data.footnotes ?? [], tool_calls: data.tool_calls ?? [],
+          },
         ];
       }
+    } finally {
+      chatSending = false;
+    }
+  }
+
+  async function regenerateTurn(index: number, model?: string) {
+    if (!activeChat || chatSending) return;
+    const slug = activeChat.slug;
+    chatSending = true;
+    try {
+      const r = await apiFetch(`${apiBase}/chats/${encodeURIComponent(slug)}/turns/${index}/regenerate`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: model ?? null }),
+      });
+      if (r.ok && activeChat?.slug === slug) activeChat = await r.json();
     } finally {
       chatSending = false;
     }
@@ -1852,6 +1888,18 @@
                           <path d="M12 21s-7-6.5-7-11a7 7 0 0 1 14 0c0 4.5-7 11-7 11z"/>
                         </svg>
                       </button>
+                      {#if msg.role === "assistant"}
+                        <button
+                          class="chat-turn-action"
+                          title="Regenerate this reply with the chat's current model"
+                          disabled={chatSending}
+                          onclick={() => regenerateTurn(i)}
+                        >
+                          <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor">
+                            <path d="M17.65 6.35A7.95 7.95 0 0 0 12 4a8 8 0 1 0 7.75 10h-2.08A6 6 0 1 1 12 6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35Z"/>
+                          </svg>
+                        </button>
+                      {/if}
                       <button class="chat-turn-action" title="Delete this turn" onclick={() => deleteChatMessage(i)}>
                         <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor">
                           <rect x="9" y="3" width="6" height="2" rx="1"/>
@@ -1869,7 +1917,7 @@
                     </div>
                   {/if}
                   <div class="chat-turn-content text-body">
-                    {#each renderContentSegments(msg.content) as seg}
+                    {#each renderContentSegments(msg.content.value) as seg}
                       {#if "text" in seg}{seg.text}{:else}
                         {@const fnRelation = msg.footnotes?.find(f => f.index === seg.footnoteIndex)?.relation}
                         <button
@@ -1880,6 +1928,14 @@
                       {/if}
                     {/each}
                   </div>
+                  {#if msg.alternates?.length}
+                    <div class="chat-turn-alternates" title="Earlier attempts at this turn, preserved when regenerated">
+                      {msg.alternates.length + 1} attempts — {msg.model ?? "current model"} shown
+                      {#each msg.alternates as alt}
+                        <span class="chat-turn-alternate-model">· {alt.model ?? "unknown model"}</span>
+                      {/each}
+                    </div>
+                  {/if}
                   {#if msg.footnotes?.length}
                     <ol class="chat-footnotes">
                       {#each msg.footnotes as fn}
@@ -1947,7 +2003,7 @@
                 {#each activeChat.pinned_turns as idx (idx)}
                   <button class="pinned-turn-item" onclick={() => scrollToTurn(idx)}>
                     <span class="pinned-turn-role">{activeChat.messages[idx]?.role === "user" ? "You" : "Prisma"}</span>
-                    <span class="pinned-turn-preview">{truncate(activeChat.messages[idx]?.content ?? "", 70)}</span>
+                    <span class="pinned-turn-preview">{truncate(activeChat.messages[idx]?.content?.value ?? "", 70)}</span>
                   </button>
                 {/each}
               </div>
@@ -3744,6 +3800,14 @@
     line-height: 1.6;
     white-space: pre-wrap;
     overflow-wrap: anywhere;
+  }
+  .chat-turn-alternates {
+    margin-top: 6px;
+    font-size: 0.75rem;
+    color: #7a8a9a;
+  }
+  .chat-turn-alternate-model {
+    color: #5c6b7a;
   }
   .footnote-ref {
     background: none;

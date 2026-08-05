@@ -10,8 +10,9 @@ from typing import Iterator
 
 import yaml
 
+from prisma.schema_gov import ContentFormat, RichContent
 from prisma.storage.models.vault_models import (
-    Chat, ChatMessage, ChatRole, ChatSession, Footnote, Note, NodeType, Source, Stream, StreamStatus,
+    Chat, ChatMessage, ChatRole, Footnote, Note, NodeType, Source, Stream, StreamStatus,
     RefreshFrequency, ToolCallRecord, VaultListing, VaultNodeMeta, VaultTreeNode,
 )
 
@@ -86,24 +87,24 @@ def _render_frontmatter(fm: dict) -> str:
     return "---\n" + yaml.dump(fm, default_flow_style=False, allow_unicode=True) + "---\n\n"
 
 
-# Chat transcripts are stored as plain markdown (no database, no HTML) —
-# role is carried by a heading per turn so any plain markdown viewer still
-# renders a readable transcript; the app parses on these headings to style
-# turns differently (user vs. assistant) at render time.
+# ── Legacy chat .md format (ADR-019) ─────────────────────────────────────────
+# Chats used to be stored as plain markdown -- role carried by a heading per
+# turn, tool calls as `>` blockquote lines, model/footnotes as a
+# `<!-- prisma:meta {...} -->` JSON comment. Superseded by pure-JSON `.sess`
+# files (see load_chat_session/save_chat_session below); every *live*
+# VaultService chat method now reads/writes `.sess` only. This block stays
+# read-only, solely so `chat_migration.migrate_chats_to_sess` can convert a
+# real vault's pre-existing chat `.md` files -- once a vault has no `.md`
+# files left under its chats directory, this whole block can be deleted.
 _CHAT_ROLE_HEADING = {ChatRole.user: "You", ChatRole.assistant: "Prisma"}
 _CHAT_HEADING_ROLE = {v: k for k, v in _CHAT_ROLE_HEADING.items()}
 _CHAT_TURN_RE = re.compile(r"^### (You|Prisma)\s*$\n(.*?)(?=^### (?:You|Prisma)\s*$|\Z)", re.MULTILINE | re.DOTALL)
 _CHAT_TOOL_LINE_RE = re.compile(r"^>\s*(?:🔧\s*)?used\s*`([a-zA-Z0-9_]+)`:\s*(.*)$", re.MULTILINE)
-# model/footnotes as one JSON blob rather than a per-field line like
-# _CHAT_TOOL_LINE_RE -- footnotes is a nested list of objects, awkward to
-# spread across single-line fields the way one tool call's marker+query is.
-# An HTML comment keeps it invisible in a plain markdown viewer, same as the
-# existing convention's own intent (readable transcript first).
 _CHAT_META_LINE_RE = re.compile(r"^<!--\s*prisma:meta\s+(.+?)\s*-->\s*$", re.MULTILINE)
 
-# ADR-019: governance for the prisma:meta blob's own shape, independent of
-# Pydantic's per-field defaults on ChatMessage/Footnote themselves (which
-# only handle *adding* an optional field, not a rename or a meaning change).
+# Governance for the prisma:meta blob's own shape, independent of Pydantic's
+# per-field defaults on ChatMessage/Footnote themselves (which only handle
+# *adding* an optional field, not a rename or a meaning change).
 CHAT_META_SCHEMA_VERSION = 1
 
 
@@ -134,42 +135,26 @@ def _migrate_chat_meta(raw: dict) -> dict:
     return raw
 
 
-def _render_chat_body(messages: list[ChatMessage]) -> str:
-    parts = []
-    for msg in messages:
-        heading = _CHAT_ROLE_HEADING[msg.role]
-        parts.append(f"### {heading}\n")
-        for tc in msg.tool_calls:
-            parts.append(f"> used `{tc.tool}`: {tc.args.get('query', '')}\n")
-        if msg.tool_calls:
-            parts.append("\n")
-        if msg.model is not None or msg.footnotes:
-            meta = {"schema_version": CHAT_META_SCHEMA_VERSION}
-            if msg.model is not None:
-                meta["model"] = msg.model
-            if msg.footnotes:
-                meta["footnotes"] = [fn.model_dump(mode="json") for fn in msg.footnotes]
-            parts.append(f"<!-- prisma:meta {json.dumps(meta)} -->\n")
-        parts.append(f"{msg.content}\n\n")
-    return "".join(parts)
-
-
 def _render_excerpt_body(summary: str | None, raw_turns: list[ChatMessage]) -> str:
     """Summary on top (verbatim mode: omitted — see ADR-015's mode switch),
-    verbatim pinned turns below, each its own heading + block (same
-    `### You`/`### Prisma` convention _render_chat_body uses for the main
-    transcript, separated by a rule) rather than run together — see
-    VaultService.save_excerpt."""
+    verbatim pinned turns below, each its own heading + block (`### You`/
+    `### Prisma`, same convention the legacy chat `.md` format used, separated
+    by a rule) rather than run together — see VaultService.save_excerpt. The
+    Excerpt note itself stays a real `.md` Note (ADR-019's two-layer model:
+    only the Excerpt is genuine prose), unaffected by chats moving to `.sess`."""
     parts = [f"## Summary\n\n{summary.strip()}\n\n## Pinned turns\n"] if summary is not None else ["## Pinned turns\n"]
     for i, msg in enumerate(raw_turns):
         heading = _CHAT_ROLE_HEADING[msg.role]
         if i > 0:
             parts.append("\n---\n")
-        parts.append(f"\n### {heading}\n\n{msg.content}\n")
+        parts.append(f"\n### {heading}\n\n{msg.content.value}\n")
     return "".join(parts)
 
 
 def _parse_chat_body(body: str) -> list[ChatMessage]:
+    """Legacy `.md` read path -- see the block comment above. Returns the
+    current `ChatMessage` shape (RichContent content) directly, so
+    chat_migration._convert_one needs no extra mapping step."""
     messages: list[ChatMessage] = []
     for heading, turn_body in _CHAT_TURN_RE.findall(body):
         role = _CHAT_HEADING_ROLE[heading]
@@ -193,26 +178,33 @@ def _parse_chat_body(body: str) -> list[ChatMessage]:
                 _log.warning("chat turn: malformed prisma:meta comment, dropping: %s", exc)
         content = _CHAT_TOOL_LINE_RE.sub("", turn_body)
         content = _CHAT_META_LINE_RE.sub("", content).strip()
-        messages.append(ChatMessage(role=role, content=content, tool_calls=tool_calls, model=model, footnotes=footnotes))
+        messages.append(ChatMessage(
+            role=role, content=RichContent(format=ContentFormat.markdown, value=content),
+            tool_calls=tool_calls, model=model, footnotes=footnotes,
+        ))
     return messages
 
 
-# ── ChatSession (ADR-019): pure-JSON `.sess` files ──────────────────────────
-# Additive alongside the markdown _parse_chat_body/_render_chat_body pair
-# above -- not yet wired into VaultService/app.py (that's the API/frontend
-# wiring phase). `path` is excluded from the file's own JSON content and
-# re-injected from the actual file location on load, same convention the
-# markdown side already follows (VaultNodeBase.path is a computed field,
-# derived from where a file was found, never round-tripped through the
-# file's own content).
+# ── Chat (ADR-019): pure-JSON `.sess` files ─────────────────────────────────
+# `path` is excluded from the file's own JSON content and re-injected from
+# the actual file location on load -- VaultNodeBase.path is a computed
+# field, derived from where a file was found, never round-tripped through
+# the file's own content (see schema_export._drop_path_from_required). The
+# other excluded fields are API-response-only (app.py's _with_context_usage
+# populates them fresh on every read) -- persisting them would just be
+# stale data nothing ever re-derives on its own.
+_CHAT_RESPONSE_ONLY_FIELDS = {
+    "path", "context_tokens_used", "context_tokens_max", "excerpt_regenerating", "excerpt_summary_html",
+}
 
-def load_chat_session(path: Path) -> ChatSession:
+
+def load_chat_session(path: Path) -> Chat:
     raw = json.loads(path.read_text(encoding="utf-8"))
-    return ChatSession.model_validate({**raw, "path": path})
+    return Chat.model_validate({**raw, "path": path})
 
 
-def save_chat_session(session: ChatSession, path: Path) -> None:
-    data = session.model_dump(mode="json", exclude={"path"})
+def save_chat_session(chat: Chat, path: Path) -> None:
+    data = chat.model_dump(mode="json", exclude=_CHAT_RESPONSE_ONLY_FIELDS)
     path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
 
@@ -304,6 +296,20 @@ class VaultService:
                 return path
         return None
 
+    def _find_sess(self, slug: str) -> Path | None:
+        """Find a chat .sess file whose slug matches. Only looks in the
+        chats directory, not a full vault walk -- same convention
+        find_stream_path already uses for streams (.yaml), unlike notes/
+        sources, which the user can freely reorganise anywhere in the vault."""
+        chats_dir = self.default_dirs[NodeType.chat]
+        if not chats_dir.exists():
+            return None
+        slug_norm = _file_slug(slug).lower()
+        for path in chats_dir.glob("*.sess"):
+            if _file_slug(path.stem).lower() == slug_norm:
+                return path
+        return None
+
     def find_file(self, slug: str) -> Path | None:
         """Find a .md or .html file whose slug matches."""
         md = self._find_md(slug)
@@ -337,13 +343,17 @@ class VaultService:
             nt = self.node_type_from_frontmatter(fm)
             if node_type and nt != node_type:
                 continue
-            if nt == NodeType.stream:
-                continue  # streams are .yaml, not .md
+            if nt in (NodeType.stream, NodeType.chat):
+                continue  # streams are .yaml, chats are .sess (ADR-019) -- neither is .md
             buckets[nt].append(self._meta_from_file(path, fm, content, nt))
 
         if not node_type or node_type == NodeType.stream:
             for s in self.list_streams():
                 buckets[NodeType.stream].append(self._meta_from_stream(s))
+
+        if not node_type or node_type == NodeType.chat:
+            for c in self.list_chats():
+                buckets[NodeType.chat].append(self._meta_from_chat(c))
 
         for nt in buckets:
             buckets[nt].sort(key=lambda m: m.modified_at, reverse=True)
@@ -397,6 +407,24 @@ class VaultService:
             total_papers=s.total_papers,
             last_updated=s.last_updated,
             next_update=s.next_update,
+        )
+
+    def list_chats(self) -> list[Chat]:
+        chats_dir = self.default_dirs[NodeType.chat]
+        if not chats_dir.exists():
+            return []
+        result = []
+        for path in chats_dir.glob("*.sess"):
+            try:
+                result.append(load_chat_session(path))
+            except Exception as exc:
+                _log.warning("skipping unreadable chat %s: %s", path, exc)
+        result.sort(key=lambda c: c.modified_at, reverse=True)
+        return result
+
+    def _meta_from_chat(self, c: Chat) -> VaultNodeMeta:
+        return VaultNodeMeta(
+            slug=c.slug, title=c.title, node_type=NodeType.chat, tags=c.tags, modified_at=c.modified_at,
         )
 
     # ── Get ───────────────────────────────────────────────────────────────────
@@ -470,49 +498,35 @@ class VaultService:
         return self.get_source(slug)
 
     def get_chat(self, slug: str) -> Chat:
-        path = self._find_md(slug)
+        path = self._find_sess(slug)
         if path is None:
             raise FileNotFoundError(f"chat not found: {slug!r}")
-        body = path.read_text(encoding="utf-8")
-        fm, content = _parse_frontmatter(body)
-        stat = path.stat()
-        return Chat(
-            slug=_file_slug(path.stem),
-            title=fm.get("title") or path.stem,
-            tags=list(fm.get("tags") or []),
-            messages=_parse_chat_body(content),
-            model=fm.get("model", "llama3"),
-            pinned_turns=list(fm.get("pinned_turns") or []),
-            excerpt_slug=fm.get("excerpt_slug"),
-            path=path,
-            created_at=datetime.fromtimestamp(stat.st_mtime),
-            modified_at=datetime.fromtimestamp(stat.st_mtime),
-        )
+        return load_chat_session(path)
 
     def create_chat(self, title: str, model: str = "llama3") -> Chat:
         self.ensure_dirs()
         slug = self.unique_slug(title)
-        fm = {"type": "chat", "title": title, "model": model, "tags": ["chat"]}
-        path = self.default_dirs[NodeType.chat] / f"{slug}.md"
-        path.write_text(_render_frontmatter(fm), encoding="utf-8")
+        path = self.default_dirs[NodeType.chat] / f"{slug}.sess"
+        chat = Chat(slug=slug, title=title, tags=["chat"], model=model, path=path)
+        save_chat_session(chat, path)
         return self.get_chat(slug)
 
     def save_chat(self, slug: str, messages: list[ChatMessage], model: str | None = None) -> Chat:
-        """`model`, when given, overwrites the chat's stored frontmatter
-        model — the model actually used for the turn just saved. Without
-        this, a chat created before a model rename/merge (e.g.
-        prisma-chat:7b -> qwen2.5:7b-32k) would keep displaying its
-        original, now-stale name forever, even though every subsequent
-        turn actually used the current config's model."""
+        """`model`, when given, overwrites the chat's stored model — the
+        model actually used for the turn just saved. Without this, a chat
+        created before a model rename/merge (e.g. prisma-chat:7b ->
+        qwen2.5:7b-32k) would keep displaying its original, now-stale name
+        forever, even though every subsequent turn actually used the
+        current config's model."""
         with self._chat_write_lock:
-            path = self._find_md(slug)
+            path = self._find_sess(slug)
             if path is None:
                 raise FileNotFoundError(f"chat not found: {slug!r}")
-            existing = path.read_text(encoding="utf-8")
-            fm, _ = _parse_frontmatter(existing)
+            chat = load_chat_session(path)
+            update = {"messages": messages, "modified_at": datetime.utcnow()}
             if model is not None:
-                fm["model"] = model
-            path.write_text(_render_frontmatter(fm) + _render_chat_body(messages), encoding="utf-8")
+                update["model"] = model
+            save_chat_session(chat.model_copy(update=update), path)
         return self.get_chat(slug)
 
     def append_messages(self, slug: str, new_messages: list[ChatMessage], model: str | None = None) -> Chat:
@@ -525,17 +539,14 @@ class VaultService:
         write would silently revive the just-deleted message. Reading and
         writing under the same lock closes that window."""
         with self._chat_write_lock:
-            path = self._find_md(slug)
+            path = self._find_sess(slug)
             if path is None:
                 raise FileNotFoundError(f"chat not found: {slug!r}")
-            existing = path.read_text(encoding="utf-8")
-            fm, content = _parse_frontmatter(existing)
+            chat = load_chat_session(path)
+            update = {"messages": chat.messages + new_messages, "modified_at": datetime.utcnow()}
             if model is not None:
-                fm["model"] = model
-            current_messages = _parse_chat_body(content)
-            path.write_text(
-                _render_frontmatter(fm) + _render_chat_body(current_messages + new_messages), encoding="utf-8",
-            )
+                update["model"] = model
+            save_chat_session(chat.model_copy(update=update), path)
         return self.get_chat(slug)
 
     def set_pinned_turns(self, chat_slug: str, indices: list[int]) -> Chat:
@@ -545,13 +556,14 @@ class VaultService:
         pure-storage layer has no access to. Callers (app.py) call this
         first, then assemble the new Summary and call save_excerpt()."""
         with self._chat_write_lock:
-            chat_path = self._find_md(chat_slug)
-            if chat_path is None:
+            path = self._find_sess(chat_slug)
+            if path is None:
                 raise FileNotFoundError(f"chat not found: {chat_slug!r}")
-            raw = chat_path.read_text(encoding="utf-8")
-            fm, content = _parse_frontmatter(raw)
-            fm["pinned_turns"] = sorted(set(indices))
-            chat_path.write_text(_render_frontmatter(fm) + content, encoding="utf-8")
+            chat = load_chat_session(path)
+            save_chat_session(
+                chat.model_copy(update={"pinned_turns": sorted(set(indices)), "modified_at": datetime.utcnow()}),
+                path,
+            )
         return self.get_chat(chat_slug)
 
     def save_excerpt(self, chat_slug: str, summary: str | None, raw_turns: list[ChatMessage]) -> Note:
@@ -576,17 +588,19 @@ class VaultService:
                 except FileNotFoundError:
                     pass  # note deleted underneath us — fall through to create a fresh one
             note = self.create_note(f"Excerpt — {chat.title}", body=body, excerpt_of_chat=chat_slug)
-            chat_path = self._find_md(chat_slug)
-            raw = chat_path.read_text(encoding="utf-8")
-            fm, content = _parse_frontmatter(raw)
-            fm["excerpt_slug"] = note.slug
-            chat_path.write_text(_render_frontmatter(fm) + content, encoding="utf-8")
+            path = self._find_sess(chat_slug)
+            save_chat_session(
+                chat.model_copy(update={"excerpt_slug": note.slug, "modified_at": datetime.utcnow()}), path,
+            )
             return note
 
     def get_any(self, slug: str) -> Note | Source | Chat | Stream:
+        if self._find_sess(slug) is not None:
+            # chats are stored as .sess, not .md (ADR-019) — find_file won't find them
+            return self.get_chat(slug)
         path = self.find_file(slug)
         if path is None:
-            # streams are stored as .yaml, not .md — _find_file won't find them
+            # streams are stored as .yaml, not .md — find_file won't find them
             try:
                 return self.get_stream(slug)
             except FileNotFoundError:
@@ -617,12 +631,10 @@ class VaultService:
             return self.get_source(slug)
         if nt == NodeType.stream:
             return self.get_stream(slug)
-        if nt == NodeType.chat:
-            return self.get_chat(slug)
         return self.get_note(slug)
 
     def slug_exists(self, slug: str) -> bool:
-        return self.find_file(slug) is not None
+        return self.find_file(slug) is not None or self._find_sess(slug) is not None
 
     def body_of(self, slug: str) -> str | None:
         path = self.find_file(slug)
@@ -726,12 +738,12 @@ class VaultService:
         return self.get_note(slug)
 
     def unique_slug(self, title: str) -> str:
-        """Slugify *title* and disambiguate against existing .md files by
-        appending -1, -2, ... on collision."""
+        """Slugify *title* and disambiguate against existing .md/.sess files
+        by appending -1, -2, ... on collision."""
         base = _slugify(title)
         slug = base
         n = 1
-        while self._find_md(slug) is not None:
+        while self._find_md(slug) is not None or self._find_sess(slug) is not None:
             slug = f"{base}-{n}"
             n += 1
         return slug
@@ -977,6 +989,20 @@ class VaultService:
         return str(rel.with_suffix("")).replace("/", "--").replace("\\", "--")
 
     def rename_node(self, slug: str, new_title: str) -> str:
+        sess_path = self._find_sess(slug)
+        if sess_path is not None:
+            new_stem = _slugify(new_title)
+            new_path = sess_path.parent / f"{new_stem}.sess"
+            if new_path.exists() and new_path != sess_path:
+                raise FileExistsError(f"a file named {new_stem!r} already exists")
+            chat = load_chat_session(sess_path)
+            new_slug = _file_slug(new_stem)
+            sess_path.rename(new_path)
+            save_chat_session(
+                chat.model_copy(update={"title": new_title, "slug": new_slug, "modified_at": datetime.utcnow()}),
+                new_path,
+            )
+            return new_slug
         path = self._find_md(slug)
         if path is None:
             raise FileNotFoundError(f"node not found: {slug!r}")
@@ -992,7 +1018,7 @@ class VaultService:
         return _file_slug(new_stem)
 
     def delete_node(self, slug: str) -> None:
-        path = self.find_file(slug)
+        path = self.find_file(slug) or self._find_sess(slug)
         if path is None:
             raise FileNotFoundError(f"node not found: {slug!r}")
         path.unlink()

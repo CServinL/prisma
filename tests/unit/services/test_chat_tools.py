@@ -126,12 +126,13 @@ def test_get_node_text_returns_note_body(vault):
 
 
 def test_get_node_text_joins_chat_messages(vault):
+    from prisma.schema_gov import RichContent
     from prisma.storage.models.vault_models import ChatMessage, ChatRole
 
     chat = vault.create_chat(title="Kùzu decision")
     vault.save_chat(chat.slug, [
-        ChatMessage(role=ChatRole.user, content="Why Kùzu over Neo4j?"),
-        ChatMessage(role=ChatRole.assistant, content="Kùzu is embedded, no JVM needed."),
+        ChatMessage(role=ChatRole.user, content=RichContent(value="Why Kùzu over Neo4j?")),
+        ChatMessage(role=ChatRole.assistant, content=RichContent(value="Kùzu is embedded, no JVM needed.")),
     ])
     toolbox = ChatToolbox(MagicMock(), MagicMock(), vault)
 

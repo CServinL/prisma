@@ -1,13 +1,18 @@
 # ADR-019: Persisted Format Governance & Migrations
 
-**Date:** 2026-08-04
+**Date:** 2026-08-04 (chat sessions cut over to `.sess` 2026-08-05)
 **Author:** CServinL
-**Status:** Proposed — narrow version (chat `prisma:meta` blob, and its
-successor the `.sess` format) implemented as a concrete first instance,
-Python-only by design (see open question 2: chat sessions never touch
-Rust). Open questions 1/3 (extending versioning to vault frontmatter
-generally, and where migration logic should live for that broader case)
-still need cservinl's decision.
+**Status:** Proposed — chat sessions are fully cut over to the `.sess`
+pure-JSON format (`Chat`/`ChatMessage`/`RichContent` in
+`prisma/storage/models/vault_models.py`, governed by the generic
+`prisma.schema_gov` package), Python-only by design (see open question 2:
+chat sessions never touch Rust). The legacy `prisma:meta`-in-markdown shape
+is now read-only, kept solely for `prisma migrate-chats-to-sess` to convert
+pre-existing `.md` chat files. Open questions 1/3 (extending versioning to
+vault frontmatter generally, and where migration logic should live for that
+broader case) still need cservinl's decision. See "Open direction: session
+as a graph, not a flat list" below for a second, not-yet-scoped redesign of
+this same format.
 
 ## Context
 
@@ -39,11 +44,12 @@ again. cservinl asked for real governance over this — a versioned format
 plus explicit migrations, done through Pydantic where it fits rather than
 ad hoc per call site.
 
-## Decision (narrow instance, built 2026-08-04)
+## Decision (narrow instance, built 2026-08-04, now legacy-only)
 
-The `prisma:meta` JSON blob now carries its own `schema_version`, checked
-and upgraded through a single dispatch function before its contents are
-used:
+The original narrow instance, kept read-only for `prisma migrate-chats-to-sess`
+(see the resolution below): the `prisma:meta` JSON blob carried its own
+`schema_version`, checked and upgraded through a single dispatch function
+before its contents were used:
 
 ```python
 CHAT_META_SCHEMA_VERSION = 1
@@ -74,34 +80,53 @@ degrades to "no metadata for this turn" rather than breaking chat load —
 binary reading a file a newer one wrote) falls into that same path, no new
 exception handling needed.
 
-`schema_version` is written unconditionally by `_render_chat_body` going
-forward, so every *new* write is self-describing from here on, even before
-there's ever a version 2 to migrate from.
+This mechanism no longer runs on any live write path — chats write `.sess`
+JSON now (`Chat.SCHEMA_VERSION`/`schema_gov.VersionedModel`, see below),
+which carries its own, separate `schema_version`. Kept here only because
+`_parse_chat_body`/`_migrate_chat_meta` are still the read path for
+converting old `.md` chat files.
 
-## Should chat sessions even be `.md`? (raised 2026-08-04)
+## Chat sessions are not `.md` (resolved 2026-08-04, built 2026-08-05)
 
 cservinl's framing: of everything a Chat persists, only the **Excerpt**
 (the distilled Summary note, ADR-015) is genuinely prose — the rest
-(`tool_calls`, `footnotes`, `model`) is structured, typed data that just
-happens to be *embedded inside* a `.md` file, via increasingly elaborate
+(`tool_calls`, `footnotes`, `model`) is structured, typed data that had
+been getting *embedded inside* a `.md` file via increasingly elaborate
 conventions layered on top of plain markdown (`> used \`tool\`: query`
-blockquote lines, and now this ADR's `<!-- prisma:meta {...} -->` JSON-in-
-HTML-comment). Each of those is markdown *abused* to carry non-markdown
+blockquote lines, then this ADR's `<!-- prisma:meta {...} -->` JSON-in-
+HTML-comment). Each of those was markdown *abused* to carry non-markdown
 data, not markdown used for what it's actually good at. `.md` earns its
 keep for Notes/Sources/the Excerpt — genuinely-prose content a plain
 markdown viewer should render meaningfully — but a chat session's
 structured metadata was never really prose to begin with.
 
-This reframes open question 1 below: the choice may not be "extend
-`schema_version` governance to `.md` frontmatter everywhere," but "does a
-Chat's structured metadata (tool_calls/footnotes/model, maybe eventually
-the ADR-018 compaction-point/summary data too) belong in `.md` at all, or
-should it live in its own properly-typed sidecar (JSON, governed by this
-ADR's schema mechanism directly, no markdown-embedding tricks needed) next
-to a `.md` file that goes back to being just the human-readable
-transcript + the Excerpt?" Not decided — a real architecture change (new
-file layout, migration of every existing chat `.md` file), not a small
-follow-up.
+**Resolution, now built**: chats moved to their own file type, `vault/chats/<slug>.sess`
+(pure JSON, ADR-019 `schema_version` governance applied directly, no
+markdown-embedding tricks). Two-layer model: a **session layer**
+(`Chat`/`ChatMessage` in `vault_models.py` — flow: role, timestamps, tool
+calls, footnotes, model, `alternates` for regenerated turns) and a **text
+layer** (`schema_gov.RichContent` — `{format, value, rendered_html}`,
+`format` supports `md`/`html`/`svg`/`latex` today, only `md` actually
+rendered). `VaultService`'s chat methods (`get_chat`/`create_chat`/
+`save_chat`/`append_messages`/`set_pinned_turns`/`save_excerpt`) all
+read/write `.sess` JSON directly — the markdown parse path
+(`_parse_chat_body`/`_migrate_chat_meta`) survives only as a read-only
+helper for `prisma migrate-chats-to-sess`, the one-time converter for
+pre-existing `.md` chat files (not yet run against the real vault — a
+deliberate, separate action). The Excerpt note is unaffected: still a real
+`.md` `Note`.
+
+One real, deliberate side effect: `KnowledgeGraphService` only walks `.md`
+files and derives trust tier from frontmatter, so it indexed raw chat
+transcripts at trust tier `"chat"` before this change. Since `.sess` files
+are outside that walk, KG coverage of chat-derived content now goes through
+the Excerpt `Note` only (already `.md`, already indexed at trust tier
+`"note"`) — no code change made to `knowledge_graph_service.py` for this,
+the old `NodeType.chat: "chat"` trust-tier mapping simply stops being
+reachable. If a future consumer needs the raw transcript beyond the
+Excerpt, the right shape is a `.sess`-side render-to-markdown helper called
+directly against an already-resolved `Chat`, not a filesystem walk over
+`.sess` files.
 
 ## Open questions (scope — need cservinl's decision)
 
@@ -160,9 +185,101 @@ this. Left open:
    parse functions assemble their inputs before construction, not just
    adding a validator.
 
+## Open direction: session as a graph, not a flat list (raised 2026-08-05)
+
+Prompted by looking at [TencentDB Agent Memory](https://github.com/TencentCloud/TencentDB-Agent-Memory)
+(a team-oriented multi-agent memory platform — evaluated and explicitly
+**not adopted**: single-vendor, ~4 months old, only 2 contributors despite
+14.8k stars, ambiguous `NOASSERTION` license, no interoperable protocol the
+way MCP has one). Its Chat Memory layer is graph-shaped; the underlying
+edge model is the useful part, not its Mermaid visualization or its
+team/ACL machinery, neither of which fits Prisma's single-user, local-first
+design.
+
+`Chat`/`ChatMessage` (this ADR's cutover, above) is still a flat
+`messages: list[ChatMessage]`, each with a flat `tool_calls` *summary*
+(name + query args only). `ChatAgent.respond()`'s tool loop
+(`prisma/agents/chat_agent.py`) round-trips intermediate LLM↔tool exchanges
+— the tool call, its raw result text, any interim reasoning — only in a
+local, in-memory list built for that one completion call; none of it is
+persisted. `alternates` (turn regeneration, above) is the one place a real
+edge already exists (`ChatMessage → alternates[]`), but it's informal, not
+a general graph a session could otherwise traverse.
+
+cservinl's framing: `UserTurn#23 -> AITurn#34 -> chroma_search() -> results
+-> AITurn#45 -> ...`, with a main branch of `User <-> primary-AI-answer`
+turns and tool calls/results as leaves off that branch, not separate
+top-level messages. Thinking/reasoning steps (a model's intermediate
+chain-of-thought before it commits to a final answer, as many agentic
+setups now surface) belong in the same category as tool-call branches, not
+on the main line: a loop off the current turn, not revisited or reloaded
+into later turns by default — only pulled back in when something
+specifically needs it (debugging, an explicit "show your reasoning," a
+faithfulness re-check), same selective-load principle as the rest of this
+section, applied to a second kind of branch besides tool calls. This also
+reframes context management:
+`ChatAgent._bounded_history()` currently drops the *oldest* turns wholesale
+once a token budget is hit, and ADR-015's Excerpt / ADR-018's not-yet-built
+compaction points both work by point-in-time *summarization* (collapse a
+span into one Summary, always reload the whole thing). If turns/tool
+results were addressable graph nodes instead of list positions, a turn
+could selectively pull in just the nodes it actually needs rather than
+"everything within budget, oldest-first" or "everything pre-compressed" —
+context growth per turn is mostly repeated tool-call noise today, and
+neither current mechanism is actually selective about what it keeps.
+
+**A concrete anchor for the thinking-branch case**: the MCP reference server
+[`sequentialthinking`](https://github.com/modelcontextprotocol/servers/tree/main/src/sequentialthinking)
+is worth studying not to adopt as an MCP integration (Prisma has no MCP
+client today — its tool loop is pattern-based markers, per ADR-014's
+appendix), but for its field shape, which is exactly this branch's edges
+already made concrete: `thought`/`thoughtNumber`/`totalThoughts`/
+`nextThoughtNeeded` (the main sequence), `isRevision`/`revisesThought` (a
+revision edge back to an earlier thought), `branchFromThought`/`branchId`
+(a fork). Verified directly against its README: the tool itself does no
+inference — it's a state-tracking scaffold the calling model drives by
+invoking it repeatedly; it "requires only standard tool-calling
+capabilities... any LLM supporting basic function calls can use it." That
+means a `THINK:`-style marker tool with the same fields could be added to
+`chat_tools.py`'s existing `TOOLS` registry the same way `SEARCH_VAULT`/
+`GRAPH_CONTEXT` already work, no new integration surface needed. When to
+advertise it: exactly for models *without* native reasoning (most local
+3B-7B chat models, unlike o1/QwQ/DeepSeek-R1/Qwen3-thinking variants) —
+the natural gate is §3a's deferred model-category work (a
+`has_native_reasoning`-style category flag), not a separate mechanism.
+This matters most precisely where Prisma already lives: local, hardware-
+constrained deployments (today's `qwen2.5-3b`/`qwen2.5:7b-32k`) can't just
+swap in a bigger native-reasoning model to get better multi-step answers —
+a `THINK:`-style scaffold is a way to get reasoning-*shaped* behavior out
+of a small model's existing compute budget, not a nice-to-have for a
+cloud-backed deployment that could just use a reasoning model directly.
+
+A graph of addressable nodes only solves half of this — something still has
+to decide, per turn, *which* nodes to load. cservinl's naming for that role:
+a **MasterAI / orchestrator / harness** — a distinct component responsible
+for per-turn context assembly, replacing `ChatAgent`'s current fixed,
+uniform policy (`_full_system_prompt()`/`_bounded_history()`: system prompt
++ tool section + Excerpt always, raw history by token budget, oldest first,
+regardless of relevance) with an actual selection decision over the graph.
+Not the same thing as `ChatAgent` itself, which today conflates "decide
+what context to send" with "run the tool-calling loop" — those may need to
+separate once selection is a real decision rather than a fixed formula.
+
+**Not scoped or designed here.** This is a second, breaking redesign of the
+same `.sess` shape this ADR just landed — node/edge shape, whether tool
+results become persisted content (raw tool text can be large — a policy
+question, not just a schema one), how `alternates` folds into a general
+edge type, how `ChatAgent` vs. the orchestrator divide responsibility, and
+how this interacts with Excerpt/`context_slugs` loading. Flagged as the
+next major design pass once the current cutover is confirmed solid in real
+use, not started.
+
 ## Related
 
 - [ADR-017](ADR-017-claim-attribution-and-footnote-model.md) — the
   `prisma:meta` persistence fix this governance was raised in response to.
+- [ADR-015](ADR-015-chat-excerpt-context-model.md) and
+  [ADR-018](ADR-018-chat-compaction-points.md) — the point-in-time
+  summarization approach the graph direction above would partly reframe.
 - `prisma-desktop/src-tauri/src/settings.rs` — the Rust-side instance of
   the same underlying problem (open question 2 above).

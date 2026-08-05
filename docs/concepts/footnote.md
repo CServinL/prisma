@@ -73,6 +73,8 @@ plainly contradicts or isn't addressed by its cited source), not subtle misrepre
 Fixed (2026-08-04): footnotes were being computed correctly per-turn but never actually
 persisted — `VaultService`'s chat markdown serialization only round-tripped `role`/`content`/
 `tool_calls`, so every reload silently dropped every historical message's footnotes back to
-empty. Now stored as a `<!-- prisma:meta {...} -->` JSON comment per turn (see
-[Chat](chat.md#persistence)). Also fixed the same day: the inline marker was previously dead,
-uncolored text (see "What it is" above for the current, clickable/colored behavior).
+empty. Fixed that day via a `<!-- prisma:meta {...} -->` JSON comment per turn; superseded
+2026-08-05 when chats moved to pure-JSON `.sess` storage (ADR-019), where `footnotes` is just a
+normal persisted field — see [Chat](chat.md#persistence). Also fixed the same day (2026-08-04):
+the inline marker was previously dead, uncolored text (see "What it is" above for the current,
+clickable/colored behavior).

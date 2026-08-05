@@ -7,8 +7,10 @@ context; the model reasons over them, optionally pulling in more of the vault at
 via tool calls. No external (internet) retrieval happens at chat time — everything the model
 sees traces back to something already in your vault.
 
-Chats are saved as `.md` files in `vault/chats/`. Pinned turns from a chat are distilled into
-a single [Note](note.md) (the chat's **Excerpt**, see below) rather than promoted piecemeal.
+Chats are saved as pure-JSON `.sess` files in `vault/chats/` (ADR-019) — the only vault node
+type that isn't `.md`, since only the Excerpt (see below) is genuinely prose; everything else a
+chat persists is structured, typed data. Pinned turns from a chat are distilled into a single
+[Note](note.md) (the chat's **Excerpt**, see below) rather than promoted piecemeal.
 
 ## Fields
 
@@ -28,12 +30,12 @@ a single [Note](note.md) (the chat's **Excerpt**, see below) rather than promote
 | Field | Type | Description |
 |---|---|---|
 | `role` | `ChatRole` | `user` \| `assistant` |
-| `content` | str | Message text, with inline footnote markers in `[^N]` form |
+| `content` | `RichContent` | `{format, value, rendered_html}` — the text layer (ADR-019's two-layer model). `format` supports `md`/`html`/`svg`/`latex`; only `md` is actually rendered today. `rendered_html` is API-response-only (sanitized HTML of `value`, computed fresh on every read, never persisted) — the UI deliberately does not use it for chat turns (see "Rendering" below), it exists for future format support and any other consumer |
 | `timestamp` | datetime | |
-| `tool_calls` | list[`ToolCallRecord`] | Which tools (`search_vault`, `graph_context`) this turn invoked, and with what query |
+| `tool_calls` | list[`ToolCallRecord`] | Which tools (`search_vault`, `graph_context`) this turn invoked, and with what query — a flat summary only (no persisted result text or ordering; see [Chat session graph](chat-session-graph.md) for the gap this leaves) |
 | `footnotes` | list[[Footnote](footnote.md)] | Per-claim attribution — what kind of sourcing backs each claim, and which document(s) |
 | `model` | str \| null | The model that actually generated *this* message. `null` for user messages. Distinct from `Chat.model` (the chat's current setting): this is what generated this specific historical reply, so it stays correct even after the chat's active model changes |
-| `html` | str \| null | API-response-only (never persisted) — sanitized HTML rendering of `content` for assistant messages (tables, code blocks, links, footnote markers as clickable spans). `null` for user messages |
+| `alternates` | list[`ChatMessage`] | Prior attempts at this same turn, preserved (not discarded) when regenerated via `POST /chats/{slug}/turns/{index}/regenerate` — each alternate keeps its own `model`, so different models' answers to the same prompt stay comparable |
 
 ## Tool use
 
@@ -107,21 +109,40 @@ in Spanish"), not one-off requests, which belong in the chat itself. The tool-ca
 footnote-marker instructions are separate, always-appended sections generated from code (not
 part of this file), since they're tied to the exact marker syntax the parser expects.
 
+## Rendering
+
+Model-generated text is treated as untrusted (same posture as tool results, see
+`prisma/services/injection_defense.py`) — the UI deliberately renders a turn's `content.value`
+as escaped plain text with just its `[^N]` footnote markers turned into clickable elements
+(`renderContentSegments()` in `+page.svelte`), never `{@html}`. `content.rendered_html` (sanitized
+markdown → HTML, via `services/chat_render.py` + the `nh3`-based sanitizer in
+`services/renderer.py`) is still computed and returned by the API on every read, for future
+format support and any other consumer — it's just not what the chat UI displays today. This is a
+deliberate, final choice, not a stopgap waiting to be wired up.
+
 ## Persistence
 
-`model` and `footnotes` are stored per message as a `<!-- prisma:meta {...} -->` JSON comment
-alongside the existing `### You` / `### Prisma` markdown transcript — invisible in a plain
-markdown viewer, parsed back out on load. A malformed or hand-edited comment degrades to "no
-metadata for this turn" rather than breaking the rest of the chat.
+A `Chat` is stored as pure JSON at `vault/chats/<slug>.sess` (ADR-019) — every field on this
+page's tables above, `schema_version`-governed (`schema_gov.VersionedModel`). Not markdown, not
+frontmatter, no embedded-comment convention: only the Excerpt (below) is genuinely prose, so only
+the Excerpt stays a `.md` file. `VaultService`'s chat methods (`get_chat`/`create_chat`/
+`save_chat`/`append_messages`/`set_pinned_turns`/`save_excerpt`) all read/write this JSON
+directly. A legacy `.md`-with-`<!-- prisma:meta {...} -->`-comment reader survives, read-only, in
+`vault.py`, solely so `prisma migrate-chats-to-sess` can convert chats saved before this cutover.
 
 ## Relations
 
 - Uses [Source](source.md)s and [Note](note.md)s as context (via `context_slugs`), and can pull
   in more at answer time via `SEARCH_VAULT`/`GRAPH_CONTEXT`.
 - Its Excerpt is a [Note](note.md), linked via `excerpt_slug`.
-- Indexed as a [GraphNode](graph-node.md).
+- **Not** indexed as a [GraphNode](graph-node.md) — the knowledge-graph indexer only walks `.md`
+  files, so a `.sess` chat is invisible to it by construction (deliberate, ADR-019: KG coverage
+  of chat-derived content goes through the Excerpt `Note` only, which *is* `.md` and *is*
+  indexed).
 - Each assistant `ChatMessage` carries [Footnote](footnote.md)s referencing the `Note`/`Source`
   slugs its claims are attributed to.
+- See [Chat session graph](chat-session-graph.md) for a proposed, not-yet-built generalization of
+  `tool_calls`/`alternates` into a real node/edge graph.
 
 ## Relevant axioms
 
@@ -135,12 +156,8 @@ metadata for this turn" rather than breaking the rest of the chat.
 
 - **Compaction points** — an explicit marker in the chat timeline after which the model would
   only consider context from that point forward (plus the Excerpt), rather than pin/unpin
-  being the only way to control what's durable. Needs to be designed against the existing
-  Excerpt/pinned-turns system, not as a parallel mechanism.
-- **Rich rendering, frontend half** — the backend now renders every assistant message to
-  sanitized HTML (`ChatMessage.html`, via `services/chat_render.py` + a new `nh3`-based
-  allowlist sanitizer wired into `services/renderer.py`, so Notes/Sources get it too) —
-  tables, code blocks, and links all work. Not yet wired into the UI: `+page.svelte` still
-  renders via the old plain-text `renderContentSegments()` path instead of `{@html}` + a
-  click-delegate action for the `.footnote-marker` spans the backend now emits. Needs live
-  browser verification before landing.
+  being the only way to control what's durable. See [Chat session graph](chat-session-graph.md)
+  — this may turn out to be the wrong question once turns/tool-results are addressable graph
+  nodes rather than list positions, not just an unresolved detail of the current design.
+- **Model-category-gated content formats and thinking blocks** — see
+  [Chat session graph](chat-session-graph.md) and ADR-019 §3a/the sequentialthinking anchor.

@@ -17,6 +17,7 @@ from typing import Callable, Literal
 
 from pydantic import ValidationError
 
+from prisma.schema_gov import ContentFormat, RichContent
 from prisma.services.chat_llm import ChatLLM
 from prisma.services.chat_tools import (
     FOOTNOTES_LINE_RE,
@@ -240,7 +241,7 @@ class ChatAgent:
     ) -> ChatMessage:
         messages = [{"role": "system", "content": self._full_system_prompt(excerpt_notes or [])}]
         for m in self._bounded_history(history):
-            messages.append({"role": m.role.value, "content": m.content})
+            messages.append({"role": m.role.value, "content": m.content.value})
         messages.append({"role": "user", "content": user_text})
 
         tool_calls: list[ToolCallRecord] = []
@@ -259,13 +260,13 @@ class ChatAgent:
             if estimated > self.context_window:
                 return ChatMessage(
                     role=ChatRole.assistant,
-                    content=(
+                    content=RichContent(format=ContentFormat.markdown, value=(
                         f"This chat's history and Excerpt exceed {self.model}'s context "
                         f"window (~{estimated} tokens estimated vs. a {self.context_window}-"
                         "token limit) -- I can't continue. Remove some pinned turns to free "
                         "up context from Excerpt buildup, or switch this chat to a model "
                         "with a bigger context window."
-                    ),
+                    )),
                     tool_calls=tool_calls,
                     model=self.model,
                 )
@@ -275,7 +276,10 @@ class ChatAgent:
                 detail = f" — {reason}" if reason else ""
                 return ChatMessage(
                     role=ChatRole.assistant,
-                    content=f"Sorry, I couldn't reach the language model just now{detail}. Please try again shortly.",
+                    content=RichContent(
+                        format=ContentFormat.markdown,
+                        value=f"Sorry, I couldn't reach the language model just now{detail}. Please try again shortly.",
+                    ),
                     tool_calls=tool_calls,
                     model=self.model,
                 )
@@ -284,8 +288,8 @@ class ChatAgent:
                 content, footnotes = _extract_footnotes(reply)
                 footnotes = [self._verify_footnote(fn) for fn in footnotes]
                 return ChatMessage(
-                    role=ChatRole.assistant, content=content, tool_calls=tool_calls, footnotes=footnotes,
-                    model=self.model,
+                    role=ChatRole.assistant, content=RichContent(format=ContentFormat.markdown, value=content),
+                    tool_calls=tool_calls, footnotes=footnotes, model=self.model,
                 )
 
             marker, query = match.group(1), match.group(2).strip()
@@ -300,7 +304,10 @@ class ChatAgent:
         _log.warning("chat tool loop hit MAX_TOOL_ITERATIONS=%d without a final answer", MAX_TOOL_ITERATIONS)
         return ChatMessage(
             role=ChatRole.assistant,
-            content="I wasn't able to reach a final answer after checking several sources — could you rephrase?",
+            content=RichContent(
+                format=ContentFormat.markdown,
+                value="I wasn't able to reach a final answer after checking several sources — could you rephrase?",
+            ),
             tool_calls=tool_calls,
             model=self.model,
         )
@@ -314,7 +321,7 @@ class ChatAgent:
         — see ADR-015's "Resolved" section for why."""
         system_prompt = self._full_system_prompt(excerpt_notes or [])
         bounded = self._bounded_history(history)
-        used = _estimate_tokens(system_prompt) + sum(_estimate_tokens(m.content) for m in bounded)
+        used = _estimate_tokens(system_prompt) + sum(_estimate_tokens(m.content.value) for m in bounded)
         return used, self._max_history_tokens
 
     def _full_system_prompt(self, excerpt_notes: list[Note]) -> str:
@@ -344,7 +351,7 @@ class ChatAgent:
         kept: list[ChatMessage] = []
         used = 0
         for m in reversed(history):
-            cost = _estimate_tokens(m.content)
+            cost = _estimate_tokens(m.content.value)
             if used + cost > self._max_history_tokens:
                 break
             kept.append(m)

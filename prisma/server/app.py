@@ -83,6 +83,7 @@ from prisma.services.sync_orchestrator import SyncDecision, diff_manifest
 _t("sync_orchestrator ok")
 
 _t("importing vault_models")
+from prisma.schema_gov import ContentFormat, RichContent
 from prisma.storage.models.vault_models import (
     Chat, ChatMessage, ChatRole, Footnote, NodeType, RenderedNode, ToolCallRecord,
     VaultTreeNode,
@@ -385,6 +386,25 @@ def _build_chat_agent(vault: "VaultService", chroma: ChromaIndexer, kg: Knowledg
     )
 
 
+def _build_chat_agent_for_model(model: str) -> ChatAgent:
+    """One-off ChatAgent for a turn regeneration (ADR-019 §6a) against a
+    model other than the chat's currently-configured one -- never replaces
+    `_chat_agent` itself. pool/base_url/context_window are inherited from
+    the current chat config unchanged; there's no per-model config roster
+    yet (that's the deferred model-category work, ADR-019 §3a), so a
+    regeneration against a model with a genuinely different real context
+    window will estimate against the wrong ceiling until that roster exists."""
+    from prisma.utils.config import ConfigLoader
+    cfg = ConfigLoader()
+    chat_config = cfg.get_chat_config().model_copy(update={"model": model})
+    llm = ChatLLM(chat_config, ollama_host=cfg.get_llm_config().host)
+    toolbox = ChatToolbox(_chroma, _indexer, _vault)
+    return ChatAgent(
+        llm, toolbox, system_prompt=load_system_prompt(),
+        blocked_reason=lambda: _chat_blocked_reason(_chroma, _indexer),
+    )
+
+
 from prisma.utils.text import content_hash as _content_hash
 
 
@@ -550,6 +570,10 @@ class ChatResponse(BaseModel):
 
 class CreateChatRequest(BaseModel):
     title: Optional[str] = None  # None auto-generates a timestamp title
+
+
+class RegenerateTurnRequest(BaseModel):
+    model: Optional[str] = None  # None = the chat's currently-configured model
 
 
 class SetTurnPinnedRequest(BaseModel):
@@ -1078,7 +1102,7 @@ def _with_context_usage(chat_node: Chat) -> Chat:
     # footnote markers, which only ever appear in a generated reply).
     for msg in chat_node.messages:
         if msg.role == ChatRole.assistant:
-            msg.html = _render_chat_html(msg.content)
+            msg.content.rendered_html = _render_chat_html(msg.content.value)
     excerpt_notes = []
     if chat_node.excerpt_slug:
         try:
@@ -1119,7 +1143,7 @@ def chat(req: ChatRequest):
             excerpt_notes.append(_vault.get_note(chat_node.excerpt_slug))
         except FileNotFoundError:
             _log.warning("chat %r: excerpt note %r no longer exists", chat_node.slug, chat_node.excerpt_slug)
-    user_msg = ChatMessage(role=ChatRole.user, content=req.message)
+    user_msg = ChatMessage(role=ChatRole.user, content=RichContent(format=ContentFormat.markdown, value=req.message))
     assistant_msg = _chat_agent.respond(history, req.message, excerpt_notes=excerpt_notes)
     # append_messages (not save_chat with the pre-call `history` snapshot)
     # re-reads the chat's *current* messages atomically right before
@@ -1129,9 +1153,53 @@ def chat(req: ChatRequest):
     _vault.append_messages(chat_node.slug, [user_msg, assistant_msg], model=_chat_agent.model)
     _activity.info("action=chat slug=%s tool_calls=%d", chat_node.slug, len(assistant_msg.tool_calls))
     return ChatResponse(
-        chat_slug=chat_node.slug, reply=assistant_msg.content, tool_calls=assistant_msg.tool_calls,
-        footnotes=assistant_msg.footnotes, html=_render_chat_html(assistant_msg.content),
+        chat_slug=chat_node.slug, reply=assistant_msg.content.value, tool_calls=assistant_msg.tool_calls,
+        footnotes=assistant_msg.footnotes, html=_render_chat_html(assistant_msg.content.value),
     )
+
+
+@app.post("/chats/{slug}/turns/{index}/regenerate", response_model=Chat)
+def regenerate_turn(slug: str, index: int, req: RegenerateTurnRequest):
+    """ADR-019 §6a: regenerate one assistant turn — with the chat's current
+    model, or (req.model given) a one-off override for just this
+    regeneration. Chat.model (the chat's own configured model) is never
+    touched by this route, even when an override is used — a real model
+    switch is a separate, deliberate action. The replaced attempt is kept
+    as an alternate (2026-08-04 decision: preserve, don't discard), so
+    different models' answers to the same prompt stay comparable."""
+    try:
+        chat_node = _vault.get_chat(slug)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"chat not found: {slug!r}")
+    if index < 0 or index >= len(chat_node.messages):
+        raise HTTPException(status_code=400, detail=f"invalid turn index: {index}")
+    target = chat_node.messages[index]
+    if target.role != ChatRole.assistant:
+        raise HTTPException(status_code=400, detail="only an assistant turn can be regenerated")
+    if index == 0 or chat_node.messages[index - 1].role != ChatRole.user:
+        raise HTTPException(status_code=400, detail="turn has no preceding user message to regenerate from")
+    user_text = chat_node.messages[index - 1].content.value
+    history = chat_node.messages[: index - 1]
+
+    excerpt_notes = []
+    if chat_node.excerpt_slug:
+        try:
+            excerpt_notes.append(_vault.get_note(chat_node.excerpt_slug))
+        except FileNotFoundError:
+            _log.warning("chat %r: excerpt note %r no longer exists", slug, chat_node.excerpt_slug)
+
+    agent = _chat_agent if req.model is None else _build_chat_agent_for_model(req.model)
+    new_attempt = agent.respond(history, user_text, excerpt_notes=excerpt_notes)
+    new_attempt = new_attempt.model_copy(update={
+        "alternates": list(target.alternates) + [target.model_copy(update={"alternates": []})],
+    })
+    messages = list(chat_node.messages)
+    messages[index] = new_attempt
+    # Deliberately no model= here -- see the docstring above: a one-off
+    # regeneration must never overwrite the chat's own configured model.
+    updated = _vault.save_chat(slug, messages)
+    _activity.info("action=regenerate_turn slug=%s index=%d model=%s", slug, index, agent.model)
+    return _with_context_usage(updated)
 
 
 def _regenerate_excerpt_now(slug: str, pinned_indices: list[int], generation: int) -> None:
@@ -1154,7 +1222,7 @@ def _regenerate_excerpt_now(slug: str, pinned_indices: list[int], generation: in
     if not pinned_turns:
         summary = "(nothing pinned yet)"
     else:
-        turns_text = "\n\n".join(f"{m.role.value}: {m.content}" for m in pinned_turns)
+        turns_text = "\n\n".join(f"{m.role.value}: {m.content.value}" for m in pinned_turns)
         if _chat_agent.excerpt_mode(turns_text) == "verbatim":
             summary = None
         else:

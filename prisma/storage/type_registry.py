@@ -1,15 +1,5 @@
 """Prisma-specific type registry -- thin glue over the generic
 `schema_gov.TypeRegistry`, keyed by `NodeType`. See ADR-019.
-
-`NodeType.chat` is registered against `ChatSession` (the target shape),
-not `VaultService.get_chat()`'s still-current `Chat` (the .md/markdown
-shape) -- schema export (below) should describe where chats are headed,
-even before the API/frontend cutover phase makes `get_chat()` return
-`ChatSession` for real. `find()`/`get_by_type()` deliberately don't wire a
-getter for chats yet for the same reason: wiring one now would either
-return the wrong type (`Chat`, mismatching what's registered) or silently
-do nothing (`list_nodes()` only scans `.md` files today, and chats haven't
-moved to `.sess` yet) -- clearer to raise than to paper over either.
 """
 from __future__ import annotations
 
@@ -18,18 +8,19 @@ from typing import Callable, Iterator
 from prisma.schema_gov import TypeRegistry
 from prisma.services.vault import VaultService
 from prisma.storage.models.vault_models import (
-    ChatSession, Note, NodeType, Source, Stream, VaultNodeBase,
+    Chat, Note, NodeType, Source, Stream, VaultNodeBase,
 )
 
 REGISTRY: TypeRegistry[NodeType] = TypeRegistry()
 REGISTRY.register(NodeType.note, Note)
 REGISTRY.register(NodeType.source, Source)
-REGISTRY.register(NodeType.chat, ChatSession)
+REGISTRY.register(NodeType.chat, Chat)
 REGISTRY.register(NodeType.stream, Stream)
 
 _GETTERS: dict[NodeType, Callable[[VaultService, str], VaultNodeBase]] = {
     NodeType.note: VaultService.get_note,
     NodeType.source: VaultService.get_source,
+    NodeType.chat: VaultService.get_chat,
     NodeType.stream: VaultService.get_stream,
 }
 

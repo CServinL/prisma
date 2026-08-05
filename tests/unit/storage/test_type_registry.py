@@ -2,7 +2,7 @@
 import pytest
 
 from prisma.services.vault import VaultService
-from prisma.storage.models.vault_models import ChatSession, Note, NodeType, Source, Stream
+from prisma.storage.models.vault_models import Chat, Note, NodeType, Source, Stream
 from prisma.storage.type_registry import REGISTRY, find, get_by_type
 
 
@@ -16,7 +16,7 @@ def vault(tmp_path):
 def test_registry_maps_every_node_type():
     assert REGISTRY.get(NodeType.note) is Note
     assert REGISTRY.get(NodeType.source) is Source
-    assert REGISTRY.get(NodeType.chat) is ChatSession
+    assert REGISTRY.get(NodeType.chat) is Chat
     assert REGISTRY.get(NodeType.stream) is Stream
 
 
@@ -27,10 +27,11 @@ def test_get_by_type_resolves_a_real_note(vault):
     assert note.title == "My Note"
 
 
-def test_get_by_type_raises_not_implemented_for_chat():
-    vault = VaultService()
-    with pytest.raises(NotImplementedError):
-        get_by_type(vault, NodeType.chat, "some-slug")
+def test_get_by_type_resolves_a_real_chat(vault):
+    chat = vault.create_chat("My Chat")
+    resolved = get_by_type(vault, NodeType.chat, chat.slug)
+    assert isinstance(resolved, Chat)
+    assert resolved.slug == chat.slug
 
 
 def test_find_returns_full_typed_instances_not_summaries(vault):

@@ -3,8 +3,13 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 from prisma.agents.chat_agent import MAX_TOOL_ITERATIONS, ChatAgent, _extract_footnotes
+from prisma.schema_gov import RichContent
 from prisma.services.chat_tools import ToolResult
 from prisma.storage.models.vault_models import ChatMessage, ChatRole, Note
+
+
+def _msg(role: ChatRole, text: str) -> ChatMessage:
+    return ChatMessage(role=role, content=RichContent(value=text))
 
 
 def _agent(llm=None, toolbox=None, max_history_tokens=16000):
@@ -53,7 +58,7 @@ def test_respond_returns_direct_answer_with_no_tool_call():
     reply = agent.respond(history=[], user_text="What does LLM stand for?")
 
     assert reply.role == ChatRole.assistant
-    assert reply.content == "LLM stands for Large Language Model."
+    assert reply.content.value == "LLM stands for Large Language Model."
     assert reply.tool_calls == []
 
 
@@ -72,7 +77,7 @@ def test_respond_calls_tool_then_returns_final_answer():
     reply = agent.respond(history=[], user_text="What have I written about attention?")
 
     toolbox.call.assert_called_once_with("SEARCH_VAULT", "attention mechanisms")
-    assert reply.content == "Based on your notes, attention mechanisms let models weigh tokens."
+    assert reply.content.value == "Based on your notes, attention mechanisms let models weigh tokens."
     assert len(reply.tool_calls) == 1
     assert reply.tool_calls[0].tool == "search_vault"
     assert reply.tool_calls[0].args == {"query": "attention mechanisms"}
@@ -87,7 +92,7 @@ def test_respond_returns_fallback_when_llm_unreachable():
 
     reply = agent.respond(history=[], user_text="hello")
 
-    assert "couldn't reach" in reply.content.lower()
+    assert "couldn't reach" in reply.content.value.lower()
 
 
 def test_respond_includes_blocked_reason_when_provided():
@@ -104,7 +109,7 @@ def test_respond_includes_blocked_reason_when_provided():
 
     reply = agent.respond(history=[], user_text="hello")
 
-    assert "knowledge graph is currently indexing" in reply.content
+    assert "knowledge graph is currently indexing" in reply.content.value
 
 
 def test_respond_fallback_has_no_extra_detail_when_reason_is_none():
@@ -119,7 +124,7 @@ def test_respond_fallback_has_no_extra_detail_when_reason_is_none():
 
     reply = agent.respond(history=[], user_text="hello")
 
-    assert reply.content == "Sorry, I couldn't reach the language model just now. Please try again shortly."
+    assert reply.content.value == "Sorry, I couldn't reach the language model just now. Please try again shortly."
     assert reply.tool_calls == []
 
 
@@ -136,7 +141,7 @@ def test_respond_stops_after_max_tool_iterations():
 
     assert toolbox.call.call_count == MAX_TOOL_ITERATIONS
     assert len(reply.tool_calls) == MAX_TOOL_ITERATIONS
-    assert "wasn't able to reach a final answer" in reply.content
+    assert "wasn't able to reach a final answer" in reply.content.value
 
 
 def test_respond_returns_overflow_message_without_calling_llm_when_assembly_exceeds_context_window():
@@ -148,9 +153,9 @@ def test_respond_returns_overflow_message_without_calling_llm_when_assembly_exce
     reply = agent.respond(history=[], user_text="x" * 1000)  # ~250 tokens, over the 100-token window
 
     llm.complete.assert_not_called()
-    assert "context window" in reply.content
-    assert "test-model" in reply.content
-    assert "Remove some pinned turns" in reply.content
+    assert "context window" in reply.content.value
+    assert "test-model" in reply.content.value
+    assert "Remove some pinned turns" in reply.content.value
     assert reply.model == "test-model"
 
 
@@ -169,7 +174,7 @@ def test_respond_checks_context_window_again_after_a_tool_result_grows_the_assem
     reply = agent.respond(history=[], user_text="short question")
 
     assert llm.complete.call_count == 1  # only the call that triggered the tool call
-    assert "context window" in reply.content
+    assert "context window" in reply.content.value
     assert len(reply.tool_calls) == 1
 
 
@@ -180,8 +185,8 @@ def test_respond_includes_prior_history_in_messages():
     llm.complete.return_value = "sure, following up on that"
     agent = _agent(llm=llm)
     history = [
-        ChatMessage(role=ChatRole.user, content="first question"),
-        ChatMessage(role=ChatRole.assistant, content="first answer"),
+        _msg(ChatRole.user, "first question"),
+        _msg(ChatRole.assistant, "first answer"),
     ]
 
     agent.respond(history=history, user_text="follow-up question")
@@ -202,8 +207,8 @@ def test_respond_drops_oldest_history_once_token_budget_exceeded():
     # only the most recent message, not the oldest one.
     agent = _agent(llm=llm, max_history_tokens=40)
     history = [
-        ChatMessage(role=ChatRole.user, content="x" * 200),  # ~50 tokens — too old, dropped
-        ChatMessage(role=ChatRole.assistant, content="y" * 100),  # ~25 tokens — kept
+        _msg(ChatRole.user, "x" * 200),  # ~50 tokens — too old, dropped
+        _msg(ChatRole.assistant, "y" * 100),  # ~25 tokens — kept
     ]
 
     agent.respond(history=history, user_text="latest question")
@@ -221,8 +226,8 @@ def test_respond_keeps_all_history_within_budget():
     llm.complete.return_value = "ok"
     agent = _agent(llm=llm, max_history_tokens=16000)
     history = [
-        ChatMessage(role=ChatRole.user, content="short question"),
-        ChatMessage(role=ChatRole.assistant, content="short answer"),
+        _msg(ChatRole.user, "short question"),
+        _msg(ChatRole.assistant, "short answer"),
     ]
 
     agent.respond(history=history, user_text="another question")
@@ -278,7 +283,7 @@ def test_respond_excerpt_notes_survive_history_truncation():
     llm.complete.return_value = "ok"
     agent = _agent(llm=llm, max_history_tokens=1)  # drops virtually all raw history
     excerpt = [_note("Settled Point", "The answer was 42.")]
-    history = [ChatMessage(role=ChatRole.user, content="x" * 400)]
+    history = [_msg(ChatRole.user, "x" * 400)]
 
     agent.respond(history=history, user_text="remind me", excerpt_notes=excerpt)
 
@@ -378,7 +383,7 @@ def test_context_usage_counts_system_prompt_and_bounded_history():
     llm.model = "test-model"
     llm.context_window = 1_000_000
     agent = _agent(llm=llm, max_history_tokens=16000)
-    history = [ChatMessage(role=ChatRole.user, content="x" * 400)]
+    history = [_msg(ChatRole.user, "x" * 400)]
 
     used, _ = agent.context_usage(history=history)
 
@@ -489,7 +494,7 @@ def test_respond_final_answer_populates_footnotes():
 
     reply = agent.respond(history=[], user_text="why Kùzu?")
 
-    assert reply.content == "Kùzu was chosen for its embedded mode[^1]."
+    assert reply.content.value == "Kùzu was chosen for its embedded mode[^1]."
     assert len(reply.footnotes) == 1
     assert reply.footnotes[0].sources == ["kg-decision"]
 

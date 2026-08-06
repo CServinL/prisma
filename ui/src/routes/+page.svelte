@@ -75,22 +75,59 @@
   }
 
   interface ToolCallOut {
+    id: string;
     tool: string;
     args: Record<string, unknown>;
+    result: string | null;
+    status: "ok" | "error";
   }
 
-  // ADR-017: per-claim attribution. `sources` are vault slugs; empty only
-  // when relation is "ai-inference". Rendered as an inline [^N] marker in
-  // the turn's content plus a list at the end of the turn — see
-  // renderFootnoteSegments() below.
-  type FootnoteRelation = "citation" | "attribution" | "relational" | "ai-inference";
+  // ADR-019: a turn's claims are one of two node kinds -- CitedClaimNode
+  // (traceable to vault sources, `relation` meaningful) or InferenceNode
+  // (the model's own reasoning, structurally no sources) -- discriminated
+  // on `kind`, matching prisma.storage.models.vault_models.ClaimNode.
+  // Rendered as an inline [^N] marker in the turn's content plus a list at
+  // the end of the turn — see renderContentSegments() below.
+  type ClaimRelation = "citation" | "attribution" | "relational";
 
-  interface FootnoteOut {
+  interface CitedClaimOut {
+    kind: "claim";
     index: number;
-    relation: FootnoteRelation;
+    claim_text: string;
     sources: string[];
-    claim_text: string | null;
+    relation: ClaimRelation;
     faithfulness_checked: boolean | null;
+  }
+
+  interface InferenceClaimOut {
+    kind: "inference";
+    index: number;
+    claim_text: string;
+  }
+
+  type ClaimOut = CitedClaimOut | InferenceClaimOut;
+
+  // ADR-019: schema support only today -- nothing populates a turn's
+  // `thoughts` yet (gated behind the still-deferred `has_native_reasoning`
+  // model-category flag), but the shape is here so rendering doesn't need
+  // to change again once something does.
+  interface ThoughtOut {
+    id: string;
+    thought: string;
+    thought_number: number;
+    revises: string | null;
+    branches_from: string | null;
+  }
+
+  // ADR-019: a RECALL hit -- a pointer to another node elsewhere in a
+  // session graph that this turn's context assembly pulled in beyond the
+  // default rolling history. Never a duplicate of that node's content.
+  // chat_slug is null for a same-chat recall, set to the source chat's slug
+  // for a cross-chat one (node_id alone is only unique within one chat).
+  interface RecallRefOut {
+    node_id: string;
+    node_kind: string;
+    chat_slug: string | null;
   }
 
   // ADR-019: chat message content is a typed, format-tagged wrapper
@@ -107,11 +144,14 @@
   }
 
   interface ChatTurn {
+    id?: string;
     role: "user" | "assistant";
     content: RichContent;
     timestamp: string;
-    footnotes: FootnoteOut[];
+    claims: ClaimOut[];
+    thoughts: ThoughtOut[];
     tool_calls: ToolCallOut[];
+    recalls: RecallRefOut[];
     model?: string | null;
     alternates?: ChatTurn[];
   }
@@ -216,7 +256,7 @@
   // results as untrusted (services/injection_defense.py); the model's own
   // final reply gets the same caution, so segments stay plain strings
   // Svelte auto-escapes rather than becoming raw HTML.
-  type ContentSegment = { text: string } | { footnoteIndex: number };
+  type ContentSegment = { text: string } | { claimIndex: number };
 
   const FOOTNOTE_MARKER_RE = /\[\^(\d+)\]/g;
 
@@ -225,19 +265,42 @@
     let lastEnd = 0;
     for (const m of content.matchAll(FOOTNOTE_MARKER_RE)) {
       if (m.index! > lastEnd) segments.push({ text: content.slice(lastEnd, m.index) });
-      segments.push({ footnoteIndex: Number(m[1]) });
+      segments.push({ claimIndex: Number(m[1]) });
       lastEnd = m.index! + m[0].length;
     }
     if (lastEnd < content.length) segments.push({ text: content.slice(lastEnd) });
     return segments;
   }
 
-  const FOOTNOTE_RELATION_LABEL: Record<FootnoteRelation, string> = {
+  const CLAIM_RELATION_LABEL: Record<ClaimRelation, string> = {
     citation: "citation",
     attribution: "attribution",
     relational: "relational",
-    "ai-inference": "AI inference",
   };
+
+  // Shared between the inline [^N] marker and the claim-list entry below --
+  // both key off this rather than raw `relation`/`kind` so the CSS classes
+  // (claim-ref-*, claim-relation-*) stay a single flat namespace covering
+  // both CitedClaimNode's three relations and InferenceNode.
+  function claimStyleKey(c: ClaimOut): string {
+    return c.kind === "inference" ? "inference" : c.relation;
+  }
+
+  function claimLabel(c: ClaimOut): string {
+    return c.kind === "inference" ? "AI inference" : CLAIM_RELATION_LABEL[c.relation];
+  }
+
+  function summarizeRecalls(recalls: RecallRefOut[]): string {
+    const labels: Record<string, string> = { turn: "turn", tool_call: "tool call", thought: "thought", claim: "claim" };
+    const counts = new Map<string, number>();
+    for (const r of recalls) counts.set(r.node_kind, (counts.get(r.node_kind) ?? 0) + 1);
+    const byKind = [...counts.entries()]
+      .map(([kind, n]) => `${n} ${labels[kind] ?? kind}${n > 1 ? "s" : ""}`)
+      .join(", ");
+    const crossChatCount = recalls.filter(r => r.chat_slug !== null).length;
+    if (crossChatCount === 0) return byKind;
+    return `${byKind} (${crossChatCount} from ${crossChatCount > 1 ? "other chats" : "another chat"})`;
+  }
 
   function _defaultApiBase(): string {
     if (typeof window === "undefined") return DEFAULT_API;
@@ -669,7 +732,7 @@
       ...activeChat.messages,
       {
         role: "user", content: { format: "md", value: text, rendered_html: null },
-        timestamp: new Date().toISOString(), footnotes: [], tool_calls: [],
+        timestamp: new Date().toISOString(), claims: [], thoughts: [], tool_calls: [], recalls: [],
       },
     ];
     try {
@@ -683,7 +746,8 @@
           ...activeChat.messages,
           {
             role: "assistant", content: { format: "md", value: data.reply, rendered_html: data.html ?? null },
-            timestamp: new Date().toISOString(), footnotes: data.footnotes ?? [], tool_calls: data.tool_calls ?? [],
+            timestamp: new Date().toISOString(), claims: data.claims ?? [], thoughts: [],
+            tool_calls: data.tool_calls ?? [], recalls: data.recalls ?? [],
           },
         ];
       }
@@ -1912,19 +1976,26 @@
                   {#if msg.tool_calls?.length}
                     <div class="chat-tool-calls">
                       {#each msg.tool_calls as tc}
-                        <span class="chat-tool-call">used <code>{tc.tool}</code>{#if tc.args?.query}: {tc.args.query}{/if}</span>
+                        <span class="chat-tool-call" class:chat-tool-call-error={tc.status === "error"}>used <code>{tc.tool}</code>{#if tc.args?.query}: {tc.args.query}{/if}</span>
+                      {/each}
+                    </div>
+                  {/if}
+                  {#if msg.thoughts?.length}
+                    <div class="chat-turn-thoughts">
+                      {#each msg.thoughts as th}
+                        <div class="chat-turn-thought">#{th.thought_number}: {th.thought}</div>
                       {/each}
                     </div>
                   {/if}
                   <div class="chat-turn-content text-body">
                     {#each renderContentSegments(msg.content.value) as seg}
                       {#if "text" in seg}{seg.text}{:else}
-                        {@const fnRelation = msg.footnotes?.find(f => f.index === seg.footnoteIndex)?.relation}
+                        {@const claim = msg.claims?.find(c => c.index === seg.claimIndex)}
                         <button
-                          class="footnote-ref footnote-ref-{fnRelation}"
-                          title="Jump to footnote {seg.footnoteIndex}"
-                          onclick={() => document.getElementById(`chat-turn-${i}-footnote-${seg.footnoteIndex}`)?.scrollIntoView({ behavior: "smooth", block: "nearest" })}
-                        >{seg.footnoteIndex}</button>
+                          class="claim-ref claim-ref-{claim ? claimStyleKey(claim) : ''}"
+                          title="Jump to claim {seg.claimIndex}"
+                          onclick={() => document.getElementById(`chat-turn-${i}-claim-${seg.claimIndex}`)?.scrollIntoView({ behavior: "smooth", block: "nearest" })}
+                        >{seg.claimIndex}</button>
                       {/if}
                     {/each}
                   </div>
@@ -1936,21 +2007,26 @@
                       {/each}
                     </div>
                   {/if}
-                  {#if msg.footnotes?.length}
-                    <ol class="chat-footnotes">
-                      {#each msg.footnotes as fn}
-                        <li id="chat-turn-{i}-footnote-{fn.index}">
-                          <span class="footnote-relation footnote-relation-{fn.relation}">{FOOTNOTE_RELATION_LABEL[fn.relation]}</span>
-                          {#if fn.faithfulness_checked !== null}
+                  {#if msg.recalls?.length}
+                    <div class="chat-turn-recalls" title="This reply pulled context from earlier in the conversation via RECALL, beyond the default rolling history">
+                      ↩ recalled {summarizeRecalls(msg.recalls)}
+                    </div>
+                  {/if}
+                  {#if msg.claims?.length}
+                    <ol class="chat-claims">
+                      {#each msg.claims as claim}
+                        <li id="chat-turn-{i}-claim-{claim.index}">
+                          <span class="claim-relation claim-relation-{claimStyleKey(claim)}">{claimLabel(claim)}</span>
+                          {#if claim.kind === "claim" && claim.faithfulness_checked !== null}
                             <span
-                              class="footnote-faithfulness"
-                              class:faithful={fn.faithfulness_checked}
-                              class:unfaithful={!fn.faithfulness_checked}
-                              title={fn.faithfulness_checked ? "Automated check: claim is supported by the cited source(s)" : "Automated check: claim does NOT appear to be supported by the cited source(s)"}
-                            >{fn.faithfulness_checked ? "✓ verified" : "⚠ unsupported"}</span>
+                              class="claim-faithfulness"
+                              class:faithful={claim.faithfulness_checked}
+                              class:unfaithful={!claim.faithfulness_checked}
+                              title={claim.faithfulness_checked ? "Automated check: claim is supported by the cited source(s)" : "Automated check: claim does NOT appear to be supported by the cited source(s)"}
+                            >{claim.faithfulness_checked ? "✓ verified" : "⚠ unsupported"}</span>
                           {/if}
-                          {#if fn.sources.length}
-                            {#each fn.sources as slug, si}{#if si > 0}, {/if}<button class="footnote-source-link" onclick={() => openNode(slug)}>{slug}</button>{/each}
+                          {#if claim.kind === "claim" && claim.sources.length}
+                            {#each claim.sources as slug, si}{#if si > 0}, {/if}<button class="claim-source-link" onclick={() => openNode(slug)}>{slug}</button>{/each}
                           {/if}
                         </li>
                       {/each}
@@ -3795,6 +3871,18 @@
   .chat-tool-calls code {
     color: #c084fc;
   }
+  .chat-tool-call-error {
+    color: #f87171;
+  }
+  .chat-turn-thoughts {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    margin-bottom: 6px;
+    font-size: 11px;
+    font-style: italic;
+    color: #6b7a8a;
+  }
   .chat-turn-content {
     color: #c8ddf0;
     line-height: 1.6;
@@ -3809,7 +3897,12 @@
   .chat-turn-alternate-model {
     color: #5c6b7a;
   }
-  .footnote-ref {
+  .chat-turn-recalls {
+    margin-top: 6px;
+    font-size: 0.75rem;
+    color: #7a8a9a;
+  }
+  .claim-ref {
     background: none;
     border: none;
     padding: 0;
@@ -3821,12 +3914,12 @@
     font-weight: 600;
     margin-left: 1px;
   }
-  .footnote-ref:hover { text-decoration: underline; }
-  .footnote-ref-citation { color: #7fd4c8; }
-  .footnote-ref-attribution { color: #60a5fa; }
-  .footnote-ref-relational { color: #c084fc; }
-  .footnote-ref-ai-inference { color: #94a3b8; }
-  .chat-footnotes {
+  .claim-ref:hover { text-decoration: underline; }
+  .claim-ref-citation { color: #7fd4c8; }
+  .claim-ref-attribution { color: #60a5fa; }
+  .claim-ref-relational { color: #c084fc; }
+  .claim-ref-inference { color: #94a3b8; }
+  .chat-claims {
     margin: 8px 0 0;
     padding-left: 18px;
     display: flex;
@@ -3835,7 +3928,7 @@
     font-size: 11px;
     color: #8ba3c0;
   }
-  .footnote-relation {
+  .claim-relation {
     display: inline-block;
     margin-right: 6px;
     padding: 1px 6px;
@@ -3844,29 +3937,29 @@
     text-transform: uppercase;
     letter-spacing: 0.02em;
   }
-  .footnote-relation-citation {
+  .claim-relation-citation {
     background: rgba(127, 212, 200, 0.15);
     color: #7fd4c8;
   }
-  .footnote-relation-attribution {
+  .claim-relation-attribution {
     background: rgba(96, 165, 250, 0.15);
     color: #60a5fa;
   }
-  .footnote-relation-relational {
+  .claim-relation-relational {
     background: rgba(192, 132, 252, 0.15);
     color: #c084fc;
   }
-  .footnote-relation-ai-inference {
+  .claim-relation-inference {
     background: rgba(148, 163, 184, 0.15);
     color: #94a3b8;
   }
-  .footnote-faithfulness {
+  .claim-faithfulness {
     margin-right: 6px;
     font-size: 10px;
   }
-  .footnote-faithfulness.faithful { color: #4ade80; }
-  .footnote-faithfulness.unfaithful { color: #f87171; }
-  .footnote-source-link {
+  .claim-faithfulness.faithful { color: #4ade80; }
+  .claim-faithfulness.unfaithful { color: #f87171; }
+  .claim-source-link {
     background: none;
     border: none;
     padding: 0;
@@ -3875,7 +3968,7 @@
     cursor: pointer;
     font-size: 11px;
   }
-  .footnote-source-link:hover {
+  .claim-source-link:hover {
     color: #c8ddf0;
   }
   .chat-input-row {

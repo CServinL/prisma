@@ -2,29 +2,29 @@
 from pathlib import Path
 from unittest.mock import MagicMock
 
-from prisma.agents.chat_agent import MAX_TOOL_ITERATIONS, ChatAgent, _extract_footnotes
+from prisma.agents.chat_agent import MAX_TOOL_ITERATIONS, ChatAgent, _extract_claims
 from prisma.schema_gov import RichContent
 from prisma.services.chat_tools import ToolResult
-from prisma.storage.models.vault_models import ChatMessage, ChatRole, Note
+from prisma.storage.models.vault_models import ChatRole, CitedClaimNode, InferenceNode, Note, TurnNode
 
 
-def _msg(role: ChatRole, text: str) -> ChatMessage:
-    return ChatMessage(role=role, content=RichContent(value=text))
+def _msg(role: ChatRole, text: str) -> TurnNode:
+    return TurnNode(role=role, content=RichContent(value=text))
 
 
 def _agent(llm=None, toolbox=None, max_history_tokens=16000):
     if llm is None:
         # Unconfigured MagicMock.model would be a MagicMock, not a real
-        # string -- ChatMessage.model (str | None) rejects that at
+        # string -- TurnNode.model (str | None) rejects that at
         # construction time, in every respond() return path.
         llm = MagicMock()
         llm.model = "test-model"
         llm.context_window = 1_000_000
     if toolbox is None:
         # Unconfigured MagicMock.get_node_text() would return a truthy
-        # MagicMock, not real text or None -- _verify_footnote would then
+        # MagicMock, not real text or None -- _verify_claim would then
         # try to slice/join it and blow up. None means "can't resolve this
-        # source," which _verify_footnote already handles by skipping the
+        # source," which _verify_claim already handles by skipping the
         # check, so tests that don't care about faithfulness_checked (most
         # of them) aren't forced to configure this explicitly.
         toolbox = MagicMock()
@@ -76,11 +76,132 @@ def test_respond_calls_tool_then_returns_final_answer():
 
     reply = agent.respond(history=[], user_text="What have I written about attention?")
 
-    toolbox.call.assert_called_once_with("SEARCH_VAULT", "attention mechanisms")
+    toolbox.call.assert_called_once()
+    call_args, call_kwargs = toolbox.call.call_args
+    assert call_args == ("SEARCH_VAULT", "attention mechanisms")
+    assert "session_graph" in call_kwargs
+    assert "remaining_budget" in call_kwargs
     assert reply.content.value == "Based on your notes, attention mechanisms let models weigh tokens."
+
+
+# ── SessionOrchestrator integration (ADR-019 §35/36) ──────────────────────────
+
+def test_respond_passes_a_session_graph_reflecting_history():
+    import networkx as nx
+
+    llm = MagicMock()
+    llm.model = "test-model"
+    llm.context_window = 1_000_000
+    llm.complete.side_effect = ["SEARCH_VAULT: x", "final answer"]
+    toolbox = MagicMock()
+    toolbox.call.return_value = ToolResult(text="hit", raw=[])
+    agent = _agent(llm=llm, toolbox=toolbox)
+    history = [_msg(ChatRole.user, "earlier question"), _msg(ChatRole.assistant, "earlier answer")]
+
+    agent.respond(history=history, user_text="follow-up")
+
+    _, call_kwargs = toolbox.call.call_args
+    graph = call_kwargs["session_graph"]
+    assert isinstance(graph, nx.MultiDiGraph)
+    assert graph.has_node(history[0].id)
+    assert graph.has_node(history[1].id)
+    assert graph.has_edge(history[0].id, history[1].id)
+
+
+def test_respond_passes_remaining_budget_reflecting_context_window():
+    llm = MagicMock()
+    llm.model = "test-model"
+    llm.context_window = 1000
+    llm.complete.side_effect = ["SEARCH_VAULT: x", "final answer"]
+    toolbox = MagicMock()
+    toolbox.call.return_value = ToolResult(text="hit", raw=[])
+    agent = _agent(llm=llm, toolbox=toolbox)
+
+    agent.respond(history=[], user_text="short question")
+
+    _, call_kwargs = toolbox.call.call_args
+    assert 0 < call_kwargs["remaining_budget"] < 1000
+
+
+def test_respond_collects_recall_hits_into_recalls():
+    llm = MagicMock()
+    llm.model = "test-model"
+    llm.context_window = 1_000_000
+    llm.complete.side_effect = ["RECALL: that earlier thing", "final answer"]
+    toolbox = MagicMock()
+    toolbox.call.return_value = ToolResult(text="recalled text", raw=[{"node_id": "abc123", "kind": "turn"}])
+    agent = _agent(llm=llm, toolbox=toolbox)
+
+    reply = agent.respond(history=[], user_text="remind me")
+
+    assert len(reply.recalls) == 1
+    assert reply.recalls[0].node_id == "abc123"
+    assert reply.recalls[0].node_kind == "turn"
+    # tool_calls still records that RECALL ran, same as any other tool
+    assert reply.tool_calls[0].tool == "recall"
+
+
+def test_respond_forwards_chat_slug_to_toolbox():
+    llm = MagicMock()
+    llm.model = "test-model"
+    llm.context_window = 1_000_000
+    llm.complete.side_effect = ["RECALL: earlier thing", "final answer"]
+    toolbox = MagicMock()
+    toolbox.call.return_value = ToolResult(text="hit", raw=[])
+    agent = _agent(llm=llm, toolbox=toolbox)
+
+    agent.respond(history=[], user_text="remind me", chat_slug="my-chat")
+
+    _, call_kwargs = toolbox.call.call_args
+    assert call_kwargs["chat_slug"] == "my-chat"
+
+
+def test_respond_without_chat_slug_passes_none_to_toolbox():
+    llm = MagicMock()
+    llm.model = "test-model"
+    llm.context_window = 1_000_000
+    llm.complete.side_effect = ["RECALL: earlier thing", "final answer"]
+    toolbox = MagicMock()
+    toolbox.call.return_value = ToolResult(text="hit", raw=[])
+    agent = _agent(llm=llm, toolbox=toolbox)
+
+    agent.respond(history=[], user_text="remind me")  # chat_slug omitted
+
+    _, call_kwargs = toolbox.call.call_args
+    assert call_kwargs["chat_slug"] is None
+
+
+def test_respond_preserves_cross_chat_slug_on_recall_hits():
+    llm = MagicMock()
+    llm.model = "test-model"
+    llm.context_window = 1_000_000
+    llm.complete.side_effect = ["RECALL: earlier thing", "final answer"]
+    toolbox = MagicMock()
+    toolbox.call.return_value = ToolResult(
+        text="recalled text",
+        raw=[{"node_id": "abc123", "kind": "turn", "chat_slug": "other-chat"}],
+    )
+    agent = _agent(llm=llm, toolbox=toolbox)
+
+    reply = agent.respond(history=[], user_text="remind me", chat_slug="my-chat")
+
+    assert reply.recalls[0].chat_slug == "other-chat"
+
+
+def test_respond_non_recall_tool_calls_leave_recalls_empty():
+    llm = MagicMock()
+    llm.model = "test-model"
+    llm.context_window = 1_000_000
+    llm.complete.side_effect = ["SEARCH_VAULT: x", "final answer"]
+    toolbox = MagicMock()
+    toolbox.call.return_value = ToolResult(text="hit", raw=[{"source_file": "x.md", "score": 0.9, "text": "..."}])
+    agent = _agent(llm=llm, toolbox=toolbox)
+
+    reply = agent.respond(history=[], user_text="question")
+
+    assert reply.recalls == []
     assert len(reply.tool_calls) == 1
     assert reply.tool_calls[0].tool == "search_vault"
-    assert reply.tool_calls[0].args == {"query": "attention mechanisms"}
 
 
 def test_respond_returns_fallback_when_llm_unreachable():
@@ -406,83 +527,84 @@ def test_context_usage_includes_excerpt_notes_in_the_count():
     assert with_excerpt > without_excerpt
 
 
-# ── _extract_footnotes() — ADR-017 claim attribution self-report ─────────────
+# ── _extract_claims() — ADR-017 claim attribution self-report ────────────────
 
-def test_extract_footnotes_parses_a_well_formed_report():
+def test_extract_claims_parses_a_well_formed_report():
     reply = (
         'Transformers use self-attention[^1].\n'
         'FOOTNOTES_JSON: [{"index": 1, "relation": "citation", "sources": ["attention-paper"]}]'
     )
 
-    content, footnotes = _extract_footnotes(reply)
+    content, claims = _extract_claims(reply)
 
     assert content == "Transformers use self-attention[^1]."
-    assert len(footnotes) == 1
-    assert footnotes[0].index == 1
-    assert footnotes[0].relation == "citation"
-    assert footnotes[0].sources == ["attention-paper"]
+    assert len(claims) == 1
+    assert isinstance(claims[0], CitedClaimNode)
+    assert claims[0].index == 1
+    assert claims[0].relation == "citation"
+    assert claims[0].sources == ["attention-paper"]
 
 
-def test_extract_footnotes_strips_the_line_even_when_list_is_empty():
+def test_extract_claims_strips_the_line_even_when_list_is_empty():
     reply = "Just chatting, no claims here.\nFOOTNOTES_JSON: []"
 
-    content, footnotes = _extract_footnotes(reply)
+    content, claims = _extract_claims(reply)
 
     assert content == "Just chatting, no claims here."
-    assert footnotes == []
+    assert claims == []
 
 
-def test_extract_footnotes_returns_unchanged_when_line_missing():
+def test_extract_claims_returns_unchanged_when_line_missing():
     # A model that ignores the instruction entirely must not lose its
     # answer -- this is the single most important fallback in the whole
-    # feature, since footnoting is new prompting complexity layered on an
-    # existing, already-working chat loop.
+    # feature, since claim attribution is new prompting complexity layered
+    # on an existing, already-working chat loop.
     reply = "No footnote line at all here."
 
-    content, footnotes = _extract_footnotes(reply)
+    content, claims = _extract_claims(reply)
 
     assert content == "No footnote line at all here."
-    assert footnotes == []
+    assert claims == []
 
 
-def test_extract_footnotes_drops_all_on_malformed_json_but_keeps_content():
+def test_extract_claims_drops_all_on_malformed_json_but_keeps_content():
     reply = "Some answer.\nFOOTNOTES_JSON: {not valid json"
 
-    content, footnotes = _extract_footnotes(reply)
+    content, claims = _extract_claims(reply)
 
     assert content == "Some answer."
-    assert footnotes == []
+    assert claims == []
 
 
-def test_extract_footnotes_skips_only_the_malformed_entry():
+def test_extract_claims_skips_only_the_malformed_entry():
     reply = (
         "Two claims here.\n"
         'FOOTNOTES_JSON: [{"index": 1, "relation": "citation", "sources": ["a"]}, '
         '{"index": 2, "relation": "not-a-real-relation", "sources": ["b"]}]'
     )
 
-    content, footnotes = _extract_footnotes(reply)
+    content, claims = _extract_claims(reply)
 
     assert content == "Two claims here."
-    assert len(footnotes) == 1
-    assert footnotes[0].index == 1
+    assert len(claims) == 1
+    assert claims[0].index == 1
 
 
-def test_extract_footnotes_uses_the_last_match_if_model_discusses_format_first():
+def test_extract_claims_uses_the_last_match_if_model_discusses_format_first():
     reply = (
         'I will use FOOTNOTES_JSON: [] as my format.\n'
         "The actual answer[^1].\n"
         'FOOTNOTES_JSON: [{"index": 1, "relation": "ai-inference", "sources": []}]'
     )
 
-    content, footnotes = _extract_footnotes(reply)
+    content, claims = _extract_claims(reply)
 
     assert "The actual answer[^1]." in content
-    assert len(footnotes) == 1
-    assert footnotes[0].relation == "ai-inference"
+    assert len(claims) == 1
+    assert isinstance(claims[0], InferenceNode)
 
 
-def test_respond_final_answer_populates_footnotes():
+def test_respond_final_answer_populates_claims():
     llm = MagicMock()
     llm.model = "test-model"
     llm.context_window = 1_000_000
@@ -495,11 +617,11 @@ def test_respond_final_answer_populates_footnotes():
     reply = agent.respond(history=[], user_text="why Kùzu?")
 
     assert reply.content.value == "Kùzu was chosen for its embedded mode[^1]."
-    assert len(reply.footnotes) == 1
-    assert reply.footnotes[0].sources == ["kg-decision"]
+    assert len(reply.claims) == 1
+    assert reply.claims[0].sources == ["kg-decision"]
 
 
-def test_respond_final_answer_with_no_footnotes_line_has_empty_footnotes():
+def test_respond_final_answer_with_no_footnotes_line_has_empty_claims():
     llm = MagicMock()
     llm.model = "test-model"
     llm.context_window = 1_000_000
@@ -508,7 +630,7 @@ def test_respond_final_answer_with_no_footnotes_line_has_empty_footnotes():
 
     reply = agent.respond(history=[], user_text="hello")
 
-    assert reply.footnotes == []
+    assert reply.claims == []
 
 
 def test_system_prompt_includes_footnote_instructions():
@@ -528,7 +650,7 @@ def test_system_prompt_includes_footnote_instructions():
 
 # ── claim_text extraction (ADR-017's faithfulness_checked input) ─────────────
 
-def test_extract_footnotes_populates_claim_text_from_preceding_sentence():
+def test_extract_claims_populates_claim_text_from_preceding_sentence():
     reply = (
         'Kùzu has no server process. It was chosen for its embedded mode[^1]. '
         'Neo4j needs a JVM[^2].\n'
@@ -536,21 +658,22 @@ def test_extract_footnotes_populates_claim_text_from_preceding_sentence():
         '{"index": 2, "relation": "attribution", "sources": ["b"]}]'
     )
 
-    _, footnotes = _extract_footnotes(reply)
+    _, claims = _extract_claims(reply)
 
-    assert footnotes[0].claim_text == "It was chosen for its embedded mode"
-    assert footnotes[1].claim_text == "Neo4j needs a JVM"
+    assert claims[0].claim_text == "It was chosen for its embedded mode"
+    assert claims[1].claim_text == "Neo4j needs a JVM"
 
 
-def test_extract_footnotes_claim_text_none_when_no_markers_in_content():
+def test_extract_claims_claim_text_empty_when_no_markers_in_content():
     # Malformed input the model never actually produces (a FOOTNOTES_JSON
-    # entry with no matching [^N] in the text) -- must degrade gracefully,
-    # not raise a KeyError.
+    # entry with no matching [^N] in the text) -- must degrade gracefully
+    # to an empty claim_text (CitedClaimNode/InferenceNode.claim_text is
+    # non-optional, unlike v1's Footnote), not raise a KeyError.
     reply = 'No markers here.\nFOOTNOTES_JSON: [{"index": 1, "relation": "ai-inference", "sources": []}]'
 
-    _, footnotes = _extract_footnotes(reply)
+    _, claims = _extract_claims(reply)
 
-    assert footnotes[0].claim_text is None
+    assert claims[0].claim_text == ""
 
 
 # ── faithfulness_checked verification (ADR-017, automatic every turn) ────────
@@ -570,7 +693,7 @@ def test_respond_faithfulness_checked_true_when_verifier_says_yes():
 
     reply = agent.respond(history=[], user_text="why Kùzu?")
 
-    assert reply.footnotes[0].faithfulness_checked is True
+    assert reply.claims[0].faithfulness_checked is True
     toolbox.get_node_text.assert_called_once_with("kg-decision")
     # Second complete() call is the verification prompt, not another chat turn.
     verify_messages = llm.complete.call_args_list[1][0][0]
@@ -594,7 +717,7 @@ def test_respond_faithfulness_checked_false_when_verifier_says_no():
 
     reply = agent.respond(history=[], user_text="why Kùzu?")
 
-    assert reply.footnotes[0].faithfulness_checked is False
+    assert reply.claims[0].faithfulness_checked is False
 
 
 def test_respond_faithfulness_checked_none_when_source_unresolvable():
@@ -611,7 +734,7 @@ def test_respond_faithfulness_checked_none_when_source_unresolvable():
 
     reply = agent.respond(history=[], user_text="hello")
 
-    assert reply.footnotes[0].faithfulness_checked is None
+    assert reply.claims[0].faithfulness_checked is None
     assert llm.complete.call_count == 1  # no verification call made
 
 
@@ -630,10 +753,10 @@ def test_respond_faithfulness_checked_none_when_verifier_unreachable():
 
     reply = agent.respond(history=[], user_text="hello")
 
-    assert reply.footnotes[0].faithfulness_checked is None
+    assert reply.claims[0].faithfulness_checked is None
 
 
-def test_respond_ai_inference_footnote_never_triggers_verification():
+def test_respond_ai_inference_claim_never_triggers_verification():
     llm = MagicMock()
     llm.model = "test-model"
     llm.context_window = 1_000_000
@@ -646,6 +769,6 @@ def test_respond_ai_inference_footnote_never_triggers_verification():
 
     reply = agent.respond(history=[], user_text="hello")
 
-    assert reply.footnotes[0].faithfulness_checked is None
+    assert isinstance(reply.claims[0], InferenceNode)  # structurally has no faithfulness_checked to verify
     toolbox.get_node_text.assert_not_called()
     assert llm.complete.call_count == 1

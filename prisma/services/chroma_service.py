@@ -181,6 +181,27 @@ class ChromaIndexer:
 
     # ── Query ─────────────────────────────────────────────────────────────────
 
+    def embed_texts(self, texts: list[str], *, priority: str = "background", max_wait: float = 10.0) -> list[list[float]] | None:
+        """Embeds arbitrary strings through this indexer's own configured
+        model/backend, gated by the same resource lease query() uses --
+        exposed for callers (e.g. RECALL, chat_tools.py) that need raw
+        embedding vectors without going through query()'s vault-wide
+        collection search. `priority`/`max_wait` let a latency-sensitive
+        caller (a live chat turn) fail fast on contention instead of
+        query()'s own 10s default wait, tuned for background indexing work,
+        not a live turn."""
+        with resource_lock.lease(
+            self._supervisor_host, self._supervisor_port, holder=_RESOURCE_HOLDER,
+            model=self._model, priority=priority, max_wait=max_wait,
+        ) as granted:
+            if not granted:
+                return None
+            return _embed_texts(texts, self._model, self._base_url, self._provider)
+
+    def embed_query(self, text: str, *, priority: str = "background", max_wait: float = 10.0) -> list[float] | None:
+        embeddings = self.embed_texts([text], priority=priority, max_wait=max_wait)
+        return embeddings[0] if embeddings else None
+
     def query(self, question: str, top_k: int = 20) -> list[GraphSearchResult]:
         try:
             self._ensure_client()

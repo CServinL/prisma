@@ -2,17 +2,22 @@
 
 **Date:** 2026-08-04 (chat sessions cut over to `.sess` 2026-08-05)
 **Author:** CServinL
-**Status:** Proposed — chat sessions are fully cut over to the `.sess`
-pure-JSON format (`Chat`/`ChatMessage`/`RichContent` in
+**Status:** Implemented in two cutovers. (1) 2026-08-05: chat sessions fully
+cut over to the `.sess` pure-JSON format (`Chat`/`RichContent` in
 `prisma/storage/models/vault_models.py`, governed by the generic
 `prisma.schema_gov` package), Python-only by design (see open question 2:
 chat sessions never touch Rust). The legacy `prisma:meta`-in-markdown shape
 is now read-only, kept solely for `prisma migrate-chats-to-sess` to convert
-pre-existing `.md` chat files. Open questions 1/3 (extending versioning to
-vault frontmatter generally, and where migration logic should live for that
-broader case) still need cservinl's decision. See "Open direction: session
-as a graph, not a flat list" below for a second, not-yet-scoped redesign of
-this same format.
+pre-existing `.md` chat files. (2) 2026-08-05, same day: the "Open
+direction" session-as-a-graph redesign below also shipped —
+`Chat.messages: list[TurnNode]` (renamed from `ChatMessage`) plus
+`ToolCallNode`/`ThinkingNode`/`CitedClaimNode`/`InferenceNode` branches,
+`SessionOrchestrator`, and the `RECALL` tool, `CHAT_SCHEMA_VERSION = 2` with
+a v1→v2 migration. See [Chat session graph](../../concepts/chat-session-graph.md)
+for the full node/edge taxonomy and current status, not restated here. Open
+questions 1/3 (extending versioning to vault frontmatter generally, and
+where migration logic should live for that broader case) still need
+cservinl's decision — the only parts of this ADR still actually open.
 
 ## Context
 
@@ -255,8 +260,8 @@ of a small model's existing compute budget, not a nice-to-have for a
 cloud-backed deployment that could just use a reasoning model directly.
 
 A graph of addressable nodes only solves half of this — something still has
-to decide, per turn, *which* nodes to load. cservinl's naming for that role:
-a **MasterAI / orchestrator / harness**. Resolved (2026-08-05, corrected
+to decide, per turn, *which* nodes to load: the **`SessionOrchestrator`**.
+Resolved (2026-08-05, corrected
 from an earlier algorithmic-only framing this same day): it isn't a
 one-shot pre-filter gating what the model sees — a pure algorithmic
 threshold can't be semantically correct, and the model itself is often in
@@ -270,13 +275,18 @@ kept current: [Chat session graph](../../concepts/chat-session-graph.md).
 
 **Not scoped or designed here** — this page states the resolved direction,
 the concept doc is where the taxonomy/algorithm actually live and get
-revised. This is a second, breaking redesign of the same `.sess` shape this
-ADR just landed — node/edge shape, whether tool results become persisted
-content, `RECALL`'s search implementation, how `ChatAgent` vs. the
-orchestrator divide responsibility, and how this interacts with
-Excerpt/`context_slugs` loading are all still open. Flagged as the next
-major design pass once the current cutover is confirmed solid in real use,
-not started.
+revised. Shipped 2026-08-05, the same day this direction was raised: this
+was a second, breaking redesign of the same `.sess` shape this ADR's first
+cutover landed (`CHAT_SCHEMA_VERSION = 2`, v1→v2 migration) — node/edge
+shape, `ToolCallNode.result` persisted in full, `RECALL`'s search
+implementation (embedding reuse + in-memory cosine scan, not a new Chroma
+collection or a Kùzu instance), `ChatAgent`/`SessionOrchestrator`
+responsibility split, and Excerpt/`context_slugs` interaction (unchanged —
+the orchestrator's default assembly still includes the Excerpt exactly as
+before) are all resolved. Cross-chat `RECALL` (a bounded, discounted search of other chats'
+session graphs, not just the active one) shipped the same day it was raised, 2026-08-05. See
+[Chat session graph](../../concepts/chat-session-graph.md#status) for what's still genuinely open
+(`ThinkingNode` population, and cross-chat scope beyond "N most recently active").
 
 ## Related
 

@@ -58,7 +58,7 @@ def test_apply_writes_sess_and_keeps_md_by_default(vault):
     assert session.messages[1].content.format == ContentFormat.markdown
     assert session.messages[1].content.value == "hello[^1]"
     assert session.messages[1].model == "qwen2.5-3b"
-    assert session.messages[1].footnotes[0].sources == ["src-a"]
+    assert session.messages[1].claims[0].sources == ["src-a"]
 
 
 def test_apply_with_remove_md_deletes_the_source_file(vault):

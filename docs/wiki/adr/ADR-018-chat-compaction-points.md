@@ -2,8 +2,16 @@
 
 **Date:** 2026-08-04
 **Author:** CServinL
-**Status:** Proposed — design drafted, not built. Several open questions
-(marked below) need cservinl's decision before implementation starts.
+**Status:** Superseded by [ADR-019](ADR-019-persisted-format-governance-and-migrations.md)
+(2026-08-05). ADR-019 turned a chat's timeline from flat prose-with-metadata
+into a graph (`TurnNode` main line + `tool_calls`/`thoughts`/`claims` branches,
+`RECALL` for pulling in anything the rolling window dropped) — a single
+`compaction_point: int | None` marker in a flat timeline is the wrong question
+once turns are graph nodes with their own reachable structure, not just token
+count to trim. The problem this ADR was chasing (long chats outgrowing the
+model's context window) is still real; ADR-019's graph model plus `RECALL` is
+now that answer instead of this design. Left below for the design history and
+open-questions record, not as something to build.
 
 ## Context
 

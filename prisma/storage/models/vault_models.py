@@ -3,11 +3,16 @@ from __future__ import annotations
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
+from uuid import uuid4
 
 from pydantic import BaseModel, Field, field_validator
 
 from prisma.schema_gov import RichContent, VersionedModel
+
+
+def _new_id() -> str:
+    return uuid4().hex
 
 
 class NodeType(str, Enum):
@@ -101,47 +106,91 @@ class Source(VaultNodeBase):
     original_ext: str | None = None
 
 
-class ToolCallRecord(BaseModel):
+CHAT_SCHEMA_VERSION = 2
+
+
+class ToolCallNode(BaseModel):
+    """One tool invocation, off the main line (`TurnNode.tool_calls`) --
+    unlike v1's `ToolCallRecord`, `result` is persisted, not discarded, so a
+    later turn can `RECALL` it instead of only ever re-running the tool."""
+    id: str = Field(default_factory=_new_id)
     tool: str
     args: dict = Field(default_factory=dict)
+    result: str | None = None
+    status: Literal["ok", "error"] = "ok"
 
 
-class FootnoteRelation(str, Enum):
-    # See docs/ontologia.md Axiom 16 and docs/concepts/footnote.md. Distinct
-    # from Axiom 5 ("grounded" — chat-wide context scope): this is per-claim,
-    # output-side attribution — what kind of sourcing backs THIS claim, not
-    # what the chat as a whole was allowed to read.
-    citation = "citation"  # direct quote / close paraphrase of one passage
-    attribution = "attribution"  # synthesized/paraphrased from one document
-    relational = "relational"  # connects/synthesizes across multiple documents
-    ai_inference = "ai-inference"  # model's own reasoning, no vault source
+class ThinkingNode(BaseModel):
+    """One reasoning step, off the main line (`TurnNode.thoughts`) -- the
+    sequentialthinking-motivated shape (see ADR-019/chat-session-graph.md).
+    Schema support only; nothing populates this yet (gated behind the
+    still-deferred model-category `has_native_reasoning` flag)."""
+    id: str = Field(default_factory=_new_id)
+    thought: str
+    thought_number: int
+    revises: str | None = None  # another ThinkingNode.id this one revises
+    branches_from: str | None = None  # another ThinkingNode.id this one forks from
 
 
-class Footnote(BaseModel):
-    index: int  # sequential per message, 1-based — the superscript number shown inline
-    relation: FootnoteRelation
-    sources: list[str] = Field(default_factory=list)  # Note/Source slugs; empty only for ai_inference
-    claim_text: str | None = None  # span of ChatMessage.content this footnote covers
-    # Whether an automated/manual check confirmed the claim accurately represents
-    # `sources`. Orthogonal to `relation`, not a relation value itself — only
-    # meaningful when `sources` is non-empty. None = not (yet) checked.
+class CitedClaimNode(BaseModel):
+    """A claim traceable to specific vault document(s) -- `citation`/
+    `attribution`/`relational` share this shape (all have real `sources`, a
+    meaningful `faithfulness_checked`), unlike `InferenceNode` below, which
+    structurally has neither. See docs/ontologia.md Axiom 16."""
+    id: str = Field(default_factory=_new_id)
+    kind: Literal["claim"] = "claim"
+    index: int  # sequential per turn, 1-based -- the inline [^N] marker this claim is
+    claim_text: str
+    sources: list[str] = Field(default_factory=list)  # Note/Source/Chat slugs
+    relation: Literal["citation", "attribution", "relational"]
+    # Whether an automated/manual check confirmed the claim accurately
+    # represents `sources`. None = not (yet) checked.
     faithfulness_checked: bool | None = None
 
 
-# ── Chat (ADR-019): pure-JSON `.sess` storage, two-layer model ────────────────
-# Session layer (this class + ChatMessage: flow -- who said what, tool calls,
-# footnotes, model) vs. text layer (RichContent, schema_gov: the actual
-# message content, format-tagged so it can grow beyond markdown later).
+class InferenceNode(BaseModel):
+    """A claim that's the model's own reasoning, traceable to no specific
+    vault document -- structurally distinct from CitedClaimNode (no
+    `sources`, nothing for `faithfulness_checked` to check), not the same
+    shape with empty fields."""
+    id: str = Field(default_factory=_new_id)
+    kind: Literal["inference"] = "inference"
+    index: int  # sequential per turn, 1-based -- the inline [^N] marker this claim is
+    claim_text: str
 
-CHAT_SCHEMA_VERSION = 1
+
+ClaimNode = Annotated[CitedClaimNode | InferenceNode, Field(discriminator="kind")]
 
 
-class ChatMessage(BaseModel):
+class RecallRef(BaseModel):
+    """A `RECALL` hit -- a pointer to another node elsewhere in a session
+    graph, never a duplicate of its content (see ADR-019's storage-vs-
+    context distinction). Resolved/dereferenced only in the in-memory
+    context assembly for the turn that recalled it."""
+    node_id: str
+    node_kind: str
+    # None = the node lives in this same chat's own graph (the original,
+    # single-chat RECALL). Set to another chat's slug for a cross-chat
+    # RECALL hit -- required to disambiguate `node_id`, which is only
+    # unique within one chat's own graph, not across `.sess` files.
+    chat_slug: str | None = None
+
+
+# ── Chat (ADR-019): pure-JSON `.sess` storage, two-layer + graph model ────────
+# Session layer (this class + TurnNode: flow -- who said what, tool calls,
+# reasoning, claims, model) vs. text layer (RichContent, schema_gov: the
+# actual message content, format-tagged so it can grow beyond markdown
+# later). A chat is a main line of TurnNodes (list order = NEXT, implicit,
+# no edge objects needed); everything else -- tool calls, reasoning,
+# claims, past regeneration attempts, recalls -- branches off one, never on
+# the main line itself. See docs/concepts/chat-session-graph.md.
+
+
+class TurnNode(BaseModel):
+    id: str = Field(default_factory=_new_id)
     role: ChatRole
     content: RichContent
     timestamp: datetime = Field(default_factory=datetime.utcnow)
-    footnotes: list[Footnote] = Field(default_factory=list)
-    tool_calls: list[ToolCallRecord] = Field(default_factory=list)
     # The model that actually generated this message -- None for user
     # messages. Distinct from Chat.model (the chat's *current* configured
     # model, overwritten on every turn, see VaultService.save_chat's
@@ -149,18 +198,68 @@ class ChatMessage(BaseModel):
     # specific historical reply" once the config changes mid-chat, which
     # matters when comparing model quality across a test session.
     model: str | None = None
+    tool_calls: list[ToolCallNode] = Field(default_factory=list)
+    thoughts: list[ThinkingNode] = Field(default_factory=list)
+    claims: list[ClaimNode] = Field(default_factory=list)
     # Preserved previous attempts when this turn was regenerated (2026-08-04
     # decision: preserve, don't discard) -- each alternate is a full
-    # historical ChatMessage, own `model` included, so different models'
+    # historical TurnNode, own `model` included, so different models'
     # answers to the same prompt stay comparable, not just the current one.
-    alternates: list["ChatMessage"] = Field(default_factory=list)
+    alternates: list["TurnNode"] = Field(default_factory=list)
+    recalls: list[RecallRef] = Field(default_factory=list)
+
+
+def _migrate_message_v1_to_v2(msg: dict) -> dict | TurnNode:
+    if not isinstance(msg, dict):
+        return msg  # already a constructed TurnNode -- e.g. Chat(messages=[TurnNode(...)])
+                    # built directly in Python, not loaded from raw v1 JSON; nothing to migrate
+    claims: list[dict] = []
+    for fn in msg.get("footnotes", []) or []:
+        claim_text = fn.get("claim_text") or ""
+        index = fn.get("index", len(claims) + 1)
+        if fn.get("relation") == "ai-inference":
+            claims.append({"kind": "inference", "index": index, "claim_text": claim_text})
+        else:
+            claims.append({
+                "kind": "claim", "index": index, "claim_text": claim_text,
+                "sources": fn.get("sources", []), "relation": fn.get("relation"),
+                "faithfulness_checked": fn.get("faithfulness_checked"),
+            })
+    tool_calls = [
+        {"tool": tc.get("tool"), "args": tc.get("args", {}), "result": None, "status": "ok"}
+        for tc in msg.get("tool_calls", []) or []
+    ]
+    out = {
+        "role": msg.get("role"),
+        "content": msg.get("content"),
+        "model": msg.get("model"),
+        "tool_calls": tool_calls,
+        "claims": claims,
+        "alternates": [_migrate_message_v1_to_v2(a) for a in msg.get("alternates", []) or []],
+    }
+    if msg.get("timestamp") is not None:
+        out["timestamp"] = msg["timestamp"]
+    return out
+
+
+def _migrate_chat_v1_to_v2(raw: dict) -> dict:
+    """v1's flat `ChatMessage` (`footnotes`/`tool_calls` summaries, no
+    persisted tool results) -> v2's `TurnNode` (claims split into
+    CitedClaimNode/InferenceNode, tool call results absent -- v1 never
+    persisted them, so `RECALL` finds nothing to inline for migrated turns
+    until they're regenerated). No `thoughts`/`recalls` for migrated data --
+    neither existed in v1."""
+    raw = dict(raw)
+    raw["messages"] = [_migrate_message_v1_to_v2(m) for m in raw.get("messages", []) or []]
+    return raw
 
 
 class Chat(VaultNodeBase, VersionedModel):
     SCHEMA_VERSION = CHAT_SCHEMA_VERSION
+    MIGRATIONS = {1: _migrate_chat_v1_to_v2}
 
     node_type: Literal[NodeType.chat] = NodeType.chat
-    messages: list[ChatMessage] = Field(default_factory=list)
+    messages: list[TurnNode] = Field(default_factory=list)
     context_slugs: list[str] = Field(default_factory=list)
     model: str = "llama3"
     # Indices into `messages` that are currently pinned — same identity

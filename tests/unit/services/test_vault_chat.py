@@ -7,7 +7,7 @@ import pytest
 
 from prisma.schema_gov import ContentFormat, RichContent
 from prisma.services.vault import CHAT_META_SCHEMA_VERSION, VaultService, _migrate_chat_meta, _parse_chat_body
-from prisma.storage.models.vault_models import ChatMessage, ChatRole, Footnote, FootnoteRelation, ToolCallRecord
+from prisma.storage.models.vault_models import ChatRole, ToolCallNode, TurnNode
 
 
 @pytest.fixture
@@ -40,7 +40,8 @@ def test_parse_chat_body_extracts_tool_call_line():
         "Based on your notes...\n\n"
     )
     parsed = _parse_chat_body(body)
-    assert parsed[0].tool_calls == [ToolCallRecord(tool="search_vault", args={"query": "attention"})]
+    assert parsed[0].tool_calls[0].tool == "search_vault"
+    assert parsed[0].tool_calls[0].args == {"query": "attention"}
     assert "Based on your notes..." in parsed[0].content.value
     assert "used `search_vault`" not in parsed[0].content.value
 
@@ -54,7 +55,13 @@ def test_parse_chat_body_extracts_model_and_footnotes_from_meta_comment():
     body = f"### Prisma\n\n<!-- prisma:meta {meta} -->\nIt achieves 28.4 BLEU.[^1]\n\n"
     parsed = _parse_chat_body(body)
     assert parsed[0].model == "qwen2.5-3b"
-    assert parsed[0].footnotes == [Footnote.model_validate(footnote)]
+    assert len(parsed[0].claims) == 1
+    claim = parsed[0].claims[0]
+    assert claim.index == 1
+    assert claim.relation == "citation"
+    assert claim.sources == ["attention-is-all-you-need"]
+    assert claim.claim_text == "The Transformer achieves 28.4 BLEU."
+    assert claim.faithfulness_checked is False
     assert "It achieves 28.4 BLEU.[^1]" in parsed[0].content.value
     assert "prisma:meta" not in parsed[0].content.value
 
@@ -63,7 +70,7 @@ def test_parse_chat_body_ignores_malformed_meta_comment():
     body = "### Prisma\n\n<!-- prisma:meta {not valid json} -->\nstill here\n\n"
     parsed = _parse_chat_body(body)
     assert parsed[0].model is None
-    assert parsed[0].footnotes == []
+    assert parsed[0].claims == []
     assert "still here" in parsed[0].content.value
 
 
@@ -94,14 +101,14 @@ def test_parse_chat_body_degrades_gracefully_for_a_too_new_schema_version():
     body = f'### Prisma\n\n<!-- prisma:meta {{"schema_version": {too_new}}} -->\nstill here\n\n'
     parsed = _parse_chat_body(body)
     assert parsed[0].model is None
-    assert parsed[0].footnotes == []
+    assert parsed[0].claims == []
     assert "still here" in parsed[0].content.value
 
 
 # ── Live .sess path ────────────────────────────────────────────────────────
 
-def _msg(role: ChatRole, text: str, **overrides) -> ChatMessage:
-    return ChatMessage(role=role, content=RichContent(format=ContentFormat.markdown, value=text), **overrides)
+def _msg(role: ChatRole, text: str, **overrides) -> TurnNode:
+    return TurnNode(role=role, content=RichContent(format=ContentFormat.markdown, value=text), **overrides)
 
 
 def test_create_chat_writes_a_sess_file(vault):
@@ -117,7 +124,7 @@ def test_save_chat_then_get_chat_roundtrip(vault):
     messages = [
         _msg(ChatRole.user, "hello"),
         _msg(ChatRole.assistant, "hi! I searched your vault.",
-             tool_calls=[ToolCallRecord(tool="search_vault", args={"query": "hello"})]),
+             tool_calls=[ToolCallNode(tool="search_vault", args={"query": "hello"})]),
     ]
     vault.save_chat(chat.slug, messages)
 

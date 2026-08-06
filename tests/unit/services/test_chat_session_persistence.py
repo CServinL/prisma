@@ -8,7 +8,7 @@ import pytest
 
 from prisma.schema_gov import RichContent
 from prisma.services.vault import load_chat_session, save_chat_session
-from prisma.storage.models.vault_models import Chat, ChatMessage, ChatRole
+from prisma.storage.models.vault_models import CHAT_SCHEMA_VERSION, Chat, ChatRole, TurnNode
 
 
 @pytest.fixture
@@ -26,7 +26,7 @@ def test_save_writes_valid_json(sess_path):
     save_chat_session(_chat(), sess_path)
     raw = json.loads(sess_path.read_text(encoding="utf-8"))
     assert raw["slug"] == "test-chat"
-    assert raw["schema_version"] == 1
+    assert raw["schema_version"] == CHAT_SCHEMA_VERSION
 
 
 def test_save_excludes_path_from_file_content(sess_path):
@@ -54,8 +54,8 @@ def test_load_reinjects_the_actual_file_path(sess_path):
 def test_round_trip_preserves_messages(sess_path):
     chat = _chat(
         messages=[
-            ChatMessage(role=ChatRole.user, content=RichContent(value="hi")),
-            ChatMessage(role=ChatRole.assistant, content=RichContent(value="hello[^1]"), model="qwen2.5-3b"),
+            TurnNode(role=ChatRole.user, content=RichContent(value="hi")),
+            TurnNode(role=ChatRole.assistant, content=RichContent(value="hello[^1]"), model="qwen2.5-3b"),
         ],
     )
     save_chat_session(chat, sess_path)

@@ -12,8 +12,9 @@ import yaml
 
 from prisma.schema_gov import ContentFormat, RichContent
 from prisma.storage.models.vault_models import (
-    Chat, ChatMessage, ChatRole, Footnote, Note, NodeType, Source, Stream, StreamStatus,
-    RefreshFrequency, ToolCallRecord, VaultListing, VaultNodeMeta, VaultTreeNode,
+    Chat, ChatRole, Note, NodeType, Source, Stream, StreamStatus,
+    RefreshFrequency, TurnNode, VaultListing, VaultNodeMeta, VaultTreeNode,
+    _migrate_message_v1_to_v2,
 )
 
 _log = logging.getLogger("prisma.vault")
@@ -103,8 +104,8 @@ _CHAT_TOOL_LINE_RE = re.compile(r"^>\s*(?:🔧\s*)?used\s*`([a-zA-Z0-9_]+)`:\s*(
 _CHAT_META_LINE_RE = re.compile(r"^<!--\s*prisma:meta\s+(.+?)\s*-->\s*$", re.MULTILINE)
 
 # Governance for the prisma:meta blob's own shape, independent of Pydantic's
-# per-field defaults on ChatMessage/Footnote themselves (which only handle
-# *adding* an optional field, not a rename or a meaning change).
+# per-field defaults on TurnNode/its claim types themselves (which only
+# handle *adding* an optional field, not a rename or a meaning change).
 CHAT_META_SCHEMA_VERSION = 1
 
 
@@ -135,7 +136,7 @@ def _migrate_chat_meta(raw: dict) -> dict:
     return raw
 
 
-def _render_excerpt_body(summary: str | None, raw_turns: list[ChatMessage]) -> str:
+def _render_excerpt_body(summary: str | None, raw_turns: list[TurnNode]) -> str:
     """Summary on top (verbatim mode: omitted — see ADR-015's mode switch),
     verbatim pinned turns below, each its own heading + block (`### You`/
     `### Prisma`, same convention the legacy chat `.md` format used, separated
@@ -151,25 +152,27 @@ def _render_excerpt_body(summary: str | None, raw_turns: list[ChatMessage]) -> s
     return "".join(parts)
 
 
-def _parse_chat_body(body: str) -> list[ChatMessage]:
-    """Legacy `.md` read path -- see the block comment above. Returns the
-    current `ChatMessage` shape (RichContent content) directly, so
-    chat_migration._convert_one needs no extra mapping step."""
-    messages: list[ChatMessage] = []
+def _parse_chat_body(body: str) -> list[TurnNode]:
+    """Legacy `.md` read path -- see the block comment above. Builds the old
+    flat (role/content/tool_calls/footnotes) shape per turn, then reuses
+    `_migrate_message_v1_to_v2` (the same v1->v2 `.sess` migration logic) to
+    get the current `TurnNode` shape directly, rather than duplicating the
+    footnote-to-claim/tool-call mapping a second time."""
+    messages: list[TurnNode] = []
     for heading, turn_body in _CHAT_TURN_RE.findall(body):
         role = _CHAT_HEADING_ROLE[heading]
         tool_calls = [
-            ToolCallRecord(tool=tool, args={"query": query})
+            {"tool": tool, "args": {"query": query}}
             for tool, query in _CHAT_TOOL_LINE_RE.findall(turn_body)
         ]
         model: str | None = None
-        footnotes: list[Footnote] = []
+        footnotes: list[dict] = []
         meta_match = _CHAT_META_LINE_RE.search(turn_body)
         if meta_match:
             try:
                 meta = _migrate_chat_meta(json.loads(meta_match.group(1)))
                 model = meta.get("model")
-                footnotes = [Footnote.model_validate(fn) for fn in meta.get("footnotes", [])]
+                footnotes = meta.get("footnotes", [])
             except (json.JSONDecodeError, TypeError, ValueError) as exc:
                 # A hand-edited or corrupted meta line degrades to "no
                 # metadata," never breaks loading the rest of the chat --
@@ -178,10 +181,12 @@ def _parse_chat_body(body: str) -> list[ChatMessage]:
                 _log.warning("chat turn: malformed prisma:meta comment, dropping: %s", exc)
         content = _CHAT_TOOL_LINE_RE.sub("", turn_body)
         content = _CHAT_META_LINE_RE.sub("", content).strip()
-        messages.append(ChatMessage(
-            role=role, content=RichContent(format=ContentFormat.markdown, value=content),
-            tool_calls=tool_calls, model=model, footnotes=footnotes,
-        ))
+        raw = _migrate_message_v1_to_v2({
+            "role": role.value,
+            "content": RichContent(format=ContentFormat.markdown, value=content).model_dump(mode="json"),
+            "model": model, "tool_calls": tool_calls, "footnotes": footnotes,
+        })
+        messages.append(TurnNode.model_validate(raw))
     return messages
 
 
@@ -511,7 +516,7 @@ class VaultService:
         save_chat_session(chat, path)
         return self.get_chat(slug)
 
-    def save_chat(self, slug: str, messages: list[ChatMessage], model: str | None = None) -> Chat:
+    def save_chat(self, slug: str, messages: list[TurnNode], model: str | None = None) -> Chat:
         """`model`, when given, overwrites the chat's stored model — the
         model actually used for the turn just saved. Without this, a chat
         created before a model rename/merge (e.g. prisma-chat:7b ->
@@ -529,7 +534,7 @@ class VaultService:
             save_chat_session(chat.model_copy(update=update), path)
         return self.get_chat(slug)
 
-    def append_messages(self, slug: str, new_messages: list[ChatMessage], model: str | None = None) -> Chat:
+    def append_messages(self, slug: str, new_messages: list[TurnNode], model: str | None = None) -> Chat:
         """Atomically append to whatever the chat's *current* on-disk
         messages are, not a snapshot taken before some earlier operation
         (e.g. an LLM call) started. `/chat`'s handler used to read
@@ -566,7 +571,7 @@ class VaultService:
             )
         return self.get_chat(chat_slug)
 
-    def save_excerpt(self, chat_slug: str, summary: str | None, raw_turns: list[ChatMessage]) -> Note:
+    def save_excerpt(self, chat_slug: str, summary: str | None, raw_turns: list[TurnNode]) -> Note:
         """Create or update the *one* Excerpt note for this chat (ADR-015)
         — Summary on top (verbatim mode: `summary=None`, no summary section
         at all — pinned turns are the whole point in that mode), verbatim

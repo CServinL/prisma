@@ -17,17 +17,13 @@ from typing import Callable, Literal
 
 from pydantic import ValidationError
 
+from prisma.agents.session_orchestrator import SessionOrchestrator
 from prisma.schema_gov import ContentFormat, RichContent
 from prisma.services.chat_llm import ChatLLM
-from prisma.services.chat_tools import (
-    FOOTNOTES_LINE_RE,
-    TOOL_CALL_RE,
-    TOOLS,
-    ChatToolbox,
-    system_prompt_footnote_section,
-    system_prompt_tool_section,
+from prisma.services.chat_tools import FOOTNOTES_LINE_RE, TOOL_CALL_RE, TOOLS, ChatToolbox
+from prisma.storage.models.vault_models import (
+    ChatRole, CitedClaimNode, ClaimNode, InferenceNode, Note, RecallRef, ToolCallNode, TurnNode,
 )
-from prisma.storage.models.vault_models import ChatMessage, ChatRole, Footnote, Note, ToolCallRecord
 
 _log = logging.getLogger("prisma.chat_agent")
 
@@ -84,12 +80,33 @@ def _extract_claim_texts(content: str) -> dict[int, str]:
     return claims
 
 
-def _extract_footnotes(reply: str) -> tuple[str, list[Footnote]]:
+def _claim_from_raw(item: dict, claim_texts: dict[int, str]) -> ClaimNode | None:
+    """One FOOTNOTES_JSON self-reported entry -> a CitedClaimNode or
+    InferenceNode, keyed off `relation` (the self-report has no `kind`
+    field -- the model was never taught that vocabulary, only `relation`,
+    see system_prompt_footnote_section())."""
+    try:
+        index = int(item["index"])
+        relation = item["relation"]
+    except (KeyError, TypeError, ValueError):
+        return None
+    claim_text = item.get("claim_text") or claim_texts.get(index) or ""
+    if relation == "ai-inference":
+        return InferenceNode(index=index, claim_text=claim_text)
+    try:
+        return CitedClaimNode(
+            index=index, claim_text=claim_text, sources=item.get("sources", []), relation=relation,
+        )
+    except ValidationError:
+        return None
+
+
+def _extract_claims(reply: str) -> tuple[str, list[ClaimNode]]:
     """ADR-017: split the model's FOOTNOTES_JSON self-report off the visible
     reply text. Defensive throughout -- an LLM self-report can be malformed
     (invalid JSON, an unknown relation value, a non-list) in ways a tool
     call marker can't be, and a bad self-report must degrade to "no
-    footnotes," never break the turn. Only the *last* match is used, in
+    claims," never break the turn. Only the *last* match is used, in
     case the model discusses the format itself earlier in its answer."""
     matches = list(FOOTNOTES_LINE_RE.finditer(reply))
     if not matches:
@@ -99,23 +116,20 @@ def _extract_footnotes(reply: str) -> tuple[str, list[Footnote]]:
     try:
         raw_items = json.loads(last.group(1))
     except (json.JSONDecodeError, ValueError) as exc:
-        _log.warning("chat footnotes: malformed FOOTNOTES_JSON, dropping: %s", exc)
+        _log.warning("chat claims: malformed FOOTNOTES_JSON, dropping: %s", exc)
         return content, []
     if not isinstance(raw_items, list):
-        _log.warning("chat footnotes: FOOTNOTES_JSON was not a JSON array, dropping")
+        _log.warning("chat claims: FOOTNOTES_JSON was not a JSON array, dropping")
         return content, []
     claim_texts = _extract_claim_texts(content)
-    footnotes: list[Footnote] = []
+    claims: list[ClaimNode] = []
     for item in raw_items:
-        try:
-            fn = Footnote.model_validate(item)
-        except ValidationError as exc:
-            _log.warning("chat footnotes: skipping malformed entry %r: %s", item, exc)
+        claim = _claim_from_raw(item, claim_texts)
+        if claim is None:
+            _log.warning("chat claims: skipping malformed entry %r", item)
             continue
-        if fn.claim_text is None and fn.index in claim_texts:
-            fn = fn.model_copy(update={"claim_text": claim_texts[fn.index]})
-        footnotes.append(fn)
-    return content, footnotes
+        claims.append(claim)
+    return content, claims
 
 
 # ADR-017's faithfulness_checked hook: is a sourced footnote's claim_text
@@ -160,8 +174,7 @@ class ChatAgent:
     ) -> None:
         self._llm = llm
         self._toolbox = toolbox
-        self._system_prompt = system_prompt
-        self._max_history_tokens = max_history_tokens
+        self._orchestrator = SessionOrchestrator(system_prompt, max_history_tokens)
         # Called only when the LLM call fails, to say *why* rather than a
         # generic "couldn't reach it" — most commonly the shared GPU pool is
         # busy with a different model (kg extraction, chroma embedding),
@@ -221,44 +234,58 @@ class ChatAgent:
         ]
         return self._llm.complete(messages)
 
-    def _verify_footnote(self, footnote: Footnote) -> Footnote:
+    def _verify_claim(self, claim: ClaimNode) -> ClaimNode:
         """ADR-017's faithfulness_checked hook: does claim_text actually say
-        what the cited source(s) say? Left at None (not False) when there's
-        nothing to check against -- an ai-inference footnote has no source
-        by design, and a missing claim_text or unresolvable source slug is a
-        "couldn't check," not a "checked and failed.\""""
-        if not footnote.sources or not footnote.claim_text:
-            return footnote
-        source_texts = [t for t in (self._toolbox.get_node_text(s) for s in footnote.sources) if t]
+        what the cited source(s) say? Only meaningful for CitedClaimNode --
+        InferenceNode structurally has no sources to check against, passed
+        through unchanged. A missing claim_text or unresolvable source slug
+        is a "couldn't check," not a "checked and failed.\""""
+        if not isinstance(claim, CitedClaimNode) or not claim.sources or not claim.claim_text:
+            return claim
+        source_texts = [t for t in (self._toolbox.get_node_text(s) for s in claim.sources) if t]
         if not source_texts:
-            return footnote
-        system_prompt, content = _build_faithfulness_prompt(footnote.claim_text, source_texts)
+            return claim
+        system_prompt, content = _build_faithfulness_prompt(claim.claim_text, source_texts)
         verdict = _parse_faithfulness_verdict(self.complete_once(system_prompt, content))
-        return footnote.model_copy(update={"faithfulness_checked": verdict})
+        return claim.model_copy(update={"faithfulness_checked": verdict})
 
     def respond(
-        self, history: list[ChatMessage], user_text: str, excerpt_notes: list[Note] | None = None,
-    ) -> ChatMessage:
-        messages = [{"role": "system", "content": self._full_system_prompt(excerpt_notes or [])}]
-        for m in self._bounded_history(history):
+        self, history: list[TurnNode], user_text: str, excerpt_notes: list[Note] | None = None,
+        chat_slug: str | None = None,
+    ) -> TurnNode:
+        """`chat_slug` is only used to exclude this chat from cross-chat
+        RECALL (`chat_tools.py`'s `_recent_other_chats`) -- `respond()` is
+        otherwise chat-agnostic (all it knows about the conversation is
+        `history`), so callers that don't have a slug yet (tests, one-off
+        completions) can simply omit it: `RECALL` degrades to its original
+        single-chat behavior, not an error."""
+        messages = [{"role": "system", "content": self._orchestrator.full_system_prompt(excerpt_notes or [])}]
+        for m in self._orchestrator.bounded_history(history):
             messages.append({"role": m.role.value, "content": m.content.value})
         messages.append({"role": "user", "content": user_text})
 
-        tool_calls: list[ToolCallRecord] = []
+        # Built once per respond() call, not per loop iteration -- `history`
+        # doesn't change during the loop, so nothing invalidates it early.
+        # Lets RECALL (chat_tools.py) reach turns bounded_history() dropped
+        # above, not just the current turn's own tool calls/reasoning.
+        session_graph = self._orchestrator.graph_for(history)
+
+        tool_calls: list[ToolCallNode] = []
+        recalls: list[RecallRef] = []
         for _ in range(MAX_TOOL_ITERATIONS):
             # Checked before every completion call, not just the first --
-            # _bounded_history() caps prior history against
-            # max_history_tokens (a soft session budget, deliberately larger
-            # than any one backend's real ceiling, see DEFAULT_MAX_HISTORY_
-            # TOKENS/ADR-015's "Resolved" section), and the Excerpt block is
-            # NEVER subject to that trim at all -- neither guards the
-            # backend's actual context_window. A tool result injected mid-
-            # loop can also push an initially-fitting assembly over the
-            # edge. Failing fast here, before ever calling the backend, beats
-            # a confusing generic "couldn't reach the model" once it 400s.
+            # bounded_history() caps prior history against max_history_tokens
+            # (a soft session budget, deliberately larger than any one
+            # backend's real ceiling, see DEFAULT_MAX_HISTORY_TOKENS/ADR-015's
+            # "Resolved" section), and the Excerpt block is NEVER subject to
+            # that trim at all -- neither guards the backend's actual
+            # context_window. A tool result injected mid-loop can also push
+            # an initially-fitting assembly over the edge. Failing fast here,
+            # before ever calling the backend, beats a confusing generic
+            # "couldn't reach the model" once it 400s.
             estimated = sum(_estimate_tokens(m["content"]) for m in messages)
             if estimated > self.context_window:
-                return ChatMessage(
+                return TurnNode(
                     role=ChatRole.assistant,
                     content=RichContent(format=ContentFormat.markdown, value=(
                         f"This chat's history and Excerpt exceed {self.model}'s context "
@@ -267,34 +294,52 @@ class ChatAgent:
                         "up context from Excerpt buildup, or switch this chat to a model "
                         "with a bigger context window."
                     )),
-                    tool_calls=tool_calls,
-                    model=self.model,
+                    tool_calls=tool_calls, recalls=recalls, model=self.model,
                 )
             reply = self._llm.complete(messages)
             if reply is None:
                 reason = self._blocked_reason()
                 detail = f" — {reason}" if reason else ""
-                return ChatMessage(
+                return TurnNode(
                     role=ChatRole.assistant,
                     content=RichContent(
                         format=ContentFormat.markdown,
                         value=f"Sorry, I couldn't reach the language model just now{detail}. Please try again shortly.",
                     ),
-                    tool_calls=tool_calls,
-                    model=self.model,
+                    tool_calls=tool_calls, recalls=recalls, model=self.model,
                 )
             match = TOOL_CALL_RE.search(reply)
             if not match:
-                content, footnotes = _extract_footnotes(reply)
-                footnotes = [self._verify_footnote(fn) for fn in footnotes]
-                return ChatMessage(
+                content, claims = _extract_claims(reply)
+                claims = [self._verify_claim(c) for c in claims]
+                return TurnNode(
                     role=ChatRole.assistant, content=RichContent(format=ContentFormat.markdown, value=content),
-                    tool_calls=tool_calls, footnotes=footnotes, model=self.model,
+                    tool_calls=tool_calls, claims=claims, recalls=recalls, model=self.model,
                 )
 
             marker, query = match.group(1), match.group(2).strip()
-            tool_calls.append(ToolCallRecord(tool=_TOOL_NAME_BY_MARKER[marker], args={"query": query}))
-            result = self._toolbox.call(marker, query)
+            remaining_budget = max(self.context_window - estimated, 0)
+            result = self._toolbox.call(
+                marker, query, session_graph=session_graph, remaining_budget=remaining_budget,
+                chat_slug=chat_slug,
+            )
+            tool_calls.append(ToolCallNode(
+                tool=_TOOL_NAME_BY_MARKER[marker], args={"query": query},
+                result=result.text or None, status="ok",
+            ))
+            if marker == "RECALL":
+                # A separate record from tool_calls above (which only says
+                # "RECALL ran") -- this is *which* specific earlier nodes it
+                # actually surfaced, so a future turn's assembly can see what
+                # was already pulled back in without re-searching. chat_slug
+                # carries a cross-chat hit's source chat through (None for a
+                # same-chat hit) -- dropping it here would silently discard
+                # `_recall()`'s cross-chat tagging before it ever reaches the
+                # persisted TurnNode.recalls.
+                recalls.extend(
+                    RecallRef(node_id=item["node_id"], node_kind=item["kind"], chat_slug=item.get("chat_slug"))
+                    for item in result.raw
+                )
             messages.append({"role": "assistant", "content": reply})
             messages.append({
                 "role": "user",
@@ -302,59 +347,24 @@ class ChatAgent:
             })
 
         _log.warning("chat tool loop hit MAX_TOOL_ITERATIONS=%d without a final answer", MAX_TOOL_ITERATIONS)
-        return ChatMessage(
+        return TurnNode(
             role=ChatRole.assistant,
             content=RichContent(
                 format=ContentFormat.markdown,
                 value="I wasn't able to reach a final answer after checking several sources — could you rephrase?",
             ),
-            tool_calls=tool_calls,
-            model=self.model,
+            tool_calls=tool_calls, recalls=recalls, model=self.model,
         )
 
-    def context_usage(self, history: list[ChatMessage], excerpt_notes: list[Note] | None = None) -> tuple[int, int]:
+    def context_usage(self, history: list[TurnNode], excerpt_notes: list[Note] | None = None) -> tuple[int, int]:
         """(tokens_used, max_tokens) for the UI's context label — the same
-        assembly `respond()` sends (system prompt + tool section + Excerpt +
-        bounded history), estimated with the same len(s)//4 heuristic used
-        throughout this codebase. max_tokens is `max_history_tokens` (the
-        session's configured budget), not the backend's raw context ceiling
-        — see ADR-015's "Resolved" section for why."""
-        system_prompt = self._full_system_prompt(excerpt_notes or [])
-        bounded = self._bounded_history(history)
+        base assembly `respond()` sends (system prompt + tool section +
+        Excerpt + bounded history, not counting mid-loop tool-result growth),
+        estimated with the same len(s)//4 heuristic used throughout this
+        codebase. max_tokens is `max_history_tokens` (the session's
+        configured budget), not the backend's raw context ceiling — see
+        ADR-015's "Resolved" section for why."""
+        system_prompt = self._orchestrator.full_system_prompt(excerpt_notes or [])
+        bounded = self._orchestrator.bounded_history(history)
         used = _estimate_tokens(system_prompt) + sum(_estimate_tokens(m.content.value) for m in bounded)
-        return used, self._max_history_tokens
-
-    def _full_system_prompt(self, excerpt_notes: list[Note]) -> str:
-        parts = [self._system_prompt, system_prompt_tool_section(), system_prompt_footnote_section()]
-        if excerpt_notes:
-            parts.append(self._excerpt_context_block(excerpt_notes))
-        return "\n\n".join(parts)
-
-    def _excerpt_context_block(self, excerpt_notes: list[Note]) -> str:
-        # Deliberately NOT subject to _bounded_history's rolling truncation —
-        # this is durable, user-curated ground truth for this conversation
-        # (see TODO.md: "meeting notes," not the raw "meeting" transcript),
-        # so it must survive even after the turns that produced it roll away.
-        lines = [
-            "Already established in this conversation (curated by the user "
-            "— treat as settled, don't re-litigate or re-ask about these):",
-        ]
-        for note in excerpt_notes:
-            lines.append(f"\n### {note.title}\n{note.body}")
-        return "\n".join(lines)
-
-    def _bounded_history(self, history: list[ChatMessage]) -> list[ChatMessage]:
-        """Keep the most recent messages whose combined estimated token
-        count fits max_history_tokens, dropping the oldest first. A very
-        long-running chat degrades gracefully (older context silently drops)
-        rather than eventually overflowing the model's context window."""
-        kept: list[ChatMessage] = []
-        used = 0
-        for m in reversed(history):
-            cost = _estimate_tokens(m.content.value)
-            if used + cost > self._max_history_tokens:
-                break
-            kept.append(m)
-            used += cost
-        kept.reverse()
-        return kept
+        return used, self._orchestrator.max_history_tokens

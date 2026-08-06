@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 from prisma.schema_gov import RichContent
 from prisma.server.app import app
 from prisma.services.vault import VaultService
-from prisma.storage.models.vault_models import Chat, ChatMessage, ChatRole, Footnote, NodeType
+from prisma.storage.models.vault_models import Chat, ChatRole, CitedClaimNode, InferenceNode, NodeType, TurnNode
 
 client = TestClient(app, client=("127.0.0.1", 12345))
 
@@ -20,11 +20,11 @@ def _chat(slug: str = "test-chat") -> Chat:
     return Chat(slug=slug, title="Test Chat", node_type=NodeType.chat, path=Path(f"/tmp/{slug}.sess"), messages=[])
 
 
-def _msg(role: ChatRole, text: str, **overrides) -> ChatMessage:
-    return ChatMessage(role=role, content=RichContent(value=text), **overrides)
+def _msg(role: ChatRole, text: str, **overrides) -> TurnNode:
+    return TurnNode(role=role, content=RichContent(value=text), **overrides)
 
 
-def test_chat_route_returns_footnotes_from_assistant_message(monkeypatch):
+def test_chat_route_returns_claims_from_assistant_message(monkeypatch):
     from prisma.server import app as app_module
 
     vault = MagicMock()
@@ -33,7 +33,7 @@ def test_chat_route_returns_footnotes_from_assistant_message(monkeypatch):
 
     assistant_msg = _msg(
         ChatRole.assistant, "Kùzu was chosen for its embedded mode[^1].",
-        footnotes=[Footnote(index=1, relation="attribution", sources=["kg-decision"])],
+        claims=[CitedClaimNode(index=1, claim_text="", relation="attribution", sources=["kg-decision"])],
     )
     chat_agent = MagicMock()
     chat_agent.respond.return_value = assistant_msg
@@ -45,14 +45,16 @@ def test_chat_route_returns_footnotes_from_assistant_message(monkeypatch):
     assert r.status_code == 200
     data = r.json()
     assert data["reply"] == "Kùzu was chosen for its embedded mode[^1]."
-    assert data["footnotes"] == [
-        {"index": 1, "relation": "attribution", "sources": ["kg-decision"],
-         "claim_text": None, "faithfulness_checked": None},
-    ]
+    assert len(data["claims"]) == 1
+    claim = data["claims"][0]
+    assert claim["kind"] == "claim"
+    assert claim["index"] == 1
+    assert claim["relation"] == "attribution"
+    assert claim["sources"] == ["kg-decision"]
     vault.append_messages.assert_called_once()
 
 
-def test_chat_route_footnotes_default_to_empty_list(monkeypatch):
+def test_chat_route_claims_default_to_empty_list(monkeypatch):
     from prisma.server import app as app_module
 
     vault = MagicMock()
@@ -67,7 +69,50 @@ def test_chat_route_footnotes_default_to_empty_list(monkeypatch):
     r = client.post("/chat", json={"message": "hello", "chat_slug": "test-chat"})
 
     assert r.status_code == 200
-    assert r.json()["footnotes"] == []
+    assert r.json()["claims"] == []
+    assert r.json()["recalls"] == []
+
+
+def test_chat_route_passes_chat_slug_to_respond(monkeypatch):
+    from prisma.server import app as app_module
+
+    vault = MagicMock()
+    vault.get_chat.return_value = _chat(slug="my-chat")
+    monkeypatch.setattr(app_module, "_vault", vault)
+
+    chat_agent = MagicMock()
+    chat_agent.respond.return_value = _msg(ChatRole.assistant, "A plain answer.")
+    chat_agent.model = "test-model"
+    monkeypatch.setattr(app_module, "_chat_agent", chat_agent)
+
+    client.post("/chat", json={"message": "hello", "chat_slug": "my-chat"})
+
+    _, call_kwargs = chat_agent.respond.call_args
+    assert call_kwargs["chat_slug"] == "my-chat"
+
+
+def test_chat_route_returns_recalls_from_assistant_message(monkeypatch):
+    from prisma.storage.models.vault_models import RecallRef
+
+    from prisma.server import app as app_module
+
+    vault = MagicMock()
+    vault.get_chat.return_value = _chat()
+    monkeypatch.setattr(app_module, "_vault", vault)
+
+    assistant_msg = _msg(
+        ChatRole.assistant, "Recalled that earlier.",
+        recalls=[RecallRef(node_id="abc123", node_kind="turn")],
+    )
+    chat_agent = MagicMock()
+    chat_agent.respond.return_value = assistant_msg
+    chat_agent.model = "test-model"
+    monkeypatch.setattr(app_module, "_chat_agent", chat_agent)
+
+    r = client.post("/chat", json={"message": "why?", "chat_slug": "test-chat"})
+
+    assert r.status_code == 200
+    assert r.json()["recalls"] == [{"node_id": "abc123", "node_kind": "turn", "chat_slug": None}]
 
 
 def test_chat_route_returns_sanitized_html_with_footnote_marker_span(monkeypatch, tmp_path):
@@ -84,7 +129,7 @@ def test_chat_route_returns_sanitized_html_with_footnote_marker_span(monkeypatch
 
     assistant_msg = _msg(
         ChatRole.assistant, "Some reply with a claim.[^1]\n\n<script>alert(1)</script>",
-        footnotes=[Footnote(index=1, relation="ai-inference", sources=[])],
+        claims=[InferenceNode(index=1, claim_text="")],
     )
     chat_agent = MagicMock()
     chat_agent.respond.return_value = assistant_msg
@@ -109,7 +154,7 @@ def test_get_chat_route_populates_html_on_historical_assistant_messages(monkeypa
     real_vault.append_messages(chat.slug, [
         _msg(ChatRole.user, "hi"),
         _msg(ChatRole.assistant, "A reply.[^1]", model="test-model",
-             footnotes=[Footnote(index=1, relation="ai-inference", sources=[])]),
+             claims=[InferenceNode(index=1, claim_text="")]),
     ])
     monkeypatch.setattr(app_module, "_vault", real_vault)
     chat_agent = MagicMock()

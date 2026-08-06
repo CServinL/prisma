@@ -85,7 +85,7 @@ _t("sync_orchestrator ok")
 _t("importing vault_models")
 from prisma.schema_gov import ContentFormat, RichContent
 from prisma.storage.models.vault_models import (
-    Chat, ChatMessage, ChatRole, Footnote, NodeType, RenderedNode, ToolCallRecord,
+    Chat, ChatRole, ClaimNode, NodeType, RecallRef, RenderedNode, ToolCallNode, TurnNode,
     VaultTreeNode,
 )
 _t("vault_models ok")
@@ -563,8 +563,9 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     chat_slug: str
     reply: str
-    tool_calls: list[ToolCallRecord]
-    footnotes: list[Footnote] = []
+    tool_calls: list[ToolCallNode]
+    claims: list[ClaimNode] = []
+    recalls: list[RecallRef] = []
     html: str = ""
 
 
@@ -1143,8 +1144,8 @@ def chat(req: ChatRequest):
             excerpt_notes.append(_vault.get_note(chat_node.excerpt_slug))
         except FileNotFoundError:
             _log.warning("chat %r: excerpt note %r no longer exists", chat_node.slug, chat_node.excerpt_slug)
-    user_msg = ChatMessage(role=ChatRole.user, content=RichContent(format=ContentFormat.markdown, value=req.message))
-    assistant_msg = _chat_agent.respond(history, req.message, excerpt_notes=excerpt_notes)
+    user_msg = TurnNode(role=ChatRole.user, content=RichContent(format=ContentFormat.markdown, value=req.message))
+    assistant_msg = _chat_agent.respond(history, req.message, excerpt_notes=excerpt_notes, chat_slug=chat_node.slug)
     # append_messages (not save_chat with the pre-call `history` snapshot)
     # re-reads the chat's *current* messages atomically right before
     # writing — closes the race where a DELETE /chats/{slug}/messages/{index}
@@ -1154,7 +1155,7 @@ def chat(req: ChatRequest):
     _activity.info("action=chat slug=%s tool_calls=%d", chat_node.slug, len(assistant_msg.tool_calls))
     return ChatResponse(
         chat_slug=chat_node.slug, reply=assistant_msg.content.value, tool_calls=assistant_msg.tool_calls,
-        footnotes=assistant_msg.footnotes, html=_render_chat_html(assistant_msg.content.value),
+        claims=assistant_msg.claims, recalls=assistant_msg.recalls, html=_render_chat_html(assistant_msg.content.value),
     )
 
 
@@ -1189,7 +1190,7 @@ def regenerate_turn(slug: str, index: int, req: RegenerateTurnRequest):
             _log.warning("chat %r: excerpt note %r no longer exists", slug, chat_node.excerpt_slug)
 
     agent = _chat_agent if req.model is None else _build_chat_agent_for_model(req.model)
-    new_attempt = agent.respond(history, user_text, excerpt_notes=excerpt_notes)
+    new_attempt = agent.respond(history, user_text, excerpt_notes=excerpt_notes, chat_slug=slug)
     new_attempt = new_attempt.model_copy(update={
         "alternates": list(target.alternates) + [target.model_copy(update={"alternates": []})],
     })

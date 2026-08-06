@@ -1,0 +1,29 @@
+{
+  "description": "A claim that's the model's own reasoning, traceable to no specific\nvault document -- structurally distinct from CitedClaimNode (no\n`sources`, nothing for `faithfulness_checked` to check), not the same\nshape with empty fields.",
+  "properties": {
+    "claim_text": {
+      "title": "Claim Text",
+      "type": "string"
+    },
+    "id": {
+      "title": "Id",
+      "type": "string"
+    },
+    "index": {
+      "title": "Index",
+      "type": "integer"
+    },
+    "kind": {
+      "const": "inference",
+      "default": "inference",
+      "title": "Kind",
+      "type": "string"
+    }
+  },
+  "required": [
+    "index",
+    "claim_text"
+  ],
+  "title": "InferenceNode",
+  "type": "object"
+}

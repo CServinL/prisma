@@ -15,14 +15,20 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from typing import TYPE_CHECKING
 
+import numpy as np
 from pydantic import BaseModel
 
+from prisma.agents.session_graph import build_session_graph
 from prisma.services.chroma_service import ChromaIndexer
 from prisma.services.injection_defense import wrap_untrusted
 from prisma.services.knowledge_graph_client import KnowledgeGraphClient
 from prisma.services.vault import VaultService
 from prisma.storage.models.vault_models import Chat
+
+if TYPE_CHECKING:
+    import networkx as nx
 
 _EXCERPT_CHARS = 800
 
@@ -60,6 +66,17 @@ TOOLS: list[ToolSpec] = [
             "things connect. Call when the question is about how things relate "
             "to each other, or a vault search alone would likely be "
             "scattered/incomplete."
+        ),
+    ),
+    ToolSpec(
+        name="recall",
+        marker="RECALL",
+        description=(
+            "Searches THIS conversation's own history — earlier turns, tool "
+            "results, and claims — for something you saw before but that "
+            "isn't shown above (older turns roll off as the conversation "
+            "grows). Call when you need to remember something specific from "
+            "earlier in this same chat, not for new information from the vault."
         ),
     ),
 ]
@@ -154,11 +171,17 @@ class ChatToolbox:
         self._kg = kg
         self._vault = vault
 
-    def call(self, marker: str, query: str) -> ToolResult:
+    def call(
+        self, marker: str, query: str, *,
+        session_graph: "nx.MultiDiGraph | None" = None, remaining_budget: int = 4000,
+        chat_slug: str | None = None,
+    ) -> ToolResult:
         if marker == "SEARCH_VAULT":
             return self._search_vault(query)
         if marker == "GRAPH_CONTEXT":
             return self._graph_context(query)
+        if marker == "RECALL":
+            return self._recall(query, session_graph, remaining_budget, chat_slug)
         raise ValueError(f"unknown tool marker: {marker!r}")
 
     def get_node_text(self, slug: str) -> str | None:
@@ -210,3 +233,139 @@ class ChatToolbox:
         else:
             wrapped = ""
         return ToolResult(text=wrapped, raw=[r.model_dump() for r in results])
+
+    # ── RECALL (ADR-019, docs/concepts/chat-session-graph.md) ───────────────
+
+    def _recall(
+        self, query: str, session_graph: "nx.MultiDiGraph | None", remaining_budget: int,
+        chat_slug: str | None = None,
+    ) -> ToolResult:
+        """Searches the whole session graph (not just tool-call/thinking
+        branches -- `_bounded_history()`/`SessionOrchestrator.bounded_history()`
+        already drop whole rolled-off turns, which `RECALL` must be able to
+        reach too), ranked by embedding similarity to `query` when the
+        embedding lease is granted, degrading to recency order otherwise --
+        never silently returning nothing just because the shared local
+        compute is busy.
+
+        `chat_slug` (the active chat's own slug) additionally pulls in the
+        `_RECALL_CROSS_CHAT_LIMIT` most-recently-modified *other* chats'
+        graphs -- cservinl's reasoning: recalling every chat in the vault
+        gets more expensive (a full graph rebuild + embed pass per chat)
+        with no bound as the vault grows, and the most recently active other
+        chats are the ones most likely to actually be relevant to what's
+        being discussed right now, so that's the cheap, well-justified place
+        to cut rather than an arbitrary cap. Cross-chat candidates are
+        scored with `_RECALL_CROSS_CHAT_DISCOUNT` applied -- "a lower grade
+        of attention" -- so an in-chat match wins unless a cross-chat one is
+        substantially more relevant. None if `chat_slug` isn't given (tests,
+        or any caller that doesn't have an active chat to exclude), matching
+        the original single-chat-only behavior exactly."""
+        candidates: list[tuple[str, str, str, str | None]] = []
+        if session_graph is not None:
+            candidates += [
+                (node_id, attrs["kind"], text, None)
+                for node_id, attrs in session_graph.nodes(data=True)
+                if (text := _recall_node_text(attrs["kind"], attrs["data"]))
+            ]
+        cross_chat: list[tuple[str, str, str, str | None]] = []
+        if chat_slug is not None:
+            for other in _recent_other_chats(self._vault, exclude_slug=chat_slug, limit=_RECALL_CROSS_CHAT_LIMIT):
+                other_graph = build_session_graph(other.messages)
+                cross_chat += [
+                    (node_id, attrs["kind"], text, other.slug)
+                    for node_id, attrs in other_graph.nodes(data=True)
+                    if (text := _recall_node_text(attrs["kind"], attrs["data"]))
+                ]
+        all_candidates = candidates + cross_chat
+        if not all_candidates:
+            return ToolResult(text="(nothing to recall yet)", raw=[])
+
+        vectors = self._chroma.embed_texts(
+            [query] + [text for _, _, text, _ in all_candidates],
+            priority="interactive", max_wait=_RECALL_LEASE_MAX_WAIT,
+        )
+        if vectors is not None:
+            query_vec, candidate_vecs = vectors[0], vectors[1:]
+
+            def _score(candidate: tuple[str, str, str, str | None], vec: list[float]) -> float:
+                base = _cosine(query_vec, vec)
+                return base if candidate[3] is None else base * _RECALL_CROSS_CHAT_DISCOUNT
+
+            ranked = [
+                c for c, _ in sorted(zip(all_candidates, candidate_vecs), key=lambda cv: -_score(cv[0], cv[1]))
+            ]
+        else:
+            # Lease denied or the embed call itself failed -- degrade to
+            # recency, don't wait or fail the turn. networkx preserves node
+            # insertion order; build_session_graph() adds nodes in
+            # chat.messages order, so reversed() is newest-first. Cross-chat
+            # candidates are dropped in this path rather than guessed at --
+            # without embeddings there's no principled way to interleave
+            # cross-chat recency against a discount weight.
+            ranked = list(reversed(candidates))
+
+        packed = _pack_within_budget(ranked, remaining_budget)
+        if not packed:
+            return ToolResult(text="(nothing found)", raw=[])
+        text = "\n\n".join(
+            wrap_untrusted(
+                f"recalled-{kind}" if slug is None else f"recalled-{kind}-from-chat-{slug}", t,
+            )
+            for _, kind, t, slug in packed
+        )
+        return ToolResult(text=text, raw=[
+            {"node_id": nid, "kind": kind, "chat_slug": slug} for nid, kind, _, slug in packed
+        ])
+
+
+_RECALL_LEASE_MAX_WAIT = 0.5  # fail fast on contention -- a live turn is waiting, unlike background indexing
+_RECALL_CROSS_CHAT_LIMIT = 8  # cap: only the N most-recently-modified OTHER chats get graph-rebuilt + embedded per RECALL call
+_RECALL_CROSS_CHAT_DISCOUNT = 0.7  # "a lower grade of attention" -- an in-chat match wins unless a cross-chat one is substantially more relevant
+
+
+def _recent_other_chats(vault: VaultService, *, exclude_slug: str, limit: int) -> list[Chat]:
+    # `list_chats()` fully parses every `.sess` file in the vault just to
+    # read `modified_at` off each -- the cap below only bounds the expensive
+    # part (graph rebuild + embedding per chat), not this listing step
+    # itself. Fine at today's vault-chat-count scale; if this listing ever
+    # shows up as real per-turn latency, the fix is a lightweight
+    # slug+modified_at-only listing, not a smaller cap.
+    others = [c for c in vault.list_chats() if c.slug != exclude_slug]
+    others.sort(key=lambda c: c.modified_at, reverse=True)
+    return others[:limit]
+
+
+def _recall_node_text(kind: str, data) -> str:
+    if kind == "turn":
+        return data.content.value
+    if kind == "tool_call":
+        return data.result or ""
+    if kind == "thought":
+        return data.thought
+    if kind == "claim":
+        return data.claim_text
+    return ""
+
+
+def _cosine(a: list[float], b: list[float]) -> float:
+    va, vb = np.array(a), np.array(b)
+    denom = float(np.linalg.norm(va) * np.linalg.norm(vb))
+    return float(np.dot(va, vb) / denom) if denom else 0.0
+
+
+def _pack_within_budget(
+    ranked: list[tuple[str, str, str, str | None]], remaining_budget: int,
+) -> list[tuple[str, str, str, str | None]]:
+    """Greedily packs ranked candidates until the budget is used up --
+    proactively self-limiting, not relying on ChatAgent's post-hoc context-
+    overflow check to fail the whole turn if RECALL returned too much."""
+    packed: list[tuple[str, str, str, str | None]] = []
+    used = 0
+    for candidate in ranked:
+        cost = len(candidate[2]) // 4
+        if used + cost > remaining_budget:
+            continue  # doesn't fit -- a smaller, lower-ranked candidate still might
+        packed.append(candidate)
+        used += cost
+    return packed

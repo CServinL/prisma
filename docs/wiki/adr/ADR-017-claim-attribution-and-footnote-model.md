@@ -4,12 +4,16 @@
 **Author:** CServinL
 **Status:** Implemented (2026-07-31, `faithfulness_checked` added 2026-08-03,
 persistence + UI interactivity fixed 2026-08-04) — data model, ontology
-(Axiom 16, `docs/concepts/footnote.md`), `ChatAgent` self-segmentation/self-
+(Axiom 16, `docs/concepts/claim.md`), `ChatAgent` self-segmentation/self-
 report, `ChatToolbox._graph_context` wiring, UI rendering, automated
 `faithfulness_checked` verification, and durable per-message persistence are
 all built. Rich reply rendering (tables/code/links, 2026-08-04) is built on
 the backend (sanitized HTML per message) but not yet wired into the
-frontend — see that section below.
+frontend — see that section below. The single-class `Footnote`/
+`FootnoteRelation` model this ADR built was later split into
+`CitedClaimNode`/`InferenceNode` (ADR-019, 2026-08-05) — see
+`docs/concepts/claim.md`, which documents the current shape; this page is
+kept as the historical record of the original decision.
 
 ### Implementation notes (added 2026-07-31, not part of the original decision)
 
@@ -269,7 +273,7 @@ actual source).
 - Axiom 5 (`docs/ontologia.md`) — grounding (input scope), the axis this
   explicitly does not overload.
 - Axiom 16 (`docs/ontologia.md`) — the axiom this ADR implements.
-- `docs/concepts/footnote.md` — the entity-level documentation.
+- `docs/concepts/claim.md` — the entity-level documentation (current shape; this ADR's original `Footnote` class was later split, see the Status line above).
 - ADR-009 — hybrid retrieval architecture; `relational` footnotes are the
   natural label for `GRAPH_CONTEXT` tool output.
 - ADR-014 — Chat module's LLM backend interface (whatever backend eventually

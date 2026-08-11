@@ -290,16 +290,15 @@
     return c.kind === "inference" ? "AI inference" : CLAIM_RELATION_LABEL[c.relation];
   }
 
-  function summarizeRecalls(recalls: RecallRefOut[]): string {
-    const labels: Record<string, string> = { turn: "turn", tool_call: "tool call", thought: "thought", claim: "claim" };
-    const counts = new Map<string, number>();
-    for (const r of recalls) counts.set(r.node_kind, (counts.get(r.node_kind) ?? 0) + 1);
-    const byKind = [...counts.entries()]
-      .map(([kind, n]) => `${n} ${labels[kind] ?? kind}${n > 1 ? "s" : ""}`)
-      .join(", ");
-    const crossChatCount = recalls.filter(r => r.chat_slug !== null).length;
-    if (crossChatCount === 0) return byKind;
-    return `${byKind} (${crossChatCount} from ${crossChatCount > 1 ? "other chats" : "another chat"})`;
+  // Collapsed-by-default toggle line summarizing a turn's process
+  // "spin-offs" -- tool calls, reasoning, recalls -- so the reply itself
+  // isn't buried under mechanism by default, while still one click away.
+  function summarizeTurnDetails(msg: ChatTurn): string {
+    const parts: string[] = [];
+    if (msg.tool_calls?.length) parts.push(`${msg.tool_calls.length} tool call${msg.tool_calls.length > 1 ? "s" : ""}`);
+    if (msg.thoughts?.length) parts.push(`${msg.thoughts.length} thought${msg.thoughts.length > 1 ? "s" : ""}`);
+    if (msg.recalls?.length) parts.push(`${msg.recalls.length} recall${msg.recalls.length > 1 ? "s" : ""}`);
+    return parts.join(" · ");
   }
 
   function _defaultApiBase(): string {
@@ -476,6 +475,17 @@
   let excerptPollInterval: ReturnType<typeof setInterval> | undefined;
   let chatInput = $state("");
   let chatSending = $state(false);
+  // Turn indices whose tool-call/thought/recall "spin-offs" (the process
+  // artifacts behind a reply, not the reply's own content) are expanded --
+  // collapsed by default, since most turns don't need examining, but always
+  // available on demand. Keyed by turn index, not persisted across chats.
+  let expandedTurnDetails = $state(new Set<number>());
+
+  function toggleTurnDetails(i: number) {
+    const next = new Set(expandedTurnDetails);
+    if (next.has(i)) next.delete(i); else next.add(i);
+    expandedTurnDetails = next;
+  }
   let serverOnline = $state(false);
   let kgState = $state<GState | null>(null);
   let kgLastIndexed = $state<string | null>(null);
@@ -1973,19 +1983,48 @@
                       </button>
                     </span>
                   </div>
-                  {#if msg.tool_calls?.length}
-                    <div class="chat-tool-calls">
-                      {#each msg.tool_calls as tc}
-                        <span class="chat-tool-call" class:chat-tool-call-error={tc.status === "error"}>used <code>{tc.tool}</code>{#if tc.args?.query}: {tc.args.query}{/if}</span>
-                      {/each}
-                    </div>
-                  {/if}
-                  {#if msg.thoughts?.length}
-                    <div class="chat-turn-thoughts">
-                      {#each msg.thoughts as th}
-                        <div class="chat-turn-thought">#{th.thought_number}: {th.thought}</div>
-                      {/each}
-                    </div>
+                  {#if msg.tool_calls?.length || msg.thoughts?.length || msg.recalls?.length}
+                    {@const detailsOpen = expandedTurnDetails.has(i)}
+                    <button class="chat-turn-details-toggle" onclick={() => toggleTurnDetails(i)}>
+                      <span class="chat-turn-details-arrow" class:expanded={detailsOpen}>▸</span>
+                      {summarizeTurnDetails(msg)}
+                    </button>
+                    {#if detailsOpen}
+                      <div class="chat-turn-details">
+                        {#if msg.tool_calls?.length}
+                          <div class="chat-node-group chat-node-group-toolcalls">
+                            <div class="chat-node-group-heading">Tool Calls</div>
+                            <ol class="chat-node-group-list">
+                              {#each msg.tool_calls as tc}
+                                <li class="node-box node-box-toolcall" class:node-box-error={tc.status === "error"}>
+                                  <code>{tc.tool}</code>{#if tc.args?.query}: {tc.args.query}{/if}
+                                </li>
+                              {/each}
+                            </ol>
+                          </div>
+                        {/if}
+                        {#if msg.thoughts?.length}
+                          <div class="chat-node-group chat-node-group-thoughts">
+                            <div class="chat-node-group-heading">Reasoning</div>
+                            <ol class="chat-node-group-list">
+                              {#each msg.thoughts as th}
+                                <li class="node-box node-box-thought">#{th.thought_number}: {th.thought}</li>
+                              {/each}
+                            </ol>
+                          </div>
+                        {/if}
+                        {#if msg.recalls?.length}
+                          <div class="chat-node-group chat-node-group-recalls">
+                            <div class="chat-node-group-heading">Recalled</div>
+                            <ol class="chat-node-group-list">
+                              {#each msg.recalls as r}
+                                <li class="node-box node-box-recall">{r.node_kind}{#if r.chat_slug} · from another chat{/if}</li>
+                              {/each}
+                            </ol>
+                          </div>
+                        {/if}
+                      </div>
+                    {/if}
                   {/if}
                   <div class="chat-turn-content text-body">
                     {#each renderContentSegments(msg.content.value) as seg}
@@ -2007,30 +2046,31 @@
                       {/each}
                     </div>
                   {/if}
-                  {#if msg.recalls?.length}
-                    <div class="chat-turn-recalls" title="This reply pulled context from earlier in the conversation via RECALL, beyond the default rolling history">
-                      ↩ recalled {summarizeRecalls(msg.recalls)}
-                    </div>
-                  {/if}
                   {#if msg.claims?.length}
-                    <ol class="chat-claims">
-                      {#each msg.claims as claim}
-                        <li id="chat-turn-{i}-claim-{claim.index}">
-                          <span class="claim-relation claim-relation-{claimStyleKey(claim)}">{claimLabel(claim)}</span>
-                          {#if claim.kind === "claim" && claim.faithfulness_checked !== null}
-                            <span
-                              class="claim-faithfulness"
-                              class:faithful={claim.faithfulness_checked}
-                              class:unfaithful={!claim.faithfulness_checked}
-                              title={claim.faithfulness_checked ? "Automated check: claim is supported by the cited source(s)" : "Automated check: claim does NOT appear to be supported by the cited source(s)"}
-                            >{claim.faithfulness_checked ? "✓ verified" : "⚠ unsupported"}</span>
-                          {/if}
-                          {#if claim.kind === "claim" && claim.sources.length}
-                            {#each claim.sources as slug, si}{#if si > 0}, {/if}<button class="claim-source-link" onclick={() => openNode(slug)}>{slug}</button>{/each}
-                          {/if}
-                        </li>
-                      {/each}
-                    </ol>
+                    <div class="chat-claims">
+                      <div class="chat-claims-heading">References</div>
+                      <ol class="chat-claims-list">
+                        {#each msg.claims as claim}
+                          <li class="claim-box claim-box-{claimStyleKey(claim)}" id="chat-turn-{i}-claim-{claim.index}">
+                            <span class="claim-index">{claim.index}</span>
+                            <span class="claim-relation claim-relation-{claimStyleKey(claim)}">{claimLabel(claim)}</span>
+                            {#if claim.kind === "claim" && claim.faithfulness_checked !== null}
+                              <span
+                                class="claim-faithfulness"
+                                class:faithful={claim.faithfulness_checked}
+                                class:unfaithful={!claim.faithfulness_checked}
+                                title={claim.faithfulness_checked ? "Automated check: claim is supported by the cited source(s)" : "Automated check: claim does NOT appear to be supported by the cited source(s)"}
+                              >{claim.faithfulness_checked ? "✓ verified" : "⚠ unsupported"}</span>
+                            {/if}
+                            {#if claim.kind === "claim" && claim.sources.length}
+                              <div class="claim-sources">
+                                {#each claim.sources as slug, si}{#if si > 0}, {/if}<button class="claim-source-link" onclick={() => openNode(slug)}>{slug}</button>{/each}
+                              </div>
+                            {/if}
+                          </li>
+                        {/each}
+                      </ol>
+                    </div>
                   {/if}
                 </div>
               {/each}
@@ -3859,29 +3899,77 @@
     color: #facc15;
     border: 1px solid #facc15;
   }
-  .chat-tool-calls {
+  .chat-turn-details-toggle {
     display: flex;
-    flex-direction: column;
-    gap: 2px;
+    align-items: center;
+    gap: 4px;
+    background: none;
+    border: none;
+    cursor: pointer;
+    padding: 0;
     margin-bottom: 6px;
-    font-family: "JetBrains Mono", monospace;
     font-size: 10px;
-    color: #8a6ab0;
+    color: #6a7a8f;
   }
-  .chat-tool-calls code {
-    color: #c084fc;
+  .chat-turn-details-toggle:hover { color: #93c5fd; }
+  .chat-turn-details-arrow {
+    display: inline-block;
+    transition: transform 0.1s;
+    font-size: 9px;
   }
-  .chat-tool-call-error {
-    color: #f87171;
-  }
-  .chat-turn-thoughts {
+  .chat-turn-details-arrow.expanded { transform: rotate(90deg); }
+  .chat-turn-details {
     display: flex;
     flex-direction: column;
-    gap: 2px;
-    margin-bottom: 6px;
-    font-size: 11px;
+    gap: 6px;
+    margin-bottom: 8px;
+  }
+  .chat-node-group {
+    padding: 6px 8px;
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.02);
+    border: 1px solid rgba(139, 163, 192, 0.12);
+  }
+  .chat-node-group-heading {
+    font-size: 9px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 4px;
+  }
+  .chat-node-group-toolcalls .chat-node-group-heading { color: #c084fc; }
+  .chat-node-group-thoughts .chat-node-group-heading { color: #94a3b8; }
+  .chat-node-group-recalls .chat-node-group-heading { color: #fbbf24; }
+  .chat-node-group-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .node-box {
+    padding: 4px 7px;
+    border-radius: 4px;
+    font-size: 10px;
+    background: rgba(255, 255, 255, 0.02);
+    border: 1px solid rgba(139, 163, 192, 0.12);
+  }
+  .node-box-toolcall {
+    font-family: "JetBrains Mono", monospace;
+    color: #8a6ab0;
+    border-color: rgba(192, 132, 252, 0.2);
+  }
+  .node-box-toolcall code { color: #c084fc; }
+  .node-box-toolcall.node-box-error { color: #f87171; border-color: rgba(248, 113, 113, 0.3); }
+  .node-box-thought {
     font-style: italic;
-    color: #6b7a8a;
+    color: #94a3b8;
+    border-color: rgba(148, 163, 184, 0.2);
+  }
+  .node-box-recall {
+    color: #d4a72c;
+    border-color: rgba(251, 191, 36, 0.25);
   }
   .chat-turn-content {
     color: #c8ddf0;
@@ -3897,11 +3985,6 @@
   .chat-turn-alternate-model {
     color: #5c6b7a;
   }
-  .chat-turn-recalls {
-    margin-top: 6px;
-    font-size: 0.75rem;
-    color: #7a8a9a;
-  }
   .claim-ref {
     background: none;
     border: none;
@@ -3910,23 +3993,56 @@
     font: inherit;
     vertical-align: super;
     font-size: 0.7em;
-    color: #7fd4c8;
+    color: #9ca3af;
     font-weight: 600;
     margin-left: 1px;
   }
   .claim-ref:hover { text-decoration: underline; }
-  .claim-ref-citation { color: #7fd4c8; }
+  .claim-ref-citation { color: #9ca3af; }
   .claim-ref-attribution { color: #60a5fa; }
   .claim-ref-relational { color: #c084fc; }
-  .claim-ref-inference { color: #94a3b8; }
+  .claim-ref-inference { color: #6b7280; }
   .chat-claims {
-    margin: 8px 0 0;
-    padding-left: 18px;
+    margin: 10px 0 0;
+    padding: 8px 10px;
+    border-radius: 8px;
+    background: rgba(96, 165, 250, 0.05);
+    border: 1px solid rgba(96, 165, 250, 0.18);
+  }
+  .chat-claims-heading {
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: #93c5fd;
+    margin-bottom: 6px;
+  }
+  .chat-claims-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
     display: flex;
     flex-direction: column;
-    gap: 4px;
+    gap: 6px;
     font-size: 11px;
     color: #8ba3c0;
+  }
+  .claim-box {
+    padding: 6px 8px;
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.02);
+    border: 1px solid rgba(139, 163, 192, 0.15);
+  }
+  .claim-box-citation { border-color: rgba(156, 163, 175, 0.3); }
+  .claim-box-attribution { border-color: rgba(96, 165, 250, 0.3); }
+  .claim-box-relational { border-color: rgba(192, 132, 252, 0.3); }
+  .claim-box-inference { border-color: rgba(107, 114, 128, 0.35); border-style: dashed; }
+  .claim-index {
+    display: inline-block;
+    min-width: 14px;
+    margin-right: 4px;
+    font-weight: 600;
+    color: #6a8aae;
   }
   .claim-relation {
     display: inline-block;
@@ -3938,8 +4054,8 @@
     letter-spacing: 0.02em;
   }
   .claim-relation-citation {
-    background: rgba(127, 212, 200, 0.15);
-    color: #7fd4c8;
+    background: rgba(156, 163, 175, 0.15);
+    color: #9ca3af;
   }
   .claim-relation-attribution {
     background: rgba(96, 165, 250, 0.15);
@@ -3950,8 +4066,8 @@
     color: #c084fc;
   }
   .claim-relation-inference {
-    background: rgba(148, 163, 184, 0.15);
-    color: #94a3b8;
+    background: rgba(107, 114, 128, 0.15);
+    color: #6b7280;
   }
   .claim-faithfulness {
     margin-right: 6px;
@@ -3959,6 +4075,9 @@
   }
   .claim-faithfulness.faithful { color: #4ade80; }
   .claim-faithfulness.unfaithful { color: #f87171; }
+  .claim-sources {
+    margin-top: 3px;
+  }
   .claim-source-link {
     background: none;
     border: none;

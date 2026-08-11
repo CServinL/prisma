@@ -134,6 +134,16 @@ def system_prompt_footnote_section() -> str:
         "you were given -- also mark it with the next [^N], but it will "
         "get relation \"ai-inference\" below. You do not need to mark "
         "filler or purely conversational sentences, only actual claims.",
+        "- Place each [^N] immediately next to the exact sentence or span "
+        "it supports, at the point in your answer where you make that "
+        "claim -- NOT gathered together at the end. A citation marker is "
+        "tied to precisely that text, so \"...uses self-attention[^1], "
+        "and normalizes with RMSNorm[^2].\" is correct; writing the full "
+        "sentence with no markers and then appending \"[^1][^2]\" "
+        "afterward is wrong, even though it looks similar. If your "
+        "answer makes three separate claims, it should have three "
+        "markers at three different places in the text, not clustered "
+        "in one spot.",
         "- Only cite documents you actually saw in a tool result in this "
         "conversation (their exact slug, shown as the `path=` of an "
         "<untrusted_source> block, or in a GRAPH_CONTEXT tool result's "

@@ -477,12 +477,21 @@ class VaultService:
             path=path,
             created_at=datetime.fromtimestamp(stat.st_mtime),
             modified_at=datetime.fromtimestamp(stat.st_mtime),
+            journal=fm.get("journal"),
+            volume=fm.get("volume"),
+            issue=fm.get("issue"),
+            pages=fm.get("pages"),
+            publisher=fm.get("publisher"),
+            url=fm.get("url"),
+            item_type=fm.get("item_type"),
         )
 
     def create_source_from_citekey(
         self, citekey: str, title: str, body: str, *,
         zotero_key: str, authors: list[str], tags: list[str],
         year: int | None = None, doi: str | None = None, url: str | None = None,
+        journal: str | None = None, volume: str | None = None, issue: str | None = None,
+        pages: str | None = None, publisher: str | None = None, item_type: str | None = None,
     ) -> Source:
         """Create a source node from Zotero-derived metadata -- the
         vault-side half of POST /zotero/import/{key}."""
@@ -498,8 +507,45 @@ class VaultService:
             fm["doi"] = doi
         if url:
             fm["url"] = url
+        if journal:
+            fm["journal"] = journal
+        if volume:
+            fm["volume"] = volume
+        if issue:
+            fm["issue"] = issue
+        if pages:
+            fm["pages"] = pages
+        if publisher:
+            fm["publisher"] = publisher
+        if item_type:
+            fm["item_type"] = item_type
         path = self.default_dirs[NodeType.source] / f"{slug}.md"
         path.write_text(_render_frontmatter(fm) + body, encoding="utf-8")
+        return self.get_source(slug)
+
+    def update_source_bibliographic_fields(
+        self, slug: str, *, journal: str | None = None, volume: str | None = None,
+        issue: str | None = None, pages: str | None = None, publisher: str | None = None,
+        url: str | None = None, item_type: str | None = None,
+    ) -> Source:
+        """Merges the given fields into `slug`'s existing frontmatter,
+        leaving the body and every other field untouched -- the ADR-020
+        backfill command's write path, for sources imported before these
+        fields existed on Source. Only overwrites a field when a non-empty
+        value is given, so re-running backfill against a partially-filled
+        source doesn't blank out fields Zotero didn't return this time."""
+        path = self._find_md(slug)
+        if path is None:
+            raise FileNotFoundError(f"source not found: {slug!r}")
+        raw = path.read_text(encoding="utf-8")
+        fm, content = _parse_frontmatter(raw)
+        for key, value in [
+            ("journal", journal), ("volume", volume), ("issue", issue), ("pages", pages),
+            ("publisher", publisher), ("url", url), ("item_type", item_type),
+        ]:
+            if value:
+                fm[key] = value
+        path.write_text(_render_frontmatter(fm) + content, encoding="utf-8")
         return self.get_source(slug)
 
     def get_chat(self, slug: str) -> Chat:

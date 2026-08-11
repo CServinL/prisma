@@ -249,6 +249,17 @@ class ChatAgent:
         verdict = _parse_faithfulness_verdict(self.complete_once(system_prompt, content))
         return claim.model_copy(update={"faithfulness_checked": verdict})
 
+    def _sources_resolve(self, claim: ClaimNode) -> bool:
+        """ADR-020: hard-validates CitedClaimNode.sources against real
+        vault slugs -- system_prompt_footnote_section() already instructs
+        the model to never invent a slug, but a small local model can
+        still hallucinate one; this turns that into an actual rejection
+        instead of _verify_claim's softer "faithfulness_checked degrades
+        to None" signal. InferenceNode has no sources, trivially resolves."""
+        if not isinstance(claim, CitedClaimNode):
+            return True
+        return all(self._toolbox.slug_resolves(s) for s in claim.sources)
+
     def respond(
         self, history: list[TurnNode], user_text: str, excerpt_notes: list[Note] | None = None,
         chat_slug: str | None = None,
@@ -311,7 +322,15 @@ class ChatAgent:
             match = TOOL_CALL_RE.search(reply)
             if not match:
                 content, claims = _extract_claims(reply)
-                claims = [self._verify_claim(c) for c in claims]
+                resolved_claims, dropped = [], 0
+                for c in claims:
+                    if self._sources_resolve(c):
+                        resolved_claims.append(c)
+                    else:
+                        dropped += 1
+                if dropped:
+                    _log.warning("chat claims: dropped %d claim(s) citing an unresolvable slug", dropped)
+                claims = [self._verify_claim(c) for c in resolved_claims]
                 return TurnNode(
                     role=ChatRole.assistant, content=RichContent(format=ContentFormat.markdown, value=content),
                     tool_calls=tool_calls, claims=claims, recalls=recalls, model=self.model,

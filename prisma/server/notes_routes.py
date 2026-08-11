@@ -21,7 +21,7 @@ from pydantic import BaseModel
 from prisma.services.asset_rewrite import asset_prefix, rewrite_html
 from prisma.services.renderer import render as vault_render
 from prisma.services.vault import VaultService
-from prisma.storage.models.vault_models import NodeType, RenderedNode, Stream, VaultListing
+from prisma.storage.models.vault_models import NodeType, RenderedNode, Source, Stream, VaultListing
 
 _activity = logging.getLogger("prisma.activity")
 
@@ -120,6 +120,29 @@ def build_notes_router(
     @router.get("", response_model=VaultListing)
     def list_notes(node_type: Optional[NodeType] = Query(None)):
         return get_vault().list_nodes(node_type)
+
+    @router.get("/apa")
+    def get_apa_citations(slugs: str = Query(..., description="Comma-separated slugs")) -> dict[str, str]:
+        """ADR-020: bulk slug -> APA-citation-string lookup, for the chat
+        UI's claim source links. A claim's `sources` can point to a Note
+        or Chat too, not just a Source (see chat_tools.get_node_text) --
+        this only ever resolves genuine Source nodes; anything else, or an
+        unresolvable slug, is simply omitted from the response rather than
+        erroring the whole batch over one bad slug. Registered before
+        `/{slug}` below so "apa" isn't swallowed as a slug parameter."""
+        from prisma.services.citation_format import format_apa
+        vault = get_vault()
+        result: dict[str, str] = {}
+        for slug in (s.strip() for s in slugs.split(",")):
+            if not slug:
+                continue
+            try:
+                node = vault.get_any(slug)
+            except FileNotFoundError:
+                continue
+            if isinstance(node, Source):
+                result[slug] = format_apa(node)
+        return result
 
     @router.get("/{slug}", response_model=RenderedNode)
     def get_note(slug: str, request: Request, format: str = "html"):

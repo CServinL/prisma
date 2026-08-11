@@ -706,6 +706,24 @@
     } catch {}
   }
 
+  // ADR-020: slug -> APA-citation-string cache, populated on demand
+  // whenever a chat's messages (could) contain new claim source slugs --
+  // fetchApaCitations() only requests what's not already cached.
+  let apaCitations = $state<Record<string, string>>({});
+
+  async function fetchApaCitations(messages: ChatTurn[]) {
+    const slugs = new Set<string>();
+    for (const msg of messages) {
+      for (const claim of msg.claims ?? []) {
+        if (claim.kind === "claim") for (const s of claim.sources) slugs.add(s);
+      }
+    }
+    const missing = [...slugs].filter(s => !(s in apaCitations));
+    if (missing.length === 0) return;
+    const r = await apiFetch(`${apiBase}/notes/apa?slugs=${missing.map(encodeURIComponent).join(",")}`);
+    if (r.ok) apaCitations = { ...apaCitations, ...(await r.json()) };
+  }
+
   async function openChat(slug: string) {
     clearInterval(excerptPollInterval);  // stop any poll for the chat we're leaving, immediately
     activeNode = null;
@@ -715,7 +733,11 @@
     loadingNode = true;
     try {
       const r = await apiFetch(`${apiBase}/chats/${encodeURIComponent(slug)}`);
-      if (r.ok) activeChat = await r.json();
+      if (r.ok) {
+        const chat: ChatDetail = await r.json();
+        activeChat = chat;
+        void fetchApaCitations(chat.messages);
+      }
     } finally {
       loadingNode = false;
     }
@@ -760,6 +782,7 @@
             tool_calls: data.tool_calls ?? [], recalls: data.recalls ?? [],
           },
         ];
+        void fetchApaCitations(activeChat.messages);
       }
     } finally {
       chatSending = false;
@@ -775,7 +798,11 @@
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ model: model ?? null }),
       });
-      if (r.ok && activeChat?.slug === slug) activeChat = await r.json();
+      if (r.ok && activeChat?.slug === slug) {
+        const chat: ChatDetail = await r.json();
+        activeChat = chat;
+        void fetchApaCitations(chat.messages);
+      }
     } finally {
       chatSending = false;
     }
@@ -2066,6 +2093,11 @@
                               <div class="claim-sources">
                                 {#each claim.sources as slug, si}{#if si > 0}, {/if}<button class="claim-source-link" onclick={() => openNode(slug)}>{slug}</button>{/each}
                               </div>
+                              {#each claim.sources as slug}
+                                {#if apaCitations[slug]}
+                                  <div class="claim-apa">{apaCitations[slug]}</div>
+                                {/if}
+                              {/each}
                             {/if}
                           </li>
                         {/each}
@@ -4089,6 +4121,12 @@
   }
   .claim-source-link:hover {
     color: #c8ddf0;
+  }
+  .claim-apa {
+    margin-top: 2px;
+    font-size: 10px;
+    font-style: italic;
+    color: #6a7a8f;
   }
   .chat-input-row {
     display: flex;

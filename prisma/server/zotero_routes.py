@@ -223,6 +223,9 @@ def build_zotero_router(
             citekey, item.title, body,
             zotero_key=item.key, authors=item.authors, tags=[t.tag for t in item.tags],
             year=item.year, doi=item.doi, url=item.url,
+            journal=item.publication_title, volume=item.volume, issue=item.issue,
+            pages=item.pages, item_type=item.item_type,
+            publisher=item.get_field("publisher"),
         )
         get_indexer().mark_stale()
         _activity.info("action=import_zotero key=%s slug=%s title=%r", key, source.slug, source.title)

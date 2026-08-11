@@ -112,6 +112,10 @@ class TestCreateSourceFromCitekey:
         assert source.authors == ["Jane Smith"]
         assert source.year == 2024
         assert source.doi == "10.1/xyz"
+        # ADR-020: url was previously written to frontmatter but never read
+        # back by get_source() -- silently dropped on every load. This
+        # assertion is the regression test for that fix.
+        assert source.url == "https://example.com/paper"
 
     def test_omits_optional_fields_when_not_given(self, vault):
         source = vault.create_source_from_citekey(
@@ -120,6 +124,23 @@ class TestCreateSourceFromCitekey:
         )
         assert source.year is None
         assert source.doi is None
+        assert source.url is None
+        assert source.journal is None
+        assert source.item_type is None
+
+    def test_creates_source_with_apa_bibliographic_fields(self, vault):
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "body",
+            zotero_key="ABC123", authors=["Jane Smith"], tags=[],
+            journal="Journal of Examples", volume="12", issue="3", pages="45-67",
+            publisher="Example Press", item_type="journalArticle",
+        )
+        assert source.journal == "Journal of Examples"
+        assert source.volume == "12"
+        assert source.issue == "3"
+        assert source.pages == "45-67"
+        assert source.publisher == "Example Press"
+        assert source.item_type == "journalArticle"
 
     def test_slug_disambiguated_on_citekey_collision(self, vault):
         vault.create_source_from_citekey(
@@ -129,3 +150,39 @@ class TestCreateSourceFromCitekey:
             "smith2024", "Second", "body2", zotero_key="B", authors=[], tags=[],
         )
         assert second.slug == "smith2024-1"
+
+
+class TestUpdateSourceBibliographicFields:
+    def test_merges_new_fields_leaving_existing_ones_untouched(self, vault):
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "the body text",
+            zotero_key="ABC123", authors=["Jane Smith"], tags=["ml"], year=2024,
+        )
+
+        updated = vault.update_source_bibliographic_fields(
+            source.slug, journal="Journal of Examples", volume="12", item_type="journalArticle",
+        )
+
+        assert updated.journal == "Journal of Examples"
+        assert updated.volume == "12"
+        assert updated.item_type == "journalArticle"
+        # untouched
+        assert updated.title == "A Great Paper"
+        assert updated.authors == ["Jane Smith"]
+        assert updated.year == 2024
+        assert updated.body == "the body text"
+
+    def test_does_not_blank_out_fields_when_called_with_none(self, vault):
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "body",
+            zotero_key="ABC123", authors=[], tags=[], journal="Original Journal",
+        )
+
+        updated = vault.update_source_bibliographic_fields(source.slug, volume="5")
+
+        assert updated.journal == "Original Journal"
+        assert updated.volume == "5"
+
+    def test_raises_file_not_found_for_missing_slug(self, vault):
+        with pytest.raises(FileNotFoundError):
+            vault.update_source_bibliographic_fields("does-not-exist", journal="X")

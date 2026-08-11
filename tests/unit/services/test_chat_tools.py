@@ -162,6 +162,32 @@ def test_get_node_text_returns_none_for_empty_body(vault):
     assert toolbox.get_node_text(note.slug) is None
 
 
+# ── slug_resolves() — ADR-020 hard-validation of CitedClaimNode.sources ───────
+
+def test_slug_resolves_true_for_a_real_note(vault):
+    note = vault.create_note("Attention", body="text")
+    toolbox = ChatToolbox(MagicMock(), MagicMock(), vault)
+
+    assert toolbox.slug_resolves(note.slug) is True
+
+
+def test_slug_resolves_false_for_a_missing_slug(vault):
+    toolbox = ChatToolbox(MagicMock(), MagicMock(), vault)
+
+    assert toolbox.slug_resolves("does-not-exist") is False
+
+
+def test_slug_resolves_true_for_a_real_but_empty_note(vault):
+    # Unlike get_node_text() (which treats an empty body as unresolved --
+    # correct for "is there text to check faithfulness against"), a real
+    # slug with an empty body is still a real slug -- correct for "does
+    # this claim cite something that actually exists."
+    note = vault.create_note("Empty", body="")
+    toolbox = ChatToolbox(MagicMock(), MagicMock(), vault)
+
+    assert toolbox.slug_resolves(note.slug) is True
+
+
 # ── RECALL (ADR-019, docs/concepts/chat-session-graph.md) ────────────────────
 
 def _graph_with_two_turns(text_a: str, text_b: str):

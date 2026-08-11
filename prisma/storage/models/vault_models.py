@@ -104,6 +104,23 @@ class Source(VaultNodeBase):
     # Extension of the companion original file, e.g. ".pdf", ".html", ".svg".
     # Companion lives at <Zotero Imported dir>/<slug><original_ext>. None when only .md exists.
     original_ext: str | None = None
+    # ADR-020: bibliographic fields APA citation formatting needs beyond
+    # author/year/title -- all already fetched from Zotero at import time
+    # (ZoteroItem has every one of these) but previously discarded rather
+    # than persisted. url specifically fixes a standing bug: it was being
+    # written into frontmatter by create_source_from_citekey() but never
+    # read back out by get_source() -- silently dropped on every load.
+    journal: str | None = None  # Zotero's publicationTitle -- journal/venue name
+    volume: str | None = None
+    issue: str | None = None
+    pages: str | None = None
+    publisher: str | None = None
+    url: str | None = None
+    # Zotero's raw itemType (e.g. "journalArticle", "book", "webpage") --
+    # the APA template selector. Distinct from source_kind (paper/document/
+    # web/media), which is a coarser 4-value classification predating this;
+    # item_type is additive, not a replacement for it.
+    item_type: str | None = None
 
 
 CHAT_SCHEMA_VERSION = 2

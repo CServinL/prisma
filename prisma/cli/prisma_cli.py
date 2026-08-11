@@ -302,6 +302,47 @@ def migrate_chats_to_sess_cmd(vault_root: str | None, apply_: bool, remove_md: b
     click.echo(f"\n{ok}/{len(results)} converted{' (dry run — nothing written)' if not apply_ else ''}.")
 
 
+@cli.command("backfill-source-metadata")
+@click.option("--vault", "vault_root", default=None, help="Vault root (defaults to config.toml's vault_root)")
+@click.option(
+    "--apply", "apply_", is_flag=True,
+    help="Actually write the fetched fields (default is dry-run: report only, write nothing)",
+)
+def backfill_source_metadata_cmd(vault_root: str | None, apply_: bool):
+    """One-time backfill (ADR-020): re-fetch journal/volume/issue/pages/
+    publisher/item_type from Zotero for sources imported before those
+    fields existed on Source, using each source's already-stored
+    zotero_key. Dry-run by default — pass --apply to actually write."""
+    from prisma.integrations.zotero.client import ZoteroClient
+    from prisma.services.source_backfill import backfill_source_metadata
+    from prisma.services.vault import VaultService
+    from prisma.utils.config import ConfigLoader
+
+    config_loader = ConfigLoader()
+    root = vault_root or str(config_loader.get_vault_root())
+    vault = VaultService(vault_root=root)
+    zotero = ZoteroClient.from_config(config_loader.config)
+    results = backfill_source_metadata(vault, zotero, dry_run=not apply_)
+
+    if not results:
+        click.echo("No sources found.")
+        return
+
+    verb = "would update" if not apply_ else "updated"
+    for r in results:
+        if r.error:
+            click.echo(f"  SKIP   {r.slug}: {r.error}")
+        elif r.updated:
+            click.echo(f"  {verb} {r.slug}")
+
+    updated = sum(1 for r in results if r.updated)
+    skipped = len(results) - updated
+    click.echo(
+        f"\n{updated}/{len(results)} sources {verb}, {skipped} skipped"
+        f"{' (dry run — nothing written)' if not apply_ else ''}.",
+    )
+
+
 cli.add_command(auth_group)
 cli.add_command(schema_group)
 

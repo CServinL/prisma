@@ -223,3 +223,9 @@ def test_zotero_import_creates_source_from_abstract_when_no_pdf(isolated_client,
     source = vault.get_source(data["slug"])
     assert source.zotero_key == "K2"
     assert source.doi == "10.1/xyz"
+    # ADR-020: these were fetched from ZoteroItem but discarded before --
+    # only ever used to build unstructured body prose, never persisted as
+    # structured fields.
+    assert source.journal == "Journal of Things"
+    assert source.item_type == "journalArticle"
+    assert source.url == "https://example.com/paper"

@@ -85,7 +85,10 @@ passed.
 
 In the UI, the inline `[^N]` marker is clickable (jumps to its claim's list entry) and colored by
 relation/kind; the claim list at the bottom shows the relation/kind badge, the faithfulness badge
-(when checked, `CitedClaimNode` only), and a clickable link to each cited source.
+(when checked, `CitedClaimNode` only), a clickable link to each cited source, and — below that,
+ADR-020 — the source's formatted APA citation, fetched on demand via `GET /notes/apa?slugs=...`
+(`services/citation_format.py`'s `format_apa()`, resolved fresh on every request, not cached) and
+cached client-side per slug so re-rendering the same chat doesn't re-fetch.
 
 ## Context management
 
@@ -173,5 +176,3 @@ directly. A legacy `.md`-with-`<!-- prisma:meta {...} -->`-comment reader surviv
 - **Thinking-step population** — `TurnNode.thoughts`/`ThinkingNode` ship as schema (ADR-019,
   2026-08-05), but nothing produces them yet; gated behind the still-deferred model-category
   `has_native_reasoning` flag. See [Chat session graph](chat-session-graph.md#status).
-- **APA citation formatting** — `CitedClaimNode.sources` resolve to vault slugs today; formatted
-  APA-style citations off that resolution are a separate, not-yet-built formatting concern.

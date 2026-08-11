@@ -702,6 +702,60 @@ def test_respond_faithfulness_checked_true_when_verifier_says_yes():
     assert "Kùzu is embedded, no server process" in verify_messages[1]["content"]
 
 
+def test_respond_drops_claim_citing_an_unresolvable_slug():
+    llm = MagicMock()
+    llm.model = "test-model"
+    llm.context_window = 1_000_000
+    llm.complete.side_effect = [
+        'Kùzu is embedded, no server process[^1].\n'
+        'FOOTNOTES_JSON: [{"index": 1, "relation": "attribution", "sources": ["made-up-slug"]}]',
+    ]
+    toolbox = MagicMock()
+    toolbox.slug_resolves.return_value = False
+    agent = _agent(llm=llm, toolbox=toolbox)
+
+    reply = agent.respond(history=[], user_text="why Kùzu?")
+
+    assert reply.claims == []
+    toolbox.slug_resolves.assert_called_once_with("made-up-slug")
+
+
+def test_respond_keeps_claim_when_all_sources_resolve():
+    llm = MagicMock()
+    llm.model = "test-model"
+    llm.context_window = 1_000_000
+    llm.complete.side_effect = [
+        'Kùzu is embedded, no server process[^1].\n'
+        'FOOTNOTES_JSON: [{"index": 1, "relation": "attribution", "sources": ["kg-decision"]}]',
+    ]
+    toolbox = MagicMock()
+    toolbox.slug_resolves.return_value = True
+    toolbox.get_node_text.return_value = None  # skip the faithfulness LLM call
+    agent = _agent(llm=llm, toolbox=toolbox)
+
+    reply = agent.respond(history=[], user_text="why Kùzu?")
+
+    assert len(reply.claims) == 1
+    assert reply.claims[0].sources == ["kg-decision"]
+
+
+def test_respond_inference_claims_never_check_source_resolution():
+    llm = MagicMock()
+    llm.model = "test-model"
+    llm.context_window = 1_000_000
+    llm.complete.side_effect = [
+        'This is my own reasoning[^1].\n'
+        'FOOTNOTES_JSON: [{"index": 1, "relation": "ai-inference", "sources": []}]',
+    ]
+    toolbox = MagicMock()
+    agent = _agent(llm=llm, toolbox=toolbox)
+
+    reply = agent.respond(history=[], user_text="what do you think?")
+
+    assert len(reply.claims) == 1
+    toolbox.slug_resolves.assert_not_called()
+
+
 def test_respond_faithfulness_checked_false_when_verifier_says_no():
     llm = MagicMock()
     llm.model = "test-model"

@@ -1,13 +1,22 @@
 # ADR-020: APA Citation Formatting
 
-**Date:** 2026-08-05
+**Date:** 2026-08-05 (open questions resolved and implemented 2026-08-11)
 **Author:** CServinL
-**Status:** Proposed — design drafted, not built. Several open questions
-(marked below) need cservinl's decision before implementation starts.
-Deliberately deferred out of the ADR-019 session-graph work (task tracking:
-"Add APA citation formatting for claims") — a separate formatting concern
-layered on top of [Claim](../../concepts/claim.md)'s existing
-`CitedClaimNode.sources: list[str]` resolution, not a change to that model.
+**Status:** Implemented, including the chat UI wiring originally left out of
+scope. All 4 open questions below resolved 2026-08-11: hard validation (not
+soft degrade), compute-fresh-on-read (not cached), no model behavior change
+(rendering only), one-time backfill command (not accept-degraded). Phases 1-5
+built as scoped; phases 6-7 (cached string, system-prompt instruction) turned
+out to be moot once their blocking questions resolved toward "don't cache" /
+"no model change" — see each open question below for what actually shipped
+instead. `GET /notes/apa?slugs=...` (`notes_routes.py`) + `+page.svelte`
+fetching/caching it per slug, rendering each claim's APA citation as an extra
+line below its source link, landed same day as a follow-on once cservinl
+asked about it directly — not deferred after all. Deliberately deferred out of the
+ADR-019 session-graph work (task tracking: "Add APA citation formatting for
+claims") — a separate formatting concern layered on top of
+[Claim](../../concepts/claim.md)'s existing `CitedClaimNode.sources: list[str]`
+resolution, not a change to that model.
 
 ## Context
 
@@ -58,74 +67,68 @@ references, with the machinery to go both directions between a slug and its APA 
    the reverse of the "slug → APA" direction, not just a variant of the existing semantic search
    (matching a citation string's specific structure, not general semantic similarity).
 
-## Proposed phases
+## Phases (all built 2026-08-11)
 
-1. **Extend `Source` with the missing bibliographic fields**: `journal: str | None`,
-   `volume: str | None`, `issue: str | None`, `pages: str | None`, `publisher: str | None`,
-   `url: str | None` (fixes finding 3 as a side effect), `item_type: str | None` (APA template
-   selector — journal article / book / webpage / etc.). Thread these through
-   `create_source_from_citekey()`, `get_source()`'s frontmatter read, and the Zotero import call
-   site (`zotero_routes.py`) from `ZoteroItem`'s already-fetched fields (finding 2) — no new
-   external data, just stop discarding what's already there.
-2. **`utils/source_metadata.py` (or similar) — a completeness evaluator.** Given a `Source`,
-   return which fields are missing for a *correct* APA citation of its specific `item_type` (a
-   journal article's requirements differ from a book's or a webpage's) — not just "does it have
-   authors and a year." Used by both phase 3's converter (to degrade gracefully — omit
-   volume/issue rather than crash when absent) and a vault-health view flagging under-cited
-   sources.
-3. **Slug → APA converter** — a pure function, `Source` (+ its completeness evaluation) in,
-   an APA 7th-edition-formatted string out, `item_type`-aware templates. Where it lives (new
-   `citation_format.py` service module vs. a `Source` method) is an implementation-time call.
-4. **APA → Slug converter (reverse lookup)** — inherently fuzzy, unlike `[[@citekey]]`'s exact
-   match: parse (author surname, year) at minimum out of an arbitrary APA-shaped string, narrow
-   candidates by `Source.authors`/`Source.year`, disambiguate by title similarity when multiple
-   sources share an author+year. Needs its own tests around malformed/partial input — this is the
-   "APA-based slug finder" finding 5 identified as missing.
-5. **APA validator** — checks a string actually conforms to APA structural rules (regex/structural,
-   not semantic). Two uses: self-check phase 3's own output in tests, and reject-early on garbage
-   input to phase 4's parser before attempting extraction.
-6. **Whether/how metadata carries a cached APA string** — see open question 2 below; if resolved
-   toward caching, this phase writes the rendered string into frontmatter (`fm["apa"] = ...`)
-   at the same points phase 1's fields get written/edited.
-7. **System-prompt instruction** — see open question 3 below; blocked on resolving what the model
-   is actually being asked to change, since today it never writes citation text at all (only
-   `[^N]` markers + slugs — APA rendering already happens entirely server/UI-side per
-   [Claim](../../concepts/claim.md)'s existing rendering model).
+1. **Extended `Source`** with `journal`/`volume`/`issue`/`pages`/`publisher`/`url`/`item_type`
+   (`vault_models.py`). Threaded through `create_source_from_citekey()`, `get_source()`'s
+   frontmatter read, and the Zotero import route (`zotero_routes.py`, from `ZoteroItem`'s already-
+   fetched fields including `get_field("publisher")` for the one field with no named `ZoteroItem`
+   attribute). Fixed finding 3's `url` silent-drop bug as a side effect.
+2. **`prisma/services/citation_format.py`: `missing_fields_for_apa(source)`** — completeness
+   evaluator, `item_type`-aware (journal-like/book-like/web-like/generic), used by `format_apa()`
+   to degrade gracefully rather than crash on absent fields.
+3. **`citation_format.py`: `format_apa(source) -> str`** — the slug → APA converter. Handles
+   1/2/3+ author lists (APA's `&`-before-last convention), no-author (title leads instead of a
+   repeated title), `n.d.` for a missing year, DOI preferred over a bare URL when both present.
+4. **`citation_format.py`: `find_source_by_apa(text, sources) -> list[Source]`** — the reverse
+   lookup, confirmed fuzzy as expected: parses a leading surname + year (or `n.d.`) out of `text`,
+   filters candidates by both, ranks remaining ties by title word overlap. A real bug caught by its
+   own test suite during implementation: the initial `n.d.` handling matched *any* source
+   regardless of whether that source itself had no year — fixed to require the candidate's own
+   `year is None` too.
+5. **`citation_format.py`: `validate_apa_format(text) -> bool`** — structural check (an
+   author/title lead-in followed by `(Year).`/`(n.d.).`, the shape `format_apa()` itself always
+   produces), not semantic.
+6. **Not built — resolved moot.** Open question 2 resolved toward compute-fresh-on-read; there is
+   no cached APA string to write or regenerate.
+7. **Not built — resolved moot.** Open question 3 resolved toward "no model behavior change";
+   `system_prompt_footnote_section()` is untouched by this ADR.
 
-## Open questions (need cservinl's decision before implementation)
+Additionally, resolving open question 1 required a real design call not anticipated by phases
+1-5: hard-validating `CitedClaimNode.sources` needs vault I/O, which doesn't belong inside a
+Pydantic field validator (no vault access, breaks construction in tests, dependency-free models).
+Built instead as `ChatToolbox.slug_resolves(slug) -> bool` + `ChatAgent._sources_resolve(claim)`,
+wired into `respond()` right after `_extract_claims()` — a claim citing an unresolvable slug is
+now dropped (logged), not just left with `faithfulness_checked = None`. `InferenceNode` trivially
+resolves (no sources to check). And resolving open question 4 needed a real write path that didn't
+exist: `VaultService.update_source_bibliographic_fields()` (merges into existing frontmatter,
+never blanks a field just because a re-fetch didn't return it), plus
+`prisma/services/source_backfill.py` + the `prisma backfill-source-metadata` CLI command
+(dry-run by default, `--apply` to write, mirroring `migrate-chats-to-sess`'s existing UX) —
+skips sources with no `zotero_key` or already-populated fields, re-fetches the rest via
+`ZoteroClient.get_item()`.
 
-1. **Hard-validate `CitedClaimNode.sources` against real vault slugs?** (finding 4) A Pydantic
-   validator or construction-time check would turn today's soft "faithfulness_checked degrades to
-   None" signal into an actual rejection/error — more correct, but changes failure behavior
-   (`ChatAgent` would need a defined response to a model citing a slug that doesn't exist, beyond
-   today's silent degrade).
-2. **Cached APA string in frontmatter, or always computed on demand?** cservinl's ask ("slug
-   metadata containing its APA representation") points at caching, but the codebase's existing
-   precedent for derived text (`RichContent.rendered_html`) is compute-fresh-on-every-read, not
-   cache-at-rest, specifically to avoid staleness drift when the source data changes. If cached,
-   needs a defined regeneration trigger (every `save_source`? explicit re-render command?) so a
-   hand-edited `journal`/`year` in frontmatter can't leave a stale cached APA string behind.
-3. **What does "instruct the model to use APA in references" actually change?** The model doesn't
-   generate reference text today — it emits `[^N]` markers plus a `sources: [slug]` list; APA
-   rendering (once built) would happen entirely at claim-list render time (server/UI), not in the
-   model's own output. Possible actual intents, needing cservinl to pick one: (a) nothing changes
-   about what the model does, this bullet is actually about the renderer, already covered by
-   phases 1-3; (b) the model's *inline prose* should start citing in APA in-text style (e.g. "...as
-   shown by (Smith, 2024)...") in addition to or instead of the `[^N]` marker convention — a real
-   UX change to how claims read, not just how the reference list at the bottom is formatted.
-4. **Backfill for existing sources** — phase 1's new fields are only populated going forward
-   (new Zotero imports). Existing vault sources imported before this lands have no
-   `journal`/`volume`/`issue`/`pages`/`url`/`item_type` on file. Needs either a one-time backfill
-   command (re-fetch from Zotero's API by `zotero_key`, already stored on every `Source`) or
-   acceptance that pre-existing sources render degraded (author/year/title-only) APA citations
-   until re-imported.
+## Open questions — all resolved 2026-08-11
+
+1. **Hard-validate `CitedClaimNode.sources` against real vault slugs?** → **Yes, hard-validate.**
+   See phase list above for where this actually landed (not a Pydantic validator).
+2. **Cached APA string in frontmatter, or always computed on demand?** → **Compute fresh on read.**
+   Matches `RichContent.rendered_html`'s existing precedent; no staleness-drift risk, and
+   `format_apa()` is cheap enough (`missing_fields_for_apa()` + string formatting only, both
+   pure/no I/O) that caching would have been optimizing something that was never slow.
+3. **What does "instruct the model to use APA in references" actually change?** → **Nothing about
+   the model.** Resolved as (a) from the original options — `system_prompt_footnote_section()` is
+   untouched; APA rendering is purely a `format_apa()` call at claim-list render time, same
+   rendering model [Claim](../../concepts/claim.md) already had.
+4. **Backfill for existing sources** → **One-time backfill command**, not accept-degraded. See
+   phase list above.
 
 ## Related
 
 - [Claim](../../concepts/claim.md) — `CitedClaimNode.sources` is what this ADR formats; not
   changed in shape by this work, only rendered differently.
 - [Citation](../../concepts/citation.md) — the `[[@citekey]]` DSL's existing exact-match
-  resolution is the precedent open question 1 is asking whether to extend to claims.
+  resolution was the precedent for hard-validating `CitedClaimNode.sources` too (open question 1).
 - [ADR-017](ADR-017-claim-attribution-and-footnote-model.md) /
   [ADR-019](ADR-019-persisted-format-governance-and-migrations.md) — where `CitedClaimNode` and
   its `sources` field came from.

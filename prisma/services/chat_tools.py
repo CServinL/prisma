@@ -210,6 +210,18 @@ class ChatToolbox:
             return "\n\n".join(m.content.value for m in node.messages) or None
         return getattr(node, "body", None) or None
 
+    def slug_resolves(self, slug: str) -> bool:
+        """ADR-020: hard-validates a claim's `sources` entries against real
+        vault nodes -- existence only, unlike get_node_text() above, which
+        also treats an empty-body node as unresolved (wrong check here: a
+        real but currently-empty Note is still a real slug, just not
+        useful as faithfulness-check input)."""
+        try:
+            self._vault.get_any(slug)
+            return True
+        except FileNotFoundError:
+            return False
+
     def _search_vault(self, query: str, top_k: int = 5) -> ToolResult:
         hits = self._chroma.query(query, top_k=top_k)
         items = []

@@ -171,3 +171,44 @@ def test_generate_md_format_rejects_non_html_node(client, vault):
 def test_generate_md_format_not_found(client):
     r = client.post("/notes/does-not-exist/md")
     assert r.status_code == 404
+
+
+# ── GET /notes/apa (ADR-020 bulk slug -> APA-citation lookup) ─────────────────
+
+def test_get_apa_citations_returns_formatted_string(client, vault):
+    source = vault.create_source_from_citekey(
+        "smith2024", "A Great Paper", "body", zotero_key="ZK1", authors=["Jane Smith"], tags=[], year=2024,
+    )
+    r = client.get(f"/notes/apa?slugs={source.slug}")
+    assert r.status_code == 200
+    assert r.json() == {"smith2024": "Smith, J. (2024). A Great Paper."}
+
+
+def test_get_apa_citations_bulk_lookup(client, vault):
+    a = vault.create_source_from_citekey("a2024", "Paper A", "body", zotero_key="A", authors=[], tags=[])
+    b = vault.create_source_from_citekey("b2024", "Paper B", "body", zotero_key="B", authors=[], tags=[])
+    r = client.get(f"/notes/apa?slugs={a.slug},{b.slug}")
+    assert set(r.json().keys()) == {"a2024", "b2024"}
+
+
+def test_get_apa_citations_omits_missing_slugs(client, vault):
+    source = vault.create_source_from_citekey("smith2024", "A Great Paper", "body", zotero_key="ZK1", authors=[], tags=[])
+    r = client.get(f"/notes/apa?slugs={source.slug},does-not-exist")
+    assert list(r.json().keys()) == ["smith2024"]
+
+
+def test_get_apa_citations_omits_notes_not_just_sources(client, vault):
+    # A claim's sources can point to a Note, not only a Source -- format_apa()
+    # would misfire on one (empty authors, note title as "citation title"),
+    # so this must be skipped rather than producing a garbage citation.
+    note = vault.create_note("A Note", body="text")
+    r = client.get(f"/notes/apa?slugs={note.slug}")
+    assert r.json() == {}
+
+
+def test_get_apa_citations_registered_before_slug_route(client, vault):
+    # Regression test for the route-ordering requirement noted in
+    # notes_routes.py: /apa must not be swallowed by GET /{slug}.
+    r = client.get("/notes/apa?slugs=whatever")
+    assert r.status_code == 200
+    assert isinstance(r.json(), dict)

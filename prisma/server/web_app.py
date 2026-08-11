@@ -25,6 +25,7 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from prisma.server.cors import extra_origins
 from prisma.server.static import CleanUrlStaticFiles
 
 _log = logging.getLogger("prisma.web")
@@ -37,7 +38,7 @@ app = FastAPI(title="Prisma Web")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["tauri://localhost"],
+    allow_origins=["tauri://localhost", *extra_origins()],
     allow_origin_regex=r"^http://(localhost|127\.0\.0\.1)(:\d+)?$",
     allow_methods=["*"],
     allow_headers=["*"],

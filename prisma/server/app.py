@@ -43,6 +43,7 @@ from prisma.server.access_log import AccessLogMiddleware
 from prisma.server.auth import (
     AuthMiddleware, LoginRequest, LoginResponse, classify_zone, issue_token, verify_password,
 )
+from prisma.server.cors import extra_origins
 _t("fastapi ok")
 
 _t("importing coordinator")
@@ -458,7 +459,7 @@ app.add_middleware(AuthMiddleware)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["tauri://localhost"],
+    allow_origins=["tauri://localhost", *extra_origins()],
     # Any port on localhost/127.0.0.1 — covers the API's own port, the Web
     # process's port (ADR-012), and whichever hostname variant the browser
     # resolved (CORS origin matching is exact-string, so both "localhost"

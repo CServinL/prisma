@@ -1,0 +1,107 @@
+# Claim
+
+## What it is
+
+A **Claim** is a per-claim attribution record on a [TurnNode](chat-session-graph.md#node-types)
+within a [Chat](chat.md) — a branch node off the turn that asserted it (`ASSERTS` edge), not flat
+attached data. Where `Chat`'s grounding (Axiom 5) constrains what context the model may draw
+from, a Claim makes visible, per claim, *what kind* of sourcing backs it and *which* document(s)
+— mirroring academic citation practice: what is self-made is never left indistinguishable from
+what belongs to someone else.
+
+Structurally two different node types, not one class with a variant field (see
+[Chat session graph](chat-session-graph.md#node-types) for why the split):
+
+- **`CitedClaimNode`** — traceable to specific vault document(s). Always has `sources` and a
+  meaningful `faithfulness_checked`.
+- **`InferenceNode`** — the model's own reasoning, traceable to no specific vault document.
+  Structurally has neither `sources` nor anything for `faithfulness_checked` to check.
+
+Rendered as a superscript marker inline in the turn's text (`...prior work[^1]`), with a claim
+list appended at the end of the turn — one entry per index, each showing its relation/kind and
+(for `CitedClaimNode`) the linked [Note](note.md)/[Source](source.md)(s). The inline marker is
+clickable (jumps to its list entry) and colored by relation/kind, using the same palette as the
+list's badge, so a claim's sourcing is visible where it's actually read, not only after scrolling
+to the end.
+
+## Notation
+
+| Rendered | Meaning |
+|---|---|
+| `...prior work[^1]` | Inline marker — the claim ending here is claim 1, colored by its relation/kind |
+| `1. [citation] Smith 2024, "Attention..."` | Claim list entry — relation/kind + linked document (clickable, opens the source) |
+
+## Fields
+
+### `CitedClaimNode`
+
+| Field | Type | Description |
+|---|---|---|
+| `id` | str | Stable node id (uuid4) — this and every other node type in the session graph got one 2026-08-05 so branches can be referenced without positional fragility |
+| `index` | int | Sequential per turn, 1-based — the superscript number shown inline |
+| `claim_text` | str | The specific span of the turn's content this claim covers — extracted deterministically (the sentence preceding the `[^N]` marker), not model self-reported. Used as `faithfulness_checked`'s verification input; not separately rendered |
+| `sources` | list[str] | Vault node slugs (`Note`/`Source`) this claim ties to |
+| `relation` | `citation` \| `attribution` \| `relational` | What kind of sourcing this claim has — see below |
+| `faithfulness_checked` | bool \| None | Whether an automated check confirmed the claim accurately represents the cited source(s): `True`/`False` from an LLM-judge verification call run automatically every turn, `None` when there was nothing to check (no `claim_text`, or an unresolvable source slug). Orthogonal to `relation`, not a relation value itself |
+
+| `relation` value | Meaning | `sources` |
+|---|---|---|
+| `citation` | Direct quote or close paraphrase of a specific passage | exactly one |
+| `attribution` | Synthesized/paraphrased from one specific document, not verbatim | exactly one |
+| `relational` | Claim connects or synthesizes across multiple documents (this is what the knowledge graph's `GRAPH_CONTEXT` chat tool inherently produces) | two or more |
+
+### `InferenceNode`
+
+| Field | Type | Description |
+|---|---|---|
+| `id` | str | Stable node id (uuid4) |
+| `index` | int | Sequential per turn, 1-based, same numbering space as `CitedClaimNode.index` on the same turn |
+| `claim_text` | str | The model's own reasoning/generalization this marker covers |
+
+No `sources`, no `faithfulness_checked` — there's structurally nothing to check or cite. This is
+what replaced the old, single-class `Footnote`'s `relation == "ai-inference"` case (see "Relations"
+below).
+
+## Relations
+
+- Attached to a `TurnNode` within a [Chat](chat.md) (`TurnNode.claims: list[CitedClaimNode |
+  InferenceNode]`) — an `ASSERTS` edge in the [session graph](chat-session-graph.md#edge-types).
+- `sources` reference [Note](note.md)/[Source](source.md) slugs — the same vault nodes a
+  [Citation](citation.md) or [WikiLink](wiki-link.md) would resolve to — via a `CITES` edge from
+  the `CitedClaimNode`, never from `TurnNode` directly.
+- `relation == citation` claims are backed by the same resolution mechanism as `Citation`.
+- `relation == relational` claims typically originate from `ChatToolbox._graph_context` (the
+  knowledge graph query tool), since graph traversal is inherently cross-document.
+- Replaces the pre-2026-08-05 `Footnote`/`FootnoteRelation` model (single class, a
+  `relation == "ai-inference"` value standing in for what's now `InferenceNode`) — see
+  [Chat session graph](chat-session-graph.md#node-types) for why the split.
+
+## Relevant axioms
+
+> Claims are footnoted. See [Axiom 16](../ontologia.md). Distinct from grounding
+> (chat-wide context scope, [Axiom 5](../ontologia.md)) and from faithfulness (accuracy of
+> representation, tracked per-claim via `faithfulness_checked`, not a `relation` value).
+
+## Build status
+
+Built (2026-07-31): the original single-class `Footnote` data model, `ChatAgent`
+self-segmenting its output into per-claim `[^N]` markers and self-reporting `relation`/`sources`
+via a trailing `FOOTNOTES_JSON:` line, `relation=relational` sourcing from
+`ChatToolbox._graph_context`, and UI rendering.
+
+Built (2026-08-03): `faithfulness_checked` verification — see ADR-017. `claim_text` is extracted
+deterministically from the rendered reply (not model self-reported), then every sourced claim is
+checked against its cited source(s) via a one-shot LLM-judge call, run automatically after every
+turn. This is a heuristic check, not a guarantee: an LLM judge can itself be wrong, so a `True`
+doesn't certify accuracy the way a citekey resolving to a real document does — it catches the
+common, egregious cases (a claim that plainly contradicts or isn't addressed by its cited
+source), not subtle misrepresentation.
+
+Fixed (2026-08-04): footnotes were being computed correctly per-turn but never actually
+persisted. Fixed that day via a `<!-- prisma:meta {...} -->` JSON comment per turn; superseded
+2026-08-05 when chats moved to pure-JSON `.sess` storage (ADR-019).
+
+Split (2026-08-05, ADR-019): the single `Footnote`/`FootnoteRelation` class replaced by
+`CitedClaimNode`/`InferenceNode` (this page) as part of the chat session graph redesign — see
+[Chat session graph](chat-session-graph.md#node-types) for the reasoning. `ChatAgent._verify_claim`
+(renamed from `_verify_footnote`) and the API/UI all updated to the split shape in the same pass.

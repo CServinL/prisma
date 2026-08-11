@@ -1,0 +1,47 @@
+{
+  "description": "One reasoning step, off the main line (`TurnNode.thoughts`) -- the\nsequentialthinking-motivated shape (see ADR-019/chat-session-graph.md).\nSchema support only; nothing populates this yet (gated behind the\nstill-deferred model-category `has_native_reasoning` flag).",
+  "properties": {
+    "branches_from": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Branches From"
+    },
+    "id": {
+      "title": "Id",
+      "type": "string"
+    },
+    "revises": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Revises"
+    },
+    "thought": {
+      "title": "Thought",
+      "type": "string"
+    },
+    "thought_number": {
+      "title": "Thought Number",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "thought",
+    "thought_number"
+  ],
+  "title": "ThinkingNode",
+  "type": "object"
+}

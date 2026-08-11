@@ -18,6 +18,7 @@ import sys
 import click
 
 from .commands.auth import auth_group
+from .commands.schema import schema_group
 
 
 @click.group()
@@ -264,7 +265,45 @@ def reload_config(port: int):
     click.echo(f"Compute pools: {'reloaded' if pools_reloaded else 'supervisor unreachable — not reloaded'}")
 
 
+@cli.command("migrate-chats-to-sess")
+@click.option("--vault", "vault_root", default=None, help="Vault root (defaults to config.toml's vault_root)")
+@click.option(
+    "--apply", "apply_", is_flag=True,
+    help="Actually write .sess files (default is dry-run: report only, write nothing)",
+)
+@click.option(
+    "--remove-md", is_flag=True,
+    help="Delete the source .md once its .sess is written successfully (only with --apply; kept by default)",
+)
+def migrate_chats_to_sess_cmd(vault_root: str | None, apply_: bool, remove_md: bool):
+    """One-time migration: convert vault/chats/*.md (markdown transcript +
+    embedded prisma:meta JSON comment) to pure-JSON .sess files (ADR-019).
+    Dry-run by default — pass --apply to actually write."""
+    from prisma.services.chat_migration import migrate_chats_to_sess
+    from prisma.services.vault import VaultService
+    from prisma.utils.config import ConfigLoader
+
+    root = vault_root or str(ConfigLoader().get_vault_root())
+    vault = VaultService(vault_root=root)
+    results = migrate_chats_to_sess(vault, dry_run=not apply_, remove_md=remove_md)
+
+    if not results:
+        click.echo("No chat .md files found.")
+        return
+
+    for r in results:
+        if r.error:
+            click.echo(f"  ERROR  {r.md_path.name}: {r.error}")
+        else:
+            verb = "would write" if not apply_ else "wrote"
+            click.echo(f"  {verb} {r.sess_path.name} ({r.message_count} messages)")
+
+    ok = sum(1 for r in results if r.error is None)
+    click.echo(f"\n{ok}/{len(results)} converted{' (dry run — nothing written)' if not apply_ else ''}.")
+
+
 cli.add_command(auth_group)
+cli.add_command(schema_group)
 
 
 if __name__ == '__main__':

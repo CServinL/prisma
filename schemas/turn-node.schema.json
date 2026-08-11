@@ -1,0 +1,347 @@
+{
+  "$defs": {
+    "ChatRole": {
+      "enum": [
+        "user",
+        "assistant"
+      ],
+      "title": "ChatRole",
+      "type": "string"
+    },
+    "CitedClaimNode": {
+      "description": "A claim traceable to specific vault document(s) -- `citation`/\n`attribution`/`relational` share this shape (all have real `sources`, a\nmeaningful `faithfulness_checked`), unlike `InferenceNode` below, which\nstructurally has neither. See docs/ontologia.md Axiom 16.",
+      "properties": {
+        "claim_text": {
+          "title": "Claim Text",
+          "type": "string"
+        },
+        "faithfulness_checked": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Faithfulness Checked"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "index": {
+          "title": "Index",
+          "type": "integer"
+        },
+        "kind": {
+          "const": "claim",
+          "default": "claim",
+          "title": "Kind",
+          "type": "string"
+        },
+        "relation": {
+          "enum": [
+            "citation",
+            "attribution",
+            "relational"
+          ],
+          "title": "Relation",
+          "type": "string"
+        },
+        "sources": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Sources",
+          "type": "array"
+        }
+      },
+      "required": [
+        "index",
+        "claim_text",
+        "relation"
+      ],
+      "title": "CitedClaimNode",
+      "type": "object"
+    },
+    "ContentFormat": {
+      "enum": [
+        "md",
+        "html",
+        "svg",
+        "latex"
+      ],
+      "title": "ContentFormat",
+      "type": "string"
+    },
+    "InferenceNode": {
+      "description": "A claim that's the model's own reasoning, traceable to no specific\nvault document -- structurally distinct from CitedClaimNode (no\n`sources`, nothing for `faithfulness_checked` to check), not the same\nshape with empty fields.",
+      "properties": {
+        "claim_text": {
+          "title": "Claim Text",
+          "type": "string"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "index": {
+          "title": "Index",
+          "type": "integer"
+        },
+        "kind": {
+          "const": "inference",
+          "default": "inference",
+          "title": "Kind",
+          "type": "string"
+        }
+      },
+      "required": [
+        "index",
+        "claim_text"
+      ],
+      "title": "InferenceNode",
+      "type": "object"
+    },
+    "RecallRef": {
+      "description": "A `RECALL` hit -- a pointer to another node elsewhere in a session\ngraph, never a duplicate of its content (see ADR-019's storage-vs-\ncontext distinction). Resolved/dereferenced only in the in-memory\ncontext assembly for the turn that recalled it.",
+      "properties": {
+        "chat_slug": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Chat Slug"
+        },
+        "node_id": {
+          "title": "Node Id",
+          "type": "string"
+        },
+        "node_kind": {
+          "title": "Node Kind",
+          "type": "string"
+        }
+      },
+      "required": [
+        "node_id",
+        "node_kind"
+      ],
+      "title": "RecallRef",
+      "type": "object"
+    },
+    "RichContent": {
+      "properties": {
+        "format": {
+          "$ref": "#/$defs/ContentFormat",
+          "default": "md"
+        },
+        "rendered_html": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Rendered Html"
+        },
+        "value": {
+          "title": "Value",
+          "type": "string"
+        }
+      },
+      "required": [
+        "value"
+      ],
+      "title": "RichContent",
+      "type": "object"
+    },
+    "ThinkingNode": {
+      "description": "One reasoning step, off the main line (`TurnNode.thoughts`) -- the\nsequentialthinking-motivated shape (see ADR-019/chat-session-graph.md).\nSchema support only; nothing populates this yet (gated behind the\nstill-deferred model-category `has_native_reasoning` flag).",
+      "properties": {
+        "branches_from": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Branches From"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "revises": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Revises"
+        },
+        "thought": {
+          "title": "Thought",
+          "type": "string"
+        },
+        "thought_number": {
+          "title": "Thought Number",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "thought",
+        "thought_number"
+      ],
+      "title": "ThinkingNode",
+      "type": "object"
+    },
+    "ToolCallNode": {
+      "description": "One tool invocation, off the main line (`TurnNode.tool_calls`) --\nunlike v1's `ToolCallRecord`, `result` is persisted, not discarded, so a\nlater turn can `RECALL` it instead of only ever re-running the tool.",
+      "properties": {
+        "args": {
+          "additionalProperties": true,
+          "title": "Args",
+          "type": "object"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "result": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Result"
+        },
+        "status": {
+          "default": "ok",
+          "enum": [
+            "ok",
+            "error"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "tool": {
+          "title": "Tool",
+          "type": "string"
+        }
+      },
+      "required": [
+        "tool"
+      ],
+      "title": "ToolCallNode",
+      "type": "object"
+    },
+    "TurnNode": {
+      "properties": {
+        "alternates": {
+          "items": {
+            "$ref": "#/$defs/TurnNode"
+          },
+          "title": "Alternates",
+          "type": "array"
+        },
+        "claims": {
+          "items": {
+            "discriminator": {
+              "mapping": {
+                "claim": "#/$defs/CitedClaimNode",
+                "inference": "#/$defs/InferenceNode"
+              },
+              "propertyName": "kind"
+            },
+            "oneOf": [
+              {
+                "$ref": "#/$defs/CitedClaimNode"
+              },
+              {
+                "$ref": "#/$defs/InferenceNode"
+              }
+            ]
+          },
+          "title": "Claims",
+          "type": "array"
+        },
+        "content": {
+          "$ref": "#/$defs/RichContent"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model"
+        },
+        "recalls": {
+          "items": {
+            "$ref": "#/$defs/RecallRef"
+          },
+          "title": "Recalls",
+          "type": "array"
+        },
+        "role": {
+          "$ref": "#/$defs/ChatRole"
+        },
+        "thoughts": {
+          "items": {
+            "$ref": "#/$defs/ThinkingNode"
+          },
+          "title": "Thoughts",
+          "type": "array"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "title": "Timestamp",
+          "type": "string"
+        },
+        "tool_calls": {
+          "items": {
+            "$ref": "#/$defs/ToolCallNode"
+          },
+          "title": "Tool Calls",
+          "type": "array"
+        }
+      },
+      "required": [
+        "role",
+        "content"
+      ],
+      "title": "TurnNode",
+      "type": "object"
+    }
+  },
+  "$ref": "#/$defs/TurnNode"
+}

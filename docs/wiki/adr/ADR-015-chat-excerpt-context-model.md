@@ -9,7 +9,9 @@ compressed mode, verbatim mode + the budget-driven mode switch
 (`ChatAgent.context_usage()` + the UI's `k`/`M`-formatted display). Verbatim
 mode has no practical effect yet since only the local, small-context
 `qwen2.5:7b-32k` is configured — it activates automatically whenever a
-larger-context backend is, no further code changes needed.
+larger-context backend is, no further code changes needed. The context-
+overflow risk this ADR's own "Negative" consequences flagged (see below) was
+closed 2026-08-04 — see "Context-window overflow guard" below.
 
 ## Context
 
@@ -137,6 +139,42 @@ convention for the UI — the Compute Pools page's numbers
 MB`), not k/M suffixes, so this isn't reusing an existing helper; a small
 `formatTokenCount()`-style function will need to be added when the label is
 built.
+
+## Context-window overflow guard (added 2026-08-04)
+
+Found live: a chat with enough pinned turns (Excerpt content, never subject
+to `_bounded_history`'s trim) plus ordinary history/tool-result traffic
+exceeded the real local backend's context window (`llama-server`'s own
+400: `request (N tokens) exceeds the available context size`), while the
+session's own context-usage label still read comfortably under its `16k`
+budget — exactly the confusable-numbers risk this ADR's "Resolved" section
+above describes, now actually hit. `ChatLLM.complete()` treated the
+resulting failure the same as any other unreachable-backend case, so the
+user saw a generic "couldn't reach the language model" with no indication
+the real cause was context size, or what to do about it.
+
+Fixed in `ChatAgent.respond()`: before every completion call in the tool
+loop (not just the first — a tool result injected mid-loop can push an
+initially-fitting assembly over the edge on its own), the current
+`messages` list's estimated token total is compared against
+`self.context_window` (the backend's real ceiling, `ChatLLM.context_window`
+— see [ADR-014](ADR-014-chat-llm-backend-interface.md)). Over budget short-
+circuits immediately, without ever calling the backend, returning:
+
+> This chat's history and Excerpt exceed `<model>`'s context window (~N
+> tokens estimated vs. an M-token limit) — I can't continue. Remove some
+> pinned turns to free up context from Excerpt buildup, or switch this chat
+> to a model with a bigger context window.
+
+Deliberately actionable (names both concrete fixes) rather than a bare
+error, since neither fix is discoverable from a generic failure message —
+"remove pinned turns" isn't an obvious response to "couldn't reach the
+model." Uses the same `len(text) // 4` estimate as `context_usage()`
+elsewhere in this file, not an exact tokenizer count — consistent with the
+rest of this codebase's token-budget heuristics, and conservative enough
+in practice (undercounts split/multi-byte tokens rather than over) that a
+false negative here just means one real 400 from the backend instead of
+zero, not silent data loss.
 
 ## Consequences (once built)
 

@@ -59,6 +59,7 @@ _t("vault ok")
 
 _t("importing renderer")
 from prisma.services.renderer import render as vault_render
+from prisma.services.chat_render import render_chat_message
 _t("renderer ok")
 
 _t("importing knowledge_graph_client")
@@ -82,8 +83,9 @@ from prisma.services.sync_orchestrator import SyncDecision, diff_manifest
 _t("sync_orchestrator ok")
 
 _t("importing vault_models")
+from prisma.schema_gov import ContentFormat, RichContent
 from prisma.storage.models.vault_models import (
-    Chat, ChatMessage, ChatRole, Footnote, NodeType, RenderedNode, ToolCallRecord,
+    Chat, ChatRole, ClaimNode, NodeType, RecallRef, RenderedNode, ToolCallNode, TurnNode,
     VaultTreeNode,
 )
 _t("vault_models ok")
@@ -361,6 +363,18 @@ def _chat_blocked_reason(chroma: ChromaIndexer, kg: KnowledgeGraphClient) -> str
     return None
 
 
+def _render_chat_html(content: str) -> str:
+    """Best-effort sanitized HTML for a chat message -- a rendering bug must
+    never break the chat response itself (same "degrade, don't 500" posture
+    as vault_stats/zotero_info in status() below); the UI still has the raw
+    `content` to fall back to."""
+    try:
+        return render_chat_message(content, _vault)
+    except Exception as exc:
+        _log.warning("chat message render failed, falling back to empty html: %s", exc)
+        return ""
+
+
 def _build_chat_agent(vault: "VaultService", chroma: ChromaIndexer, kg: KnowledgeGraphClient) -> ChatAgent:
     from prisma.utils.config import ConfigLoader
     cfg = ConfigLoader()
@@ -369,6 +383,25 @@ def _build_chat_agent(vault: "VaultService", chroma: ChromaIndexer, kg: Knowledg
     return ChatAgent(
         llm, toolbox, system_prompt=load_system_prompt(),
         blocked_reason=lambda: _chat_blocked_reason(chroma, kg),
+    )
+
+
+def _build_chat_agent_for_model(model: str) -> ChatAgent:
+    """One-off ChatAgent for a turn regeneration (ADR-019 §6a) against a
+    model other than the chat's currently-configured one -- never replaces
+    `_chat_agent` itself. pool/base_url/context_window are inherited from
+    the current chat config unchanged; there's no per-model config roster
+    yet (that's the deferred model-category work, ADR-019 §3a), so a
+    regeneration against a model with a genuinely different real context
+    window will estimate against the wrong ceiling until that roster exists."""
+    from prisma.utils.config import ConfigLoader
+    cfg = ConfigLoader()
+    chat_config = cfg.get_chat_config().model_copy(update={"model": model})
+    llm = ChatLLM(chat_config, ollama_host=cfg.get_llm_config().host)
+    toolbox = ChatToolbox(_chroma, _indexer, _vault)
+    return ChatAgent(
+        llm, toolbox, system_prompt=load_system_prompt(),
+        blocked_reason=lambda: _chat_blocked_reason(_chroma, _indexer),
     )
 
 
@@ -530,12 +563,18 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     chat_slug: str
     reply: str
-    tool_calls: list[ToolCallRecord]
-    footnotes: list[Footnote] = []
+    tool_calls: list[ToolCallNode]
+    claims: list[ClaimNode] = []
+    recalls: list[RecallRef] = []
+    html: str = ""
 
 
 class CreateChatRequest(BaseModel):
     title: Optional[str] = None  # None auto-generates a timestamp title
+
+
+class RegenerateTurnRequest(BaseModel):
+    model: Optional[str] = None  # None = the chat's currently-configured model
 
 
 class SetTurnPinnedRequest(BaseModel):
@@ -873,7 +912,8 @@ class VaultStats(BaseModel):
     streams: int
 
 
-class OllamaStatus(BaseModel):
+class LLMBackendStatus(BaseModel):
+    provider: str
     reachable: bool
 
 
@@ -891,7 +931,10 @@ class SystemStatusResponse(BaseModel):
     chroma: ChromaStatus
     vault: VaultStats
     zotero: Optional[ZoteroStatus] = None
-    ollama: OllamaStatus
+    # None for a cloud chat provider (openrouter/anthropic) -- there's no
+    # single "is it up" host to probe for those, so the field is just
+    # absent rather than a misleading always-false reachable.
+    llm_backend: Optional[LLMBackendStatus] = None
     # resources/processes are proxied verbatim from the supervisor's own
     # stdlib-only control API (see resource_lock.py's module docstring and
     # ADR-012's finding #6 -- supervisor.py deliberately can't import
@@ -932,6 +975,14 @@ def status():
     except Exception as exc:
         _log.debug("zotero status probe failed: %s", exc)
 
+    llm_backend = None
+    if _chat_agent.provider in ("ollama", "llama_cpp"):
+        try:
+            llm_backend = {"provider": _chat_agent.provider, "reachable": _chat_agent.reachable()}
+        except Exception as exc:
+            _log.debug("llm backend reachability probe failed: %s", exc)
+            llm_backend = {"provider": _chat_agent.provider, "reachable": False}
+
     return {
         "online": connectivity.is_online,
         "config": {"ok": config_ok, "error": config_error},
@@ -943,7 +994,7 @@ def status():
         "chroma": _chroma.status(),
         "vault": vault_stats,
         "zotero": zotero_info,
-        "ollama": {"reachable": _indexer._ollama_ready()},
+        "llm_backend": llm_backend,
         "resources": resource_lock.status("127.0.0.1", resource_lock.default_port()),
         "processes": resource_lock.process_status("127.0.0.1", resource_lock.default_port()),
         # The chat.model/pool actually configured right now — the UI shows
@@ -1047,6 +1098,12 @@ def _with_context_usage(chat_node: Chat) -> Chat:
     """Attaches response-only fields (ADR-015) — not persisted, computed
     fresh on every response since they depend on the live-configured
     ChatAgent / in-memory regeneration state, not stored chat data."""
+    # Assistant messages only -- a user message is the user's own plain
+    # typed text, nothing to render (no markdown formatting expected, no
+    # footnote markers, which only ever appear in a generated reply).
+    for msg in chat_node.messages:
+        if msg.role == ChatRole.assistant:
+            msg.content.rendered_html = _render_chat_html(msg.content.value)
     excerpt_notes = []
     if chat_node.excerpt_slug:
         try:
@@ -1087,8 +1144,8 @@ def chat(req: ChatRequest):
             excerpt_notes.append(_vault.get_note(chat_node.excerpt_slug))
         except FileNotFoundError:
             _log.warning("chat %r: excerpt note %r no longer exists", chat_node.slug, chat_node.excerpt_slug)
-    user_msg = ChatMessage(role=ChatRole.user, content=req.message)
-    assistant_msg = _chat_agent.respond(history, req.message, excerpt_notes=excerpt_notes)
+    user_msg = TurnNode(role=ChatRole.user, content=RichContent(format=ContentFormat.markdown, value=req.message))
+    assistant_msg = _chat_agent.respond(history, req.message, excerpt_notes=excerpt_notes, chat_slug=chat_node.slug)
     # append_messages (not save_chat with the pre-call `history` snapshot)
     # re-reads the chat's *current* messages atomically right before
     # writing — closes the race where a DELETE /chats/{slug}/messages/{index}
@@ -1097,9 +1154,53 @@ def chat(req: ChatRequest):
     _vault.append_messages(chat_node.slug, [user_msg, assistant_msg], model=_chat_agent.model)
     _activity.info("action=chat slug=%s tool_calls=%d", chat_node.slug, len(assistant_msg.tool_calls))
     return ChatResponse(
-        chat_slug=chat_node.slug, reply=assistant_msg.content, tool_calls=assistant_msg.tool_calls,
-        footnotes=assistant_msg.footnotes,
+        chat_slug=chat_node.slug, reply=assistant_msg.content.value, tool_calls=assistant_msg.tool_calls,
+        claims=assistant_msg.claims, recalls=assistant_msg.recalls, html=_render_chat_html(assistant_msg.content.value),
     )
+
+
+@app.post("/chats/{slug}/turns/{index}/regenerate", response_model=Chat)
+def regenerate_turn(slug: str, index: int, req: RegenerateTurnRequest):
+    """ADR-019 §6a: regenerate one assistant turn — with the chat's current
+    model, or (req.model given) a one-off override for just this
+    regeneration. Chat.model (the chat's own configured model) is never
+    touched by this route, even when an override is used — a real model
+    switch is a separate, deliberate action. The replaced attempt is kept
+    as an alternate (2026-08-04 decision: preserve, don't discard), so
+    different models' answers to the same prompt stay comparable."""
+    try:
+        chat_node = _vault.get_chat(slug)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"chat not found: {slug!r}")
+    if index < 0 or index >= len(chat_node.messages):
+        raise HTTPException(status_code=400, detail=f"invalid turn index: {index}")
+    target = chat_node.messages[index]
+    if target.role != ChatRole.assistant:
+        raise HTTPException(status_code=400, detail="only an assistant turn can be regenerated")
+    if index == 0 or chat_node.messages[index - 1].role != ChatRole.user:
+        raise HTTPException(status_code=400, detail="turn has no preceding user message to regenerate from")
+    user_text = chat_node.messages[index - 1].content.value
+    history = chat_node.messages[: index - 1]
+
+    excerpt_notes = []
+    if chat_node.excerpt_slug:
+        try:
+            excerpt_notes.append(_vault.get_note(chat_node.excerpt_slug))
+        except FileNotFoundError:
+            _log.warning("chat %r: excerpt note %r no longer exists", slug, chat_node.excerpt_slug)
+
+    agent = _chat_agent if req.model is None else _build_chat_agent_for_model(req.model)
+    new_attempt = agent.respond(history, user_text, excerpt_notes=excerpt_notes, chat_slug=slug)
+    new_attempt = new_attempt.model_copy(update={
+        "alternates": list(target.alternates) + [target.model_copy(update={"alternates": []})],
+    })
+    messages = list(chat_node.messages)
+    messages[index] = new_attempt
+    # Deliberately no model= here -- see the docstring above: a one-off
+    # regeneration must never overwrite the chat's own configured model.
+    updated = _vault.save_chat(slug, messages)
+    _activity.info("action=regenerate_turn slug=%s index=%d model=%s", slug, index, agent.model)
+    return _with_context_usage(updated)
 
 
 def _regenerate_excerpt_now(slug: str, pinned_indices: list[int], generation: int) -> None:
@@ -1122,7 +1223,7 @@ def _regenerate_excerpt_now(slug: str, pinned_indices: list[int], generation: in
     if not pinned_turns:
         summary = "(nothing pinned yet)"
     else:
-        turns_text = "\n\n".join(f"{m.role.value}: {m.content}" for m in pinned_turns)
+        turns_text = "\n\n".join(f"{m.role.value}: {m.content.value}" for m in pinned_turns)
         if _chat_agent.excerpt_mode(turns_text) == "verbatim":
             summary = None
         else:

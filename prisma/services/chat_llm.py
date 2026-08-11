@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import logging
 import os
+import socket
+from urllib.parse import urlparse
 
 from openai import OpenAI
 
@@ -103,6 +105,26 @@ class ChatLLM:
     @property
     def context_window(self) -> int:
         return self._config.context_window
+
+    def reachable(self, timeout: float = 3.0) -> bool:
+        """Plain TCP probe of this backend's own resolved base_url --
+        meaningful only for local providers (ollama/llama_cpp); callers
+        checking a cloud provider (openrouter/anthropic) shouldn't call
+        this at all (see app.py's /status, which only calls it when
+        provider is local). Same "just check the port" convention
+        knowledge_graph_service.py's _ollama_ready used, but parameterized
+        on the actually-configured host instead of a hardcoded 11434 --
+        that hardcoding meant a provider=llama_cpp deployment (a different
+        default port) was reported unreachable regardless of whether it
+        was actually up."""
+        parsed = urlparse(self._resolve_base_url())
+        host = parsed.hostname or "127.0.0.1"
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        try:
+            with socket.create_connection((host, port), timeout=timeout):
+                return True
+        except OSError:
+            return False
 
     def _resolve_base_url(self) -> str:
         if self._config.base_url:

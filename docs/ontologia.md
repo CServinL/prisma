@@ -71,7 +71,8 @@ The key separation:
 | [WikiLink](concepts/wiki-link.md) | `[[slug]]` DSL — navigate to a vault node | concepts/wiki-link.md |
 | [Transclusion](concepts/transclusion.md) | `![[slug]]` DSL — embed node content inline | concepts/transclusion.md |
 | [Citation](concepts/citation.md) | `[[@citekey]]` DSL — reference a Source | concepts/citation.md |
-| [Footnote](concepts/footnote.md) | Per-claim attribution marker on a Chat turn — what kind of sourcing backs this claim, and which document(s) | concepts/footnote.md |
+| [Claim](concepts/claim.md) | Per-claim attribution node (`CitedClaimNode`/`InferenceNode`) on a Chat turn — what kind of sourcing backs this claim, and which document(s) | concepts/claim.md |
+| [Chat session graph](concepts/chat-session-graph.md) | A Chat's own internal flow as nodes/edges (turns, tool calls, claims, thinking steps) rather than a flat message list — distinct from the knowledge graph below | concepts/chat-session-graph.md |
 | [GraphNode](concepts/graph-node.md) | Vault node as a vertex in the knowledge graph | concepts/graph-node.md |
 | [Job](concepts/job.md) | Async literature review task (server-side) | concepts/job.md |
 
@@ -91,7 +92,7 @@ The key separation:
 | **Note promotion** | chat excerpt selected by user → new `Note` (back-linked via `promoted_from_chat`) |
 | **Stream scheduling** | `_StreamScheduler` daemon checks every 5 min; runs any `Stream` where `next_update ≤ now` and `status == active` and `refresh_frequency != manual` |
 | **docu-craft conversion** | companion file (PDF, HTML, …) → docu-craft → `.md` body for the knowledge graph indexer + HTML view for UI |
-| **Footnote rendering** | assistant turn generated → each claim needing attribution gets a sequential superscript marker (`word¹`) inline in `ChatMessage.content` → a footnote list is appended at the end of the turn, each entry showing `Footnote.relation` + the linked `Note`/`Source`(s) |
+| **Claim rendering** | assistant turn generated → each claim needing attribution gets a sequential `[^N]` marker inline in `TurnNode.content` (clickable, colored by relation/kind) → a claim list is appended at the end of the turn, each entry showing the `CitedClaimNode.relation` (or `InferenceNode`'s kind) + the linked `Note`/`Source`(s) → persisted per turn (`TurnNode.claims`) alongside the transcript so it survives reload |
 
 ### Stream run — per-candidate pipeline (detailed)
 
@@ -164,7 +165,7 @@ Rules that are always true. Not preferences — invariants.
 
 15. **Collection membership is the acceptance record.** A `ZoteroItem` being in a stream's collection is the only record that the stream's LLM gate accepted it. Absence from a collection means either: the stream hasn't run yet, the paper wasn't found, or the LLM rejected it. These three cases are not distinguished — they are all "not accepted by this stream."
 
-16. **Claims are footnoted.** Distinct from Axiom 5 (`grounded` = the *chat's context is scoped to vault nodes*), every claim in an assistant turn that asserts something must carry a [Footnote](concepts/footnote.md) marking *what kind* of sourcing backs it — a direct citation, an attributed paraphrase, a cross-document synthesis, or the model's own inference with no vault source at all — and *which* `Note`/`Source` document(s), if any. Mirrors the academic-writing norm the ontology is named for: what is self-made is never left indistinguishable from what belongs to someone else. See ADR-017.
+16. **Claims are footnoted.** Distinct from Axiom 5 (`grounded` = the *chat's context is scoped to vault nodes*), every claim in an assistant turn that asserts something must carry a [Claim](concepts/claim.md) node marking *what kind* of sourcing backs it — a direct citation, an attributed paraphrase, a cross-document synthesis, or the model's own inference with no vault source at all — and *which* `Note`/`Source` document(s), if any. Mirrors the academic-writing norm the ontology is named for: what is self-made is never left indistinguishable from what belongs to someone else. See ADR-017, ADR-019.
 
 ---
 
@@ -174,8 +175,18 @@ Concepts that belong to the domain and are defined here, but whose code support 
 
 - **SmartTag** — defined in ontology; not yet applied during stream runs or import.
 - **PaperSummary per stream item** — produced during `prisma review`; not yet generated per-item during stream runs.
-- **Footnote / claim attribution** — data model defined (`Footnote`, `FootnoteRelation`), Axiom 16 and ADR-017 written; `ChatAgent` self-segmentation, `ChatToolbox._graph_context` wiring, UI rendering, and automated `faithfulness_checked` verification are all built (2026-07-31 / 2026-08-03, see ADR-017).
+- **Claim attribution** — data model defined (`CitedClaimNode`/`InferenceNode`, replacing the
+  original single-class `Footnote`/`FootnoteRelation`), Axiom 16 and ADR-017/ADR-019 written;
+  `ChatAgent` self-segmentation, `ChatToolbox._graph_context` wiring, UI rendering, and automated
+  `faithfulness_checked` verification are all built (2026-07-31 / 2026-08-03 / 2026-08-05, see
+  ADR-017, ADR-019).
 - **ChromaDB / semantic search** — integrated (ADR-009); see `services/chroma_service.py`, wired into `/search/deep`.
 - **Async rewrite** — `PrismaCoordinator` and agents are synchronous; `ThreadPoolExecutor` offloads blocking I/O. Full async rewrite deferred.
 - **Encryption at rest** — vault files are plaintext. `fscrypt` / `gocryptfs` / `age` deferred.
 - **`AnalysisAgent` confidence persistence** — `confidence_score` is computed during search; not saved to `ZoteroItem` or `Source` frontmatter.
+- **Chat session graph** — shipped 2026-08-05 (ADR-019 v2, see concepts/chat-session-graph.md): a
+  real node/edge graph generalizing `TurnNode.tool_calls`/`alternates`/`claims` (formerly flat,
+  resultless summaries) plus a `SessionOrchestrator` component for per-turn selective context
+  loading and a `RECALL` tool for pulling in graph nodes the rolling history window already
+  dropped. Still open: `ThinkingNode` population (schema only, gated behind the deferred
+  model-category `has_native_reasoning` flag) — see concepts/chat-session-graph.md#status.

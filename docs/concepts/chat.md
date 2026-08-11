@@ -3,11 +3,14 @@
 ## What it is
 
 A **Chat** is a saved LLM session grounded in vault nodes. You bring Sources and Notes as
-context; the model reasons over them. No external retrieval happens at chat time — the model
-only sees what is already in your vault.
+context; the model reasons over them, optionally pulling in more of the vault at answer time
+via tool calls. No external (internet) retrieval happens at chat time — everything the model
+sees traces back to something already in your vault.
 
-Chats are saved as `.md` files in `vault/chats/`. Good excerpts from a chat can be
-promoted to [Notes](note.md).
+Chats are saved as pure-JSON `.sess` files in `vault/chats/` (ADR-019) — the only vault node
+type that isn't `.md`, since only the Excerpt (see below) is genuinely prose; everything else a
+chat persists is structured, typed data. Pinned turns from a chat are distilled into a single
+[Note](note.md) (the chat's **Excerpt**, see below) rather than promoted piecemeal.
 
 ## Fields
 
@@ -15,27 +18,147 @@ promoted to [Notes](note.md).
 |---|---|---|
 | `slug` | str | URL-safe identifier |
 | `title` | str | Display name |
-| `messages` | list[`ChatMessage`] | Full turn history |
+| `messages` | list[`TurnNode`] | The main line of the [session graph](chat-session-graph.md) — full turn history, list order = `NEXT` |
 | `context_slugs` | list[str] | Vault node slugs used as context for this session |
-| `model` | str | Ollama model name used |
-| `promoted_excerpts` | list[str] | Note slugs promoted from this chat |
+| `model` | str | The model this chat is *currently* configured to use — overwritten on every turn, not a historical record (see `TurnNode.model` below for that) |
+| `pinned_turns` | list[int] | Indices into `messages` currently pinned into the Excerpt |
+| `excerpt_slug` | str \| null | Slug of this chat's single Excerpt note, once one exists |
+| `context_tokens_used` / `context_tokens_max` | int | API-response-only (never persisted) — how full the session's configured history budget is, see "Context management" below |
 
-### ChatMessage fields
+### TurnNode fields
+
+The main-line node type of the [session graph](chat-session-graph.md) — everything else a turn
+produces (tool calls, claims, past regeneration attempts, session-graph recalls) branches off it
+rather than sharing its position in `messages`. See that page for the full node/edge taxonomy;
+this table is just the fields directly on `TurnNode` itself.
 
 | Field | Type | Description |
 |---|---|---|
+| `id` | str | Stable node id (uuid4) — how branches and `RecallRef`s address a specific turn regardless of its position in `messages` |
 | `role` | `ChatRole` | `user` \| `assistant` |
-| `content` | str | Message text, with inline superscript footnote markers (e.g. `word¹`) |
+| `content` | `RichContent` | `{format, value, rendered_html}` — the text layer (ADR-019's two-layer model). `format` supports `md`/`html`/`svg`/`latex`; only `md` is actually rendered today. `rendered_html` is API-response-only (sanitized HTML of `value`, computed fresh on every read, never persisted) — the UI deliberately does not use it for chat turns (see "Rendering" below), it exists for future format support and any other consumer |
 | `timestamp` | datetime | |
-| `footnotes` | list[[Footnote](footnote.md)] | Per-claim attribution — what kind of sourcing backs each claim, and which document(s) |
+| `tool_calls` | list[`ToolCallNode`] | Which tools (`search_vault`, `graph_context`, `recall`) this turn invoked, with what args, and — unlike the pre-ADR-019 model — the persisted `result` too, so a later turn's `RECALL` can find it |
+| `thoughts` | list[`ThinkingNode`] | Reasoning steps. Schema support only today — nothing populates this yet, see [Chat session graph](chat-session-graph.md#status) |
+| `claims` | list[[Claim](claim.md)] (`CitedClaimNode` \| `InferenceNode`) | Per-claim attribution — what kind of sourcing backs each claim, and which document(s) |
+| `model` | str \| null | The model that actually generated *this* message. `null` for user messages. Distinct from `Chat.model` (the chat's current setting): this is what generated this specific historical reply, so it stays correct even after the chat's active model changes |
+| `alternates` | list[`TurnNode`] | Prior attempts at this same turn, preserved (not discarded) when regenerated via `POST /chats/{slug}/turns/{index}/regenerate` — each alternate keeps its own `model`, so different models' answers to the same prompt stay comparable |
+| `recalls` | list[`RecallRef`] | Pointers to session-graph nodes this turn's `RECALL` calls pulled in beyond the default rolling history — a reference, never a duplicate of the recalled content, see [Chat session graph](chat-session-graph.md) |
+
+## Tool use
+
+The assistant can call tools mid-turn by writing a recognized marker line (pattern-based, not
+native function-calling — see [ADR-014](../wiki/adr/ADR-014-chat-llm-backend-interface.md)'s
+appendix for why):
+
+- **`SEARCH_VAULT`** — semantic search over the vault's ChromaDB embedding index. The default
+  first step for almost any question about your notes/papers.
+- **`GRAPH_CONTEXT`** — traverses the Knowledge Graph (entities and relationships extracted
+  across the whole vault) to answer questions about how things connect, or when a vault search
+  alone would likely come back scattered/incomplete.
+- **`RECALL`** — searches this chat's own [session graph](chat-session-graph.md), including
+  turns the rolling history window has already dropped. Not a vault search — this is the
+  session's own memory, not the vault's.
+
+Tool results are wrapped as untrusted content before entering the model's context (same
+mechanism ingested documents use, see `prisma/services/injection_defense.py`) and shown in the
+UI as a `used <tool>: <query>` line above the reply.
+
+## Claims
+
+Every substantive claim in an assistant reply is marked with where it came from — this is
+Axiom 16 (see [Claim](claim.md), [ADR-017](../wiki/adr/ADR-017-claim-attribution-and-footnote-model.md),
+[ADR-019](../wiki/adr/ADR-019-persisted-format-governance-and-migrations.md)):
+
+- `CitedClaimNode`, `relation == citation` / `attribution` — traces to exactly one vault document
+  (verbatim vs. paraphrased).
+- `CitedClaimNode`, `relation == relational` — synthesizes across two or more documents (what a
+  `GRAPH_CONTEXT` result usually produces).
+- `InferenceNode` — the model's own reasoning, no vault source, structurally distinct from
+  `CitedClaimNode` rather than a same-shape variant of it (see [Claim](claim.md#build-status)).
+
+Every `CitedClaimNode` can also carry `faithfulness_checked` (`true` / `false` / `null` for "not
+checked") — an automatic LLM-judge call, run on every turn for every sourced claim, that checks
+whether it actually represents what the cited source says. `null` means nothing disqualified the
+check outright (e.g. an unresolvable source slug or a failed judge call), not that the check
+passed.
+
+In the UI, the inline `[^N]` marker is clickable (jumps to its claim's list entry) and colored by
+relation/kind; the claim list at the bottom shows the relation/kind badge, the faithfulness badge
+(when checked, `CitedClaimNode` only), and a clickable link to each cited source.
+
+## Context management
+
+Two independent budgets apply to what the model actually sees on a given turn:
+
+- **Session history budget** (`ChatAgent.max_history_tokens`, shown as the UI's context label,
+  e.g. `1.2k / 16k`) — a soft cap on how much *raw prior history* gets included; older turns
+  roll off first. This is deliberately not the same number as the backend's real context
+  window (see [ADR-015](../wiki/adr/ADR-015-chat-excerpt-context-model.md)'s "Resolved"
+  section) — it answers "how full is this session's configured budget," not "how much of the
+  model's total window is in use."
+- **Excerpt** — pinned turns (`pinned_turns`) are distilled into a single durable note
+  (`excerpt_slug`), always included in full regardless of the rolling history budget above.
+  Compressed (LLM-summarized) or verbatim depending on the backend's real context window
+  (ADR-015's mode switch) — today's local models stay compressed.
+
+Because the Excerpt is never subject to the rolling trim, a chat with enough pinned turns (or
+simply enough raw history + tool-result traffic) can still exceed the backend's *actual*
+context window even while the session budget label looks fine. When that would happen, the
+chat fails fast with an explicit message instead of a confusing generic "couldn't reach the
+model" error:
+
+> This chat's history and Excerpt exceed `<model>`'s context window (~N tokens estimated vs.
+> an M-token limit) — I can't continue. Remove some pinned turns to free up context from
+> Excerpt buildup, or switch this chat to a model with a bigger context window.
+
+This check runs before every completion call in a turn (not just the first), so a tool result
+that pushes an otherwise-fitting turn over the edge is caught too.
+
+## System prompt
+
+Chat's system prompt is user-editable, not baked into code or `config.toml` — it lives at
+`~/.config/prisma/chat_system_prompt.md` (materialized with a sensible default on first use)
+and is editable from the Settings page. It's a place for standing preferences ("always answer
+in Spanish"), not one-off requests, which belong in the chat itself. The tool-calling and
+claim-marker instructions are separate, always-appended sections generated from code (not
+part of this file), since they're tied to the exact marker syntax the parser expects.
+
+## Rendering
+
+Model-generated text is treated as untrusted (same posture as tool results, see
+`prisma/services/injection_defense.py`) — the UI deliberately renders a turn's `content.value`
+as escaped plain text with just its `[^N]` claim markers turned into clickable elements
+(`renderContentSegments()` in `+page.svelte`), never `{@html}`. `content.rendered_html` (sanitized
+markdown → HTML, via `services/chat_render.py` + the `nh3`-based sanitizer in
+`services/renderer.py`) is still computed and returned by the API on every read, for future
+format support and any other consumer — it's just not what the chat UI displays today. This is a
+deliberate, final choice, not a stopgap waiting to be wired up.
+
+## Persistence
+
+A `Chat` is stored as pure JSON at `vault/chats/<slug>.sess` (ADR-019) — every field on this
+page's tables above, `schema_version`-governed (`schema_gov.VersionedModel`). Not markdown, not
+frontmatter, no embedded-comment convention: only the Excerpt (below) is genuinely prose, so only
+the Excerpt stays a `.md` file. `VaultService`'s chat methods (`get_chat`/`create_chat`/
+`save_chat`/`append_messages`/`set_pinned_turns`/`save_excerpt`) all read/write this JSON
+directly. A legacy `.md`-with-`<!-- prisma:meta {...} -->`-comment reader survives, read-only, in
+`vault.py`, solely so `prisma migrate-chats-to-sess` can convert chats saved before this cutover.
 
 ## Relations
 
-- Uses [Source](source.md)s and [Note](note.md)s as context (via `context_slugs`).
-- Produces [Note](note.md)s via promotion (back-linked on the Note via `promoted_from_chat`).
-- Indexed as a [GraphNode](graph-node.md).
-- Each assistant `ChatMessage` carries [Footnote](footnote.md)s referencing the `Note`/`Source`
-  slugs its claims are attributed to.
+- Uses [Source](source.md)s and [Note](note.md)s as context (via `context_slugs`), and can pull
+  in more at answer time via `SEARCH_VAULT`/`GRAPH_CONTEXT`/`RECALL`.
+- Its Excerpt is a [Note](note.md), linked via `excerpt_slug`.
+- **Not** indexed as a [GraphNode](graph-node.md) — the knowledge-graph indexer only walks `.md`
+  files, so a `.sess` chat is invisible to it by construction (deliberate, ADR-019: KG coverage
+  of chat-derived content goes through the Excerpt `Note` only, which *is* `.md` and *is*
+  indexed).
+- Each assistant `TurnNode` carries [Claim](claim.md)s referencing the `Note`/`Source` slugs its
+  claims are attributed to.
+- `messages` is the main line (`NEXT`) of the [Chat session graph](chat-session-graph.md) — see
+  that page for how tool calls, reasoning, claims, regeneration attempts, and recalls branch off
+  each `TurnNode`.
 
 ## Relevant axioms
 
@@ -43,8 +166,12 @@ promoted to [Notes](note.md).
 >
 > Claims are footnoted — distinct from grounding, this is about whether each individual claim
 > in the output is marked as sourced or as the model's own inference. See
-> [Axiom 16](../ontologia.md) and [Footnote](footnote.md).
+> [Axiom 16](../ontologia.md) and [Claim](claim.md).
 
 ## Not yet implemented
 
-Chat API routes are not yet implemented. The data model is fully defined.
+- **Thinking-step population** — `TurnNode.thoughts`/`ThinkingNode` ship as schema (ADR-019,
+  2026-08-05), but nothing produces them yet; gated behind the still-deferred model-category
+  `has_native_reasoning` flag. See [Chat session graph](chat-session-graph.md#status).
+- **APA citation formatting** — `CitedClaimNode.sources` resolve to vault slugs today; formatted
+  APA-style citations off that resolution are a separate, not-yet-built formatting concern.

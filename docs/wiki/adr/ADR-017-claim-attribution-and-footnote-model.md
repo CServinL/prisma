@@ -2,10 +2,18 @@
 
 **Date:** 2026-07-27
 **Author:** CServinL
-**Status:** Implemented (2026-07-31, `faithfulness_checked` added 2026-08-03) —
-data model, ontology (Axiom 16, `docs/concepts/footnote.md`), `ChatAgent`
-self-segmentation/self-report, `ChatToolbox._graph_context` wiring, UI
-rendering, and automated `faithfulness_checked` verification are all built.
+**Status:** Implemented (2026-07-31, `faithfulness_checked` added 2026-08-03,
+persistence + UI interactivity fixed 2026-08-04) — data model, ontology
+(Axiom 16, `docs/concepts/claim.md`), `ChatAgent` self-segmentation/self-
+report, `ChatToolbox._graph_context` wiring, UI rendering, automated
+`faithfulness_checked` verification, and durable per-message persistence are
+all built. Rich reply rendering (tables/code/links, 2026-08-04) is built on
+the backend (sanitized HTML per message) but not yet wired into the
+frontend — see that section below. The single-class `Footnote`/
+`FootnoteRelation` model this ADR built was later split into
+`CitedClaimNode`/`InferenceNode` (ADR-019, 2026-08-05) — see
+`docs/concepts/claim.md`, which documents the current shape; this page is
+kept as the historical record of the original decision.
 
 ### Implementation notes (added 2026-07-31, not part of the original decision)
 
@@ -59,6 +67,84 @@ rendering, and automated `faithfulness_checked` verification are all built.
   failed to extract, an unresolvable source slug, or the verifier LLM call
   itself failing. `None` means "not checked," never conflated with "checked
   and failed."
+
+### Persistence + UI interactivity fixes (added 2026-08-04)
+
+- **Footnotes were never actually persisted.** `VaultService._render_chat_body`/
+  `_parse_chat_body` only ever round-tripped `role`/`content`/`tool_calls` —
+  every reload (or server restart) silently reconstructed every historical
+  message with `footnotes=[]`, regardless of what a `/chat` response had just
+  returned. Found live testing against a real local backend: only the most
+  recently sent turn ever showed footnote badges, because that turn's data
+  only ever existed in the frontend's in-memory state. Fixed by adding a
+  `<!-- prisma:meta {"model": ..., "footnotes": [...]} -->` HTML-comment line
+  per turn (invisible in a plain markdown viewer, matching this format's own
+  "readable transcript first" intent) — a single JSON blob rather than a
+  per-field line like the existing `> used \`tool\`: query` convention,
+  since footnotes is a nested list of objects. Parsing is defensive, same
+  posture as the model's own FOOTNOTES_JSON self-report: a malformed or
+  hand-edited comment degrades to "no metadata for this turn," never breaks
+  loading the rest of the chat.
+- **`ChatMessage.model`, new field** — the model that actually generated
+  that specific message, `None` for user messages. Distinct from `Chat.model`
+  (the chat's *current* configured model, silently overwritten on every
+  turn per `VaultService.save_chat`'s own docstring) — that field alone
+  can't answer "which model produced *this* historical reply" once the
+  config changes mid-chat, which matters for comparing model quality across
+  a test session (motivating use case: swapping the local backend between
+  `qwen2.5-3b` and larger models on the same machine).
+- **Inline `[^N]` markers were dead text** — rendered as a bare `<sup>`,
+  no click handler, no visual distinction between relation types (only the
+  bottom footnote-list badge was colored). Fixed: the inline marker is now
+  a button that scrolls to its footnote entry (`#chat-turn-{i}-footnote-{n}`,
+  an anchor the list already had) and is colored by `relation` using the
+  same palette as the list badge, so a claim's sourcing is visible at the
+  point it's actually read, not just after scrolling to the end.
+- **`system_prompt_tool_section()`'s tool descriptions now name the actual
+  backing system** (`SEARCH_VAULT` → "ChromaDB embedding index", `GRAPH_CONTEXT`
+  → "the Knowledge Graph (KG)") instead of only describing behavior — bridges
+  the vocabulary the user-editable base prompt already uses ("ChromaDB and
+  the knowledge graph") with the code-generated operational instructions,
+  since the two were previously written independently and never used matching
+  terms for the same systems.
+
+### Rich reply rendering, backend half (added 2026-08-04)
+
+cservinl asked for chat replies to support real markdown — tables, code
+blocks, links — instead of rendering as auto-escaped plain text (the
+previous, deliberately conservative choice: model-generated text gets the
+same caution as tool results, see `injection_defense.py`). `docu_craft`
+(the same pipeline Notes/Sources already use via `services/renderer.py`,
+Python-Markdown underneath with `tables`/`fenced_code`/`codehilite`/`toc`/
+`attr_list`) gives all of that essentially for free — but Python-Markdown
+does not sanitize embedded raw HTML by design, and a chat reply is less
+trusted than hand-authored Notes (it can echo tool-result/ingested-document
+text, an indirect-injection → stored-XSS path if ever rendered unsanitized).
+
+Built:
+- `prisma/services/html_sanitize.py` — an `nh3` (maintained Rust binding of
+  Mozilla's html5ever/ammonia) allowlist sanitizer. Wired into
+  `renderer.render()` itself, so *every* caller gets it automatically —
+  this also closes the same latent gap for Notes/Sources, which were
+  rendering unsanitized before this.
+- `prisma/services/chat_render.py` — converts `[^N]` footnote markers to a
+  real `<span class="footnote-marker" data-footnote-index="N">` *before*
+  handing content to `renderer.render()`, so the marker survives as actual
+  markup the UI can attach click-to-jump/color-by-relation behavior to
+  (rather than a fragile client-side string-surgery pass on
+  already-rendered HTML, which risks corrupting tag structure if a marker
+  lands mid-block).
+- `ChatMessage.html: str | None` (new field, API-response-only like
+  `Chat.context_tokens_used` — never persisted) and `ChatResponse.html` —
+  populated for every assistant message in `POST /chat` and
+  `GET /chats/{slug}`.
+
+**Not yet built**: the frontend still renders via the old plain-text
+`renderContentSegments()` path (see `+page.svelte`) instead of `{@html}` +
+a click-delegate action for the new `.footnote-marker` spans (the existing
+`contentClickDelegate` action, already used for Note/Source `{@html}`
+content, is the pattern to extend). Needs live browser verification before
+landing — held back deliberately rather than shipped un-tested.
 
 ## Context
 
@@ -187,7 +273,7 @@ actual source).
 - Axiom 5 (`docs/ontologia.md`) — grounding (input scope), the axis this
   explicitly does not overload.
 - Axiom 16 (`docs/ontologia.md`) — the axiom this ADR implements.
-- `docs/concepts/footnote.md` — the entity-level documentation.
+- `docs/concepts/claim.md` — the entity-level documentation (current shape; this ADR's original `Footnote` class was later split, see the Status line above).
 - ADR-009 — hybrid retrieval architecture; `relational` footnotes are the
   natural label for `GRAPH_CONTEXT` tool output.
 - ADR-014 — Chat module's LLM backend interface (whatever backend eventually

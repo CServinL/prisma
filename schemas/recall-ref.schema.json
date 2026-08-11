@@ -1,0 +1,31 @@
+{
+  "description": "A `RECALL` hit -- a pointer to another node elsewhere in a session\ngraph, never a duplicate of its content (see ADR-019's storage-vs-\ncontext distinction). Resolved/dereferenced only in the in-memory\ncontext assembly for the turn that recalled it.",
+  "properties": {
+    "chat_slug": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Chat Slug"
+    },
+    "node_id": {
+      "title": "Node Id",
+      "type": "string"
+    },
+    "node_kind": {
+      "title": "Node Kind",
+      "type": "string"
+    }
+  },
+  "required": [
+    "node_id",
+    "node_kind"
+  ],
+  "title": "RecallRef",
+  "type": "object"
+}

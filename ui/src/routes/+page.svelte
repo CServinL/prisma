@@ -1,9 +1,7 @@
 <script lang="ts">
-  import { isTauri, DEFAULT_SCALE, DEFAULT_SAVED_SERVERS, applyScale, loadSettings as loadPlatformSettings, saveSettings as savePlatformSettings, shellOpen, winDrag, pickVaultFolder, type AppSettings } from "$lib/platform";
+  import { isTauri, DEFAULT_SCALE, applyScale, loadSettings as loadPlatformSettings, saveSettings as savePlatformSettings, shellOpen, pickVaultFolder, apiUrl, type AppSettings } from "$lib/platform";
   import { apiFetch, restoreSession, setAuthRequiredHandler, getToken } from "$lib/auth";
   import { applySyncPolicy, syncEngineStatus, syncDiff, syncStart, syncStop, type SyncStatusInfo, type SyncDiffInfo } from "$lib/sync";
-  import TauriResizeGrips from "$lib/components/TauriResizeGrips.svelte";
-  import TauriWindowControls from "$lib/components/TauriWindowControls.svelte";
   import LoginScreen from "$lib/components/LoginScreen.svelte";
 
   type NodeType = "note" | "source" | "chat" | "stream";
@@ -26,7 +24,9 @@
     chroma?: { chunks: number; files_indexed: number; model: string; provider?: string; current_activity?: string | null } | null;
     vault?: { root: string; notes: number; sources: number; chats: number; streams: number };
     zotero?: { mode: string; available: boolean; reachable?: boolean } | null;
-    ollama?: { reachable: boolean } | null;
+    // Absent for a cloud chat provider (openrouter/anthropic) -- there's
+    // no single "is it up" host to probe for those.
+    llm_backend?: { provider: string; reachable: boolean } | null;
     processes?: {
       [worker: string]: { pid: number | null; alive: boolean; restart_count: number; memory_mb: number | null };
     } & {
@@ -75,30 +75,85 @@
   }
 
   interface ToolCallOut {
+    id: string;
     tool: string;
     args: Record<string, unknown>;
+    result: string | null;
+    status: "ok" | "error";
   }
 
-  // ADR-017: per-claim attribution. `sources` are vault slugs; empty only
-  // when relation is "ai-inference". Rendered as an inline [^N] marker in
-  // the turn's content plus a list at the end of the turn — see
-  // renderFootnoteSegments() below.
-  type FootnoteRelation = "citation" | "attribution" | "relational" | "ai-inference";
+  // ADR-019: a turn's claims are one of two node kinds -- CitedClaimNode
+  // (traceable to vault sources, `relation` meaningful) or InferenceNode
+  // (the model's own reasoning, structurally no sources) -- discriminated
+  // on `kind`, matching prisma.storage.models.vault_models.ClaimNode.
+  // Rendered as an inline [^N] marker in the turn's content plus a list at
+  // the end of the turn — see renderContentSegments() below.
+  type ClaimRelation = "citation" | "attribution" | "relational";
 
-  interface FootnoteOut {
+  interface CitedClaimOut {
+    kind: "claim";
     index: number;
-    relation: FootnoteRelation;
+    claim_text: string;
     sources: string[];
-    claim_text: string | null;
+    relation: ClaimRelation;
     faithfulness_checked: boolean | null;
   }
 
+  interface InferenceClaimOut {
+    kind: "inference";
+    index: number;
+    claim_text: string;
+  }
+
+  type ClaimOut = CitedClaimOut | InferenceClaimOut;
+
+  // ADR-019: schema support only today -- nothing populates a turn's
+  // `thoughts` yet (gated behind the still-deferred `has_native_reasoning`
+  // model-category flag), but the shape is here so rendering doesn't need
+  // to change again once something does.
+  interface ThoughtOut {
+    id: string;
+    thought: string;
+    thought_number: number;
+    revises: string | null;
+    branches_from: string | null;
+  }
+
+  // ADR-019: a RECALL hit -- a pointer to another node elsewhere in a
+  // session graph that this turn's context assembly pulled in beyond the
+  // default rolling history. Never a duplicate of that node's content.
+  // chat_slug is null for a same-chat recall, set to the source chat's slug
+  // for a cross-chat one (node_id alone is only unique within one chat).
+  interface RecallRefOut {
+    node_id: string;
+    node_kind: string;
+    chat_slug: string | null;
+  }
+
+  // ADR-019: chat message content is a typed, format-tagged wrapper
+  // (schema_gov.RichContent) rather than a flat string -- `format` is
+  // always "md" today (svg/latex are schema-forward-compatible, not
+  // rendered anywhere yet); `rendered_html` is server-sanitized markdown
+  // HTML, computed but deliberately unused for chat turns here (see
+  // renderContentSegments below) -- model-generated text stays untrusted,
+  // rendered as plain escaped segments client-side, same as before ADR-019.
+  interface RichContent {
+    format: "md" | "html" | "svg" | "latex";
+    value: string;
+    rendered_html: string | null;
+  }
+
   interface ChatTurn {
+    id?: string;
     role: "user" | "assistant";
-    content: string;
+    content: RichContent;
     timestamp: string;
-    footnotes: FootnoteOut[];
+    claims: ClaimOut[];
+    thoughts: ThoughtOut[];
     tool_calls: ToolCallOut[];
+    recalls: RecallRefOut[];
+    model?: string | null;
+    alternates?: ChatTurn[];
   }
 
   interface ChatDetail {
@@ -175,7 +230,13 @@
 
   const DEFAULT_API = "http://127.0.0.1:8765";
   const DEFAULT_API_PORT = 8765;
+  const DEFAULT_WEB_PORT = 8766;
   const DEFAULT_SUPERVISOR_PORT = 8760;
+
+  // serverStatus.llm_backend.provider values -> display label (see app.py's
+  // /status: only ever "ollama" or "llama_cpp", the two local providers it
+  // probes for reachability).
+  const LLM_BACKEND_LABELS: Record<string, string> = { ollama: "Ollama", llama_cpp: "llama.cpp" };
 
   // The Web process (serving this page at /app) and the API process are
   // independent processes/ports (see ADR-012) — the page's own origin is no
@@ -195,7 +256,7 @@
   // results as untrusted (services/injection_defense.py); the model's own
   // final reply gets the same caution, so segments stay plain strings
   // Svelte auto-escapes rather than becoming raw HTML.
-  type ContentSegment = { text: string } | { footnoteIndex: number };
+  type ContentSegment = { text: string } | { claimIndex: number };
 
   const FOOTNOTE_MARKER_RE = /\[\^(\d+)\]/g;
 
@@ -204,19 +265,41 @@
     let lastEnd = 0;
     for (const m of content.matchAll(FOOTNOTE_MARKER_RE)) {
       if (m.index! > lastEnd) segments.push({ text: content.slice(lastEnd, m.index) });
-      segments.push({ footnoteIndex: Number(m[1]) });
+      segments.push({ claimIndex: Number(m[1]) });
       lastEnd = m.index! + m[0].length;
     }
     if (lastEnd < content.length) segments.push({ text: content.slice(lastEnd) });
     return segments;
   }
 
-  const FOOTNOTE_RELATION_LABEL: Record<FootnoteRelation, string> = {
+  const CLAIM_RELATION_LABEL: Record<ClaimRelation, string> = {
     citation: "citation",
     attribution: "attribution",
     relational: "relational",
-    "ai-inference": "AI inference",
   };
+
+  // Shared between the inline [^N] marker and the claim-list entry below --
+  // both key off this rather than raw `relation`/`kind` so the CSS classes
+  // (claim-ref-*, claim-relation-*) stay a single flat namespace covering
+  // both CitedClaimNode's three relations and InferenceNode.
+  function claimStyleKey(c: ClaimOut): string {
+    return c.kind === "inference" ? "inference" : c.relation;
+  }
+
+  function claimLabel(c: ClaimOut): string {
+    return c.kind === "inference" ? "AI inference" : CLAIM_RELATION_LABEL[c.relation];
+  }
+
+  // Collapsed-by-default toggle line summarizing a turn's process
+  // "spin-offs" -- tool calls, reasoning, recalls -- so the reply itself
+  // isn't buried under mechanism by default, while still one click away.
+  function summarizeTurnDetails(msg: ChatTurn): string {
+    const parts: string[] = [];
+    if (msg.tool_calls?.length) parts.push(`${msg.tool_calls.length} tool call${msg.tool_calls.length > 1 ? "s" : ""}`);
+    if (msg.thoughts?.length) parts.push(`${msg.thoughts.length} thought${msg.thoughts.length > 1 ? "s" : ""}`);
+    if (msg.recalls?.length) parts.push(`${msg.recalls.length} recall${msg.recalls.length > 1 ? "s" : ""}`);
+    return parts.join(" · ");
+  }
 
   function _defaultApiBase(): string {
     if (typeof window === "undefined") return DEFAULT_API;
@@ -225,7 +308,7 @@
     return url.origin;
   }
 
-  // Real persisted value arrives async via loadSettings() -> cfg.server_url
+  // Real persisted value arrives async via loadSettings() -> apiUrl(cfg)
   // (platform.ts's own loadSettings: Tauri reads settings.json via the Rust
   // side, browser/PWA reads a "prisma-settings" localStorage key) -- this
   // is just the synchronous placeholder $state needs at declaration time.
@@ -251,7 +334,7 @@
   // mirror against the same machine is pointless) — reruns on every
   // apiBase change (initial load AND switching servers in Settings), so
   // this one effect is the single place that policy lives.
-  $effect(() => { applySyncPolicy(apiBase); });
+  $effect(() => { applySyncPolicy(apiBase).then(r => syncBlockedReason = r); });
 
   // ── WebSocket — API-process push events (vault_change, stream_progress) ──────
   // Hot-reload is handled separately below, by polling the Web process directly —
@@ -319,11 +402,10 @@
   const SIDEBAR_MIN_WIDTH = 160;
   const SIDEBAR_MAX_WIDTH = 480;
   const SIDEBAR_DEFAULT_WIDTH = 220;
-  let sidebarWidth = $state(
-    typeof window !== "undefined"
-      ? Number(localStorage.getItem("prisma.sidebarWidth")) || SIDEBAR_DEFAULT_WIDTH
-      : SIDEBAR_DEFAULT_WIDTH
-  );
+  // Real persisted value arrives async via loadSettings() -> cfg.sidebar_width
+  // (see bootstrap() below) -- this is just the synchronous placeholder
+  // $state needs at declaration time, same convention as apiBase/cfg.scale.
+  let sidebarWidth = $state(SIDEBAR_DEFAULT_WIDTH);
   let sidebarCollapsed = $state(
     typeof window !== "undefined" && localStorage.getItem("prisma.sidebarCollapsed") === "1"
   );
@@ -338,15 +420,15 @@
     e.preventDefault();
     sidebarResizing = true;
     // Measure from the sidebar's own left edge rather than assuming it sits
-    // at viewport x=0 — Tauri's .shell has a 20px margin around it (see
-    // :global(.tauri) .shell), so clientX alone would be off by that much.
+    // at viewport x=0.
     const sidebarLeft = sidebarAsideEl?.getBoundingClientRect().left ?? 0;
     const onMove = (ev: MouseEvent) => {
       sidebarWidth = Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, ev.clientX - sidebarLeft));
     };
     const onUp = () => {
       sidebarResizing = false;
-      localStorage.setItem("prisma.sidebarWidth", String(sidebarWidth));
+      cfg.sidebar_width = sidebarWidth;
+      savePlatformSettings(cfg).catch(() => {});
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseup", onUp);
     };
@@ -393,6 +475,17 @@
   let excerptPollInterval: ReturnType<typeof setInterval> | undefined;
   let chatInput = $state("");
   let chatSending = $state(false);
+  // Turn indices whose tool-call/thought/recall "spin-offs" (the process
+  // artifacts behind a reply, not the reply's own content) are expanded --
+  // collapsed by default, since most turns don't need examining, but always
+  // available on demand. Keyed by turn index, not persisted across chats.
+  let expandedTurnDetails = $state(new Set<number>());
+
+  function toggleTurnDetails(i: number) {
+    const next = new Set(expandedTurnDetails);
+    if (next.has(i)) next.delete(i); else next.add(i);
+    expandedTurnDetails = next;
+  }
   let serverOnline = $state(false);
   let kgState = $state<GState | null>(null);
   let kgLastIndexed = $state<string | null>(null);
@@ -647,7 +740,10 @@
     chatSending = true;
     activeChat.messages = [
       ...activeChat.messages,
-      { role: "user", content: text, timestamp: new Date().toISOString(), footnotes: [], tool_calls: [] },
+      {
+        role: "user", content: { format: "md", value: text, rendered_html: null },
+        timestamp: new Date().toISOString(), claims: [], thoughts: [], tool_calls: [], recalls: [],
+      },
     ];
     try {
       const r = await apiFetch(`${apiBase}/chat`, {
@@ -658,9 +754,28 @@
         const data = await r.json();
         activeChat.messages = [
           ...activeChat.messages,
-          { role: "assistant", content: data.reply, timestamp: new Date().toISOString(), footnotes: data.footnotes ?? [], tool_calls: data.tool_calls ?? [] },
+          {
+            role: "assistant", content: { format: "md", value: data.reply, rendered_html: data.html ?? null },
+            timestamp: new Date().toISOString(), claims: data.claims ?? [], thoughts: [],
+            tool_calls: data.tool_calls ?? [], recalls: data.recalls ?? [],
+          },
         ];
       }
+    } finally {
+      chatSending = false;
+    }
+  }
+
+  async function regenerateTurn(index: number, model?: string) {
+    if (!activeChat || chatSending) return;
+    const slug = activeChat.slug;
+    chatSending = true;
+    try {
+      const r = await apiFetch(`${apiBase}/chats/${encodeURIComponent(slug)}/turns/${index}/regenerate`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: model ?? null }),
+      });
+      if (r.ok && activeChat?.slug === slug) activeChat = await r.json();
     } finally {
       chatSending = false;
     }
@@ -1037,8 +1152,6 @@
 
   import { untrack } from "svelte";
 
-  let isMaximized = $state(false);
-
   function handleIframeMessage(e: MessageEvent) {
     if (e.data?.type === "open-url" && typeof e.data.url === "string") {
       shellOpen(e.data.url);
@@ -1051,8 +1164,28 @@
   const SCALE_STEP = 0.05;
 
   let showSettings = $state(false);
-  let cfg = $state<AppSettings>({ scale: DEFAULT_SCALE, server_url: untrack(() => apiBase), saved_servers: DEFAULT_SAVED_SERVERS, vault_path: null });
-  let syncStatus = $state<SyncStatusInfo>({ running: false, server_url: null, vault_path: null, tracked_files: 0 });
+  // Real persisted value arrives async via loadSettings() below -- this is
+  // just the synchronous placeholder $state needs at declaration time,
+  // parsed from apiBase's own placeholder (see _defaultApiBase()) so it's
+  // at least self-consistent until then.
+  let cfg = $state<AppSettings>(untrack(() => {
+    const url = new URL(apiBase);
+    return {
+      scale: DEFAULT_SCALE,
+      hostname: url.hostname,
+      tls: url.protocol === "https:",
+      api_port: Number(url.port) || (url.protocol === "https:" ? 443 : 80),
+      web_port: DEFAULT_WEB_PORT,
+      vault_path: null,
+      sidebar_width: SIDEBAR_DEFAULT_WIDTH,
+    };
+  }));
+  let syncStatus = $state<SyncStatusInfo>({ running: false, server_url: null, vault_path: null, tracked_files: 0, needs_reauth: false });
+  // Non-null only when the last applySyncPolicy()/syncStart() call actively
+  // refused to start (e.g. prisma-desktop's same-filesystem collision
+  // guard) -- distinct from the ordinary "stopped because Local" case,
+  // which needs no explanation.
+  let syncBlockedReason = $state<string | null>(null);
   let syncDiffInfo = $state<SyncDiffInfo | null>(null);
   let syncDiffLoading = $state(false);
 
@@ -1101,7 +1234,7 @@
     // Restart (not just leave running) so the engine picks up the new
     // vault_path immediately instead of on next app launch.
     await syncStop();
-    await applySyncPolicy(apiBase);
+    syncBlockedReason = await applySyncPolicy(apiBase);
     await refreshSyncInfo();
   }
 
@@ -1129,7 +1262,8 @@
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
         cfg = await loadPlatformSettings();
-        apiBase = cfg.server_url || apiBase;
+        apiBase = cfg.hostname ? apiUrl(cfg) : apiBase;
+        sidebarWidth = cfg.sidebar_width || SIDEBAR_DEFAULT_WIDTH;
         break;
       } catch (err) {
         console.error(`loadSettings: attempt ${attempt}/3 failed`, err);
@@ -1147,30 +1281,18 @@
   }
 
   async function saveAndApply() {
-    cfg.server_url = apiBase;
+    // The hostname/TLS/port fields only exist in the Tauri Settings card
+    // (isTauri-gated, see the "Server" resource-card below) -- in
+    // browser/PWA mode cfg.hostname is never populated by the user, so
+    // deriving apiBase from cfg here would overwrite the real, working
+    // apiBase with the empty "http://:0" placeholder on every single save.
+    if (isTauri) apiBase = apiUrl(cfg);
     try {
       await savePlatformSettings(cfg);
       await applyScale(cfg.scale);
     } catch {}
     showSettings = false;
     bootstrap();
-  }
-
-  /// One-click switch between saved_servers entries — deliberately does
-  /// NOT call bootstrap()/loadHome() (which reset showSettings to false,
-  /// see their own bodies) so the user stays on the Settings page and can
-  /// see which server is now active, instead of being bounced to Home
-  /// right after switching.
-  async function switchServer(url: string) {
-    apiBase = url;
-    cfg.server_url = url;
-    try { await savePlatformSettings(cfg); } catch {}
-    serverOnline = await ping();
-    if (serverOnline) {
-      await Promise.all([loadTree(), loadStreams(), loadChats(), loadZoteroStatus()]);
-      pollStatus();
-    }
-    connectWS();
   }
 
   // ── Stream form ─────────────────────────────────────────────────────────────
@@ -1241,204 +1363,7 @@
   <LoginScreen serverUrl={apiBase} onLoggedIn={() => { showLoginScreen = false; loadTree(); connectWS(); }} />
 {/if}
 
-{#if isTauri}
-  <!-- Sibling of .shell, not a descendant — see TauriResizeGrips.svelte. -->
-  <TauriResizeGrips bind:isMaximized />
-{/if}
-
-<div class="shell" class:maximized={isMaximized}>
-
-  <!-- Titlebar (CSD) -->
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="titlebar" onmousedown={winDrag}>
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div class="drag-area">
-      <span class="logo">Prisma</span>
-    </div>
-
-    <div class="search-wrap" onmousedown={e => e.stopPropagation()}>
-      <input
-        class="search-input"
-        bind:value={searchQuery}
-        placeholder="Search vault…"
-        oninput={onSearchInput}
-        onkeydown={e => { if (e.key === "Enter") openDeepSearch(); }}
-      />
-      {#if searchQuery}
-        <button class="clear-btn" onclick={clearSearch} title="Clear">✕</button>
-      {/if}
-      {#if searching}
-        <span class="spinner-sm"></span>
-      {/if}
-      <button class="deep-btn" onclick={openDeepSearch} title="Deep search (graph + semantic)">⌕</button>
-    </div>
-
-    <button
-      class="icon-btn"
-      onmousedown={e => e.stopPropagation()}
-      onclick={() => { activeNode = null; activeChat = null; showResourcesPage = false; showKgProgressPage = false; showSettings = !showSettings; }}
-      title="Settings"
-    >⚙</button>
-
-    <!-- Status dot + popover -->
-    <div class="status-anchor" onmousedown={e => e.stopPropagation()}>
-      <button
-        class="gdot-btn"
-        class:offline={!serverOnline}
-        class:error={serverOnline && !serverStatus?.config?.ok}
-        class:indexing={serverOnline && serverStatus?.config?.ok && kgState === "indexing"}
-        class:stale={serverOnline && serverStatus?.config?.ok && kgState === "stale"}
-        class:idle={serverOnline && serverStatus?.config?.ok && kgState === "idle"}
-        onclick={() => statusPopoverOpen = !statusPopoverOpen}
-        title="System status"
-      ></button>
-      {#if statusPopoverOpen}
-        <button class="status-backdrop" aria-label="Close" onclick={() => statusPopoverOpen = false}></button>
-        <div class="status-popover">
-          <div class="sp-header">System status</div>
-
-          <div class="sp-section">
-            <span class="sp-label">Server</span>
-            <span class="sp-val" class:ok={serverOnline} class:bad={!serverOnline}>
-              {serverOnline ? "online" : "offline"}
-            </span>
-          </div>
-
-          {#if serverStatus}
-            <div class="sp-section">
-              <span class="sp-label">Config</span>
-              <span class="sp-val" class:ok={serverStatus.config.ok} class:bad={!serverStatus.config.ok}>
-                {serverStatus.config.ok ? "ok" : serverStatus.config.error ?? "error"}
-              </span>
-            </div>
-
-            <div class="sp-section">
-              <span class="sp-label">Internet</span>
-              <span class="sp-val" class:ok={serverStatus.online} class:warn={!serverStatus.online}>
-                {serverStatus.online ? "reachable" : "offline"}
-              </span>
-            </div>
-
-            {#if serverStatus.chat_config}
-              <div class="sp-section">
-                <span class="sp-label">Chat</span>
-                <span class="sp-val ok">{serverStatus.chat_config.provider} / {serverStatus.chat_config.model}</span>
-              </div>
-            {/if}
-
-            {#if serverStatus.ollama != null && serverStatus.chat_config?.provider === "ollama"}
-              <div class="sp-section">
-                <span class="sp-label">Ollama</span>
-                <span class="sp-val" class:ok={serverStatus.ollama.reachable} class:bad={!serverStatus.ollama.reachable}>
-                  {serverStatus.ollama.reachable ? "reachable" : "offline"}
-                </span>
-              </div>
-            {/if}
-
-            {#if serverStatus.vault}
-              <div class="sp-section">
-                <span class="sp-label">Vault</span>
-                <span class="sp-val ok">
-                  {serverStatus.vault.notes}n · {serverStatus.vault.sources}s · {serverStatus.vault.chats}c · {serverStatus.vault.streams}st
-                </span>
-              </div>
-              <div class="sp-vault-root">{serverStatus.vault.root}</div>
-            {/if}
-
-            <div class="sp-section">
-              <span class="sp-label">Knowledge graph</span>
-              <span class="sp-val"
-                class:ok={kgState === "idle"}
-                class:warn={kgState === "stale"}
-                class:info={kgState === "indexing"}
-              >
-                {kgState ?? "—"}
-                {#if kgLastIndexed && kgState === "idle"}
-                  · {new Date(kgLastIndexed).toLocaleTimeString()}
-                {/if}
-              </span>
-            </div>
-            {#if serverStatus.knowledge_graph?.last_error}
-              <div class="sp-error">{serverStatus.knowledge_graph.last_error}</div>
-            {/if}
-            {#if serverStatus.knowledge_graph?.current_activity}
-              <div class="sp-vault-root">{serverStatus.knowledge_graph.current_activity}</div>
-            {/if}
-
-            {#if serverStatus.chroma}
-              <div class="sp-section">
-                <span class="sp-label">Chroma</span>
-                <span class="sp-val" class:ok={serverStatus.chroma.chunks > 0} class:warn={serverStatus.chroma.chunks === 0}>
-                  {serverStatus.chroma.chunks} chunks · {serverStatus.chroma.files_indexed} files
-                </span>
-              </div>
-              <div class="sp-vault-root">{serverStatus.chroma.model}{serverStatus.chroma.provider ? ` (${serverStatus.chroma.provider})` : ""}</div>
-              {#if serverStatus.chroma.current_activity}
-                <div class="sp-vault-root">{serverStatus.chroma.current_activity}</div>
-              {/if}
-            {/if}
-
-            {#if serverStatus.zotero}
-              <div class="sp-section">
-                <span class="sp-label">Zotero</span>
-                <span class="sp-val"
-                  class:ok={serverStatus.zotero.available}
-                  class:warn={!serverStatus.zotero.available}
-                >
-                  {serverStatus.zotero.mode} · {serverStatus.zotero.available ? "available" : "unavailable"}
-                </span>
-              </div>
-              {#if serverStatus.zotero.available && serverStatus.zotero.reachable !== undefined}
-                <div class="sp-vault-root">
-                  Web API:
-                  <span class:ok={serverStatus.zotero.reachable} class:warn={!serverStatus.zotero.reachable}>
-                    {serverStatus.zotero.reachable ? "reachable" : "unreachable"}
-                  </span>
-                </div>
-              {/if}
-            {/if}
-
-            {#if serverStatus.pending_jobs > 0}
-              <div class="sp-section">
-                <span class="sp-label">Jobs</span>
-                <span class="sp-val warn">{serverStatus.pending_jobs} pending</span>
-              </div>
-            {/if}
-
-            {#if serverStatus.processes}
-              <div class="sp-section">
-                <span class="sp-label">Processes</span>
-                <span class="sp-val">
-                  {#if serverStatus.processes.system}
-                    {serverStatus.processes.system.cpu_count} cores
-                    {#if serverStatus.processes.system.memory_available_mb != null}
-                      · {Math.round(serverStatus.processes.system.memory_available_mb / 1024 * 10) / 10}GB free
-                      / {Math.round((serverStatus.processes.system.memory_total_mb ?? 0) / 1024 * 10) / 10}GB
-                    {/if}
-                  {/if}
-                </span>
-              </div>
-              {#each Object.entries(serverStatus.processes).filter(([k]) => k !== "system") as [name, proc]}
-                {#if proc && typeof proc === "object" && "pid" in proc}
-                  <div class="sp-proc-row">
-                    <span class="sp-proc-name" class:bad={!proc.alive}>{name}</span>
-                    <span class="sp-proc-mem">{proc.memory_mb != null ? `${proc.memory_mb}MB` : "—"}</span>
-                  </div>
-                {/if}
-              {/each}
-            {/if}
-          {/if}
-        </div>
-      {/if}
-    </div>
-
-
-    {#if isTauri}
-      <TauriWindowControls />
-    {/if}
-  </div>
-
-  <div class="accent-divider"></div>
+<div class="shell">
 
   <!-- Workspace -->
   <div class="workspace">
@@ -1451,6 +1376,27 @@
       style={sidebarCollapsed ? "" : `width: ${sidebarWidth}px`}
     >
       {#if !sidebarCollapsed}
+      <button class="home-btn" class:active={activeNode?.slug === "home"} onclick={loadHome}>
+        Home
+      </button>
+      <div class="sidebar-search">
+        <div class="search-wrap">
+          <input
+            class="search-input"
+            bind:value={searchQuery}
+            placeholder="Search vault…"
+            oninput={onSearchInput}
+            onkeydown={e => { if (e.key === "Enter") openDeepSearch(); }}
+          />
+          {#if searchQuery}
+            <button class="clear-btn" onclick={clearSearch} title="Clear">✕</button>
+          {/if}
+          {#if searching}
+            <span class="spinner-sm"></span>
+          {/if}
+          <button class="deep-btn" onclick={openDeepSearch} title="Deep search (graph + semantic)">⌕</button>
+        </div>
+      </div>
       {#if !serverOnline}
         <div class="sidebar-offline">
           Server offline<br/>
@@ -1521,11 +1467,6 @@
             </button>
           {/if}
         {/snippet}
-
-        <!-- Home -->
-        <button class="home-btn" class:active={activeNode?.slug === "home"} onclick={loadHome}>
-          Home
-        </button>
 
         <!-- Vault section -->
         <div class="section-header">
@@ -1711,6 +1652,165 @@
           </div>
         {/if}
       {/if}
+
+      <div class="sidebar-footer">
+        <button
+          class="icon-btn"
+          onclick={() => { activeNode = null; activeChat = null; showResourcesPage = false; showKgProgressPage = false; showSettings = !showSettings; }}
+          title="Settings"
+        >⚙</button>
+
+        <div class="status-anchor">
+          <button
+            class="gdot-btn"
+            class:offline={!serverOnline}
+            class:error={serverOnline && !serverStatus?.config?.ok}
+            class:indexing={serverOnline && serverStatus?.config?.ok && kgState === "indexing"}
+            class:stale={serverOnline && serverStatus?.config?.ok && kgState === "stale"}
+            class:idle={serverOnline && serverStatus?.config?.ok && kgState === "idle"}
+            onclick={() => statusPopoverOpen = !statusPopoverOpen}
+            title="System status"
+          ></button>
+          {#if statusPopoverOpen}
+            <button class="status-backdrop" aria-label="Close" onclick={() => statusPopoverOpen = false}></button>
+            <div class="status-popover">
+              <div class="sp-header">System status</div>
+
+              <div class="sp-section">
+                <span class="sp-label">Server</span>
+                <span class="sp-val" class:ok={serverOnline} class:bad={!serverOnline}>
+                  {serverOnline ? "online" : "offline"}
+                </span>
+              </div>
+
+              {#if serverStatus}
+                <div class="sp-section">
+                  <span class="sp-label">Config</span>
+                  <span class="sp-val" class:ok={serverStatus.config.ok} class:bad={!serverStatus.config.ok}>
+                    {serverStatus.config.ok ? "ok" : serverStatus.config.error ?? "error"}
+                  </span>
+                </div>
+
+                <div class="sp-section">
+                  <span class="sp-label">Internet</span>
+                  <span class="sp-val" class:ok={serverStatus.online} class:warn={!serverStatus.online}>
+                    {serverStatus.online ? "reachable" : "offline"}
+                  </span>
+                </div>
+
+                {#if serverStatus.chat_config}
+                  <div class="sp-section">
+                    <span class="sp-label">Chat</span>
+                    <span class="sp-val ok">{serverStatus.chat_config.provider} / {serverStatus.chat_config.model}</span>
+                  </div>
+                {/if}
+
+                {#if serverStatus.llm_backend}
+                  <div class="sp-section">
+                    <span class="sp-label">{LLM_BACKEND_LABELS[serverStatus.llm_backend.provider] ?? serverStatus.llm_backend.provider}</span>
+                    <span class="sp-val" class:ok={serverStatus.llm_backend.reachable} class:bad={!serverStatus.llm_backend.reachable}>
+                      {serverStatus.llm_backend.reachable ? "reachable" : "offline"}
+                    </span>
+                  </div>
+                {/if}
+
+                {#if serverStatus.vault}
+                  <div class="sp-section">
+                    <span class="sp-label">Vault</span>
+                    <span class="sp-val ok">
+                      {serverStatus.vault.notes}n · {serverStatus.vault.sources}s · {serverStatus.vault.chats}c · {serverStatus.vault.streams}st
+                    </span>
+                  </div>
+                  <div class="sp-vault-root">{serverStatus.vault.root}</div>
+                {/if}
+
+                <div class="sp-section">
+                  <span class="sp-label">Knowledge graph</span>
+                  <span class="sp-val"
+                    class:ok={kgState === "idle"}
+                    class:warn={kgState === "stale"}
+                    class:info={kgState === "indexing"}
+                  >
+                    {kgState ?? "—"}
+                    {#if kgLastIndexed && kgState === "idle"}
+                      · {new Date(kgLastIndexed).toLocaleTimeString()}
+                    {/if}
+                  </span>
+                </div>
+                {#if serverStatus.knowledge_graph?.last_error}
+                  <div class="sp-error">{serverStatus.knowledge_graph.last_error}</div>
+                {/if}
+                {#if serverStatus.knowledge_graph?.current_activity}
+                  <div class="sp-vault-root">{serverStatus.knowledge_graph.current_activity}</div>
+                {/if}
+
+                {#if serverStatus.chroma}
+                  <div class="sp-section">
+                    <span class="sp-label">Chroma</span>
+                    <span class="sp-val" class:ok={serverStatus.chroma.chunks > 0} class:warn={serverStatus.chroma.chunks === 0}>
+                      {serverStatus.chroma.chunks} chunks · {serverStatus.chroma.files_indexed} files
+                    </span>
+                  </div>
+                  <div class="sp-vault-root">{serverStatus.chroma.model}{serverStatus.chroma.provider ? ` (${serverStatus.chroma.provider})` : ""}</div>
+                  {#if serverStatus.chroma.current_activity}
+                    <div class="sp-vault-root">{serverStatus.chroma.current_activity}</div>
+                  {/if}
+                {/if}
+
+                {#if serverStatus.zotero}
+                  <div class="sp-section">
+                    <span class="sp-label">Zotero</span>
+                    <span class="sp-val"
+                      class:ok={serverStatus.zotero.available}
+                      class:warn={!serverStatus.zotero.available}
+                    >
+                      {serverStatus.zotero.mode} · {serverStatus.zotero.available ? "available" : "unavailable"}
+                    </span>
+                  </div>
+                  {#if serverStatus.zotero.available && serverStatus.zotero.reachable !== undefined}
+                    <div class="sp-vault-root">
+                      Web API:
+                      <span class:ok={serverStatus.zotero.reachable} class:warn={!serverStatus.zotero.reachable}>
+                        {serverStatus.zotero.reachable ? "reachable" : "unreachable"}
+                      </span>
+                    </div>
+                  {/if}
+                {/if}
+
+                {#if serverStatus.pending_jobs > 0}
+                  <div class="sp-section">
+                    <span class="sp-label">Jobs</span>
+                    <span class="sp-val warn">{serverStatus.pending_jobs} pending</span>
+                  </div>
+                {/if}
+
+                {#if serverStatus.processes}
+                  <div class="sp-section">
+                    <span class="sp-label">Processes</span>
+                    <span class="sp-val">
+                      {#if serverStatus.processes.system}
+                        {serverStatus.processes.system.cpu_count} cores
+                        {#if serverStatus.processes.system.memory_available_mb != null}
+                          · {Math.round(serverStatus.processes.system.memory_available_mb / 1024 * 10) / 10}GB free
+                          / {Math.round((serverStatus.processes.system.memory_total_mb ?? 0) / 1024 * 10) / 10}GB
+                        {/if}
+                      {/if}
+                    </span>
+                  </div>
+                  {#each Object.entries(serverStatus.processes).filter(([k]) => k !== "system") as [name, proc]}
+                    {#if proc && typeof proc === "object" && "pid" in proc}
+                      <div class="sp-proc-row">
+                        <span class="sp-proc-name" class:bad={!proc.alive}>{name}</span>
+                        <span class="sp-proc-mem">{proc.memory_mb != null ? `${proc.memory_mb}MB` : "—"}</span>
+                      </div>
+                    {/if}
+                  {/each}
+                {/if}
+              {/if}
+            </div>
+          {/if}
+        </div>
+      </div>
       {/if}
     </aside>
     {#if !sidebarCollapsed}
@@ -1862,6 +1962,18 @@
                           <path d="M12 21s-7-6.5-7-11a7 7 0 0 1 14 0c0 4.5-7 11-7 11z"/>
                         </svg>
                       </button>
+                      {#if msg.role === "assistant"}
+                        <button
+                          class="chat-turn-action"
+                          title="Regenerate this reply with the chat's current model"
+                          disabled={chatSending}
+                          onclick={() => regenerateTurn(i)}
+                        >
+                          <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor">
+                            <path d="M17.65 6.35A7.95 7.95 0 0 0 12 4a8 8 0 1 0 7.75 10h-2.08A6 6 0 1 1 12 6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35Z"/>
+                          </svg>
+                        </button>
+                      {/if}
                       <button class="chat-turn-action" title="Delete this turn" onclick={() => deleteChatMessage(i)}>
                         <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor">
                           <rect x="9" y="3" width="6" height="2" rx="1"/>
@@ -1871,37 +1983,94 @@
                       </button>
                     </span>
                   </div>
-                  {#if msg.tool_calls?.length}
-                    <div class="chat-tool-calls">
-                      {#each msg.tool_calls as tc}
-                        <span class="chat-tool-call">used <code>{tc.tool}</code>{#if tc.args?.query}: {tc.args.query}{/if}</span>
+                  {#if msg.tool_calls?.length || msg.thoughts?.length || msg.recalls?.length}
+                    {@const detailsOpen = expandedTurnDetails.has(i)}
+                    <button class="chat-turn-details-toggle" onclick={() => toggleTurnDetails(i)}>
+                      <span class="chat-turn-details-arrow" class:expanded={detailsOpen}>▸</span>
+                      {summarizeTurnDetails(msg)}
+                    </button>
+                    {#if detailsOpen}
+                      <div class="chat-turn-details">
+                        {#if msg.tool_calls?.length}
+                          <div class="chat-node-group chat-node-group-toolcalls">
+                            <div class="chat-node-group-heading">Tool Calls</div>
+                            <ol class="chat-node-group-list">
+                              {#each msg.tool_calls as tc}
+                                <li class="node-box node-box-toolcall" class:node-box-error={tc.status === "error"}>
+                                  <code>{tc.tool}</code>{#if tc.args?.query}: {tc.args.query}{/if}
+                                </li>
+                              {/each}
+                            </ol>
+                          </div>
+                        {/if}
+                        {#if msg.thoughts?.length}
+                          <div class="chat-node-group chat-node-group-thoughts">
+                            <div class="chat-node-group-heading">Reasoning</div>
+                            <ol class="chat-node-group-list">
+                              {#each msg.thoughts as th}
+                                <li class="node-box node-box-thought">#{th.thought_number}: {th.thought}</li>
+                              {/each}
+                            </ol>
+                          </div>
+                        {/if}
+                        {#if msg.recalls?.length}
+                          <div class="chat-node-group chat-node-group-recalls">
+                            <div class="chat-node-group-heading">Recalled</div>
+                            <ol class="chat-node-group-list">
+                              {#each msg.recalls as r}
+                                <li class="node-box node-box-recall">{r.node_kind}{#if r.chat_slug} · from another chat{/if}</li>
+                              {/each}
+                            </ol>
+                          </div>
+                        {/if}
+                      </div>
+                    {/if}
+                  {/if}
+                  <div class="chat-turn-content text-body">
+                    {#each renderContentSegments(msg.content.value) as seg}
+                      {#if "text" in seg}{seg.text}{:else}
+                        {@const claim = msg.claims?.find(c => c.index === seg.claimIndex)}
+                        <button
+                          class="claim-ref claim-ref-{claim ? claimStyleKey(claim) : ''}"
+                          title="Jump to claim {seg.claimIndex}"
+                          onclick={() => document.getElementById(`chat-turn-${i}-claim-${seg.claimIndex}`)?.scrollIntoView({ behavior: "smooth", block: "nearest" })}
+                        >{seg.claimIndex}</button>
+                      {/if}
+                    {/each}
+                  </div>
+                  {#if msg.alternates?.length}
+                    <div class="chat-turn-alternates" title="Earlier attempts at this turn, preserved when regenerated">
+                      {msg.alternates.length + 1} attempts — {msg.model ?? "current model"} shown
+                      {#each msg.alternates as alt}
+                        <span class="chat-turn-alternate-model">· {alt.model ?? "unknown model"}</span>
                       {/each}
                     </div>
                   {/if}
-                  <div class="chat-turn-content text-body">
-                    {#each renderContentSegments(msg.content) as seg}
-                      {#if "text" in seg}{seg.text}{:else}<sup class="footnote-ref">{seg.footnoteIndex}</sup>{/if}
-                    {/each}
-                  </div>
-                  {#if msg.footnotes?.length}
-                    <ol class="chat-footnotes">
-                      {#each msg.footnotes as fn}
-                        <li id="chat-turn-{i}-footnote-{fn.index}">
-                          <span class="footnote-relation footnote-relation-{fn.relation}">{FOOTNOTE_RELATION_LABEL[fn.relation]}</span>
-                          {#if fn.faithfulness_checked !== null}
-                            <span
-                              class="footnote-faithfulness"
-                              class:faithful={fn.faithfulness_checked}
-                              class:unfaithful={!fn.faithfulness_checked}
-                              title={fn.faithfulness_checked ? "Automated check: claim is supported by the cited source(s)" : "Automated check: claim does NOT appear to be supported by the cited source(s)"}
-                            >{fn.faithfulness_checked ? "✓ verified" : "⚠ unsupported"}</span>
-                          {/if}
-                          {#if fn.sources.length}
-                            {#each fn.sources as slug, si}{#if si > 0}, {/if}<button class="footnote-source-link" onclick={() => openNode(slug)}>{slug}</button>{/each}
-                          {/if}
-                        </li>
-                      {/each}
-                    </ol>
+                  {#if msg.claims?.length}
+                    <div class="chat-claims">
+                      <div class="chat-claims-heading">References</div>
+                      <ol class="chat-claims-list">
+                        {#each msg.claims as claim}
+                          <li class="claim-box claim-box-{claimStyleKey(claim)}" id="chat-turn-{i}-claim-{claim.index}">
+                            <span class="claim-index">{claim.index}</span>
+                            <span class="claim-relation claim-relation-{claimStyleKey(claim)}">{claimLabel(claim)}</span>
+                            {#if claim.kind === "claim" && claim.faithfulness_checked !== null}
+                              <span
+                                class="claim-faithfulness"
+                                class:faithful={claim.faithfulness_checked}
+                                class:unfaithful={!claim.faithfulness_checked}
+                                title={claim.faithfulness_checked ? "Automated check: claim is supported by the cited source(s)" : "Automated check: claim does NOT appear to be supported by the cited source(s)"}
+                              >{claim.faithfulness_checked ? "✓ verified" : "⚠ unsupported"}</span>
+                            {/if}
+                            {#if claim.kind === "claim" && claim.sources.length}
+                              <div class="claim-sources">
+                                {#each claim.sources as slug, si}{#if si > 0}, {/if}<button class="claim-source-link" onclick={() => openNode(slug)}>{slug}</button>{/each}
+                              </div>
+                            {/if}
+                          </li>
+                        {/each}
+                      </ol>
+                    </div>
                   {/if}
                 </div>
               {/each}
@@ -1950,7 +2119,7 @@
                 {#each activeChat.pinned_turns as idx (idx)}
                   <button class="pinned-turn-item" onclick={() => scrollToTurn(idx)}>
                     <span class="pinned-turn-role">{activeChat.messages[idx]?.role === "user" ? "You" : "Prisma"}</span>
-                    <span class="pinned-turn-preview">{truncate(activeChat.messages[idx]?.content ?? "", 70)}</span>
+                    <span class="pinned-turn-preview">{truncate(activeChat.messages[idx]?.content?.value ?? "", 70)}</span>
                   </button>
                 {/each}
               </div>
@@ -2276,23 +2445,25 @@
                 <div class="resource-card-header">
                   <span class="resource-pool-name">Server</span>
                 </div>
-                <div class="server-switcher">
-                  {#each cfg.saved_servers as server (server.url)}
-                    <button
-                      class="server-switch-btn"
-                      class:active={apiBase === server.url}
-                      onclick={() => switchServer(server.url)}
-                    >
-                      <span class="server-switch-name">{server.name}</span>
-                      <span class="server-switch-url">{server.url}</span>
-                    </button>
-                  {/each}
-                </div>
                 <label class="setting-row">
-                  <span class="setting-label">Custom URL</span>
-                  <input bind:value={apiBase} placeholder="http://127.0.0.1:8765" />
-                  <span class="setting-hint">URL of the running <code>prisma serve</code> process — click Save to apply a custom value.</span>
+                  <span class="setting-label">Hostname</span>
+                  <input bind:value={cfg.hostname} placeholder="127.0.0.1" />
                 </label>
+                <label class="setting-row" style="flex-direction:row; align-items:center; gap:6px;">
+                  <input type="checkbox" bind:checked={cfg.tls} style="width:auto" />
+                  <span class="setting-label" style="margin:0">TLS / SSL (https)</span>
+                </label>
+                <div class="server-switcher" style="flex-direction:row; gap:8px;">
+                  <label class="setting-row" style="flex:1">
+                    <span class="setting-label">API port</span>
+                    <input type="number" min="1" max="65535" bind:value={cfg.api_port} />
+                  </label>
+                  <label class="setting-row" style="flex:1">
+                    <span class="setting-label">Web port</span>
+                    <input type="number" min="1" max="65535" bind:value={cfg.web_port} />
+                  </label>
+                </div>
+                <span class="setting-hint">Host/ports of the running <code>prisma serve</code> process — click Save to apply.</span>
               </div>
 
               <div class="resource-card">
@@ -2313,8 +2484,10 @@
                       <span class="resource-fact-val">{syncStatus.tracked_files}</span>
                     </div>
                   </div>
+                {:else if syncBlockedReason}
+                  <div class="setting-hint setting-hint-error">{syncBlockedReason}</div>
                 {:else}
-                  <div class="setting-hint">Only runs against a non-Local server (see above) — syncing against the same machine is a no-op.</div>
+                  <div class="setting-hint">Only runs when the hostname above isn't a loopback address (127.0.0.1/localhost) — syncing a local vault against the same machine is a no-op.</div>
                 {/if}
 
                 <label class="setting-row">
@@ -2353,7 +2526,7 @@
                   {#if syncStatus.running}
                     <button class="btn-secondary" onclick={async () => { await syncStop(); await refreshSyncInfo(); }}>Stop</button>
                   {:else}
-                    <button class="btn-secondary" onclick={async () => { await syncStart(); await refreshSyncInfo(); }}>Start</button>
+                    <button class="btn-secondary" onclick={async () => { syncBlockedReason = await syncStart(); await refreshSyncInfo(); }}>Start</button>
                   {/if}
                 </div>
               </div>
@@ -2599,73 +2772,14 @@
     height: calc(100vh / var(--ui-scale, 1));
   }
 
-  :global(.tauri) .shell {
-    margin: 20px;
-    height: calc(100vh - 40px);
-    border: 2px solid #1e3558;
-    border-radius: 6px;
-    box-shadow:
-      0 0 0 1px rgba(0, 0, 0, 0.5),
-      0 0 6px rgba(0, 0, 0, 0.6),
-      0 0 14px rgba(0, 0, 0, 0.4),
-      0 0 20px rgba(0, 0, 0, 0.2);
-    overflow: hidden;
-  }
 
-  :global(.tauri) .shell.maximized {
-    margin: 0;
-    height: 100vh;
-    border: none;
-    border-radius: 0;
-    box-shadow: none;
-  }
-
-  /* ── Titlebar (CSD) ────────────────────────────────────────────────────── */
-  .titlebar {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 0 0 0 14px;
-    background: #080c16;
+  .sidebar-search {
     flex-shrink: 0;
-    height: 38px;
-    user-select: none;
-  }
-
-  /* A restrained accent seam between the title bar and the workspace.
-     Same crimson/orange/tan/navy set as before, but blended into a smooth
-     gradient rather than hard-stopped stripes — stacked flat bands read as
-     a UI glitch at this height, a blend reads as a deliberate accent. This
-     palette is reserved for very highlighted elements only — not the
-     note/source/chat/stream semantic palette used elsewhere. */
-  .accent-divider {
-    height: 12px;
-    flex-shrink: 0;
-    background: linear-gradient(180deg, #c8203a 0%, #dd6b3a 33%, #ddb066 66%, #2c4d75 100%);
-  }
-
-  .drag-area {
-    display: flex;
-    align-items: center;
-    padding: 0 8px;
-    flex-shrink: 0;
-    height: 100%;
-    cursor: move;
-    min-width: 80px;
-  }
-
-  .logo {
-    font-size: 14px;
-    font-weight: 700;
-    color: #4a9eff;
-    letter-spacing: 0.06em;
-    white-space: nowrap;
-    pointer-events: none;
-    user-select: none;
+    padding: 10px 12px;
   }
 
   .search-wrap {
-    flex: 1;
+    width: 100%;
     position: relative;
     display: flex;
     align-items: center;
@@ -2709,18 +2823,22 @@
     animation: spin 0.7s linear infinite;
   }
 
+  .sidebar-footer {
+    flex-shrink: 0;
+    margin-top: auto;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 12px;
+    border-top: 1px solid #1a2d4a;
+  }
+
   /* Status dot + popover */
   .status-anchor {
     position: relative;
     flex-shrink: 0;
     display: flex;
     align-items: center;
-  }
-  /* In Tauri, .window-controls follows this and provides its own right-side
-     buffer against the window edge. In web mode nothing renders after it,
-     so without this the status dot sits flush against the browser edge. */
-  .status-anchor:last-child {
-    margin-right: 14px;
   }
 
   .gdot-btn {
@@ -2752,10 +2870,15 @@
     cursor: default;
   }
 
+  /* position: fixed, not absolute -- .status-anchor now lives inside
+     .sidebar-footer, a descendant of .sidebar, which has overflow-x: hidden
+     (for its tree/search content); an absolutely-positioned popover would
+     get clipped to the sidebar's own bounds instead of floating over the
+     rest of the window. */
   .status-popover {
-    position: absolute;
-    top: calc(100% + 10px);
-    right: 0;
+    position: fixed;
+    left: 12px;
+    bottom: 46px;
     width: 280px;
     background: #080c16;
     border: 1px solid #1a2d4a;
@@ -3776,17 +3899,77 @@
     color: #facc15;
     border: 1px solid #facc15;
   }
-  .chat-tool-calls {
+  .chat-turn-details-toggle {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    background: none;
+    border: none;
+    cursor: pointer;
+    padding: 0;
+    margin-bottom: 6px;
+    font-size: 10px;
+    color: #6a7a8f;
+  }
+  .chat-turn-details-toggle:hover { color: #93c5fd; }
+  .chat-turn-details-arrow {
+    display: inline-block;
+    transition: transform 0.1s;
+    font-size: 9px;
+  }
+  .chat-turn-details-arrow.expanded { transform: rotate(90deg); }
+  .chat-turn-details {
     display: flex;
     flex-direction: column;
-    gap: 2px;
-    margin-bottom: 6px;
-    font-family: "JetBrains Mono", monospace;
-    font-size: 10px;
-    color: #8a6ab0;
+    gap: 6px;
+    margin-bottom: 8px;
   }
-  .chat-tool-calls code {
-    color: #c084fc;
+  .chat-node-group {
+    padding: 6px 8px;
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.02);
+    border: 1px solid rgba(139, 163, 192, 0.12);
+  }
+  .chat-node-group-heading {
+    font-size: 9px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 4px;
+  }
+  .chat-node-group-toolcalls .chat-node-group-heading { color: #c084fc; }
+  .chat-node-group-thoughts .chat-node-group-heading { color: #94a3b8; }
+  .chat-node-group-recalls .chat-node-group-heading { color: #fbbf24; }
+  .chat-node-group-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .node-box {
+    padding: 4px 7px;
+    border-radius: 4px;
+    font-size: 10px;
+    background: rgba(255, 255, 255, 0.02);
+    border: 1px solid rgba(139, 163, 192, 0.12);
+  }
+  .node-box-toolcall {
+    font-family: "JetBrains Mono", monospace;
+    color: #8a6ab0;
+    border-color: rgba(192, 132, 252, 0.2);
+  }
+  .node-box-toolcall code { color: #c084fc; }
+  .node-box-toolcall.node-box-error { color: #f87171; border-color: rgba(248, 113, 113, 0.3); }
+  .node-box-thought {
+    font-style: italic;
+    color: #94a3b8;
+    border-color: rgba(148, 163, 184, 0.2);
+  }
+  .node-box-recall {
+    color: #d4a72c;
+    border-color: rgba(251, 191, 36, 0.25);
   }
   .chat-turn-content {
     color: #c8ddf0;
@@ -3794,21 +3977,74 @@
     white-space: pre-wrap;
     overflow-wrap: anywhere;
   }
-  .footnote-ref {
-    color: #7fd4c8;
+  .chat-turn-alternates {
+    margin-top: 6px;
+    font-size: 0.75rem;
+    color: #7a8a9a;
+  }
+  .chat-turn-alternate-model {
+    color: #5c6b7a;
+  }
+  .claim-ref {
+    background: none;
+    border: none;
+    padding: 0;
+    cursor: pointer;
+    font: inherit;
+    vertical-align: super;
+    font-size: 0.7em;
+    color: #9ca3af;
     font-weight: 600;
     margin-left: 1px;
   }
-  .chat-footnotes {
-    margin: 8px 0 0;
-    padding-left: 18px;
+  .claim-ref:hover { text-decoration: underline; }
+  .claim-ref-citation { color: #9ca3af; }
+  .claim-ref-attribution { color: #60a5fa; }
+  .claim-ref-relational { color: #c084fc; }
+  .claim-ref-inference { color: #6b7280; }
+  .chat-claims {
+    margin: 10px 0 0;
+    padding: 8px 10px;
+    border-radius: 8px;
+    background: rgba(96, 165, 250, 0.05);
+    border: 1px solid rgba(96, 165, 250, 0.18);
+  }
+  .chat-claims-heading {
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: #93c5fd;
+    margin-bottom: 6px;
+  }
+  .chat-claims-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
     display: flex;
     flex-direction: column;
-    gap: 4px;
+    gap: 6px;
     font-size: 11px;
     color: #8ba3c0;
   }
-  .footnote-relation {
+  .claim-box {
+    padding: 6px 8px;
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.02);
+    border: 1px solid rgba(139, 163, 192, 0.15);
+  }
+  .claim-box-citation { border-color: rgba(156, 163, 175, 0.3); }
+  .claim-box-attribution { border-color: rgba(96, 165, 250, 0.3); }
+  .claim-box-relational { border-color: rgba(192, 132, 252, 0.3); }
+  .claim-box-inference { border-color: rgba(107, 114, 128, 0.35); border-style: dashed; }
+  .claim-index {
+    display: inline-block;
+    min-width: 14px;
+    margin-right: 4px;
+    font-weight: 600;
+    color: #6a8aae;
+  }
+  .claim-relation {
     display: inline-block;
     margin-right: 6px;
     padding: 1px 6px;
@@ -3817,29 +4053,32 @@
     text-transform: uppercase;
     letter-spacing: 0.02em;
   }
-  .footnote-relation-citation {
-    background: rgba(127, 212, 200, 0.15);
-    color: #7fd4c8;
+  .claim-relation-citation {
+    background: rgba(156, 163, 175, 0.15);
+    color: #9ca3af;
   }
-  .footnote-relation-attribution {
+  .claim-relation-attribution {
     background: rgba(96, 165, 250, 0.15);
     color: #60a5fa;
   }
-  .footnote-relation-relational {
+  .claim-relation-relational {
     background: rgba(192, 132, 252, 0.15);
     color: #c084fc;
   }
-  .footnote-relation-ai-inference {
-    background: rgba(148, 163, 184, 0.15);
-    color: #94a3b8;
+  .claim-relation-inference {
+    background: rgba(107, 114, 128, 0.15);
+    color: #6b7280;
   }
-  .footnote-faithfulness {
+  .claim-faithfulness {
     margin-right: 6px;
     font-size: 10px;
   }
-  .footnote-faithfulness.faithful { color: #4ade80; }
-  .footnote-faithfulness.unfaithful { color: #f87171; }
-  .footnote-source-link {
+  .claim-faithfulness.faithful { color: #4ade80; }
+  .claim-faithfulness.unfaithful { color: #f87171; }
+  .claim-sources {
+    margin-top: 3px;
+  }
+  .claim-source-link {
     background: none;
     border: none;
     padding: 0;
@@ -3848,7 +4087,7 @@
     cursor: pointer;
     font-size: 11px;
   }
-  .footnote-source-link:hover {
+  .claim-source-link:hover {
     color: #c8ddf0;
   }
   .chat-input-row {
@@ -4184,22 +4423,6 @@
     gap: 6px;
     margin-bottom: 10px;
   }
-  .server-switch-btn {
-    display: flex;
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 2px;
-    padding: 8px 10px;
-    background: #0d1320;
-    border: 1px solid #1c2b40;
-    border-radius: 6px;
-    color: #e8edf8;
-    cursor: pointer;
-    text-align: left;
-  }
-  .server-switch-btn:hover { border-color: #2a4060; }
-  .server-switch-btn.active { border-color: #4a9eff; background: #10233a; }
-  .server-switch-name { font-size: 13px; font-weight: 600; }
   .server-switch-url { font-size: 11px; color: #6a8aa8; }
 
   .scale-slider-row {
@@ -4245,6 +4468,7 @@
     color: #2a4060;
     line-height: 1.5;
   }
+  .setting-hint-error { color: #f87171; }
   .chat-system-prompt-input + .setting-hint {
     display: block;
     margin-bottom: 10px;

@@ -110,7 +110,18 @@ All vault operations go through the REST API (`GET /notes`, `PUT /notes/{slug}`,
 
 ## Chat
 
-The chat assistant (see `ADR-014-chat-llm-backend-interface.md`) has retrieval access to the whole vault — notes, sources, and **past chat transcripts**, not just the current conversation — via `search_vault` (ChromaDB semantic search) and `graph_context` (knowledge graph traversal), both called on demand as the model needs them. Claims it makes are self-reported with footnotes back to the source vault item (see `docs/concepts/footnote.md` / ADR-017).
+The chat assistant (see `ADR-014-chat-llm-backend-interface.md`) has retrieval access to the whole vault — notes, sources, and **past chat transcripts**, not just the current conversation — via `search_vault` (ChromaDB semantic search) and `graph_context` (knowledge graph traversal), both called on demand as the model needs them. Claims it makes are self-reported with per-claim attribution back to the source vault item (see `docs/concepts/claim.md` / ADR-017 / ADR-019).
+
+### Chat as a session graph
+
+A chat isn't a flat message list — it's its own graph (ADR-019, see `docs/concepts/chat-session-graph.md` for the full node/edge taxonomy). The **main line** is the plain `User <-> AI` turn sequence (`TurnNode`, in order); everything else a turn produces branches off it rather than competing for a position in that sequence:
+
+- **Tool calls** (`ToolCallNode`) — which tool, what args, and (unlike the pre-ADR-019 model) the actual result, persisted, so it can be recalled later instead of only ever re-run.
+- **Claims** (`CitedClaimNode`/`InferenceNode`) — per-claim attribution, see "Claims" above.
+- **Regeneration attempts** (`alternates`) — prior replies to the same turn, preserved when regenerated, each keeping its own model.
+- **Reasoning steps** (`ThinkingNode`) — schema ships, nothing populates it yet (gated behind a still-deferred model-category flag).
+
+A `SessionOrchestrator` assembles context per turn: a cheap default (system prompt + Excerpt + a token-bounded walk of the main line — the same algorithm the pre-graph model used, just relocated) plus a fourth tool, `recall`, that searches the *whole* session graph — including turns the rolling window has already dropped — when the model decides it's missing something. `RECALL` also reaches into a bounded set of *other* chats' session graphs (the most recently active few, at a discounted relevance weight, capped to keep cost bounded regardless of vault size) — see `docs/concepts/chat-session-graph.md`'s Status section for the exact mechanics.
 
 ### Chat instructions
 

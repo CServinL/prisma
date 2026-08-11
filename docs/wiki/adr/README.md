@@ -20,4 +20,7 @@ Each ADR documents a significant design decision: what was decided, why, and wha
 | [ADR-014](ADR-014-chat-llm-backend-interface.md) | Chat Module's LLM Backend Interface — `openai` SDK, multi-`base_url` | Accepted |
 | [ADR-015](ADR-015-chat-excerpt-context-model.md) | Chat Excerpt & Context Model — one Excerpt per chat, compressed vs. verbatim pinning by backend context budget | Accepted |
 | [ADR-016](ADR-016-chunking-and-structured-extraction-tooling.md) | Chunking and Structured-Extraction Tooling — `semchunk` over Chonkie, Instructor over Outlines | Accepted |
-| [ADR-017](ADR-017-claim-attribution-and-footnote-model.md) | Claim Attribution & Footnote Model for Chat — per-claim sourcing, distinct from grounding | Proposed |
+| [ADR-017](ADR-017-claim-attribution-and-footnote-model.md) | Claim Attribution & Footnote Model for Chat — per-claim sourcing, distinct from grounding | Implemented |
+| [ADR-018](ADR-018-chat-compaction-points.md) | Chat Compaction Points — bounding long-chat context growth beyond what pinning/Excerpt cap today | Superseded |
+| [ADR-019](ADR-019-persisted-format-governance-and-migrations.md) | Persisted-Format Governance & Migrations — `.sess` pure-JSON chat storage, `VersionedModel` migrations, chat-as-session-graph (`TurnNode`/`SessionOrchestrator`/`RECALL`) | Implemented |
+| [ADR-020](ADR-020-apa-citation-formatting.md) | APA Citation Formatting — slug↔APA converters, `Source` metadata completeness, validator, referencing-to-slug enforcement | Proposed |

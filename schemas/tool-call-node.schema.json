@@ -1,0 +1,44 @@
+{
+  "description": "One tool invocation, off the main line (`TurnNode.tool_calls`) --\nunlike v1's `ToolCallRecord`, `result` is persisted, not discarded, so a\nlater turn can `RECALL` it instead of only ever re-running the tool.",
+  "properties": {
+    "args": {
+      "additionalProperties": true,
+      "title": "Args",
+      "type": "object"
+    },
+    "id": {
+      "title": "Id",
+      "type": "string"
+    },
+    "result": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Result"
+    },
+    "status": {
+      "default": "ok",
+      "enum": [
+        "ok",
+        "error"
+      ],
+      "title": "Status",
+      "type": "string"
+    },
+    "tool": {
+      "title": "Tool",
+      "type": "string"
+    }
+  },
+  "required": [
+    "tool"
+  ],
+  "title": "ToolCallNode",
+  "type": "object"
+}

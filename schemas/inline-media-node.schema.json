@@ -1,0 +1,40 @@
+{
+  "description": "A media artifact whose content is small, text-based, and stored\ninline -- svg/latex/drawio are all XML or plain-text source, one shape\nfor all three since they're structurally identical, not a class per\nformat. See `AssetMediaNode` for the genuinely different binary case.",
+  "properties": {
+    "caption": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Caption"
+    },
+    "id": {
+      "title": "Id",
+      "type": "string"
+    },
+    "kind": {
+      "enum": [
+        "svg",
+        "latex",
+        "drawio"
+      ],
+      "title": "Kind",
+      "type": "string"
+    },
+    "value": {
+      "title": "Value",
+      "type": "string"
+    }
+  },
+  "required": [
+    "kind",
+    "value"
+  ],
+  "title": "InlineMediaNode",
+  "type": "object"
+}

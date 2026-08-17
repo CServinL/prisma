@@ -1,0 +1,36 @@
+{
+  "description": "A media artifact too large/binary to inline (jpg) -- stored as a\nvault-relative path served via vault/assets/, never base64-inlined into\nthe .sess file. Split from `InlineMediaNode` because the two are\ngenuinely different shapes (`value` vs. `asset_path`) -- same reasoning\n`CitedClaimNode`/`InferenceNode` were split on, not one class with two\nfields where exactly one is always None.",
+  "properties": {
+    "asset_path": {
+      "title": "Asset Path",
+      "type": "string"
+    },
+    "caption": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Caption"
+    },
+    "id": {
+      "title": "Id",
+      "type": "string"
+    },
+    "kind": {
+      "const": "jpg",
+      "default": "jpg",
+      "title": "Kind",
+      "type": "string"
+    }
+  },
+  "required": [
+    "asset_path"
+  ],
+  "title": "AssetMediaNode",
+  "type": "object"
+}

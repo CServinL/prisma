@@ -5,8 +5,9 @@ from pathlib import Path
 
 from prisma.schema_gov import ContentFormat, RichContent
 from prisma.storage.models.vault_models import (
-    CHAT_SCHEMA_VERSION, Chat, ChatRole, CitedClaimNode, InferenceNode,
-    NodeType, ThinkingNode, ToolCallNode, TurnNode,
+    CHAT_SCHEMA_VERSION, AssetMediaNode, Chat, ChatRole, CitedClaimNode, InferenceNode,
+    InlineMediaNode, MediaKind, NodeType, Qualifier, ThinkingNode, ToolCallNode, TurnNode,
+    WarrantNode,
 )
 
 
@@ -177,3 +178,115 @@ def test_v1_chat_with_no_messages_migrates_cleanly():
     raw = _v1_chat_raw()
     c = Chat.model_validate(raw)
     assert c.messages == []
+
+
+# ── v3: Toulmin extension, MediaNode, attachments ──────────────────────────
+
+def test_warrant_and_qualifier_round_trip_on_a_cited_claim():
+    claim = CitedClaimNode(
+        index=1, claim_text="X causes Y", sources=["src-a"], relation="citation",
+        qualifier=Qualifier.probable,
+        warrant=WarrantNode(text="src-a's methodology directly measures causation", backing=["src-b"]),
+    )
+    restored = CitedClaimNode.model_validate_json(claim.model_dump_json())
+    assert restored.qualifier == Qualifier.probable
+    assert restored.warrant.text == "src-a's methodology directly measures causation"
+    assert restored.warrant.backing == ["src-b"]
+
+
+def test_rebuts_references_another_claim_by_id():
+    original = CitedClaimNode(index=1, claim_text="X is universal", sources=["src-a"], relation="citation")
+    exception = CitedClaimNode(
+        index=2, claim_text="X fails under condition Z", sources=["src-c"], relation="citation",
+        rebuts=original.id,
+    )
+    assert exception.rebuts == original.id
+
+
+def test_inference_node_also_carries_qualifier_and_warrant():
+    inf = InferenceNode(index=1, claim_text="probably related", qualifier=Qualifier.tentative)
+    restored = InferenceNode.model_validate_json(inf.model_dump_json())
+    assert restored.qualifier == Qualifier.tentative
+    assert restored.warrant is None
+
+
+def test_inline_media_node_kinds():
+    svg = InlineMediaNode(kind=MediaKind.svg, value="<svg></svg>")
+    latex = InlineMediaNode(kind=MediaKind.latex, value=r"$E=mc^2$")
+    drawio = InlineMediaNode(kind=MediaKind.drawio, value="<mxGraphModel/>")
+    assert svg.value == "<svg></svg>"
+    assert latex.value == r"$E=mc^2$"
+    assert drawio.kind == MediaKind.drawio
+
+
+def test_asset_media_node_uses_asset_path_not_inline_value():
+    jpg = AssetMediaNode(asset_path="chats/my-chat/figure-1.jpg", caption="Figure 1")
+    assert jpg.kind == MediaKind.jpg
+    assert jpg.asset_path == "chats/my-chat/figure-1.jpg"
+    assert not hasattr(jpg, "value")  # genuinely a different shape, not a null field
+
+
+def test_turn_node_media_is_assistant_output():
+    turn = TurnNode(
+        role=ChatRole.assistant, content=RichContent(value="here's a diagram"),
+        media=[InlineMediaNode(kind=MediaKind.svg, value="<svg></svg>")],
+    )
+    restored = TurnNode.model_validate_json(turn.model_dump_json())
+    assert len(restored.media) == 1
+    assert isinstance(restored.media[0], InlineMediaNode)
+    assert restored.media[0].kind == MediaKind.svg
+
+
+def test_turn_node_media_discriminates_inline_vs_asset():
+    turn = TurnNode(
+        role=ChatRole.assistant, content=RichContent(value="figure + diagram"),
+        media=[
+            InlineMediaNode(kind=MediaKind.drawio, value="<mxGraphModel/>"),
+            AssetMediaNode(asset_path="chats/x/fig.jpg"),
+        ],
+    )
+    restored = TurnNode.model_validate_json(turn.model_dump_json())
+    assert isinstance(restored.media[0], InlineMediaNode)
+    assert isinstance(restored.media[1], AssetMediaNode)
+
+
+def test_turn_node_attachments_and_attached_slugs_are_human_input():
+    turn = TurnNode(
+        role=ChatRole.user, content=RichContent(value="check this diagram against my notes"),
+        attachments=[InlineMediaNode(kind=MediaKind.drawio, value="<mxGraphModel/>")],
+        attached_slugs=["my-existing-note"],
+    )
+    restored = TurnNode.model_validate_json(turn.model_dump_json())
+    assert restored.attachments[0].kind == MediaKind.drawio
+    assert restored.attached_slugs == ["my-existing-note"]
+
+
+def test_new_turn_node_defaults_media_and_attachments_to_empty():
+    turn = TurnNode(role=ChatRole.user, content=RichContent(value="hi"))
+    assert turn.media == []
+    assert turn.attachments == []
+    assert turn.attached_slugs == []
+
+
+# ── v2 -> v3 migration ──────────────────────────────────────────────────────
+
+def _v2_chat_raw(**overrides) -> dict:
+    defaults = dict(slug="x", title="X", path="/tmp/x.sess", schema_version=2)
+    defaults.update(overrides)
+    return defaults
+
+
+def test_v2_chat_migrates_to_v3_with_empty_defaults():
+    raw = _v2_chat_raw(messages=[{
+        "role": "assistant", "content": {"format": "md", "value": "answer[^1]"},
+        "timestamp": "2026-08-01T00:00:00",
+        "claims": [{"kind": "claim", "index": 1, "claim_text": "answer", "sources": ["src-a"], "relation": "citation"}],
+    }])
+    c = Chat.model_validate(raw)
+    assert c.schema_version == CHAT_SCHEMA_VERSION
+    turn = c.messages[0]
+    assert turn.media == [] and turn.attachments == [] and turn.attached_slugs == []
+    claim = turn.claims[0]
+    assert claim.qualifier is None
+    assert claim.warrant is None
+    assert claim.rebuts is None

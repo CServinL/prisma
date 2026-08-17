@@ -43,6 +43,9 @@ to the end.
 | `sources` | list[str] | Vault node slugs (`Note`/`Source`) this claim ties to |
 | `relation` | `citation` \| `attribution` \| `relational` | What kind of sourcing this claim has — see below |
 | `faithfulness_checked` | bool \| None | Whether an automated check confirmed the claim accurately represents the cited source(s): `True`/`False` from an LLM-judge verification call run automatically every turn, `None` when there was nothing to check (no `claim_text`, or an unresolvable source slug). Orthogonal to `relation`, not a relation value itself |
+| `qualifier` | `Qualifier` \| None | Toulmin model's epistemic-strength modifier — `certain`\|`probable`\|`possible`\|`tentative` (the last also covers "this is a hypothesis"). Schema only, v3 — nothing populates it yet |
+| `warrant` | `WarrantNode` \| None | Toulmin model's Warrant — the reasoning bridge explaining *why* `sources` support this specific claim. `{id, text, backing: list[str]}`; `backing` is Toulmin's Backing (support for the warrant itself), same shape as `sources` since it's the same kind of thing. Schema only, v3 |
+| `rebuts` | str \| None | Another `CitedClaimNode`/`InferenceNode`'s `id` this one contradicts or states an exception to (Toulmin's Rebuttal — also covers a self-authored "limitation"). Schema only, v3 |
 
 | `relation` value | Meaning | `sources` |
 |---|---|---|
@@ -57,6 +60,9 @@ to the end.
 | `id` | str | Stable node id (uuid4) |
 | `index` | int | Sequential per turn, 1-based, same numbering space as `CitedClaimNode.index` on the same turn |
 | `claim_text` | str | The model's own reasoning/generalization this marker covers |
+| `qualifier` | `Qualifier` \| None | Same Toulmin field as `CitedClaimNode.qualifier` above. Schema only, v3 |
+| `warrant` | `WarrantNode` \| None | Same Toulmin field as `CitedClaimNode.warrant` above — an inference can have a warrant too, even with no `sources` to ground it. Schema only, v3 |
+| `rebuts` | str \| None | Same as `CitedClaimNode.rebuts` above. Schema only, v3 |
 
 No `sources`, no `faithfulness_checked` — there's structurally nothing to check or cite. This is
 what replaced the old, single-class `Footnote`'s `relation == "ai-inference"` case (see "Relations"
@@ -105,3 +111,11 @@ Split (2026-08-05, ADR-019): the single `Footnote`/`FootnoteRelation` class repl
 `CitedClaimNode`/`InferenceNode` (this page) as part of the chat session graph redesign — see
 [Chat session graph](chat-session-graph.md#node-types) for the reasoning. `ChatAgent._verify_claim`
 (renamed from `_verify_footnote`) and the API/UI all updated to the split shape in the same pass.
+
+Extended (2026-08-17, v3, `CHAT_SCHEMA_VERSION=3`, branch `chat-schema-v3-toulmin-media-
+attachments`): `qualifier`/`warrant`/`rebuts` added, covering the remaining four of Toulmin's six
+argumentation elements (Claim/Grounds already existed as this class/`sources`) — see
+[Chat session graph](chat-session-graph.md#argumentation-structure-toulmin) for the full mapping.
+Schema and migration only — nothing in `ChatAgent`'s self-reporting (`_claim_from_raw`,
+`FOOTNOTES_JSON:`) produces these fields yet, and the UI renders them only if present (no styling
+work needed later once something does populate them).

@@ -44,6 +44,9 @@ this table is just the fields directly on `TurnNode` itself.
 | `model` | str \| null | The model that actually generated *this* message. `null` for user messages. Distinct from `Chat.model` (the chat's current setting): this is what generated this specific historical reply, so it stays correct even after the chat's active model changes |
 | `alternates` | list[`TurnNode`] | Prior attempts at this same turn, preserved (not discarded) when regenerated via `POST /chats/{slug}/turns/{index}/regenerate` — each alternate keeps its own `model`, so different models' answers to the same prompt stay comparable |
 | `recalls` | list[`RecallRef`] | Pointers to session-graph nodes this turn's `RECALL` calls pulled in beyond the default rolling history — a reference, never a duplicate of the recalled content, see [Chat session graph](chat-session-graph.md) |
+| `media` | list[`MediaNode`] | v3 — media the *assistant* generated this turn (`PRODUCES` edge). Schema only, no generator exists for any kind yet — see [Chat session graph](chat-session-graph.md#media-nodes) |
+| `attachments` | list[`MediaNode`] | v3 — media the *human* attached as input this turn (`ATTACHES` edge). See "Attachments" below |
+| `attached_slugs` | list[str] | v3 — vault `Note`/`Source`/`Chat` slugs the human referenced as input this turn (conceptually `REFERENCES`, not a graph edge — see [Chat session graph](chat-session-graph.md#attachments-human-turn-input)) |
 
 ## Tool use
 
@@ -90,6 +93,34 @@ ADR-020 — the source's formatted APA citation, fetched on demand via `GET /not
 (`services/citation_format.py`'s `format_apa()`, resolved fresh on every request, not cached) and
 cached client-side per slug so re-rendering the same chat doesn't re-fetch.
 
+Since v3, a claim can also carry a Toulmin `qualifier`/`warrant`/`rebuts` — schema and rendering
+exist, nothing populates them yet. See [Claim](claim.md) and
+[Chat session graph](chat-session-graph.md#argumentation-structure-toulmin).
+
+## Attachments
+
+Since v3, a human turn can bring in more than plain text: an image or PDF (uploaded), an inline
+SVG/LaTeX/draw.io snippet (pasted), or a reference to an existing vault node (`attached_slugs`) —
+via the compose box's attachment toolbar. Two distinct paths, not one:
+
+- **Ephemeral (default)** — `POST /chats/{slug}/attachments/upload` (jpg/pdf) or a client-built
+  inline snippet lands in that turn's own `attachments`, scoped to this chat's session graph only
+  (memory tier L1 when sent, L2 once the turn rolls off the active history window — see
+  [Chat session graph](chat-session-graph.md#memory-tiers-l1--l2--l3)). Never indexed, never
+  searchable outside this one chat.
+- **Promoted (deliberate)** — `POST /chats/{slug}/attachments/promote` turns any attachment (or a
+  freshly-uploaded one) into a real vault [Note](note.md) with a companion file, referenced from
+  then on via `attached_slugs` instead — indexed, searchable, outlives this chat entirely (memory
+  tier L3). A promoted `.pdf` gets real extracted body text (`docu_craft`'s PDF→MD conversion,
+  the same conversion `POST /zotero/import` uses, generalized in v3 to not require Zotero), not
+  just an empty body.
+
+Honesty about what's not built yet: `svg`/`latex`/`drawio` attachments render as an unstyled code
+block, not as an actual diagram/formula — no rendering pipeline exists for any of the three. A
+`jpg` attachment can't actually be *seen* by the model at all — `ChatLLM.complete()` is text-only,
+no multimodal/vision path exists in the transport layer. See
+[Chat session graph](chat-session-graph.md#attachments-human-turn-input) for the full mechanics.
+
 ## Context management
 
 Two independent budgets apply to what the model actually sees on a given turn:
@@ -126,6 +157,22 @@ and is editable from the Settings page. It's a place for standing preferences ("
 in Spanish"), not one-off requests, which belong in the chat itself. The tool-calling and
 claim-marker instructions are separate, always-appended sections generated from code (not
 part of this file), since they're tied to the exact marker syntax the parser expects.
+
+## Model selection
+
+`Chat.model` is the chat's *currently configured* model — but it's not sticky in the way that
+phrase implies: every turn's `POST /chat` call overwrites it with whatever the server's single
+globally-configured `ChatAgent` is currently running (`_vault.append_messages(..., model=
+_chat_agent.model)`). There's no per-chat default-model override today; changing which model a
+chat *keeps* using means changing the server-side config, not a per-chat UI setting.
+
+What does exist, since v3: `GET /models` lists what's actually available (Ollama's `/api/tags`
+for `ollama`/`llama_cpp`, degrading to just the current model for other providers or if discovery
+fails) — populating a per-turn model picker next to **Regenerate**. Picking a model there is a
+genuine one-off override (`RegenerateTurnRequest.model` → `_build_chat_agent_for_model()`,
+predates v3 — only the discovery UI was missing), preserved as that turn's `alternates` entry, and
+never touches `Chat.model` itself (see `regenerate_turn`'s own docstring: "a real model switch is
+a separate, deliberate action").
 
 ## Rendering
 
@@ -176,3 +223,12 @@ directly. A legacy `.md`-with-`<!-- prisma:meta {...} -->`-comment reader surviv
 - **Thinking-step population** — `TurnNode.thoughts`/`ThinkingNode` ship as schema (ADR-019,
   2026-08-05), but nothing produces them yet; gated behind the still-deferred model-category
   `has_native_reasoning` flag. See [Chat session graph](chat-session-graph.md#status).
+- **Toulmin claim population** — `qualifier`/`warrant`/`rebuts` ship as schema (v3, 2026-08-17)
+  and render if present, but `ChatAgent`'s self-reporting doesn't produce them yet.
+- **Media rendering** — `svg`/`latex`/`drawio` (both `media` and `attachments`) render as an
+  unstyled code block; no diagram/formula rendering pipeline exists. No generator exists either
+  (nothing turns a request into a `media` entry today).
+- **Vision/multimodal input** — a `jpg` attachment is stored and displayable in the UI, but the
+  model itself can't see it; `ChatLLM.complete()` has no multimodal path.
+- **Sticky per-chat model override** — see "Model selection" above; today only a one-off
+  regenerate override exists, not a way to change which model a chat defaults to going forward.

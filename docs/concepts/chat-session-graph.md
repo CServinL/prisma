@@ -69,7 +69,7 @@ around whenever a turn's position shifts.
 | `InferenceNode` | `id`, `index`, `claim_text`, `qualifier`, `warrant`, `rebuts` | the pre-ADR-019 `ai-inference` relation — see below | Shipped |
 | `WarrantNode` | `id`, `text`, `backing` | new — see [Argumentation structure](#argumentation-structure-toulmin) | v3, on branch (unmerged) |
 | `InlineMediaNode` | `id`, `kind` (`svg`\|`latex`\|`drawio`), `value`, `caption` | new — see [Media nodes](#media-nodes) and [Attachments](#attachments-human-turn-input) (both directions) | v3, on branch (unmerged) |
-| `AssetMediaNode` | `id`, `kind` (`jpg`), `asset_path`, `caption` | new — split from `InlineMediaNode`, not a shared shape (see [Media nodes](#media-nodes)) | v3, on branch (unmerged) |
+| `AssetMediaNode` | `id`, `kind` (`jpg`\|`pdf`), `asset_path`, `caption` | new — split from `InlineMediaNode`, not a shared shape (see [Media nodes](#media-nodes)) | v3, on branch (unmerged) |
 
 `MediaNode` (used elsewhere in this doc) is `Annotated[InlineMediaNode | AssetMediaNode,
 Field(discriminator="kind")]` — a type alias for the discriminated union, not its own class, same
@@ -192,7 +192,7 @@ same "branch off the turn" pattern as `ToolCallNode`/`ClaimNode`, not a competin
 
 Split into two node types, not one class with two always-partly-empty fields, and not one class
 per format either — svg/latex/drawio are structurally identical (small text, stored inline);
-jpg is the one genuinely different shape (binary, stored as a file). Same reasoning
+jpg/pdf are the genuinely different shape (binary, stored as a file). Same reasoning
 `CitedClaimNode`/`InferenceNode` were split on:
 
 ```python
@@ -201,6 +201,7 @@ class MediaKind(str, Enum):
     latex = "latex"
     drawio = "drawio"
     jpg = "jpg"
+    pdf = "pdf"
 
 class InlineMediaNode(BaseModel):
     id: str = Field(default_factory=_new_id)
@@ -210,7 +211,7 @@ class InlineMediaNode(BaseModel):
 
 class AssetMediaNode(BaseModel):
     id: str = Field(default_factory=_new_id)
-    kind: Literal[MediaKind.jpg] = MediaKind.jpg
+    kind: Literal[MediaKind.jpg, MediaKind.pdf]
     asset_path: str                 # vault-relative path, served via vault/assets/
                                      # (asset_rewrite.py), never base64-inlined into the .sess
                                      # file -- inlining a binary would reopen exactly the
@@ -223,12 +224,20 @@ class AssetMediaNode(BaseModel):
 MediaNode = Annotated[InlineMediaNode | AssetMediaNode, Field(discriminator="kind")]
 ```
 
+`pdf` was added after this section was first written — not part of the original Toulmin/media
+design pass, but folded in once [attachment promotion](#attachments-human-turn-input) needed a
+fifth kind that isn't svg/latex/drawio/jpg. It's an `AssetMediaNode` like `jpg`, not `InlineMediaNode`
+(same binary-vs-text split reasoning), and it's the one kind with a real, working conversion path
+(PDF→MD, see [Status](#status)) — everything else on this page stays schema-only.
+
 `TurnNode.media: list[MediaNode] = []`, edge `PRODUCES` (`TurnNode → MediaNode`).
 
-**Scope honesty, same caveat `ThinkingNode` already carries:** this is schema only. Nothing in the
-codebase generates SVG, LaTeX, draw.io XML, or images today — no `GENERATE_DIAGRAM:`-style tool
-exists yet. What this unlocks is *where* such a tool's output would live in the graph, the day one
-is built, without another schema bump.
+**Scope honesty, same caveat `ThinkingNode` already carries — still true for the *assistant output*
+side specifically.** Nothing in the codebase generates SVG, LaTeX, draw.io XML, or images/PDFs as
+`media` today — no `GENERATE_DIAGRAM:`-style tool exists, and `PRODUCES` has no real producer.
+What this unlocks is *where* such a tool's output would live in the graph, the day one is built,
+without another schema bump. The *human input* side (`attachments`) is a different story — see
+below, it's fully wired end to end for jpg/pdf.
 
 See the [open question above](#argumentation-structure-toulmin) — the same citability question
 (can a claim's `sources` point at a `MediaNode.id`?) applies here too, and stays unresolved the
@@ -266,21 +275,48 @@ No new node types — this reuses both shapes already on the table, only adding 
 - Convention by role (expected on human turns), not a hard schema constraint — same looseness this
   codebase already accepts elsewhere (e.g. "Sources are read-only" is enforced by nothing either).
 
-**Interaction with [memory tiers](#memory-tiers-l1--l2--l3):** an attachment is the user
-deliberately bringing something into *this* turn, so by construction it belongs in L1 for that
-turn — inlined into that turn's message content the same way `RECALL`'s dereferenced hits are
-(text-based kinds and `attached_slugs`' resolved bodies inline directly; nothing new here). Once
-that turn eventually rolls off `bounded_history()`'s window, the attachment rolls off with it into
-L2, and stays reachable afterward via `RECALL` like anything else — attaching something doesn't
-grant it permanent L1 status the way pinning does.
+**Two real endpoints, not just schema — fully implemented, both directions of the flow:**
 
-**Real, undisguised gap: `jpg` has nowhere to go today.** `ChatLLM.complete()`
-(`prisma/services/chat_llm.py:152`) takes `messages: list[dict]` of plain
-`{"role", "content": str}` — there is no multimodal/vision path anywhere in the transport layer.
-Text-based attachments (`svg`/`latex`/`drawio` source, or an `attached_slugs` node's body) inline
-as text trivially. A `jpg` attachment could be *stored* (`asset_path`) today, but the model
-literally cannot see it — same "schema reserves the slot, no pipeline" honesty as `MediaNode`'s
-output side and `ThinkingNode`.
+- `POST /chats/{slug}/attachments/upload` — multipart, `jpg`/`pdf` only, kind sniffed by magic
+  bytes (not the filename/content-type header). Writes an *ephemeral* file under
+  `<chats_dir>/<slug>-attachments/`, returns an `AssetMediaNode` the client then includes in its
+  next `POST /chat` call. `svg`/`latex`/`drawio` skip this endpoint entirely — small inline text,
+  built client-side, sent directly as `ChatRequest.attachments`.
+- `POST /chats/{slug}/attachments/promote` — the L1/L2 → L3 step described below. Takes any
+  attachment (an already-uploaded `AssetMediaNode`, or a client-built `InlineMediaNode`) and
+  writes it as a real vault [Note](note.md) with a companion file
+  (`VaultService.create_note()` + a `<slug>.<ext>` companion, `COMPANION_EXTS` extended with
+  `.jpg`/`.jpeg`/`.tex`/`.drawio` for this). Stays plain `type: note` — not auto-promoted to
+  `type: source`, since that needs bibliographic fields this endpoint has no way to know; the
+  existing manual type-badge toggle still applies afterward if wanted. Marks the knowledge graph
+  stale (`_indexer.mark_stale()`), same as `zotero_import()`.
+
+**Interaction with [memory tiers](#memory-tiers-l1--l2--l3) — this is where L1/L2/L3 stops being
+just naming and becomes an actual user-facing choice.** An attachment sent via `POST /chat` is the
+user deliberately bringing something into *this* turn, so by construction it belongs in L1 for
+that turn — inlined into that turn's message content the same way `RECALL`'s dereferenced hits
+are. Once that turn eventually rolls off `bounded_history()`'s window, the attachment rolls off
+with it into L2, reachable afterward only via `RECALL`, scoped to this one chat (or a capped set
+of recent others). **Promoting** is the deliberate move to L3: a real vault Note, indexed by
+`SEARCH_VAULT`/`GRAPH_CONTEXT`, reachable from *any* chat, outliving this one entirely — the same
+distinction the mechanism was named for.
+
+**Real, undisguised gaps, precisely scoped:**
+
+- `svg`/`latex`/`drawio` (all three, in `media` and `attachments` alike): stored and shown as an
+  unstyled code block, never actually rendered as a diagram/formula. No pipeline exists.
+- `jpg`: stored, servable (`GET /vault/assets/{path}`, `.jpg` was already in `_ALLOWED_ASSET_EXTS`
+  before this pass), and shown in the UI as a real `<img>` — but the *model* still can't see it.
+  `ChatLLM.complete()` (`prisma/services/chat_llm.py:152`) takes `messages: list[dict]` of plain
+  `{"role", "content": str}` — no multimodal/vision path exists anywhere in the transport layer.
+  This is unchanged by attachment promotion; promoting a jpg makes it a searchable vault Note, not
+  a visible one.
+- `pdf` is the one case that's *not* fully gapped: once promoted, `ensure_md_format()` runs real
+  PDF→MD text extraction (`pdf_bytes_to_md()`, the same conversion `POST /zotero/import` uses,
+  generalized in this pass to not require Zotero — see [Status](#status)) — so a promoted PDF's
+  *extracted text* genuinely can reach the model later, via `SEARCH_VAULT` or a future turn's
+  `attached_slugs`. What's still missing is the raw PDF file itself being visible to the model
+  (same transport gap as jpg) — only its converted text is.
 
 ## Memory tiers (L1 / L2 / L3)
 
@@ -416,10 +452,15 @@ inside `RECALL` itself.
   (`CitedClaimNode`/`InferenceNode`, see "Node types" above).
 - `CITES` edges (from `CitedClaimNode`, not `TurnNode`) point into
   [Note](note.md)/[Source](source.md)/`Chat` — the same resolution target as the pre-ADR-019
-  `Footnote.sources`. Proposed `WARRANTS`/`REBUTS`/`PRODUCES` edges (see above) stay entirely
+  `Footnote.sources`. `WARRANTS`/`REBUTS`/`PRODUCES`/`ATTACHES` edges (see above) stay entirely
   within the session graph — they don't point into the vault.
 - `PINNED_IN` edges point at a chat's Excerpt [Note](note.md), same as `pinned_turns`/
   `excerpt_slug` (unchanged in shape by this redesign).
+- **Attachment promotion crosses that boundary deliberately** — `POST /chats/{slug}/attachments/
+  promote` (see [Attachments](#attachments-human-turn-input)) turns a session-local `MediaNode`
+  into a real vault [Note](note.md). Not a graph edge either direction: once promoted, the session
+  graph's only trace is whatever `attached_slugs` a later turn adds — the session graph and the
+  vault stay two separate structures, same posture as `RECALL` never touching Kùzu.
 - Distinct from the vault-wide [GraphNode](graph-node.md) knowledge graph — see "What it is"
   above. `RECALL`'s NetworkX-backed traversal is deliberately a separate structure from Kùzu's
   vault-wide graph, not an extension of it.
@@ -427,8 +468,9 @@ inside `RECALL` itself.
 ## Status
 
 Shipped 2026-08-05 (ADR-019 v2, `CHAT_SCHEMA_VERSION = 2`, with a v1→v2 migration for chats saved
-before this cutover): the full node/edge taxonomy above (excluding the "Proposed" rows),
-`SessionOrchestrator` (default assembly + `graph_for()`), and `RECALL` (`chat_tools.py`'s `TOOLS`
+before this cutover): the full node/edge taxonomy above (excluding the v3 rows, marked "v3, on
+branch (unmerged)" — see further down), `SessionOrchestrator` (default assembly + `graph_for()`),
+and `RECALL` (`chat_tools.py`'s `TOOLS`
 registry) — all backed by tests, including a real (not mocked) short `max_wait` exercise of
 `resource_lock.lease()`'s degrade path. The frontend (`+page.svelte`) renders `claims`/`thoughts`/
 `recalls` per turn, styled per node kind.
@@ -471,20 +513,52 @@ purely naming for `bounded_history()` + `RecallRef.chat_slug`'s existing L1/L2/L
 terminology.
 
 **Implemented 2026-08-17 on branch `chat-schema-v3-toulmin-media-attachments`, not yet merged to
-`main` — `CHAT_SCHEMA_VERSION = 3`:**
+`main` (working tree clean, PR not yet opened — blocked on a `gh auth login` re-auth, not on any
+remaining code) — `CHAT_SCHEMA_VERSION = 3`, backend, and frontend, all three commits:**
 
 - **Toulmin argumentation extension** — `WarrantNode`, `Qualifier`, `qualifier`/`warrant`/`rebuts`
   fields on `CitedClaimNode`/`InferenceNode`, `WARRANTS`/`REBUTS` graph edges. See
   [Argumentation structure](#argumentation-structure-toulmin). Covered by
   `tests/unit/storage/test_vault_models_chat.py` and `tests/unit/agents/test_session_graph.py`.
-- **`InlineMediaNode`/`AssetMediaNode`** (the `MediaNode` union) — `svg`/`latex`/`drawio`/`jpg`,
-  `PRODUCES` edge. See [Media nodes](#media-nodes). No generator pipeline exists for any of the
-  four formats yet; this only reserves where their output would live.
+  Renders in the UI (qualifier badge, warrant text + backing links, a "rebuts" jump-link) — nothing
+  populates the fields yet, so this is currently dead code path in practice, exercised by tests
+  only, exactly like `ThinkingNode` below.
+- **`InlineMediaNode`/`AssetMediaNode`** (the `MediaNode` union) — kinds `svg`/`latex`/`drawio`
+  (inline) and `jpg`/`pdf` (asset-backed), `PRODUCES` edge for assistant-generated media. Still no
+  generator exists for *any* kind (`ThinkingNode`-style honesty holds) — but `jpg`/`pdf` do have a
+  real producer now, just from the human side: attachment upload (below), not generation.
 - **Attachments** — `TurnNode.attachments`/`attached_slugs`, `ATTACHES` graph edge (`REFERENCES`
   is a documented concept, not a graph edge — see [Attachments](#attachments-human-turn-input)).
-  Reuses `MediaNode` and the `sources`-list shape, no new node types. `jpg` attachments have
-  nowhere to be seen by the model yet — `ChatLLM.complete()` is text-only, no multimodal path
-  exists.
+  Two new endpoints, both tested (`tests/unit/server/test_chat_route.py`):
+  - `POST /chats/{slug}/attachments/upload` (multipart, jpg/pdf only, sniffed by magic bytes) —
+    writes an *ephemeral* file under `<chats_dir>/<slug>-attachments/`, returns an `AssetMediaNode`
+    for the client to include in its next `POST /chat` (`ChatRequest.attachments`/
+    `attached_slugs`, also v3). svg/latex/drawio need no upload step — built client-side, sent
+    directly, no ephemeral file at all.
+  - `POST /chats/{slug}/attachments/promote` — turns any attachment (ephemeral upload or inline)
+    into a real vault [Note](note.md) with a companion file (`VaultService.create_note()` +
+    `COMPANION_EXTS`, gained `.jpg`/`.jpeg`/`.tex`/`.drawio` this pass), referenced going forward
+    via `attached_slugs` — the L1/L2 → L3 promotion path the [memory tiers](#memory-tiers-l1--l2--l3)
+    section anticipates. A promoted `.pdf` gets a real extracted body (see below), not an empty one.
+  - `GET /models` — lists available models (Ollama `/api/tags`, degrading to just the current model
+    for other providers or on failure) — not attachment-specific, but shipped alongside this work to
+    populate the frontend's per-turn regenerate model picker (`RegenerateTurnRequest.model` already
+    accepted any model name; only discovery was missing).
+  - Frontend: compose-box attachment toolbar (file picker, inline svg/latex/drawio textarea, vault-
+    slug reference input, pending chips), and turn rendering for `media`/`attachments`/
+    `attached_slugs` (jpg → `<img>`, pdf → link, svg/latex/drawio → labeled unrendered code block,
+    slugs → clickable chips) — via a shared blob-URL cache for the auth-header gap plain `<img src>`
+    can't close (same pattern `htmlFrameSrc` already used for HTML notes). `npx svelte-check`
+    (0 errors) and `npm run build` clean; **not yet verified live in a browser.**
+  - **Closed along the way, not new schema**: the PDF→MD gap tracked in `TODO.md` since 2026-08-11
+    — promoting a PDF attachment made it load-bearing rather than a future nice-to-have.
+    `zotero_routes.py`'s `_pdf_bytes_to_md` moved to `vault.py` as `pdf_bytes_to_md()` (no Zotero
+    dependency, belongs at the service layer both callers share); `ensure_md_format()` now branches
+    on `.pdf` the same way it already branched on `.html`; `generate_md_format()`
+    (`POST /notes/{slug}/md`) resolves the real companion via `find_companion()` instead of only
+    ever accepting `node.path.suffix == ".html"`. Also found and fixed in the same pass:
+    `get_note()` never populated `original_ext` at all (only `get_source()` did) — see
+    [Note](note.md#fields).
 - **Migration**: `_migrate_chat_v2_to_v3` is a no-op identity function (purely additive schema,
   nothing to restructure) — covered by `test_v2_chat_migrates_to_v3_with_empty_defaults`.
 - **Committed JSON schemas regenerated**: `schemas/warrant-node.schema.json`,
@@ -494,9 +568,10 @@ terminology.
 - **Still open, deliberately unresolved rather than guessed at**: whether `CitedClaimNode.sources`
   / `WarrantNode.backing` can reference a session-local `MediaNode.id`, not just vault-wide slugs
   — `sources`/`backing` stay vault-slug-only for this pass.
-- **Not yet done**: frontend rendering (`+page.svelte` doesn't know about `warrant`/`qualifier`/
-  `rebuts`/`media`/`attachments`/`attached_slugs` yet — same "schema first, UI later" sequencing
-  the v2 node types went through), and no PR opened yet.
+- **Real, undisguised gaps that remain** (not schema issues, transport/pipeline ones): a `jpg`
+  attachment can't be *seen* by the model — `ChatLLM.complete()` is text-only, no multimodal path.
+  `svg`/`latex`/`drawio` never render as an actual diagram/formula, only as code. Neither has a
+  generator either (nothing produces `media`, the assistant-output side, at all).
 
 Still genuinely open from the 2026-08-05 pass, not just undocumented:
 

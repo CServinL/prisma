@@ -90,6 +90,18 @@
   // the end of the turn — see renderContentSegments() below.
   type ClaimRelation = "citation" | "attribution" | "relational";
 
+  // v3 (schema-only until the chat-schema-v3 branch): Toulmin argumentation
+  // extension. qualifier/warrant/rebuts exist on both claim kinds but
+  // nothing populates them yet -- same "renders if present" posture as
+  // `thoughts` below.
+  type Qualifier = "certain" | "probable" | "possible" | "tentative";
+
+  interface WarrantOut {
+    id: string;
+    text: string;
+    backing: string[];
+  }
+
   interface CitedClaimOut {
     kind: "claim";
     index: number;
@@ -97,15 +109,41 @@
     sources: string[];
     relation: ClaimRelation;
     faithfulness_checked: boolean | null;
+    qualifier: Qualifier | null;
+    warrant: WarrantOut | null;
+    rebuts: string | null;
   }
 
   interface InferenceClaimOut {
     kind: "inference";
     index: number;
     claim_text: string;
+    qualifier: Qualifier | null;
+    warrant: WarrantOut | null;
+    rebuts: string | null;
   }
 
   type ClaimOut = CitedClaimOut | InferenceClaimOut;
+
+  // v3: a media artifact, either the assistant's own output (`media`,
+  // PRODUCES) or something a human turn attached as input (`attachments`,
+  // ATTACHES). Two shapes, not four-per-format -- see
+  // docs/concepts/chat-session-graph.md's Media nodes section.
+  interface InlineMediaOut {
+    id: string;
+    kind: "svg" | "latex" | "drawio";
+    value: string;
+    caption: string | null;
+  }
+
+  interface AssetMediaOut {
+    id: string;
+    kind: "jpg" | "pdf";
+    asset_path: string;
+    caption: string | null;
+  }
+
+  type MediaOut = InlineMediaOut | AssetMediaOut;
 
   // ADR-019: schema support only today -- nothing populates a turn's
   // `thoughts` yet (gated behind the still-deferred `has_native_reasoning`
@@ -154,6 +192,9 @@
     recalls: RecallRefOut[];
     model?: string | null;
     alternates?: ChatTurn[];
+    media?: MediaOut[];          // v3, assistant output
+    attachments?: MediaOut[];    // v3, human input
+    attached_slugs?: string[];   // v3, human input (vault node references)
   }
 
   interface ChatDetail {
@@ -486,6 +527,58 @@
     if (next.has(i)) next.delete(i); else next.add(i);
     expandedTurnDetails = next;
   }
+  // GET /models: populates the regenerate model picker. `current` (the
+  // chat's own configured model) is always included even if provider
+  // discovery fails or returns nothing else -- see app.py's list_models.
+  let availableModels = $state<string[]>([]);
+  // Per-turn regenerate model choice ("" = no override, use the chat's
+  // current model) -- keyed by turn index so multiple turns' pickers don't
+  // clobber each other.
+  let regenModelChoice = $state<Record<number, string>>({});
+  // Which alternate (by its index into msg.alternates) is currently shown
+  // expanded, per turn index -- null/absent = none expanded, the live
+  // content is all that's shown (the pre-existing behavior).
+  let expandedAlternate = $state<Record<number, number | null>>({});
+
+  function toggleAlternate(turnIndex: number, altIndex: number) {
+    const cur = expandedAlternate[turnIndex] ?? null;
+    expandedAlternate = { ...expandedAlternate, [turnIndex]: cur === altIndex ? null : altIndex };
+  }
+
+  // asset_path is vault-root-relative with real '/' separators (e.g.
+  // "chats/my-chat-attachments/abc.jpg") -- encode per-segment, not the
+  // whole string, so '/' stays a path separator for GET /vault/assets/{path:path}.
+  function vaultAssetUrl(assetPath: string): string {
+    return `${apiBase}/vault/assets/${assetPath.split("/").map(encodeURIComponent).join("/")}`;
+  }
+
+  // <img src="..."> / <a href="..."> can't carry an Authorization header,
+  // same gap htmlFrameSrc above already works around -- one shared blob-URL
+  // cache instead of duplicating that per-node effect for every chat media
+  // item across every turn. ensureAssetBlobUrl is idempotent (checked
+  // before fetching), safe to call directly from template rendering.
+  let assetBlobUrls = $state<Record<string, string>>({});
+  function ensureAssetBlobUrl(assetPath: string) {
+    if (assetBlobUrls[assetPath]) return;
+    (async () => {
+      try {
+        const r = await apiFetch(vaultAssetUrl(assetPath));
+        if (!r.ok) return;
+        const blob = await r.blob();
+        assetBlobUrls = { ...assetBlobUrls, [assetPath]: URL.createObjectURL(blob) };
+      } catch { /* image/link just won't load */ }
+    })();
+  }
+
+  async function loadAvailableModels() {
+    try {
+      const r = await apiFetch(`${apiBase}/models`);
+      if (r.ok) {
+        const data = await r.json();
+        availableModels = data.models ?? [];
+      }
+    } catch { /* non-critical -- regenerate still works with no override */ }
+  }
   let serverOnline = $state(false);
   let kgState = $state<GState | null>(null);
   let kgLastIndexed = $state<string | null>(null);
@@ -549,7 +642,7 @@
   async function bootstrap() {
     serverOnline = await ping();
     if (!serverOnline) return;
-    await Promise.all([loadTree(), loadHome(), loadStreams(), loadChats(), loadZoteroStatus()]);
+    await Promise.all([loadTree(), loadHome(), loadStreams(), loadChats(), loadZoteroStatus(), loadAvailableModels()]);
     pollStatus();
   }
 
@@ -754,23 +847,92 @@
     }
   }
 
+  // v3: attachments pending for the NEXT message, not yet sent -- cleared
+  // once sendChatMessage() actually posts them. jpg/pdf go through
+  // uploadFileAttachment() (ephemeral, L1/L2 -- see POST /chats/{slug}/
+  // attachments/upload) first; svg/latex/drawio need no upload step, built
+  // directly as an InlineMediaOut.
+  let pendingAttachments = $state<MediaOut[]>([]);
+  let pendingAttachedSlugs = $state<string[]>([]);
+  let attachmentUploading = $state(false);
+  let showInlineAttachForm = $state<"svg" | "latex" | "drawio" | null>(null);
+  let inlineAttachValue = $state("");
+  let slugAttachInput = $state("");
+
+  async function uploadFileAttachment(file: File) {
+    if (!activeChat) return;
+    attachmentUploading = true;
+    try {
+      const form = new FormData();
+      form.append("file", file);
+      const r = await apiFetch(`${apiBase}/chats/${encodeURIComponent(activeChat.slug)}/attachments/upload`, {
+        method: "POST", body: form,
+      });
+      if (r.ok) {
+        const data = await r.json();
+        pendingAttachments = [...pendingAttachments, data.attachment];
+      } else {
+        alert("Couldn't attach that file — must be a valid jpg or pdf.");
+      }
+    } finally {
+      attachmentUploading = false;
+    }
+  }
+
+  function onAttachmentFileChosen(e: Event) {
+    const input = e.currentTarget as HTMLInputElement;
+    const file = input.files?.[0];
+    input.value = "";
+    if (file) void uploadFileAttachment(file);
+  }
+
+  function addInlineAttachment() {
+    if (!showInlineAttachForm || !inlineAttachValue.trim()) return;
+    // Client-generated id -- the server assigns its own real id once this
+    // gets promoted or otherwise round-trips; this one only needs to be
+    // locally unique for Svelte's #each keying and TS's InlineMediaOut shape.
+    pendingAttachments = [...pendingAttachments, { id: crypto.randomUUID(), kind: showInlineAttachForm, value: inlineAttachValue, caption: null }];
+    inlineAttachValue = "";
+    showInlineAttachForm = null;
+  }
+
+  function addSlugAttachment() {
+    const s = slugAttachInput.trim();
+    if (!s || pendingAttachedSlugs.includes(s)) return;
+    pendingAttachedSlugs = [...pendingAttachedSlugs, s];
+    slugAttachInput = "";
+  }
+
+  function removePendingAttachment(idx: number) {
+    pendingAttachments = pendingAttachments.filter((_, ix) => ix !== idx);
+  }
+
+  function removePendingSlug(idx: number) {
+    pendingAttachedSlugs = pendingAttachedSlugs.filter((_, ix) => ix !== idx);
+  }
+
   async function sendChatMessage() {
     if (!activeChat || !chatInput.trim() || chatSending) return;
     const text = chatInput;
     const slug = activeChat.slug;
+    const attachments = pendingAttachments;
+    const attachedSlugs = pendingAttachedSlugs;
     chatInput = "";
+    pendingAttachments = [];
+    pendingAttachedSlugs = [];
     chatSending = true;
     activeChat.messages = [
       ...activeChat.messages,
       {
         role: "user", content: { format: "md", value: text, rendered_html: null },
         timestamp: new Date().toISOString(), claims: [], thoughts: [], tool_calls: [], recalls: [],
+        attachments, attached_slugs: attachedSlugs,
       },
     ];
     try {
       const r = await apiFetch(`${apiBase}/chat`, {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: text, chat_slug: slug }),
+        body: JSON.stringify({ message: text, chat_slug: slug, attachments, attached_slugs: attachedSlugs }),
       });
       if (r.ok && activeChat?.slug === slug) {
         const data = await r.json();
@@ -976,7 +1138,7 @@
       kgState = s.knowledge_graph?.state ?? null;
       kgLastIndexed = s.knowledge_graph?.last_indexed ?? null;
       if (!wasOnline) {
-        await Promise.all([loadTree(), loadHome(), loadStreams(), loadChats(), loadZoteroStatus()]);
+        await Promise.all([loadTree(), loadHome(), loadStreams(), loadChats(), loadZoteroStatus(), loadAvailableModels()]);
       } else {
         await loadTree();
       }
@@ -1970,6 +2132,25 @@
               <span class="chat-model" title="Configured chat model/pool">{serverStatus?.chat_config?.model ?? activeChat.model}{#if serverStatus?.chat_config?.pool} · {serverStatus.chat_config.pool}{/if}</span>
               <span class="chat-context-usage" title="Session context usage vs. the configured rolling-history budget">{formatTokenCount(activeChat.context_tokens_used)} / {formatTokenCount(activeChat.context_tokens_max)}</span>
             </div>
+            {#snippet mediaItem(m: MediaOut, role: "produced" | "attached")}
+              {#if m.kind === "jpg"}
+                {@const _ = ensureAssetBlobUrl(m.asset_path)}
+                {#if assetBlobUrls[m.asset_path]}
+                  <img class="chat-media-jpg" src={assetBlobUrls[m.asset_path]} alt={m.caption ?? "attached image"} title={m.caption ?? undefined} />
+                {/if}
+              {:else if m.kind === "pdf"}
+                {@const _ = ensureAssetBlobUrl(m.asset_path)}
+                {#if assetBlobUrls[m.asset_path]}
+                  <a class="chat-media-pdf-link" href={assetBlobUrls[m.asset_path]} target="_blank" rel="noopener">📎 {m.caption ?? "attached.pdf"}</a>
+                {/if}
+              {:else}
+                {@const inline = m as InlineMediaOut}
+                <div class="chat-media-inline">
+                  <div class="chat-media-inline-label">{inline.kind}{#if inline.caption} · {inline.caption}{/if} — {role === "produced" ? "generated" : "attached"}, not rendered yet</div>
+                  <pre class="chat-media-inline-code">{inline.value}</pre>
+                </div>
+              {/if}
+            {/snippet}
             <div class="chat-turns">
               {#if activeChat.messages.length === 0}
                 <div class="empty-state"><p class="text-body">Ask anything about your vault.</p></div>
@@ -1990,11 +2171,24 @@
                         </svg>
                       </button>
                       {#if msg.role === "assistant"}
+                        {#if availableModels.length > 1}
+                          <select
+                            class="chat-regen-model-picker"
+                            title="Model to use if you regenerate this reply (blank = chat's current model)"
+                            disabled={chatSending}
+                            bind:value={regenModelChoice[i]}
+                          >
+                            <option value="">current model</option>
+                            {#each availableModels as m}
+                              <option value={m}>{m}</option>
+                            {/each}
+                          </select>
+                        {/if}
                         <button
                           class="chat-turn-action"
-                          title="Regenerate this reply with the chat's current model"
+                          title="Regenerate this reply"
                           disabled={chatSending}
-                          onclick={() => regenerateTurn(i)}
+                          onclick={() => regenerateTurn(i, regenModelChoice[i] || undefined)}
                         >
                           <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor">
                             <path d="M17.65 6.35A7.95 7.95 0 0 0 12 4a8 8 0 1 0 7.75 10h-2.08A6 6 0 1 1 12 6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35Z"/>
@@ -2025,6 +2219,9 @@
                               {#each msg.tool_calls as tc}
                                 <li class="node-box node-box-toolcall" class:node-box-error={tc.status === "error"}>
                                   <code>{tc.tool}</code>{#if tc.args?.query}: {tc.args.query}{/if}
+                                  {#if tc.result}
+                                    <div class="node-box-toolcall-result">{tc.result}</div>
+                                  {/if}
                                 </li>
                               {/each}
                             </ol>
@@ -2065,13 +2262,38 @@
                       {/if}
                     {/each}
                   </div>
-                  {#if msg.alternates?.length}
-                    <div class="chat-turn-alternates" title="Earlier attempts at this turn, preserved when regenerated">
-                      {msg.alternates.length + 1} attempts — {msg.model ?? "current model"} shown
-                      {#each msg.alternates as alt}
-                        <span class="chat-turn-alternate-model">· {alt.model ?? "unknown model"}</span>
+                  {#if msg.media?.length || msg.attachments?.length || msg.attached_slugs?.length}
+                    <div class="chat-media-list">
+                      {#each msg.media ?? [] as m}{@render mediaItem(m, "produced")}{/each}
+                      {#each msg.attachments ?? [] as m}{@render mediaItem(m, "attached")}{/each}
+                      {#each msg.attached_slugs ?? [] as slug}
+                        <button class="chat-media-slug" title="Referenced vault node" onclick={() => openNode(slug)}>📄 {slug}</button>
                       {/each}
                     </div>
+                  {/if}
+                  {#if msg.alternates?.length}
+                    <div class="chat-turn-alternates" title="Earlier attempts at this turn, preserved when regenerated — click a model to view it">
+                      {msg.alternates.length + 1} attempts —
+                      <button
+                        class="chat-turn-alternate-model"
+                        class:active={expandedAlternate[i] == null}
+                        onclick={() => (expandedAlternate = { ...expandedAlternate, [i]: null })}
+                      >{msg.model ?? "current model"} (shown)</button>
+                      {#each msg.alternates as alt, ai}
+                        <button
+                          class="chat-turn-alternate-model"
+                          class:active={expandedAlternate[i] === ai}
+                          onclick={() => toggleAlternate(i, ai)}
+                        >· {alt.model ?? "unknown model"}</button>
+                      {/each}
+                    </div>
+                    {#if expandedAlternate[i] != null && msg.alternates[expandedAlternate[i]]}
+                      {@const alt = msg.alternates[expandedAlternate[i]]}
+                      <div class="chat-turn-alternate-content text-body">
+                        <div class="chat-turn-alternate-content-label">{alt.model ?? "unknown model"}'s attempt:</div>
+                        {#each renderContentSegments(alt.content.value) as seg}{#if "text" in seg}{seg.text}{/if}{/each}
+                      </div>
+                    {/if}
                   {/if}
                   {#if msg.claims?.length}
                     <div class="chat-claims">
@@ -2081,6 +2303,24 @@
                           <li class="claim-box claim-box-{claimStyleKey(claim)}" id="chat-turn-{i}-claim-{claim.index}">
                             <span class="claim-index">{claim.index}</span>
                             <span class="claim-relation claim-relation-{claimStyleKey(claim)}">{claimLabel(claim)}</span>
+                            {#if claim.qualifier}
+                              <span class="claim-qualifier" title="Epistemic strength (Toulmin qualifier)">{claim.qualifier}</span>
+                            {/if}
+                            {#if claim.rebuts}
+                              <button
+                                class="claim-rebuts"
+                                title="Rebuts claim #{claim.rebuts} — click to jump to it"
+                                onclick={() => document.getElementById(`chat-turn-${i}-claim-${claim.rebuts}`)?.scrollIntoView({ behavior: "smooth", block: "nearest" })}
+                              >⤺ rebuts</button>
+                            {/if}
+                            {#if claim.warrant}
+                              <div class="claim-warrant" title="Toulmin warrant — why the grounds support this claim">
+                                <span class="claim-warrant-label">Warrant:</span> {claim.warrant.text}
+                                {#if claim.warrant.backing.length}
+                                  <span class="claim-warrant-backing">(backed by {#each claim.warrant.backing as s, si}{#if si > 0}, {/if}<button class="claim-source-link" onclick={() => openNode(s)}>{s}</button>{/each})</span>
+                                {/if}
+                              </div>
+                            {/if}
                             {#if claim.kind === "claim" && claim.faithfulness_checked !== null}
                               <span
                                 class="claim-faithfulness"
@@ -2112,7 +2352,54 @@
                 </div>
               {/if}
             </div>
+            {#if pendingAttachments.length || pendingAttachedSlugs.length}
+              <div class="chat-pending-attachments">
+                {#each pendingAttachments as a, ai}
+                  <span class="chat-pending-chip">
+                    {a.kind === "jpg" ? "🖼️" : a.kind === "pdf" ? "📎" : "📝"} {a.kind}
+                    <button type="button" class="chat-pending-chip-remove" onclick={() => removePendingAttachment(ai)}>×</button>
+                  </span>
+                {/each}
+                {#each pendingAttachedSlugs as s, si}
+                  <span class="chat-pending-chip">
+                    📄 {s}
+                    <button type="button" class="chat-pending-chip-remove" onclick={() => removePendingSlug(si)}>×</button>
+                  </span>
+                {/each}
+              </div>
+            {/if}
+            {#if showInlineAttachForm}
+              <div class="chat-attach-inline-form">
+                <textarea
+                  class="chat-attach-inline-textarea"
+                  placeholder={showInlineAttachForm === "svg" ? "<svg>…</svg>" : showInlineAttachForm === "latex" ? "\\begin{equation}…\\end{equation}" : "<mxGraphModel>…</mxGraphModel>"}
+                  bind:value={inlineAttachValue}
+                ></textarea>
+                <div class="chat-attach-inline-actions">
+                  <button type="button" class="chat-turn-action" onclick={addInlineAttachment} disabled={!inlineAttachValue.trim()}>Add {showInlineAttachForm}</button>
+                  <button type="button" class="chat-turn-action" onclick={() => { showInlineAttachForm = null; inlineAttachValue = ""; }}>Cancel</button>
+                </div>
+              </div>
+            {/if}
             <form class="chat-input-row" onsubmit={(e) => { e.preventDefault(); sendChatMessage(); }}>
+              <div class="chat-attach-toolbar">
+                <label class="chat-attach-btn" title="Attach a jpg or pdf">
+                  📎
+                  <input type="file" accept=".jpg,.jpeg,.pdf,image/jpeg,application/pdf" hidden onchange={onAttachmentFileChosen} disabled={attachmentUploading || chatSending} />
+                </label>
+                <button type="button" class="chat-attach-btn" title="Attach SVG source" onclick={() => (showInlineAttachForm = showInlineAttachForm === "svg" ? null : "svg")}>SVG</button>
+                <button type="button" class="chat-attach-btn" title="Attach LaTeX source" onclick={() => (showInlineAttachForm = showInlineAttachForm === "latex" ? null : "latex")}>TeX</button>
+                <button type="button" class="chat-attach-btn" title="Attach draw.io XML" onclick={() => (showInlineAttachForm = showInlineAttachForm === "drawio" ? null : "drawio")}>Draw</button>
+                <input
+                  class="chat-attach-slug-input"
+                  type="text"
+                  placeholder="vault slug…"
+                  title="Reference an existing vault node"
+                  bind:value={slugAttachInput}
+                  onkeydown={(e) => { if (e.key === "Enter") { e.preventDefault(); addSlugAttachment(); } }}
+                />
+                {#if attachmentUploading}<span class="spinner chat-attach-spinner"></span>{/if}
+              </div>
               <input
                 class="chat-input"
                 type="text"
@@ -3994,6 +4281,16 @@
   }
   .node-box-toolcall code { color: #c084fc; }
   .node-box-toolcall.node-box-error { color: #f87171; border-color: rgba(248, 113, 113, 0.3); }
+  .node-box-toolcall-result {
+    margin-top: 4px;
+    padding-left: 8px;
+    border-left: 2px solid rgba(192, 132, 252, 0.25);
+    color: #a99bc4;
+    font-family: inherit;
+    white-space: pre-wrap;
+    max-height: 120px;
+    overflow-y: auto;
+  }
   .node-box-thought {
     font-style: italic;
     color: #94a3b8;
@@ -4009,13 +4306,94 @@
     white-space: pre-wrap;
     overflow-wrap: anywhere;
   }
+  .chat-regen-model-picker {
+    max-width: 130px;
+    font-size: 10px;
+    background: rgba(255, 255, 255, 0.03);
+    color: #8ba3c0;
+    border: 1px solid rgba(139, 163, 192, 0.2);
+    border-radius: 4px;
+    padding: 1px 3px;
+  }
+  .chat-media-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 6px;
+  }
+  .chat-media-jpg {
+    max-width: 260px;
+    max-height: 200px;
+    border-radius: 6px;
+    border: 1px solid rgba(139, 163, 192, 0.2);
+  }
+  .chat-media-pdf-link, .chat-media-slug {
+    display: inline-block;
+    padding: 3px 8px;
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid rgba(139, 163, 192, 0.2);
+    color: #8ba3c0;
+    font-size: 11px;
+    text-decoration: none;
+    cursor: pointer;
+  }
+  .chat-media-pdf-link:hover, .chat-media-slug:hover { color: #c8ddf0; }
+  .chat-media-inline {
+    padding: 6px 8px;
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid rgba(139, 163, 192, 0.2);
+    max-width: 100%;
+  }
+  .chat-media-inline-label {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    color: #6a7a8f;
+    margin-bottom: 4px;
+  }
+  .chat-media-inline-code {
+    margin: 0;
+    font-family: "JetBrains Mono", monospace;
+    font-size: 11px;
+    color: #a99bc4;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    max-height: 160px;
+    overflow-y: auto;
+  }
   .chat-turn-alternates {
     margin-top: 6px;
     font-size: 0.75rem;
     color: #7a8a9a;
   }
   .chat-turn-alternate-model {
+    background: none;
+    border: none;
+    padding: 0 2px;
+    cursor: pointer;
+    font: inherit;
     color: #5c6b7a;
+  }
+  .chat-turn-alternate-model:hover { color: #93c5fd; }
+  .chat-turn-alternate-model.active { color: #93c5fd; font-weight: 600; }
+  .chat-turn-alternate-content {
+    margin-top: 6px;
+    padding: 8px 10px;
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.02);
+    border: 1px dashed rgba(139, 163, 192, 0.25);
+    color: #9aafc4;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+  .chat-turn-alternate-content-label {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    color: #6a7a8f;
+    margin-bottom: 4px;
   }
   .claim-ref {
     background: none;
@@ -4107,6 +4485,43 @@
   }
   .claim-faithfulness.faithful { color: #4ade80; }
   .claim-faithfulness.unfaithful { color: #f87171; }
+  .claim-qualifier {
+    display: inline-block;
+    margin-right: 6px;
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-size: 10px;
+    font-style: italic;
+    background: rgba(212, 167, 44, 0.12);
+    color: #d4a72c;
+  }
+  .claim-rebuts {
+    display: inline-block;
+    margin-right: 6px;
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-size: 10px;
+    background: none;
+    border: 1px solid rgba(248, 113, 113, 0.3);
+    color: #f87171;
+    cursor: pointer;
+  }
+  .claim-rebuts:hover { background: rgba(248, 113, 113, 0.1); }
+  .claim-warrant {
+    margin-top: 4px;
+    padding: 4px 6px;
+    border-left: 2px solid rgba(139, 163, 192, 0.25);
+    font-size: 11px;
+    color: #8ba3c0;
+  }
+  .claim-warrant-label {
+    font-weight: 600;
+    color: #6a8aae;
+  }
+  .claim-warrant-backing {
+    color: #6a7a8f;
+    font-size: 10px;
+  }
   .claim-sources {
     margin-top: 3px;
   }
@@ -4128,6 +4543,84 @@
     font-style: italic;
     color: #6a7a8f;
   }
+  .chat-pending-attachments {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 6px 18px 0;
+    background: #080c16;
+  }
+  .chat-pending-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 4px 2px 8px;
+    border-radius: 10px;
+    background: rgba(74, 158, 255, 0.1);
+    border: 1px solid rgba(74, 158, 255, 0.25);
+    color: #8ba3c0;
+    font-size: 11px;
+  }
+  .chat-pending-chip-remove {
+    background: none;
+    border: none;
+    color: #6a7a8f;
+    cursor: pointer;
+    font-size: 13px;
+    line-height: 1;
+    padding: 0 3px;
+  }
+  .chat-pending-chip-remove:hover { color: #f87171; }
+  .chat-attach-inline-form {
+    padding: 8px 18px;
+    background: #080c16;
+    border-top: 1px solid #1a2d4a;
+  }
+  .chat-attach-inline-textarea {
+    width: 100%;
+    min-height: 70px;
+    background: #0d1420;
+    border: 1px solid #1a2d4a;
+    border-radius: 6px;
+    color: #c8ddf0;
+    padding: 8px;
+    font-size: 12px;
+    font-family: "JetBrains Mono", monospace;
+    resize: vertical;
+  }
+  .chat-attach-inline-actions {
+    display: flex;
+    gap: 8px;
+    margin-top: 6px;
+  }
+  .chat-attach-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .chat-attach-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 6px 8px;
+    border-radius: 6px;
+    background: none;
+    border: 1px solid #1a2d4a;
+    color: #8ba3c0;
+    cursor: pointer;
+    font-size: 11px;
+  }
+  .chat-attach-btn:hover { border-color: #4a9eff; color: #c8ddf0; }
+  .chat-attach-slug-input {
+    width: 90px;
+    background: #0d1420;
+    border: 1px solid #1a2d4a;
+    border-radius: 6px;
+    color: #c8ddf0;
+    padding: 6px 8px;
+    font-size: 11px;
+  }
+  .chat-attach-spinner { width: 12px; height: 12px; }
   .chat-input-row {
     display: flex;
     gap: 8px;

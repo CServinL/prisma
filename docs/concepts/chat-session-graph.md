@@ -142,7 +142,7 @@ argumentation](https://en.wikipedia.org/wiki/Stephen_Toulmin#The_Toulmin_model_o
 |---|---|---|
 | Claim | The assertion being made | `CitedClaimNode`/`InferenceNode` (shipped) |
 | Grounds (data) | The raw evidence behind the claim | already `CitedClaimNode.sources` — no new shape needed |
-| Warrant | The logical bridge explaining *why* the grounds support *this* claim — often left implicit in informal writing, required to be explicit in formal academic writing | `WarrantNode` (proposed) |
+| Warrant | The logical bridge explaining *why* the grounds support *this* claim — often left implicit in informal writing, required to be explicit in formal academic writing | `WarrantNode` (implemented, v3) |
 | Backing | Support for the warrant itself, if it's challenged | `WarrantNode.backing: list[str]` — structurally identical to `sources` (a list of vault-node references), so it's a field, not a new node type |
 | Qualifier | Epistemic strength of the claim ("necessarily", "probably", "in certain conditions") — also covers "this is a hypothesis" (`tentative`) | `Qualifier` enum field on `CitedClaimNode`/`InferenceNode` — not a node |
 | Rebuttal | Conditions under which the claim doesn't hold, or a direct counter-claim (also covers "limitation": an author's own rebuttal of their own claim) | `REBUTS` edge, `ClaimNode → ClaimNode` — reuses the existing claim types rather than inventing a `RebuttalNode` with the same shape |

@@ -182,15 +182,26 @@ def build_notes_router(
 
     @router.post("/{slug}/md", status_code=202, response_model=GenerateMdResponse)
     def generate_md_format(slug: str):
+        """.html: the node itself may BE the .html file with no .md yet
+        (a raw import, node.path points straight at it). .pdf: the node
+        always has a real .md already (created via create_note()), with the
+        .pdf sitting alongside as a companion -- vault.find_companion()
+        resolves that case, node.path alone would only ever be the .md.
+        Both end up calling the same ensure_md_format(), which branches on
+        the companion's own suffix (vault.py)."""
         vault = get_vault()
         try:
             node = vault.get_any(slug)
         except FileNotFoundError:
             raise HTTPException(status_code=404, detail=f"node not found: {slug!r}")
-        html_path = getattr(node, "path", None)
-        if html_path is None or html_path.suffix != ".html":
-            raise HTTPException(status_code=400, detail="node has no HTML format")
-        generated = vault.ensure_md_format(html_path)
+        node_path = getattr(node, "path", None)
+        companion_path = (
+            node_path if (node_path is not None and node_path.suffix == ".html")
+            else vault.find_companion(slug)
+        )
+        if companion_path is None or companion_path.suffix not in (".html", ".pdf"):
+            raise HTTPException(status_code=400, detail="node has no HTML or PDF format")
+        generated = vault.ensure_md_format(companion_path)
         return {"generated": generated, "slug": slug}
 
     @router.patch("/{slug}/type")

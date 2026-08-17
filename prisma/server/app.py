@@ -36,7 +36,9 @@ def _t(label: str, _t0=[0.0]):
     _log.info("startup  %+6.2fs  %s", now - _t0[0], label)
 
 _t("importing fastapi")
-from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi import (
+    FastAPI, File, Form, HTTPException, Query, Request, UploadFile, WebSocket, WebSocketDisconnect,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, ValidationError
 from prisma.server.access_log import AccessLogMiddleware
@@ -86,8 +88,8 @@ _t("sync_orchestrator ok")
 _t("importing vault_models")
 from prisma.schema_gov import ContentFormat, RichContent
 from prisma.storage.models.vault_models import (
-    Chat, ChatRole, ClaimNode, NodeType, RecallRef, RenderedNode, ToolCallNode, TurnNode,
-    VaultTreeNode,
+    AssetMediaNode, Chat, ChatRole, ClaimNode, InlineMediaNode, MediaKind, MediaNode, NodeType,
+    RecallRef, RenderedNode, ToolCallNode, TurnNode, VaultTreeNode,
 )
 _t("vault_models ok")
 
@@ -559,6 +561,14 @@ class RenderResponse(BaseModel):
 class ChatRequest(BaseModel):
     message: str
     chat_slug: str  # create via POST /chats first — /chat only ever sends a message
+    # v3 (schema-only until now): media/vault-node references the human turn
+    # brought in as input. jpg attachments must already be uploaded via
+    # POST /chats/{slug}/attachments/upload before being included here --
+    # this field only ever carries the resulting AssetMediaNode reference,
+    # never raw file bytes. svg/latex/drawio need no upload step (inline
+    # text), built client-side and included directly.
+    attachments: list[MediaNode] = Field(default_factory=list)
+    attached_slugs: list[str] = Field(default_factory=list)
 
 
 class ChatResponse(BaseModel):
@@ -751,6 +761,41 @@ def update_chat_system_prompt(req: UpdateChatSystemPromptRequest):
     save_system_prompt(req.content)
     _reload_chat()  # so the running ChatAgent picks up the edit immediately
     return {"content": load_system_prompt()}
+
+
+class ModelsResponse(BaseModel):
+    models: list[str]
+    current: str
+
+
+@app.get("/models", response_model=ModelsResponse)
+def list_models():
+    """Populates the desktop UI's per-turn regenerate model picker
+    (RegenerateTurnRequest.model / _build_chat_agent_for_model already
+    accept any model name — this endpoint only adds discovery, no new
+    capability). Only ollama/llama_cpp support live discovery (same /api/tags
+    query prisma_cli.py's `prisma doctor` already uses); other providers
+    (openrouter) have no roster here yet, so `models` degrades to just the
+    currently-configured one rather than a fake/empty list. This does not
+    change which model a chat defaults to going forward -- Chat.model is
+    still always overwritten by _chat_agent.model on every turn (no sticky
+    per-chat override exists yet)."""
+    from prisma.utils.config import ConfigLoader
+    cfg = ConfigLoader()
+    chat_config = cfg.get_chat_config()
+    current = chat_config.model
+    if chat_config.provider in ("ollama", "llama_cpp"):
+        import requests
+        llm_host = cfg.get_llm_config().host
+        try:
+            resp = requests.get(f"http://{llm_host}/api/tags", timeout=5)
+            resp.raise_for_status()
+            names = sorted({m["name"] for m in resp.json().get("models", []) if m.get("name")})
+            if names:
+                return ModelsResponse(models=names, current=current)
+        except Exception as exc:
+            _log.debug("list_models: /api/tags query against %s failed: %s", llm_host, exc)
+    return ModelsResponse(models=[current], current=current)
 
 
 @app.post("/supervisor/restart/{name}")
@@ -1145,7 +1190,10 @@ def chat(req: ChatRequest):
             excerpt_notes.append(_vault.get_note(chat_node.excerpt_slug))
         except FileNotFoundError:
             _log.warning("chat %r: excerpt note %r no longer exists", chat_node.slug, chat_node.excerpt_slug)
-    user_msg = TurnNode(role=ChatRole.user, content=RichContent(format=ContentFormat.markdown, value=req.message))
+    user_msg = TurnNode(
+        role=ChatRole.user, content=RichContent(format=ContentFormat.markdown, value=req.message),
+        attachments=req.attachments, attached_slugs=req.attached_slugs,
+    )
     assistant_msg = _chat_agent.respond(history, req.message, excerpt_notes=excerpt_notes, chat_slug=chat_node.slug)
     # append_messages (not save_chat with the pre-call `history` snapshot)
     # re-reads the chat's *current* messages atomically right before
@@ -1158,6 +1206,96 @@ def chat(req: ChatRequest):
         chat_slug=chat_node.slug, reply=assistant_msg.content.value, tool_calls=assistant_msg.tool_calls,
         claims=assistant_msg.claims, recalls=assistant_msg.recalls, html=_render_chat_html(assistant_msg.content.value),
     )
+
+
+class UploadAttachmentResponse(BaseModel):
+    attachment: AssetMediaNode
+
+
+def _sniff_asset_kind(data: bytes) -> MediaKind | None:
+    if data[:3] == b"\xff\xd8\xff":
+        return MediaKind.jpg
+    if data[:4] == b"%PDF":
+        return MediaKind.pdf
+    return None
+
+
+@app.post("/chats/{slug}/attachments/upload", response_model=UploadAttachmentResponse, status_code=201)
+async def upload_chat_attachment(slug: str, file: UploadFile = File(...), caption: Optional[str] = None):
+    """jpg/pdf upload for TurnNode.attachments (v3, docs/concepts/chat-
+    session-graph.md's Attachments section) -- svg/latex/drawio need no
+    upload step (small inline text, built client-side and sent directly in
+    POST /chat's `attachments`). Written under the chat's own
+    <slug>-attachments/ dir as an *ephemeral* (L1/L2) attachment, served
+    back via the existing GET /vault/assets/{path} route (jpg/pdf already
+    in _ALLOWED_ASSET_EXTS). This does NOT create a vault Note -- that's a
+    separate, deliberate action, see POST /chats/{slug}/attachments/promote."""
+    try:
+        chat_node = _vault.get_chat(slug)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"chat not found: {slug!r}")
+    data = await file.read()
+    kind = _sniff_asset_kind(data)
+    if kind is None:
+        raise HTTPException(status_code=400, detail="unsupported file — must be a valid jpg or pdf")
+    attachments_dir = _vault.default_dirs[NodeType.chat] / f"{chat_node.slug}-attachments"
+    attachments_dir.mkdir(parents=True, exist_ok=True)
+    dest = attachments_dir / f"{uuid.uuid4().hex}.{kind.value}"
+    dest.write_bytes(data)
+    rel_path = dest.relative_to(_vault.root).as_posix()
+    return UploadAttachmentResponse(attachment=AssetMediaNode(kind=kind, asset_path=rel_path, caption=caption))
+
+
+_MEDIA_KIND_FILE_EXT = {
+    MediaKind.svg: ".svg", MediaKind.latex: ".tex", MediaKind.drawio: ".drawio",
+    MediaKind.jpg: ".jpg", MediaKind.pdf: ".pdf",
+}
+
+
+class PromoteAttachmentRequest(BaseModel):
+    attachment: MediaNode
+    title: Optional[str] = None  # None -> auto-generate from kind/caption
+
+
+class PromoteAttachmentResponse(BaseModel):
+    slug: str
+
+
+@app.post("/chats/{slug}/attachments/promote", response_model=PromoteAttachmentResponse, status_code=201)
+def promote_attachment_to_vault(slug: str, req: PromoteAttachmentRequest):
+    """Promotes an ephemeral (L1/L2) attachment -- already uploaded via
+    POST /chats/{slug}/attachments/upload for jpg/pdf, or built client-side
+    for the three inline kinds -- into a real vault Note (L3): indexed,
+    searchable, outlives the chat's own rolling history. A chat keeps
+    referencing the promoted node via TurnNode.attached_slugs (REFERENCES)
+    from here on, not via `attachments` -- that's the point of promoting.
+    Stays plain `type: note`, not auto-set to `source`, same as the existing
+    manual "create Note, drop companion, toggle type badge" flow -- source
+    requires bibliographic fields this endpoint has no way to know."""
+    try:
+        _vault.get_chat(slug)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"chat not found: {slug!r}")
+
+    attachment = req.attachment
+    title = req.title or attachment.caption or f"Attachment ({attachment.kind.value})"
+    note = _vault.create_note(title=title)
+    ext = _MEDIA_KIND_FILE_EXT[attachment.kind]
+    dest = note.path.with_suffix(ext)
+
+    if isinstance(attachment, AssetMediaNode):
+        src = _vault.resolve_within_root(attachment.asset_path)
+        if not src.is_file():
+            raise HTTPException(status_code=404, detail=f"attachment file not found: {attachment.asset_path!r}")
+        dest.write_bytes(src.read_bytes())
+    else:
+        dest.write_text(attachment.value, encoding="utf-8")
+
+    if ext in (".pdf", ".html"):
+        _vault.ensure_md_format(dest)
+    _indexer.mark_stale()
+    _activity.info("action=promote_attachment note_slug=%s kind=%s", note.slug, attachment.kind.value)
+    return PromoteAttachmentResponse(slug=note.slug)
 
 
 @app.post("/chats/{slug}/turns/{index}/regenerate", response_model=Chat)

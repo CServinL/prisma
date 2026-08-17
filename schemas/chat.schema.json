@@ -1,7 +1,7 @@
 {
   "$defs": {
     "AssetMediaNode": {
-      "description": "A media artifact too large/binary to inline (jpg) -- stored as a\nvault-relative path served via vault/assets/, never base64-inlined into\nthe .sess file. Split from `InlineMediaNode` because the two are\ngenuinely different shapes (`value` vs. `asset_path`) -- same reasoning\n`CitedClaimNode`/`InferenceNode` were split on, not one class with two\nfields where exactly one is always None.",
+      "description": "A media artifact too large/binary to inline (jpg, pdf) -- stored as a\nvault-relative path served via vault/assets/, never base64-inlined into\nthe .sess file. Split from `InlineMediaNode` because the two are\ngenuinely different shapes (`value` vs. `asset_path`) -- same reasoning\n`CitedClaimNode`/`InferenceNode` were split on, not one class with two\nfields where exactly one is always None. `pdf` is the one kind that also\nhas a promotion path to a real vault Note (see VaultService.promote_\nattachment_to_note) -- PDF text is worth extracting/indexing, unlike a\nbare jpg.",
       "properties": {
         "asset_path": {
           "title": "Asset Path",
@@ -24,13 +24,16 @@
           "type": "string"
         },
         "kind": {
-          "const": "jpg",
-          "default": "jpg",
+          "enum": [
+            "jpg",
+            "pdf"
+          ],
           "title": "Kind",
           "type": "string"
         }
       },
       "required": [
+        "kind",
         "asset_path"
       ],
       "title": "AssetMediaNode",
@@ -434,6 +437,7 @@
                 "drawio": "#/$defs/InlineMediaNode",
                 "jpg": "#/$defs/AssetMediaNode",
                 "latex": "#/$defs/InlineMediaNode",
+                "pdf": "#/$defs/AssetMediaNode",
                 "svg": "#/$defs/InlineMediaNode"
               },
               "propertyName": "kind"
@@ -485,6 +489,7 @@
                 "drawio": "#/$defs/InlineMediaNode",
                 "jpg": "#/$defs/AssetMediaNode",
                 "latex": "#/$defs/InlineMediaNode",
+                "pdf": "#/$defs/AssetMediaNode",
                 "svg": "#/$defs/InlineMediaNode"
               },
               "propertyName": "kind"

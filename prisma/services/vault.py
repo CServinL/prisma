@@ -20,7 +20,27 @@ from prisma.storage.models.vault_models import (
 _log = logging.getLogger("prisma.vault")
 
 # Recognised companion file extensions stored alongside a .md source node.
-COMPANION_EXTS = (".pdf", ".html", ".htm", ".svg", ".epub", ".docx")
+# .jpg/.jpeg added alongside .tex/.drawio for attachment promotion (v3,
+# POST /chats/{slug}/attachments/promote) -- previously absent even though
+# _ALLOWED_ASSET_EXTS (app.py's GET /vault/assets/) already served jpg fine;
+# nothing had ever created a jpg companion before, so the gap went unnoticed.
+COMPANION_EXTS = (".pdf", ".html", ".htm", ".svg", ".epub", ".docx", ".tex", ".drawio", ".jpg", ".jpeg")
+
+
+def pdf_bytes_to_md(data: bytes) -> str:
+    """Relocated from zotero_routes.py (was `_pdf_bytes_to_md`) -- a pure
+    function of raw bytes, no Zotero dependency, so it belongs at the
+    service layer where both zotero_import() and ensure_md_format() (the
+    generic companion->.md conversion, see below) can share it, rather than
+    ensure_md_format() reaching into a route module for it. Closes the gap
+    documented in TODO.md: a manually-attached PDF companion (no Zotero
+    import involved) previously got no body text at all."""
+    try:
+        from docu_craft.renderers.pdf_md import pdf_to_md
+        return pdf_to_md(data)
+    except Exception as exc:
+        _log.warning("pdf_to_md conversion failed, no body generated: %s", exc)
+        return ""
 
 # Directories that are never part of the vault (VCS, build artifacts, hidden).
 # Internal app state (chromadb/, kg-out/) lives under .vault-files/ instead of
@@ -448,6 +468,13 @@ class VaultService:
             tags=list(dict.fromkeys(tags)),
             body=content,
             excerpt_of_chat=fm.get("excerpt_of_chat"),
+            # Same companion detection get_source() already does -- a Note
+            # can have a real companion too (manually dropped, or written by
+            # POST /chats/{slug}/attachments/promote), and GET /notes/{slug}
+            # /original needs this to know it's there. Previously never set
+            # for notes, only sources -- found while building attachment
+            # promotion, whose whole point is a servable companion file.
+            original_ext=_companion_ext(path),
             path=path,
             created_at=datetime.fromtimestamp(stat.st_mtime),
             modified_at=datetime.fromtimestamp(stat.st_mtime),
@@ -728,28 +755,38 @@ class VaultService:
 
     # ── Format generation ─────────────────────────────────────────────────────
 
-    def ensure_md_format(self, html_path: Path) -> bool:
-        """Convert an HTML file to Markdown and store it in the companion .md body.
-        Returns True if the companion was created/updated, False if already present."""
-        companion = html_path.with_suffix(".md")
+    def ensure_md_format(self, companion_path: Path) -> bool:
+        """Convert a companion file (.html or .pdf) to Markdown and store it
+        in the sibling .md body. Returns True if the companion .md was
+        created/updated, False if already present. .pdf uses pdf_bytes_to_md
+        (module-level, above) -- the same conversion zotero_import() uses,
+        generalized here so a manually-attached PDF (no Zotero import
+        involved) gets real extracted text too, not just whatever metadata
+        the user typed by hand. See TODO.md's now-closed PDF->MD gap."""
+        companion = companion_path.with_suffix(".md")
         if companion.exists():
             raw = companion.read_text(encoding="utf-8")
             fm, body = _parse_frontmatter(raw)
             if body.strip():
                 return False
         else:
-            fm, body = {"title": html_path.stem}, ""
-        try:
-            from docu_craft import render as _dc_render
-            import tempfile
-            with tempfile.NamedTemporaryFile(suffix=".md", delete=False) as tf:
-                tmp = Path(tf.name)
-            _dc_render(source=html_path, format="md", output=tmp)
-            md_content = tmp.read_text(encoding="utf-8")
-            tmp.unlink(missing_ok=True)
-        except Exception as exc:
-            _log.warning("docu_craft render failed for %s, no .md companion generated: %s", html_path, exc)
-            return False
+            fm, body = {"title": companion_path.stem}, ""
+        if companion_path.suffix == ".pdf":
+            md_content = pdf_bytes_to_md(companion_path.read_bytes())
+            if not md_content:
+                return False
+        else:
+            try:
+                from docu_craft import render as _dc_render
+                import tempfile
+                with tempfile.NamedTemporaryFile(suffix=".md", delete=False) as tf:
+                    tmp = Path(tf.name)
+                _dc_render(source=companion_path, format="md", output=tmp)
+                md_content = tmp.read_text(encoding="utf-8")
+                tmp.unlink(missing_ok=True)
+            except Exception as exc:
+                _log.warning("docu_craft render failed for %s, no .md companion generated: %s", companion_path, exc)
+                return False
         fm.setdefault("type", "note")
         companion.write_text(_render_frontmatter(fm) + md_content, encoding="utf-8")
         return True

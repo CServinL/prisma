@@ -1473,3 +1473,37 @@ Fixed the *build/publish* half:
   not, since nothing mounts the PVC over `/app`. Needs an explicit fix (env override, absolute
   path under `HOME`, or a PVC mount at `/app/data`) before switching the chart over, or this
   queue silently stops persisting across pod restarts.
+
+## Closed: PDF→MD auto-generation only worked via Zotero import, not for manually-placed PDFs (opened 2026-08-11, fixed 2026-08-17)
+
+Found while the user tried to turn a raw `.pdf` (companion file dropped next to a manually
+created Note, then toggled to `type: source` via the node-toolbar badge / `PATCH
+/notes/{slug}/type`) into a real indexed Source. The `.md` body stayed empty — nothing ever ran
+docu-craft's PDF conversion outside `POST /zotero/import/{key}`.
+
+**Fixed as part of chat schema v3 (`chat-schema-v3-toulmin-media-attachments` branch)**, once the
+new `POST /chats/{slug}/attachments/promote` endpoint made this load-bearing rather than a future
+nice-to-have (promoting an uploaded PDF attachment into a vault Note needs the same conversion):
+
+- `_pdf_bytes_to_md()` moved from `prisma/server/zotero_routes.py` to `prisma/services/vault.py`
+  as `pdf_bytes_to_md()` — a pure function of bytes, no Zotero dependency, so it belongs at the
+  service layer both `zotero_import()` and `ensure_md_format()` can share, not routes reaching
+  into other routes for it.
+- `VaultService.ensure_md_format()` (renamed param `html_path` → `companion_path`) now branches
+  on the companion's suffix: `.pdf` → `pdf_bytes_to_md()`, `.html` → the existing docu_craft
+  `render()` path (unchanged).
+- `notes_routes.py`'s `generate_md_format()` (`POST /{slug}/md`) now resolves the actual companion
+  via `vault.find_companion(slug)` when the node's own `.path` isn't already the companion itself
+  (the .html-with-no-.md-yet case `node.path` already covered), instead of only ever accepting
+  `node.path.suffix == ".html"` — so a `.pdf` companion sitting alongside a real `.md` (the normal
+  case, unlike raw HTML imports) is now reachable at all.
+- Found and fixed one more gap along the way: `VaultService.get_note()` never populated
+  `original_ext` at all (only `get_source()` did) — a promoted Note with a real companion needs
+  it for `GET /notes/{slug}/original` to work.
+- Also found and fixed: `.jpg`/`.jpeg`/`.tex`/`.drawio` were missing from `COMPANION_EXTS`
+  entirely (only `.pdf`/`.html`/`.htm`/`.svg`/`.epub`/`.docx` were recognised) — nothing had ever
+  created those companion kinds before this feature.
+
+Not touched: the ~68 pre-existing hand-written `.md` files the user separately backfilled by hand
+in a parallel session — this fix doesn't retroactively regenerate those, only new promotions from
+here on.

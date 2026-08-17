@@ -220,7 +220,7 @@ def test_inline_media_node_kinds():
 
 
 def test_asset_media_node_uses_asset_path_not_inline_value():
-    jpg = AssetMediaNode(asset_path="chats/my-chat/figure-1.jpg", caption="Figure 1")
+    jpg = AssetMediaNode(kind=MediaKind.jpg, asset_path="chats/my-chat/figure-1.jpg", caption="Figure 1")
     assert jpg.kind == MediaKind.jpg
     assert jpg.asset_path == "chats/my-chat/figure-1.jpg"
     assert not hasattr(jpg, "value")  # genuinely a different shape, not a null field
@@ -242,7 +242,7 @@ def test_turn_node_media_discriminates_inline_vs_asset():
         role=ChatRole.assistant, content=RichContent(value="figure + diagram"),
         media=[
             InlineMediaNode(kind=MediaKind.drawio, value="<mxGraphModel/>"),
-            AssetMediaNode(asset_path="chats/x/fig.jpg"),
+            AssetMediaNode(kind=MediaKind.jpg, asset_path="chats/x/fig.jpg"),
         ],
     )
     restored = TurnNode.model_validate_json(turn.model_dump_json())

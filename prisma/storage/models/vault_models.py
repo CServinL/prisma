@@ -217,6 +217,7 @@ class MediaKind(str, Enum):
     latex = "latex"
     drawio = "drawio"
     jpg = "jpg"
+    pdf = "pdf"
 
 
 class InlineMediaNode(BaseModel):
@@ -231,14 +232,17 @@ class InlineMediaNode(BaseModel):
 
 
 class AssetMediaNode(BaseModel):
-    """A media artifact too large/binary to inline (jpg) -- stored as a
+    """A media artifact too large/binary to inline (jpg, pdf) -- stored as a
     vault-relative path served via vault/assets/, never base64-inlined into
     the .sess file. Split from `InlineMediaNode` because the two are
     genuinely different shapes (`value` vs. `asset_path`) -- same reasoning
     `CitedClaimNode`/`InferenceNode` were split on, not one class with two
-    fields where exactly one is always None."""
+    fields where exactly one is always None. `pdf` is the one kind that also
+    has a promotion path to a real vault Note (see VaultService.promote_
+    attachment_to_note) -- PDF text is worth extracting/indexing, unlike a
+    bare jpg."""
     id: str = Field(default_factory=_new_id)
-    kind: Literal[MediaKind.jpg] = MediaKind.jpg
+    kind: Literal[MediaKind.jpg, MediaKind.pdf]
     asset_path: str
     caption: str | None = None
 

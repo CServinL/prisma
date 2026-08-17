@@ -20,7 +20,7 @@ from prisma.integrations.zotero.client import ZoteroStatus
 from prisma.integrations.zotero import ZoteroClient
 from prisma.services.knowledge_graph_client import KnowledgeGraphClient
 from prisma.services.renderer import render as vault_render
-from prisma.services.vault import VaultService
+from prisma.services.vault import VaultService, pdf_bytes_to_md
 from prisma.storage.models.vault_models import RenderedNode
 from prisma.storage.models.zotero_models import ZoteroCollection, ZoteroItem
 
@@ -69,15 +69,6 @@ def _fetch_pdf_from_url(url: str | None, doi: str | None) -> bytes | None:
             _log.debug("pdf candidate %s failed, trying next: %s", pdf_url, exc)
             continue
     return None
-
-
-def _pdf_bytes_to_md(data: bytes) -> str:
-    try:
-        from docu_craft.renderers.pdf_md import pdf_to_md
-        return pdf_to_md(data)
-    except Exception as exc:
-        _log.warning("pdf_to_md conversion failed, importing with empty body: %s", exc)
-        return ""
 
 
 def build_zotero_router(
@@ -202,7 +193,7 @@ def build_zotero_router(
             pdf_bytes = _fetch_pdf_from_url(item.url, item.doi)
 
         if pdf_bytes:
-            body = _pdf_bytes_to_md(pdf_bytes)
+            body = pdf_bytes_to_md(pdf_bytes)
         else:
             lines = []
             if item.abstract_note:

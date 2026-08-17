@@ -72,7 +72,7 @@ def test_produces_edge_for_assistant_media():
 
 
 def test_attaches_edge_for_human_attachments():
-    media = AssetMediaNode(asset_path="chats/x/fig.jpg")
+    media = AssetMediaNode(kind=MediaKind.jpg, asset_path="chats/x/fig.jpg")
     turn = _turn(role=ChatRole.user, attachments=[media])
     g = build_session_graph([turn])
     assert g[turn.id][media.id][0]["kind"] == "ATTACHES"

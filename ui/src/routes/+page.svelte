@@ -418,7 +418,6 @@
   }
 
   let _wsRetry = 0;
-  connectWS();
 
   // ── UI dev hot-reload (polling the Web process — dev-only, self-contained) ───
   let _devBuildVersion: number | null = null;
@@ -642,6 +641,11 @@
   async function bootstrap() {
     serverOnline = await ping();
     if (!serverOnline) return;
+    // Deliberately after the ping, not at component init (see removed
+    // top-level call) -- apiBase is still the Tauri loopback placeholder
+    // until loadSettings() resolves, so an eager connectWS() always fails
+    // its first attempt against the wrong host.
+    connectWS();
     await Promise.all([loadTree(), loadHome(), loadStreams(), loadChats(), loadZoteroStatus(), loadAvailableModels()]);
     pollStatus();
   }

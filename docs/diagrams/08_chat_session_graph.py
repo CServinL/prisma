@@ -9,20 +9,9 @@ sharing its position in the list. See docs/concepts/chat-session-graph.md
 for the full node/edge taxonomy this diagram mirrors — that page is the
 source of truth; this is its structural picture.
 
-Deliberately NOT shown as edges here: NEXT/REGENERATES/RECALLS
-(TurnNode -> TurnNode) and REVISES/BRANCHES_FROM (ThinkingNode ->
-ThinkingNode) and REBUTS (CitedClaimNode -> CitedClaimNode) are all
-self-referencing relationships. sysatlas's ER ontology has no guard
-against self-loops the way its architecture ontology does
-(`_ontology/architecture.py`'s `_no_self_loop` validator) -- an earlier
-version of this script with those five self-relate() calls hung the
-renderer (observed: 11GB+ RSS, still climbing, killed after ~3 minutes).
-Reported as a real sysatlas gap, not routed around silently: self-
-referencing entities are common enough (linked lists, org charts,
-category trees) that ERMap should either support them or reject them
-loudly, the way SystemMap already does. These five relationships are
-plain prose facts instead (main-line order, alternates, cross-references)
--- the branch structure below is what this diagram actually needs to show.
+Includes six self-referencing relationships (NEXT/REGENERATES/RECALLS on
+TurnNode, REVISES/BRANCHES_FROM on ThinkingNode, REBUTS on
+CitedClaimNode).
 """
 from pathlib import Path
 from sysatlas import ERMap
@@ -85,15 +74,18 @@ m.attribute("AssetMediaNode", "asset_path", type="str",               is_require
 m.entity("VaultNode", label="Note / Source / Chat (vault-wide)")
 m.attribute("VaultNode", "slug", type="str", is_key=True, is_required=True)
 
-# Edges (see chat-session-graph.md's Edge types table for the full mapping).
-# NEXT/REGENERATES/RECALLS/REVISES/BRANCHES_FROM/REBUTS omitted -- all six
-# are self-referencing, see the module docstring for why.
+# Edges (see chat-session-graph.md's Edge types table for the full mapping)
+m.relate("TurnNode",       "TurnNode",         "NEXT (main line)",     source_card="1", target_card="0..1")
+m.relate("TurnNode",       "TurnNode",         "REGENERATES (alternates)", source_card="1", target_card="*")
+m.relate("TurnNode",       "TurnNode",         "RECALLS (session-local; cross-chat too, v2)", source_card="*", target_card="*")
 m.relate("TurnNode",       "ToolCallNode",     "INVOKES",              source_card="1", target_card="*")
 m.relate("TurnNode",       "ThinkingNode",     "REASONS",              source_card="1", target_card="*")
+m.relate("ThinkingNode",   "ThinkingNode",     "REVISES / BRANCHES_FROM", source_card="0..1", target_card="*")
 m.relate("TurnNode",       "CitedClaimNode",   "ASSERTS",              source_card="1", target_card="*")
 m.relate("TurnNode",       "InferenceNode",    "ASSERTS",              source_card="1", target_card="*")
 m.relate("CitedClaimNode", "WarrantNode",      "WARRANTS",             source_card="0..1", target_card="1")
 m.relate("InferenceNode",  "WarrantNode",      "WARRANTS",             source_card="0..1", target_card="1")
+m.relate("CitedClaimNode", "CitedClaimNode",   "REBUTS",               source_card="0..1", target_card="1")
 m.relate("TurnNode",       "InlineMediaNode",  "PRODUCES / ATTACHES",  source_card="1", target_card="*")
 m.relate("TurnNode",       "AssetMediaNode",   "PRODUCES / ATTACHES",  source_card="1", target_card="*")
 m.relate("CitedClaimNode", "VaultNode",        "CITES",                source_card="*", target_card="1")

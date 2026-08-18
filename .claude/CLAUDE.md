@@ -54,3 +54,7 @@ Diagrams live in `docs/diagrams/`. Include updated HTML files in the PR — revi
 | `06_process_supervision.html` | SystemMap | Supervisor topology + crash/restart recovery paths |
 | `07a_compute_pool_topology.html` | SystemMap | GPU/LLM compute-pool: the three Ollama callers, the arbiter, the shared backend |
 | `07b_compute_pool_contention.html` | SequenceMap | What happens when two callers want different models at once (409 → backoff retry → grant) |
+| `08_chat_session_graph.html` | ERMap | Chat session graph (ADR-019 v2/v3): TurnNode's branch structure — tool calls, reasoning, claims, Toulmin warrant/rebuttal, media/attachments — see `docs/concepts/chat-session-graph.md` |
+| `09_chat_attachment_flow.html` | SequenceMap | Chat attachment lifecycle: ephemeral upload (L1/L2) vs. deliberate promotion to a vault Note (L3), including the PDF→MD conversion step |
+
+**sysatlas ER self-loop gap**: `08_chat_session_graph.py`'s docstring documents a real sysatlas bug found while building it — a self-referencing `ERMap.relate()` call (e.g. `TurnNode → TurnNode`) hung the renderer (11GB+ RSS, still climbing, killed after ~3 min) instead of raising or degrading gracefully, unlike `SystemMap`'s `_no_self_loop` validator. Worked around by omitting those relationships as diagram edges (documented in prose instead) — not fixed at the source. If touching ER diagrams here or in sysatlas itself, don't reintroduce a self-relate() without checking whether that's been fixed upstream first.

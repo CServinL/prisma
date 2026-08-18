@@ -773,20 +773,26 @@ def list_models():
     """Populates the desktop UI's per-turn regenerate model picker
     (RegenerateTurnRequest.model / _build_chat_agent_for_model already
     accept any model name — this endpoint only adds discovery, no new
-    capability). Only ollama/llama_cpp support live discovery (same /api/tags
-    query prisma_cli.py's `prisma doctor` already uses); other providers
-    (openrouter) have no roster here yet, so `models` degrades to just the
-    currently-configured one rather than a fake/empty list. This does not
-    change which model a chat defaults to going forward -- Chat.model is
-    still always overwritten by _chat_agent.model on every turn (no sticky
-    per-chat override exists yet)."""
+    capability). Discovery is provider-specific -- `ollama` and `llama_cpp`
+    are NOT interchangeable here despite both being "local providers"
+    elsewhere (chat_llm.py's _resolve_base_url): plain Ollama exposes its
+    own /api/tags ({"models": [{"name": ...}]}), but llama_cpp here means
+    llama-swap (see /opt/llama-swap on anvil/forge), which only speaks the
+    OpenAI-compatible /v1/models ({"data": [{"id": ...}]}) -- llama-swap has
+    no /api/tags at all (found live: 404, silently degraded to
+    models=[current], hiding the picker entirely since it never renders for
+    a single-model list). Other providers (openrouter) have no roster here
+    yet, so `models` degrades to just the currently-configured one rather
+    than a fake/empty list. This does not change which model a chat defaults
+    to going forward -- Chat.model is still always overwritten by
+    _chat_agent.model on every turn (no sticky per-chat override exists yet)."""
     from prisma.utils.config import ConfigLoader
     cfg = ConfigLoader()
     chat_config = cfg.get_chat_config()
     current = chat_config.model
-    if chat_config.provider in ("ollama", "llama_cpp"):
+    llm_host = cfg.get_llm_config().host
+    if chat_config.provider == "ollama":
         import requests
-        llm_host = cfg.get_llm_config().host
         try:
             resp = requests.get(f"http://{llm_host}/api/tags", timeout=5)
             resp.raise_for_status()
@@ -795,6 +801,16 @@ def list_models():
                 return ModelsResponse(models=names, current=current)
         except Exception as exc:
             _log.debug("list_models: /api/tags query against %s failed: %s", llm_host, exc)
+    elif chat_config.provider == "llama_cpp":
+        import requests
+        try:
+            resp = requests.get(f"http://{llm_host}/v1/models", timeout=5)
+            resp.raise_for_status()
+            names = sorted({m["id"] for m in resp.json().get("data", []) if m.get("id")})
+            if names:
+                return ModelsResponse(models=names, current=current)
+        except Exception as exc:
+            _log.debug("list_models: /v1/models query against %s failed: %s", llm_host, exc)
     return ModelsResponse(models=[current], current=current)
 
 

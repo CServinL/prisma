@@ -332,6 +332,54 @@ def test_list_models_degrades_to_current_only_when_ollama_unreachable(monkeypatc
     assert r.json() == {"models": ["qwen2.5:7b-32k"], "current": "qwen2.5:7b-32k"}
 
 
+def test_list_models_returns_llama_swap_openai_models(monkeypatch):
+    # llama_cpp here means llama-swap (/opt/llama-swap) -- OpenAI-compatible
+    # /v1/models ({"data": [{"id": ...}]}), NOT Ollama's /api/tags shape.
+    # Found live: querying /api/tags against llama-swap 404s, silently
+    # degrading to a single-model list that hides the picker entirely.
+    from prisma.server import app as app_module
+    from prisma.utils.config import ChatConfig, ConfigLoader, LLMConfig
+
+    class FakeResp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"data": [{"id": "qwen2.5-3b"}, {"id": "bge-m3"}], "object": "list"}
+
+    cfg = MagicMock(spec=ConfigLoader)
+    cfg.get_chat_config.return_value = ChatConfig(provider="llama_cpp", model="qwen2.5-3b")
+    cfg.get_llm_config.return_value = LLMConfig(host="localhost:8090")
+    monkeypatch.setattr("prisma.utils.config.ConfigLoader", lambda: cfg)
+    monkeypatch.setattr("requests.get", lambda *a, **k: FakeResp())
+
+    r = client.get("/models")
+
+    assert r.status_code == 200
+    data = r.json()
+    assert data["current"] == "qwen2.5-3b"
+    assert set(data["models"]) == {"qwen2.5-3b", "bge-m3"}
+
+
+def test_list_models_degrades_to_current_only_when_llama_swap_unreachable(monkeypatch):
+    from prisma.server import app as app_module
+    from prisma.utils.config import ChatConfig, ConfigLoader, LLMConfig
+
+    def _raise(*a, **k):
+        raise ConnectionError("no route to host")
+
+    cfg = MagicMock(spec=ConfigLoader)
+    cfg.get_chat_config.return_value = ChatConfig(provider="llama_cpp", model="qwen2.5-3b")
+    cfg.get_llm_config.return_value = LLMConfig(host="localhost:8090")
+    monkeypatch.setattr("prisma.utils.config.ConfigLoader", lambda: cfg)
+    monkeypatch.setattr("requests.get", _raise)
+
+    r = client.get("/models")
+
+    assert r.status_code == 200
+    assert r.json() == {"models": ["qwen2.5-3b"], "current": "qwen2.5-3b"}
+
+
 # ── POST /chats/{slug}/attachments/promote ───────────────────────────────────
 
 def test_promote_asset_media_node_copies_file_and_returns_note_slug(monkeypatch, tmp_path):

@@ -554,7 +554,9 @@ remaining code) — `CHAT_SCHEMA_VERSION = 3`, backend, and frontend, all three 
     `attached_slugs` (jpg → `<img>`, pdf → link, svg/latex/drawio → labeled unrendered code block,
     slugs → clickable chips) — via a shared blob-URL cache for the auth-header gap plain `<img src>`
     can't close (same pattern `htmlFrameSrc` already used for HTML notes). `npx svelte-check`
-    (0 errors) and `npm run build` clean; **not yet verified live in a browser.**
+    (0 errors) and `npm run build` clean; **verified live in the desktop app (2026-08-18)**
+    — chat, THINK, vault-topic priming, relation classification, and svg/latex/drawio upload
+    all exercised against a real vault and a real OpenRouter backend.
   - **Closed along the way, not new schema**: the PDF→MD gap tracked in `TODO.md` since 2026-08-11
     — promoting a PDF attachment made it load-bearing rather than a future nice-to-have.
     `zotero_routes.py`'s `_pdf_bytes_to_md` moved to `vault.py` as `pdf_bytes_to_md()` (no Zotero

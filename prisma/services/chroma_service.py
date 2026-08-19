@@ -84,6 +84,8 @@ class ChromaIndexer:
         self._supervisor_port = supervisor_port if supervisor_port is not None else resource_lock.default_port()
         self._chroma_dir = vault.root / "chromadb"
         self._manifest_path = self._chroma_dir / "manifest.json"
+        self._embedding_model_path = self._chroma_dir / "embedding_model.json"
+        self._embedding_model_mismatch = False
         self._client = None
         self._collection = None
         self._manifest: dict[str, float] = {}
@@ -145,6 +147,14 @@ class ChromaIndexer:
                 _log.warning("chroma indexer thread did not exit within 5s — likely mid-extraction")
         _log.info("chroma stopped")
 
+    @property
+    def embedding_model_mismatch(self) -> bool:
+        try:
+            self._ensure_client()
+        except Exception:
+            pass
+        return self._embedding_model_mismatch
+
     def status(self) -> ChromaStatus:
         try:
             self._ensure_client()
@@ -158,6 +168,7 @@ class ChromaIndexer:
         return ChromaStatus(
             chunks=chunks, files_indexed=files, model=self._model,
             provider=self._provider, current_activity=activity,
+            embedding_model_mismatch=self._embedding_model_mismatch,
         )
 
     def _set_activity(self, activity: str | None) -> None:
@@ -211,10 +222,12 @@ class ChromaIndexer:
         except Exception as exc:
             _log.warning("chroma query: collection unavailable, returning no results: %s", exc)
             return []
+        if self._embedding_model_mismatch:
+            return []
         with resource_lock.lease(self._supervisor_host, self._supervisor_port, holder=_RESOURCE_HOLDER, model=self._model) as granted:
             embeddings = _embed_texts([question], self._model, self._base_url, self._provider) if granted else None
         if not embeddings:
-            _log.warning("chroma query: embedding failed for question, skipping")
+            _log.error("Error de busqueda vectorial, no puedo realizar busquedas vectoriales sin acceso a el mismo modelo que se uso para indexar")
             return []
         try:
             results = self._collection.query(
@@ -262,6 +275,40 @@ class ChromaIndexer:
             except Exception as exc:
                 _log.warning("failed to load chroma manifest, starting from empty (will re-embed): %s", exc)
                 self._manifest = {}
+        self._check_embedding_model()
+
+    def _check_embedding_model(self) -> None:
+        """A collection's vectors are only comparable to a query vector if
+        both were produced by the same embedding model -- get_or_create_collection
+        happily reuses old vectors under a new model with no error, no
+        dimension check, just silently wrong similarity scores. Records
+        which model built this collection the first time it's seen, then
+        refuses to read/write against it if the configured model ever
+        drifts from that record."""
+        current = {"provider": self._provider, "model": self._model}
+        if not self._embedding_model_path.exists():
+            # First time this collection's been seen with this tracking in
+            # place -- if it already has vectors, they predate this check
+            # and we can't know for certain what built them, so the current
+            # config is adopted as the recorded baseline rather than
+            # guessed at. If it's genuinely empty, this is just the normal
+            # first-run bootstrap.
+            self._embedding_model_path.write_text(json.dumps(current), encoding="utf-8")
+            return
+        try:
+            recorded = json.loads(self._embedding_model_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            _log.warning("failed to read %s, cannot verify embedding model consistency: %s", self._embedding_model_path, exc)
+            return
+        self._embedding_model_mismatch = recorded != current
+        if self._embedding_model_mismatch:
+            _log.error(
+                "chroma: configured embedding model %s does not match %s, which built the "
+                "existing 'vault' collection -- vector search is disabled until this is "
+                "resolved (either revert the config, or delete %s and %s to re-index from "
+                "scratch with the new model)",
+                current, recorded, self._chroma_dir / "manifest.json", self._embedding_model_path,
+            )
 
     def _loop(self) -> None:
         self._stop_event.wait(timeout=20)
@@ -362,6 +409,8 @@ class ChromaIndexer:
             _log.info("chroma full index done: %d files indexed, %d chunks", len(self._manifest), self._collection.count())
 
     def _upsert_file(self, path: Path) -> bool:
+        if self._embedding_model_mismatch:
+            return False
         try:
             mtime = path.stat().st_mtime
             rel = str(path.relative_to(self._vault.root))

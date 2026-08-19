@@ -49,8 +49,18 @@ class ChatLLM:
         # kg-extraction num_predict bug didn't already cover elsewhere.
         # Per-call complete(timeout=...) overrides this for callers that need
         # tighter/looser bounds per prompt (see AnalysisAgent).
+        # A missing api_key_env value is a config problem, not a process
+        # crash -- degrade the same way a failed .create() call does
+        # (complete() returns None) instead of raising out of __init__,
+        # which would take the whole server down at startup.
+        try:
+            api_key = self._resolve_api_key()
+            self._config_error: str | None = None
+        except RuntimeError as exc:
+            api_key = "unconfigured"  # never sent -- complete() short-circuits first
+            self._config_error = str(exc)
         self._client = OpenAI(
-            base_url=self._resolve_base_url(), api_key=self._resolve_api_key(), timeout=180.0,
+            base_url=self._resolve_base_url(), api_key=api_key, timeout=180.0,
         )
 
     @classmethod
@@ -105,6 +115,14 @@ class ChatLLM:
     @property
     def context_window(self) -> int:
         return self._config.context_window
+
+    @property
+    def has_native_reasoning(self) -> bool:
+        return self._config.has_native_reasoning
+
+    @property
+    def config_error(self) -> str | None:
+        return self._config_error
 
     def reachable(self, timeout: float = 3.0) -> bool:
         """Plain TCP probe of this backend's own resolved base_url --
@@ -165,6 +183,9 @@ class ChatLLM:
         just this call — e.g. AnalysisAgent wants a short cap for a
         yes/no-style prompt and a long one for a full summary, from the
         same ChatLLM instance."""
+        if self._config_error is not None:
+            _log.warning("chat completion skipped: %s", self._config_error)
+            return None
         with resource_lock.lease(
             self._supervisor_host, self._supervisor_port,
             holder=_RESOURCE_HOLDER, model=self._config.model, pool=self._config.pool,
@@ -200,4 +221,10 @@ class ChatLLM:
                 self._config.provider, self._config.model,
                 resp.usage.prompt_tokens, resp.usage.completion_tokens, resp.usage.total_tokens,
             )
+        if not resp.choices:
+            # A cloud provider can return HTTP 200 with empty choices
+            # instead of raising an APIError, which the try/except above
+            # can't catch.
+            _log.warning("chat completion returned no choices: %s", resp.model_dump_json())
+            return None
         return resp.choices[0].message.content

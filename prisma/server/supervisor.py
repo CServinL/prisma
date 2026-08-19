@@ -479,6 +479,7 @@ class Worker:
         self.restart_count = 0
         self._stop_timeout = stop_timeout
         self._env = {**os.environ, **env} if env else None
+        self._started_at: float | None = None
 
     def start(self) -> None:
         # Own session — a signal to the supervisor's terminal doesn't propagate
@@ -487,10 +488,14 @@ class Worker:
         self.proc = subprocess.Popen(
             self.cmd, start_new_session=True, preexec_fn=_die_with_parent, env=self._env,
         )
+        self._started_at = time.monotonic()
         log.info("started %s (pid=%d): %s", self.name, self.proc.pid, " ".join(self.cmd))
 
     def is_alive(self) -> bool:
         return self.proc is not None and self.proc.poll() is None
+
+    def uptime(self) -> float:
+        return time.monotonic() - self._started_at if self._started_at is not None else 0.0
 
     def stop(self) -> None:
         if self.proc is None or self.proc.poll() is not None:
@@ -999,11 +1004,19 @@ class ResourceManager:
 class Supervisor:
     _POLL_INTERVAL = 2.0
     _MAX_BACKOFF = 30.0
+    # A worker dying within this long of starting almost certainly failed
+    # before doing real work (e.g. a config error at import time) rather
+    # than crashing mid-operation -- retrying that with backoff forever
+    # just repeats the same failure. _MAX_FAST_DEATHS consecutive fast
+    # deaths gives up on that worker instead of looping indefinitely.
+    _FAST_DEATH_THRESHOLD = 5.0
+    _MAX_FAST_DEATHS = 3
 
     def __init__(self, workers: dict[str, Worker], resources: ResourceManager) -> None:
         self.workers = workers
         self.resources = resources
         self._stop_event = threading.Event()
+        self._given_up: set[str] = set()
 
     def start_all(self) -> None:
         for w in self.workers.values():
@@ -1020,12 +1033,29 @@ class Supervisor:
 
     def monitor_loop(self) -> None:
         backoff = {name: 1.0 for name in self.workers}
+        fast_deaths = {name: 0 for name in self.workers}
         while not self._stop_event.is_set():
             for name, w in self.workers.items():
                 if self._stop_event.is_set():
                     break
+                if name in self._given_up:
+                    continue
                 if w.is_alive():
                     backoff[name] = 1.0
+                    fast_deaths[name] = 0
+                    continue
+                if w.uptime() < self._FAST_DEATH_THRESHOLD:
+                    fast_deaths[name] += 1
+                else:
+                    fast_deaths[name] = 0
+                if fast_deaths[name] >= self._MAX_FAST_DEATHS:
+                    log.error(
+                        "%s crash-looped %d times, each within %.0fs of starting -- giving up "
+                        "(likely a config error, not a transient crash); fix it and "
+                        "POST /supervisor/restart/%s to try again",
+                        name, fast_deaths[name], self._FAST_DEATH_THRESHOLD, name,
+                    )
+                    self._given_up.add(name)
                     continue
                 delay = backoff[name]
                 log.warning("%s died unexpectedly — restarting in %.0fs", name, delay)
@@ -1073,6 +1103,7 @@ def _make_handler(supervisor: Supervisor):
                         "alive": w.is_alive(),
                         "restart_count": w.restart_count,
                         "memory_mb": _process_memory_mb(w.proc.pid) if w.proc and w.is_alive() else None,
+                        "given_up": name in supervisor._given_up,
                     }
                     for name, w in supervisor.workers.items()
                 }
@@ -1091,6 +1122,7 @@ def _make_handler(supervisor: Supervisor):
                     return
                 w.restart()
                 supervisor.resources.release_all_held_by(name)
+                supervisor._given_up.discard(name)
                 self._json(200, {"status": "restarted", "worker": name})
             elif self.path == "/supervisor/resources/acquire":
                 body = self._read_json_body()

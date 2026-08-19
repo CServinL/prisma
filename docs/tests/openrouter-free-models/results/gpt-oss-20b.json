@@ -1,0 +1,44 @@
+{
+  "model": "openai/gpt-oss-20b:free",
+  "results": [
+    {
+      "scenario": "single_source_match",
+      "elapsed_s": 6.9,
+      "tool_calls_made": [],
+      "error": null,
+      "raw_reply": "",
+      "has_markers": false,
+      "marker_count": 0,
+      "has_trailer": false,
+      "trailer_valid": false,
+      "trailer_entry_count": null,
+      "marker_trailer_match": false
+    },
+    {
+      "scenario": "no_results_found",
+      "elapsed_s": 3.3,
+      "tool_calls_made": [],
+      "error": null,
+      "raw_reply": "",
+      "has_markers": false,
+      "marker_count": 0,
+      "has_trailer": false,
+      "trailer_valid": false,
+      "trailer_entry_count": null,
+      "marker_trailer_match": false
+    },
+    {
+      "scenario": "multi_source_relational",
+      "elapsed_s": 10.3,
+      "tool_calls_made": [],
+      "error": null,
+      "raw_reply": "",
+      "has_markers": false,
+      "marker_count": 0,
+      "has_trailer": false,
+      "trailer_valid": false,
+      "trailer_entry_count": null,
+      "marker_trailer_match": false
+    }
+  ]
+}

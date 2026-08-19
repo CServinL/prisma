@@ -1,0 +1,43 @@
+{
+  "model": "z-ai/glm-5.2:free",
+  "results": [
+    {
+      "scenario": "single_source_match",
+      "elapsed_s": 39.1,
+      "tool_calls_made": [
+        "SEARCH_VAULT"
+      ],
+      "error": "RateLimitError: Error code: 429 - {'error': {'message': 'Provider returned error', 'code': 429, 'metadata': {'raw': 'z-ai/glm-5.2:free is temporarily rate-limited upstream. Please retry shortly, or add your own key to accumulate your rate limits: https://openrouter.ai/settings/integrations', 'provider_name': 'Decart', 'is_byok': False, 'provider_error_code': 'upstream_429', 'limit_source': 'upstream_provider_shared_pool', 'remedy_hint': 'Retry shortly, add your own provider key (https://openrouter.ai/settings/integrations), or route to another provider with provider routing: https://openrouter.ai/docs/features/provider-routing', 'retry_after_seconds': 5, 'retry_after_seconds_raw': 5, 'headers': {'Retry-After': '5'}}}, 'user_id': 'user_3DSONpc34jAyDF9cxKFWVzrJpAT'}",
+      "raw_reply": null,
+      "has_markers": false,
+      "marker_count": 0,
+      "has_trailer": false,
+      "trailer_valid": false,
+      "marker_trailer_match": false
+    },
+    {
+      "scenario": "no_results_found",
+      "elapsed_s": 11.4,
+      "tool_calls_made": [],
+      "error": "RateLimitError: Error code: 429 - {'error': {'message': 'Provider returned error', 'code': 429, 'metadata': {'raw': 'z-ai/glm-5.2:free is temporarily rate-limited upstream. Please retry shortly, or add your own key to accumulate your rate limits: https://openrouter.ai/settings/integrations', 'provider_name': 'Decart', 'is_byok': False, 'provider_error_code': 'upstream_429', 'limit_source': 'upstream_provider_shared_pool', 'remedy_hint': 'Retry shortly, add your own provider key (https://openrouter.ai/settings/integrations), or route to another provider with provider routing: https://openrouter.ai/docs/features/provider-routing', 'retry_after_seconds': 5, 'retry_after_seconds_raw': 5, 'headers': {'Retry-After': '5'}}}, 'user_id': 'user_3DSONpc34jAyDF9cxKFWVzrJpAT'}",
+      "raw_reply": null,
+      "has_markers": false,
+      "marker_count": 0,
+      "has_trailer": false,
+      "trailer_valid": false,
+      "marker_trailer_match": false
+    },
+    {
+      "scenario": "multi_source_relational",
+      "elapsed_s": 10.9,
+      "tool_calls_made": [],
+      "error": "RateLimitError: Error code: 429 - {'error': {'message': 'Provider returned error', 'code': 429, 'metadata': {'raw': 'z-ai/glm-5.2:free is temporarily rate-limited upstream. Please retry shortly, or add your own key to accumulate your rate limits: https://openrouter.ai/settings/integrations', 'provider_name': 'Decart', 'is_byok': False, 'provider_error_code': 'upstream_429', 'limit_source': 'upstream_provider_shared_pool', 'remedy_hint': 'Retry shortly, add your own provider key (https://openrouter.ai/settings/integrations), or route to another provider with provider routing: https://openrouter.ai/docs/features/provider-routing', 'retry_after_seconds': 5, 'retry_after_seconds_raw': 5, 'headers': {'Retry-After': '5'}}}, 'user_id': 'user_3DSONpc34jAyDF9cxKFWVzrJpAT'}",
+      "raw_reply": null,
+      "has_markers": false,
+      "marker_count": 0,
+      "has_trailer": false,
+      "trailer_valid": false,
+      "marker_trailer_match": false
+    }
+  ]
+}

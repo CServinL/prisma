@@ -45,6 +45,7 @@ class ToolSpec(BaseModel):
     name: str
     marker: str
     description: str
+    hidden_when_native_reasoning: bool = False
 
 
 TOOLS: list[ToolSpec] = [
@@ -79,6 +80,19 @@ TOOLS: list[ToolSpec] = [
             "earlier in this same chat, not for new information from the vault."
         ),
     ),
+    ToolSpec(
+        name="think",
+        marker="THINK",
+        description=(
+            "Externalizes one reasoning step before you answer — write down "
+            "what you're weighing, checking, or ruling out. Call it as many "
+            "times in a row as you need while working through a multi-step "
+            "question, then answer normally once you've reasoned it through. "
+            "Not for looking anything up — SEARCH_VAULT/GRAPH_CONTEXT/RECALL "
+            "do that."
+        ),
+        hidden_when_native_reasoning=True,
+    ),
 ]
 
 TOOL_CALL_RE = re.compile(
@@ -95,20 +109,28 @@ TOOL_CALL_RE = re.compile(
 FOOTNOTES_LINE_RE = re.compile(r"^FOOTNOTES_JSON:\s*(.+)$", re.MULTILINE)
 
 
-def system_prompt_tool_section() -> str:
+def system_prompt_tool_section(has_native_reasoning: bool = True) -> str:
+    visible = [t for t in TOOLS if not (t.hidden_when_native_reasoning and has_native_reasoning)]
     lines = [
         "You have tools you may call by writing a line in exactly this "
         "format, and nothing else on that line:",
     ]
-    for t in TOOLS:
+    for t in visible:
         lines.append(f"{t.marker}: <query text>")
     lines.append("")
-    for t in TOOLS:
+    for t in visible:
         lines.append(f"- {t.marker} — {t.description}")
     lines.append(
-        "\nIf no tool is needed (e.g. the user is just chatting, or asking "
-        "something you can answer directly), just answer normally without "
-        "any tool line."
+        "\nFor any question with actual factual content -- even one that "
+        "sounds like general knowledge -- call SEARCH_VAULT first, before "
+        "answering from your own training knowledge. The user's vault may "
+        "have relevant notes you have no way of knowing about otherwise. "
+        "Only skip straight to answering, with no tool line, for messages "
+        "with no factual content to check at all: greetings, thanks, or a "
+        "question about this conversation itself. If SEARCH_VAULT (and "
+        "GRAPH_CONTEXT, if relevant) come back empty, you may still answer "
+        "from your own knowledge -- just mark that content ai-inference "
+        "below, every time, with no exceptions."
     )
     return "\n".join(lines)
 
@@ -122,7 +144,9 @@ def system_prompt_footnote_section() -> str:
         "For every substantive claim in your answer (not filler like "
         '"Sure, here\'s what I found"), mark where it came from, so the '
         "reader can tell what traces to a document vs. what is your own "
-        "reasoning:",
+        "reasoning. An unmarked substantive claim is treated exactly as "
+        "badly as a factual error -- there is no acceptable middle ground "
+        "where content just doesn't have a type:",
         "",
         "- Right after a claim that traces to a document, write an inline "
         "marker in this exact format: [^N] where N is the next unused "
@@ -153,12 +177,15 @@ def system_prompt_footnote_section() -> str:
         "you used as a single-line JSON array, exactly in this format:",
         "",
         'FOOTNOTES_JSON: [{"index": 1, "relation": "citation", '
-        '"sources": ["slug-a"]}, {"index": 2, "relation": "relational", '
-        '"sources": ["slug-b", "slug-c"]}, {"index": 3, '
+        '"sources": ["slug-a"]}, {"index": 2, "relation": "paraphrase", '
+        '"sources": ["slug-a"]}, {"index": 3, "relation": "relational", '
+        '"sources": ["slug-b", "slug-c"]}, {"index": 4, '
         '"relation": "ai-inference", "sources": []}]',
         "",
         "relation is one of:",
-        "- citation — direct quote or close paraphrase, exactly one source",
+        "- citation — an exact/verbatim quote, exactly one source",
+        "- paraphrase — a close restatement in your own words of one "
+        "source's content, exactly one source",
         "- attribution — paraphrased/synthesized from one source, exactly "
         "one source",
         "- relational — connects or synthesizes across sources, two or "
@@ -192,7 +219,18 @@ class ChatToolbox:
             return self._graph_context(query)
         if marker == "RECALL":
             return self._recall(query, session_graph, remaining_budget, chat_slug)
+        if marker == "THINK":
+            return self._think(query)
         raise ValueError(f"unknown tool marker: {marker!r}")
+
+    def _think(self, query: str) -> ToolResult:
+        # No external lookup, unlike the other tools -- THINK is a
+        # self-reflection scratchpad, so the loop just needs a minimal
+        # acknowledgment to continue on, not real "tool" output.
+        return ToolResult(
+            text="(thought recorded — continue reasoning, or give your final answer if you're ready)",
+            raw=[],
+        )
 
     def get_node_text(self, slug: str) -> str | None:
         """Resolves a footnote's `sources` slug back to plain text, for
@@ -223,6 +261,17 @@ class ChatToolbox:
             return False
 
     def _search_vault(self, query: str, top_k: int = 5) -> ToolResult:
+        if self._chroma.embedding_model_mismatch:
+            # Distinct from an empty `hits` list -- that means "searched
+            # and found nothing," this means "couldn't search at all," and
+            # the model needs to say which one happened, not paper over it.
+            return ToolResult(
+                text="(vector search is currently unavailable -- the embedding model "
+                     "configured for retrieval doesn't match the one that built the vault "
+                     "index; tell the user this needs attention, don't guess at an answer "
+                     "instead)",
+                raw=[],
+            )
         hits = self._chroma.query(query, top_k=top_k)
         items = []
         for h in hits:

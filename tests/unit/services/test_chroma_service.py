@@ -386,3 +386,75 @@ def test_taint_file_clears_manifest_entry_and_enqueues_existing_file(indexer, va
     assert tainted is True
     assert "notes/test.md" not in indexer._manifest
     assert f in indexer._pending
+
+
+# ── embedding model consistency ──────────────────────────────────────────────
+# A collection's vectors are only comparable to a query vector if both were
+# built by the same embedding model -- get_or_create_collection reuses old
+# vectors under a new model with no error and no dimension check, so this is
+# the only thing standing between a config change and silently wrong search
+# results.
+
+def test_check_embedding_model_bootstraps_on_first_run(indexer):
+    col = _mock_chroma_collection()
+    client = _mock_chroma_client(col)
+    with patch("chromadb.HttpClient", return_value=client):
+        indexer._ensure_client()
+
+    assert indexer._embedding_model_mismatch is False
+    recorded = json.loads(indexer._embedding_model_path.read_text())
+    assert recorded == {"provider": "ollama", "model": "nomic-embed-text"}
+
+
+def test_check_embedding_model_detects_mismatch(indexer):
+    indexer._chroma_dir.mkdir(parents=True, exist_ok=True)
+    indexer._embedding_model_path.write_text(
+        json.dumps({"provider": "ollama", "model": "some-other-model"}), encoding="utf-8"
+    )
+    col = _mock_chroma_collection()
+    client = _mock_chroma_client(col)
+    with patch("chromadb.HttpClient", return_value=client):
+        indexer._ensure_client()
+
+    assert indexer._embedding_model_mismatch is True
+
+
+def test_check_embedding_model_matches_recorded_model(indexer):
+    indexer._chroma_dir.mkdir(parents=True, exist_ok=True)
+    indexer._embedding_model_path.write_text(
+        json.dumps({"provider": "ollama", "model": "nomic-embed-text"}), encoding="utf-8"
+    )
+    col = _mock_chroma_collection()
+    client = _mock_chroma_client(col)
+    with patch("chromadb.HttpClient", return_value=client):
+        indexer._ensure_client()
+
+    assert indexer._embedding_model_mismatch is False
+
+
+def test_query_returns_empty_without_embedding_when_mismatched(indexer):
+    col = _mock_chroma_collection()
+    col.count.return_value = 6
+    client = _mock_chroma_client(col)
+    with patch("chromadb.HttpClient", return_value=client):
+        indexer._ensure_client()
+    indexer._embedding_model_mismatch = True
+
+    with patch("prisma.services.chroma_service._embed_texts") as mock_embed:
+        result = indexer.query("test question", top_k=5)
+
+    assert result == []
+    mock_embed.assert_not_called()
+
+
+def test_upsert_file_skips_when_mismatched(indexer, vault):
+    f = vault.root / "notes" / "test.md"
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text("some content", encoding="utf-8")
+    indexer._embedding_model_mismatch = True
+
+    with patch("prisma.services.chroma_service._embed_texts") as mock_embed:
+        result = indexer._upsert_file(f)
+
+    assert result is False
+    mock_embed.assert_not_called()

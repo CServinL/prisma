@@ -7,7 +7,8 @@ from __future__ import annotations
 from prisma.schema_gov import RichContent
 from prisma.schema_gov import export_schemas as _export_schemas
 from prisma.storage.models.vault_models import (
-    CitedClaimNode, InferenceNode, RecallRef, ThinkingNode, ToolCallNode, TurnNode,
+    AssetMediaNode, CitedClaimNode, InferenceNode, InlineMediaNode, RecallRef, ThinkingNode,
+    ToolCallNode, TurnNode, WarrantNode,
 )
 from prisma.storage.type_registry import REGISTRY
 
@@ -39,6 +40,9 @@ def export_schemas() -> dict[str, dict]:
             "cited-claim-node": CitedClaimNode,
             "inference-node": InferenceNode,
             "recall-ref": RecallRef,
+            "warrant-node": WarrantNode,
+            "inline-media-node": InlineMediaNode,
+            "asset-media-node": AssetMediaNode,
         },
     )
     return {key: _drop_path_from_required(schema) for key, schema in schemas.items()}

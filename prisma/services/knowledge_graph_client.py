@@ -24,6 +24,7 @@ from prisma.storage.models.kg_models import (
     GraphQueryResult,
     KGStatus,
     RankedNode,
+    TopEntity,
 )
 from prisma.storage.models.search_models import DeepSearchCandidate, GraphSearchResult
 
@@ -96,6 +97,16 @@ class KnowledgeGraphClient:
     def query(self, question: str, budget: int = 1500) -> list[GraphQueryResult]:
         data = self._get("/query", params={"q": question, "budget": budget}) or []
         return [GraphQueryResult.model_validate(d) for d in data]
+
+    def top_entities(self, limit: int = 15) -> list[TopEntity]:
+        # Called synchronously on every chat turn (SessionOrchestrator's
+        # vault_overview callable) -- same short-timeout/degrade-fast
+        # reasoning as status() above, cached data on the other end so this
+        # should normally be fast regardless.
+        data = self._get("/top_entities", params={"limit": limit}, timeout=2.0)
+        if data is None:
+            return []
+        return [TopEntity.model_validate(d) for d in data]
 
     def _ollama_ready(self) -> bool:
         # Also polled on every /status request — see status()'s comment.

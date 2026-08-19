@@ -110,7 +110,7 @@ All vault operations go through the REST API (`GET /notes`, `PUT /notes/{slug}`,
 
 ## Chat
 
-The chat assistant (see `ADR-014-chat-llm-backend-interface.md`) has retrieval access to the whole vault — notes, sources, and **past chat transcripts**, not just the current conversation — via `search_vault` (ChromaDB semantic search) and `graph_context` (knowledge graph traversal), both called on demand as the model needs them. Claims it makes are self-reported with per-claim attribution back to the source vault item (see `docs/concepts/claim.md` / ADR-017 / ADR-019).
+The chat assistant (see `ADR-014-chat-llm-backend-interface.md`) has retrieval access to the whole vault — notes, sources, and **past chat transcripts**, not just the current conversation — via four on-demand tools: `search_vault` (ChromaDB semantic search), `graph_context` (knowledge graph traversal), `recall` (this session's own history, plus a bounded set of other chats), and `think` (an externalized reasoning step, only offered to models without native reasoning). Claims it makes are self-reported with per-claim attribution back to the source vault item (see `docs/concepts/claim.md` / ADR-017 / ADR-019).
 
 ### Chat as a session graph
 
@@ -119,7 +119,7 @@ A chat isn't a flat message list — it's its own graph (ADR-019, see `docs/conc
 - **Tool calls** (`ToolCallNode`) — which tool, what args, and (unlike the pre-ADR-019 model) the actual result, persisted, so it can be recalled later instead of only ever re-run.
 - **Claims** (`CitedClaimNode`/`InferenceNode`) — per-claim attribution, see "Claims" above.
 - **Regeneration attempts** (`alternates`) — prior replies to the same turn, preserved when regenerated, each keeping its own model.
-- **Reasoning steps** (`ThinkingNode`) — schema ships, nothing populates it yet (gated behind a still-deferred model-category flag).
+- **Reasoning steps** (`ThinkingNode`) — populated by the `THINK:` tool, advertised only to models configured with `has_native_reasoning = false` (weak/local models that benefit from externalizing a reasoning step; not offered to models that already reason natively). **Not yet merged to `main`** (branch `chat-schema-v3-toulmin-media-attachments`) — everything else in this list is.
 
 A `SessionOrchestrator` assembles context per turn: a cheap default (system prompt + Excerpt + a token-bounded walk of the main line — the same algorithm the pre-graph model used, just relocated) plus a fourth tool, `recall`, that searches the *whole* session graph — including turns the rolling window has already dropped — when the model decides it's missing something. `RECALL` also reaches into a bounded set of *other* chats' session graphs (the most recently active few, at a discounted relevance weight, capped to keep cost bounded regardless of vault size) — see `docs/concepts/chat-session-graph.md`'s Status section for the exact mechanics.
 
@@ -146,7 +146,7 @@ Returns up to 30 results ordered by score, with an excerpt from the first matchi
 
 `GET /search/deep?q=...` — two-stage semantic search:
 
-1. **ChromaDB** embeds the query via `nomic-embed-text` and retrieves the top 60 matching chunks across all indexed files. Chunk-level distances are aggregated to file-level scores (best chunk wins).
+1. **ChromaDB** embeds the query via the configured `[retrieval]` embedding model and retrieves the top 60 matching chunks across all indexed files. Chunk-level distances are aggregated to file-level scores (best chunk wins).
 2. **Knowledge graph re-ranking** applies a title-match boost using knowledge graph node titles, then returns the top 20 results with matched concepts.
 3. **NLTK re-rank boost**: after semantic scoring, each result receives a +0.05 bonus per shared stem root between its title/body and the query. This adjusts ordering without overriding semantic scores.
 
@@ -156,7 +156,7 @@ Deep search is slower than regular search but finds semantically related content
 
 ## Knowledge Graph
 
-A background indexer (`KnowledgeGraphService`, native — replaced the third-party `graphify` pip dependency, see ADR-012's follow-up section and `TODO.md`) watches the vault root and extracts a knowledge graph via a local Ollama model, chunked **per section** (not per-file) so no single oversized document can exceed the model's token budget. The graph is persisted to an embedded Kùzu database at `{vault_root}/kg-out/`. On query, it returns related concepts and connections relevant to the search query.
+A background indexer (`KnowledgeGraphService`, native — replaced the third-party `graphify` pip dependency, see ADR-012's follow-up section and `TODO.md`) watches the vault root and extracts a knowledge graph via the configured `[llm]` backend (Ollama, llama.cpp, or OpenRouter — ADR-014), chunked **per section** (not per-file) so no single oversized document can exceed the model's token budget. The graph is persisted to an embedded Kùzu database at `{vault_root}/kg-out/`. On query, it returns related concepts and connections relevant to the search query.
 
 Status is exposed at `GET /status` under `knowledge_graph` and shown in the desktop app status popover.
 
@@ -164,9 +164,9 @@ Status is exposed at `GET /status` under `knowledge_graph` and shown in the desk
 
 ## ChromaDB Semantic Index
 
-A background indexer maintains a persistent ChromaDB collection at `{vault_root}/chromadb/`. It watches the vault for file changes and embeds modified `.md` files in chunks using the configured `nomic-embed-text` model via Ollama. The manifest tracks per-file mtimes so only changed files are re-embedded on restart.
+A background indexer maintains a persistent ChromaDB collection at `{vault_root}/chromadb/`. It watches the vault for file changes and embeds modified `.md` files in chunks using the configured `[retrieval]` embedding model. It records which model built the collection (`chromadb/embedding_model.json`) the first time it runs, and refuses to read or write against the collection if the configured model ever drifts from that record — mixing vectors from two different embedding models would silently corrupt search quality otherwise. The manifest tracks per-file mtimes so only changed files are re-embedded on restart.
 
-At startup, if the embedding model is not available in Ollama, the indexer logs one actionable error (with the `ollama pull` command) and skips indexing — no per-file errors. See [Installation](installation.md) for required models.
+At startup, if the embedding model is not available, the indexer logs one actionable error and skips indexing — no per-file errors. See [Installation](installation.md) for required models.
 
 Status (chunk count, files indexed, model name) is exposed at `GET /status` under `chroma` and shown in the desktop app.
 

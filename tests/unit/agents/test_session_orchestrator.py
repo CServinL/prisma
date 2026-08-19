@@ -9,8 +9,11 @@ from prisma.storage.models.vault_models import (
 )
 
 
-def _orchestrator(max_history_tokens=16000) -> SessionOrchestrator:
-    return SessionOrchestrator(system_prompt="You are a test assistant.", max_history_tokens=max_history_tokens)
+def _orchestrator(max_history_tokens=16000, has_native_reasoning=True, vault_overview=None) -> SessionOrchestrator:
+    return SessionOrchestrator(
+        system_prompt="You are a test assistant.", max_history_tokens=max_history_tokens,
+        has_native_reasoning=has_native_reasoning, vault_overview=vault_overview,
+    )
 
 
 def _msg(role: ChatRole, text: str, **overrides) -> TurnNode:
@@ -40,6 +43,47 @@ def test_full_system_prompt_with_no_excerpt_notes_has_no_established_block():
     orch = _orchestrator()
     prompt = orch.full_system_prompt([])
     assert "Already established" not in prompt
+
+
+def test_full_system_prompt_hides_think_when_native_reasoning_true():
+    orch = _orchestrator(has_native_reasoning=True)
+    assert "THINK:" not in orch.full_system_prompt([])
+
+
+def test_full_system_prompt_shows_think_when_native_reasoning_false():
+    orch = _orchestrator(has_native_reasoning=False)
+    assert "THINK:" in orch.full_system_prompt([])
+
+
+def test_full_system_prompt_omits_vault_overview_block_when_callable_is_none():
+    orch = _orchestrator()
+    assert "knowledge graph currently centers on" not in orch.full_system_prompt([])
+
+
+def test_full_system_prompt_omits_vault_overview_block_below_min_entities():
+    orch = _orchestrator(vault_overview=lambda: ["A", "B"])
+    assert "knowledge graph currently centers on" not in orch.full_system_prompt([])
+
+
+def test_full_system_prompt_includes_vault_overview_block_when_above_threshold():
+    labels = ["A", "B", "C", "D", "E"]
+    orch = _orchestrator(vault_overview=lambda: labels)
+    prompt = orch.full_system_prompt([])
+    assert "knowledge graph currently centers on" in prompt
+    assert "A, B, C, D, E" in prompt
+
+
+def test_full_system_prompt_calls_vault_overview_fresh_each_call():
+    calls = []
+
+    def _labels():
+        calls.append(1)
+        return ["A", "B", "C", "D", "E"]
+
+    orch = _orchestrator(vault_overview=_labels)
+    orch.full_system_prompt([])
+    orch.full_system_prompt([])
+    assert len(calls) == 2
 
 
 def test_full_system_prompt_injects_excerpt_notes():

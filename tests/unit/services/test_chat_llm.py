@@ -63,10 +63,22 @@ def test_resolve_api_key_reads_named_env_var(monkeypatch):
     assert llm._resolve_api_key() == "sk-real-key"
 
 
-def test_resolve_api_key_raises_when_env_var_missing(monkeypatch):
+def test_construction_does_not_raise_when_env_var_missing(monkeypatch):
+    # A missing api_key_env is a config problem for complete() to degrade
+    # on, not a reason to take the whole process down at construction time.
     monkeypatch.delenv("MISSING_TEST_KEY", raising=False)
-    with pytest.raises(RuntimeError, match="MISSING_TEST_KEY"):
-        _llm(provider="openrouter", api_key_env="MISSING_TEST_KEY")
+    llm = _llm(provider="openrouter", api_key_env="MISSING_TEST_KEY")
+    assert llm.config_error is not None
+    assert "MISSING_TEST_KEY" in llm.config_error
+
+
+def test_complete_returns_none_when_env_var_missing(monkeypatch):
+    monkeypatch.delenv("MISSING_TEST_KEY", raising=False)
+    llm = _llm(provider="openrouter", api_key_env="MISSING_TEST_KEY")
+    with patch.object(llm._client.chat.completions, "create") as mock_create:
+        result = llm.complete([{"role": "user", "content": "hi"}])
+    assert result is None
+    mock_create.assert_not_called()
 
 
 def test_complete_returns_none_when_lease_denied():
@@ -110,6 +122,20 @@ def test_complete_returns_none_on_client_exception():
     with patch("prisma.services.chat_llm.resource_lock.acquire", return_value=(True, "local-ollama", "req-1")), \
          patch("prisma.services.chat_llm.resource_lock.release"), \
          patch.object(llm._client.chat.completions, "create", side_effect=RuntimeError("boom")):
+        result = llm.complete([{"role": "user", "content": "hi"}])
+    assert result is None
+
+
+def test_complete_returns_none_when_response_has_no_choices():
+    # A cloud provider can return HTTP 200 with empty choices instead of
+    # raising an APIError -- not caught by the try/except around .create().
+    llm = _llm()
+    mock_resp = MagicMock()
+    mock_resp.choices = []
+    mock_resp.model_dump_json.return_value = "{}"
+    with patch("prisma.services.chat_llm.resource_lock.acquire", return_value=(True, "local-ollama", "req-1")), \
+         patch("prisma.services.chat_llm.resource_lock.release"), \
+         patch.object(llm._client.chat.completions, "create", return_value=mock_resp):
         result = llm.complete([{"role": "user", "content": "hi"}])
     assert result is None
 

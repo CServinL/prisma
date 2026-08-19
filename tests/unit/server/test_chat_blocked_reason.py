@@ -27,6 +27,12 @@ def _kg_status(**overrides) -> KGStatus:
     return KGStatus(**defaults)
 
 
+def _llm(config_error=None) -> MagicMock:
+    llm = MagicMock()
+    llm.config_error = config_error
+    return llm
+
+
 def test_returns_none_when_both_idle():
     kg = MagicMock()
     kg.status.return_value = _kg_status(state="idle")
@@ -34,7 +40,7 @@ def test_returns_none_when_both_idle():
     chroma.status.return_value = ChromaStatus(
         chunks=0, files_indexed=0, model="nomic-embed-text", provider="ollama", current_activity=None,
     )
-    assert _chat_blocked_reason(chroma, kg) is None
+    assert _chat_blocked_reason(_llm(), chroma, kg) is None
 
 
 def test_returns_reason_when_kg_indexing():
@@ -44,7 +50,7 @@ def test_returns_reason_when_kg_indexing():
     chroma.status.return_value = ChromaStatus(
         chunks=0, files_indexed=0, model="nomic-embed-text", provider="ollama", current_activity=None,
     )
-    assert "knowledge graph" in _chat_blocked_reason(chroma, kg)
+    assert "knowledge graph" in _chat_blocked_reason(_llm(), chroma, kg)
 
 
 def test_returns_reason_when_chroma_active():
@@ -55,7 +61,7 @@ def test_returns_reason_when_chroma_active():
         chunks=0, files_indexed=0, model="nomic-embed-text", provider="ollama",
         current_activity="embedding notes/foo.md",
     )
-    assert "semantic search" in _chat_blocked_reason(chroma, kg)
+    assert "semantic search" in _chat_blocked_reason(_llm(), chroma, kg)
 
 
 def test_swallows_exceptions_from_either_status_call():
@@ -63,4 +69,13 @@ def test_swallows_exceptions_from_either_status_call():
     kg.status.side_effect = RuntimeError("kg unreachable")
     chroma = MagicMock()
     chroma.status.side_effect = RuntimeError("chroma unreachable")
-    assert _chat_blocked_reason(chroma, kg) is None
+    assert _chat_blocked_reason(_llm(), chroma, kg) is None
+
+
+def test_returns_config_error_before_checking_kg_or_chroma():
+    kg = MagicMock()
+    chroma = MagicMock()
+    reason = _chat_blocked_reason(_llm(config_error="OPENROUTER_API_KEY not set"), chroma, kg)
+    assert reason == "OPENROUTER_API_KEY not set"
+    kg.status.assert_not_called()
+    chroma.status.assert_not_called()

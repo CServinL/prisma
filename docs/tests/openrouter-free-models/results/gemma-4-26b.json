@@ -1,0 +1,44 @@
+{
+  "model": "google/gemma-4-26b-a4b-it:free",
+  "results": [
+    {
+      "scenario": "single_source_match",
+      "elapsed_s": 2.3,
+      "tool_calls_made": [],
+      "error": null,
+      "raw_reply": "<|tool_call>call:SEARCH_VAULT: MEMIT paper editing memory GPT models<|\"|>",
+      "has_markers": false,
+      "marker_count": 0,
+      "has_trailer": false,
+      "trailer_valid": false,
+      "trailer_entry_count": null,
+      "marker_trailer_match": false
+    },
+    {
+      "scenario": "no_results_found",
+      "elapsed_s": 2.0,
+      "tool_calls_made": [],
+      "error": null,
+      "raw_reply": "<|tool_call>call:SEARCH_VAULT: LLM small RAM memory constraints quantization edge devices mobile\n",
+      "has_markers": false,
+      "marker_count": 0,
+      "has_trailer": false,
+      "trailer_valid": false,
+      "trailer_entry_count": null,
+      "marker_trailer_match": false
+    },
+    {
+      "scenario": "multi_source_relational",
+      "elapsed_s": 18.0,
+      "tool_calls_made": [],
+      "error": null,
+      "raw_reply": "To compare ROME and MEMIT, it is helpful to view them as two stages in the evolution of model editing: ROME focuses on precise, localized updates to specific facts, while MEMIT scales that logic to handle much larger batches of information.\n\n### ROME (Rank-One Model Editing)\nROME is designed to perform \"locality-constrained\" edits, meaning it aims to change a specific fact (e.g., \"The Eiffel Tower is in Paris\") without inadvertently changing unrelated facts (e.g., \"The Louvre is in Paris\") [^1].\n\n*   **Mechanism:** It treats the model's knowledge as being stored in the MLP (Multi-Layer Perceptron) layers, specifically targeting the \"key-value\" structure of the activations [^1]. It uses a rank-one update to the weight matrices, which allows it to shift the model's output for a specific input while minimizing the impact on the rest of the parameter space [^1].\n*   **Scope:** ROME is typically applied to a single fact at a time or a very small number of facts, making it highly precise but computationally inefficient for large-scale knowledge updates [^2].\n\n### MEMIT (Massive Editing of Cognition and Knowledge)\nMEMIT is a direct evolution of the ROME framework, designed to solve the scalability problem [^2].\n\n*   **Mechanism:** While ROME uses a rank-one update, MEMIT uses a higher-rank update (specifically, it uses a low-rank approximation of the covariance matrix) [^2]. This allows it to incorporate many different edits simultaneously [^2].\n*   **Scope:** MEMIT can handle thousands of edits in a single pass [^2]. This makes it much more efficient for \"massively\" updating a model's knowledge base compared to the one-by-one approach of ROME [^2].\n\n### Key Comparison Summary\n\n| Feature | ROME | MEMIT |\n| :--- | :--- | :--- |\n| **Primary Goal** | Precise, localized single-fact editing [^1] | Large-scale, batch knowledge editing [^2] |\n| **Update Rank** | Rank-one (low complexity) [^1] | Higher-rank (more complex/expressive) [^2] |\n| **Scalability** | Low (one edit at a time) [^2] | High (thousands of edits at once) [^2] |\n| **Risk** | Low risk of collateral damage due to localization [^1] | Higher complexity, but designed to maintain performance across large batches [^2] |\n\n[^1]: ROME is a method for localized model editing that targets MLP layers to change specific facts without affecting unrelated knowledge [^1].\n[^2]: MEMIT scales the ROME approach by using higher-rank updates, allowing for the simultaneous editing of thousands of facts [^2].\n\nFOOTNOTES_JSON: [{\"index\": 1, \"relation\": \"ai-inference\", \"sources\": []}, {\"index\": 2, \"relation\": \"ai-inference\", \"sources\": []}]",
+      "has_markers": true,
+      "marker_count": 21,
+      "has_trailer": true,
+      "trailer_valid": true,
+      "trailer_entry_count": 2,
+      "marker_trailer_match": true
+    }
+  ]
+}

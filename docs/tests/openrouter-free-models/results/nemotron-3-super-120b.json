@@ -1,0 +1,50 @@
+{
+  "model": "nvidia/nemotron-3-super-120b-a12b:free",
+  "results": [
+    {
+      "scenario": "single_source_match",
+      "elapsed_s": 7.3,
+      "tool_calls_made": [
+        "SEARCH_VAULT"
+      ],
+      "error": null,
+      "raw_reply": "MEMIT (Mass-Editing Memory in a Transformer) is a method for directly editing factual associations stored in the weights of large transformer language models. It generalizes the ROME method to allow thousands of edits at once by distributing parameter updates across multiple layers rather than a single layer.[^1]\n\nFOOTNOTES_JSON: [{\"index\": 1, \"relation\": \"citation\", \"sources\": [\"sources/meng-2023-memit.md\"]}]",
+      "has_markers": true,
+      "marker_count": 1,
+      "has_trailer": true,
+      "trailer_valid": true,
+      "trailer_entry_count": 1,
+      "marker_trailer_match": true
+    },
+    {
+      "scenario": "no_results_found",
+      "elapsed_s": 6.6,
+      "tool_calls_made": [
+        "SEARCH_VAULT"
+      ],
+      "error": null,
+      "raw_reply": "I don't have any specific information in your personal knowledge vault about LLMs for very small RAM sizes. My semantic search of your notes, papers, and chat history returned no results for this topic. [^1]\n\nHowever, based on general knowledge about efficient LLMs (not from your vault), I can share that researchers have developed several approaches for deploying language models in extremely constrained RAM environments (e.g., <1GB or even <512MB): [^2]\n\n- **Ultra-small parameter models**: Models like TinyLlama (1.1B parameters), Phi-2 (2.7B), or MobileLLM series (125M-1B parameters) are designed for low-resource settings.\n- **Aggressive quantization**: Using 3-bit or 4-bit quantization (e.g., GGUF format with q3_K_M or q4_K_M) can reduce RAM needs by 75%+ compared to FP16. For example, a 1.3B model quantized to 3-bit might run in ~300-400MB RAM.\n- **Architectural optimizations**: Techniques like grouped-query attention (GQA), sliding window attention, or specialized efficient transformers (e.g., Mamba-based models) reduce memory footprint during inference.\n- **Offloading strategies**: Some frameworks allow partial CPU offloading or layered inference to manage peak RAM usage.\n\nThese approaches enable LLMs to run on devices like Raspberry Pis, older smartphones, or microcontrollers in some cases, though performance and capabilities scale with available resources. [^2]\n\nIf you have specific notes about particular models, quantization techniques, or deployment strategies you've saved, trying different search terms (like \"quantized LLMs,\" \"edge deployment,\" or specific model names you recall) might yield results from your vault. Would you like me to try alternative search terms? [^3]\n\nFOOTNOTES_JSON: [{\"index\": 1, \"relation\": \"ai-inference\", \"sources\": []}, {\"index\": 2, \"relation\": \"ai-inference\", \"sources\": []}, {\"index\": 3, \"relation\": \"ai-inference\", \"sources\": []}]",
+      "has_markers": true,
+      "marker_count": 4,
+      "has_trailer": true,
+      "trailer_valid": true,
+      "trailer_entry_count": 3,
+      "marker_trailer_match": true
+    },
+    {
+      "scenario": "multi_source_relational",
+      "elapsed_s": 8.6,
+      "tool_calls_made": [
+        "SEARCH_VAULT"
+      ],
+      "error": null,
+      "raw_reply": "ROME (Rank\u2011One Model Editing) locates and edits a single factual association at a time by identifying the specific MLP layer that stores it and applying a rank\u2011one weight update[^1].  \nMEMIT generalizes ROME to allow thousands of simultaneous edits by distributing parameter updates across multiple layers instead of one[^2].  \nAs a result, ROME is best for fast, individual fact corrections, whereas MEMIT is designed for mass\u2011editing scenarios where many facts must be updated at once[^3].\n\nFOOTNOTES_JSON: [\n  {\"index\": 1, \"relation\": \"citation\", \"sources\": [\"sources/meng-2022-rome.md\"]},\n  {\"index\": 2, \"relation\": \"citation\", \"sources\": [\"sources/meng-2023-memit.md\"]},\n  {\"index\": 3, \"relation\": \"ai-inference\", \"sources\": []}\n]",
+      "has_markers": true,
+      "marker_count": 3,
+      "has_trailer": true,
+      "trailer_valid": false,
+      "trailer_entry_count": null,
+      "marker_trailer_match": false
+    }
+  ]
+}

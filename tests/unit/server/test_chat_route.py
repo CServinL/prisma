@@ -183,6 +183,366 @@ def test_chat_route_404_when_chat_not_found(monkeypatch):
     assert r.status_code == 404
 
 
+# ── v3: attachments/attached_slugs flow into the user TurnNode ──────────────
+
+def test_chat_route_passes_attachments_and_attached_slugs_to_user_turn(monkeypatch):
+    from prisma.server import app as app_module
+
+    vault = MagicMock()
+    vault.get_chat.return_value = _chat()
+    monkeypatch.setattr(app_module, "_vault", vault)
+
+    chat_agent = MagicMock()
+    chat_agent.respond.return_value = _msg(ChatRole.assistant, "ok")
+    chat_agent.model = "test-model"
+    monkeypatch.setattr(app_module, "_chat_agent", chat_agent)
+
+    r = client.post("/chat", json={
+        "message": "check this diagram against my notes", "chat_slug": "test-chat",
+        "attachments": [{"kind": "drawio", "value": "<mxGraphModel/>"}],
+        "attached_slugs": ["my-existing-note"],
+    })
+
+    assert r.status_code == 200
+    user_msg = vault.append_messages.call_args[0][1][0]
+    assert user_msg.role == ChatRole.user
+    assert user_msg.attachments[0].kind == "drawio"
+    assert user_msg.attached_slugs == ["my-existing-note"]
+
+
+def test_chat_route_attachments_default_to_empty(monkeypatch):
+    from prisma.server import app as app_module
+
+    vault = MagicMock()
+    vault.get_chat.return_value = _chat()
+    monkeypatch.setattr(app_module, "_vault", vault)
+
+    chat_agent = MagicMock()
+    chat_agent.respond.return_value = _msg(ChatRole.assistant, "ok")
+    chat_agent.model = "test-model"
+    monkeypatch.setattr(app_module, "_chat_agent", chat_agent)
+
+    r = client.post("/chat", json={"message": "hello", "chat_slug": "test-chat"})
+
+    assert r.status_code == 200
+    user_msg = vault.append_messages.call_args[0][1][0]
+    assert user_msg.attachments == []
+    assert user_msg.attached_slugs == []
+
+
+# ── POST /chats/{slug}/attachments/upload (jpg only) ─────────────────────────
+
+_JPG_MAGIC = b"\xff\xd8\xff" + b"\x00" * 16
+
+
+def test_upload_attachment_writes_file_and_returns_asset_media_node(monkeypatch, tmp_path):
+    from prisma.server import app as app_module
+
+    real_vault = VaultService(vault_root=tmp_path / "vault")
+    real_vault.ensure_dirs()
+    chat_slug = real_vault.create_chat(title="Test Chat").slug
+    monkeypatch.setattr(app_module, "_vault", real_vault)
+
+    r = client.post(
+        f"/chats/{chat_slug}/attachments/upload",
+        files={"file": ("figure.jpg", _JPG_MAGIC, "image/jpeg")},
+    )
+
+    assert r.status_code == 201
+    attachment = r.json()["attachment"]
+    assert attachment["kind"] == "jpg"
+    assert attachment["asset_path"].startswith(f"chats/{chat_slug}-attachments/")
+    assert (real_vault.root / attachment["asset_path"]).read_bytes() == _JPG_MAGIC
+
+
+def test_upload_attachment_svg_file_returns_inline_media_node(monkeypatch, tmp_path):
+    from prisma.server import app as app_module
+
+    real_vault = VaultService(vault_root=tmp_path / "vault")
+    real_vault.ensure_dirs()
+    chat_slug = real_vault.create_chat(title="Test Chat").slug
+    monkeypatch.setattr(app_module, "_vault", real_vault)
+    svg_bytes = b'<svg xmlns="http://www.w3.org/2000/svg"><circle r="5"/></svg>'
+
+    r = client.post(
+        f"/chats/{chat_slug}/attachments/upload",
+        files={"file": ("diagram.svg", svg_bytes, "image/svg+xml")},
+    )
+
+    assert r.status_code == 201
+    attachment = r.json()["attachment"]
+    assert attachment["kind"] == "svg"
+    assert attachment["value"] == svg_bytes.decode("utf-8")
+    assert "asset_path" not in attachment
+    # No ephemeral file written -- svg is returned inline, not to disk.
+    assert not (real_vault.root / f"chats/{chat_slug}-attachments").exists()
+
+
+def test_upload_attachment_drawio_file_returns_inline_media_node(monkeypatch, tmp_path):
+    from prisma.server import app as app_module
+
+    real_vault = VaultService(vault_root=tmp_path / "vault")
+    real_vault.ensure_dirs()
+    chat_slug = real_vault.create_chat(title="Test Chat").slug
+    monkeypatch.setattr(app_module, "_vault", real_vault)
+    drawio_bytes = b'<mxfile><diagram name="Page-1"></diagram></mxfile>'
+
+    r = client.post(
+        f"/chats/{chat_slug}/attachments/upload",
+        files={"file": ("flow.drawio", drawio_bytes, "application/octet-stream")},
+    )
+
+    assert r.status_code == 201
+    attachment = r.json()["attachment"]
+    assert attachment["kind"] == "drawio"
+    assert attachment["value"] == drawio_bytes.decode("utf-8")
+
+
+def test_upload_attachment_tex_file_falls_back_to_filename(monkeypatch, tmp_path):
+    from prisma.server import app as app_module
+
+    real_vault = VaultService(vault_root=tmp_path / "vault")
+    real_vault.ensure_dirs()
+    chat_slug = real_vault.create_chat(title="Test Chat").slug
+    monkeypatch.setattr(app_module, "_vault", real_vault)
+    tex_bytes = b"E = mc^2"  # a bare formula snippet, no \documentclass marker
+
+    r = client.post(
+        f"/chats/{chat_slug}/attachments/upload",
+        files={"file": ("formula.tex", tex_bytes, "text/plain")},
+    )
+
+    assert r.status_code == 201
+    attachment = r.json()["attachment"]
+    assert attachment["kind"] == "latex"
+    assert attachment["value"] == "E = mc^2"
+
+
+def test_upload_attachment_rejects_non_jpg_bytes(monkeypatch, tmp_path):
+    from prisma.server import app as app_module
+
+    real_vault = VaultService(vault_root=tmp_path / "vault")
+    real_vault.ensure_dirs()
+    chat_slug = real_vault.create_chat(title="Test Chat").slug
+    monkeypatch.setattr(app_module, "_vault", real_vault)
+
+    r = client.post(
+        f"/chats/{chat_slug}/attachments/upload",
+        files={"file": ("not-a.jpg", b"plain text, not a jpeg", "image/jpeg")},
+    )
+
+    assert r.status_code == 400
+
+
+def test_upload_attachment_404_when_chat_not_found(monkeypatch):
+    from prisma.server import app as app_module
+
+    vault = MagicMock()
+    vault.get_chat.side_effect = FileNotFoundError()
+    monkeypatch.setattr(app_module, "_vault", vault)
+
+    r = client.post(
+        "/chats/missing-chat/attachments/upload",
+        files={"file": ("figure.jpg", _JPG_MAGIC, "image/jpeg")},
+    )
+
+    assert r.status_code == 404
+
+
+# ── GET /models ───────────────────────────────────────────────────────────
+
+def test_list_models_returns_ollama_tags(monkeypatch):
+    from prisma.server import app as app_module
+    from prisma.utils.config import ChatConfig, ConfigLoader, LLMConfig
+
+    class FakeResp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"models": [{"name": "qwen2.5:7b-32k"}, {"name": "qwen2.5-3b"}]}
+
+    cfg = MagicMock(spec=ConfigLoader)
+    cfg.get_chat_config.return_value = ChatConfig(model="qwen2.5:7b-32k")
+    cfg.get_llm_config.return_value = LLMConfig(host="localhost:11434")
+    monkeypatch.setattr("prisma.utils.config.ConfigLoader", lambda: cfg)
+    monkeypatch.setattr("requests.get", lambda *a, **k: FakeResp())
+
+    r = client.get("/models")
+
+    assert r.status_code == 200
+    data = r.json()
+    assert data["current"] == "qwen2.5:7b-32k"
+    assert set(data["models"]) == {"qwen2.5:7b-32k", "qwen2.5-3b"}
+
+
+def test_list_models_degrades_to_current_only_when_ollama_unreachable(monkeypatch):
+    from prisma.server import app as app_module
+    from prisma.utils.config import ChatConfig, ConfigLoader, LLMConfig
+
+    def _raise(*a, **k):
+        raise ConnectionError("no route to host")
+
+    cfg = MagicMock(spec=ConfigLoader)
+    cfg.get_chat_config.return_value = ChatConfig(model="qwen2.5:7b-32k")
+    cfg.get_llm_config.return_value = LLMConfig(host="localhost:11434")
+    monkeypatch.setattr("prisma.utils.config.ConfigLoader", lambda: cfg)
+    monkeypatch.setattr("requests.get", _raise)
+
+    r = client.get("/models")
+
+    assert r.status_code == 200
+    assert r.json() == {"models": ["qwen2.5:7b-32k"], "current": "qwen2.5:7b-32k"}
+
+
+def test_list_models_returns_llama_swap_openai_models(monkeypatch):
+    # llama_cpp here means llama-swap (/opt/llama-swap) -- OpenAI-compatible
+    # /v1/models ({"data": [{"id": ...}]}), NOT Ollama's /api/tags shape.
+    # Found live: querying /api/tags against llama-swap 404s, silently
+    # degrading to a single-model list that hides the picker entirely.
+    from prisma.server import app as app_module
+    from prisma.utils.config import ChatConfig, ConfigLoader, LLMConfig
+
+    class FakeResp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"data": [{"id": "qwen2.5-3b"}, {"id": "bge-m3"}], "object": "list"}
+
+    cfg = MagicMock(spec=ConfigLoader)
+    cfg.get_chat_config.return_value = ChatConfig(provider="llama_cpp", model="qwen2.5-3b")
+    cfg.get_llm_config.return_value = LLMConfig(host="localhost:8090")
+    monkeypatch.setattr("prisma.utils.config.ConfigLoader", lambda: cfg)
+    monkeypatch.setattr("requests.get", lambda *a, **k: FakeResp())
+
+    r = client.get("/models")
+
+    assert r.status_code == 200
+    data = r.json()
+    assert data["current"] == "qwen2.5-3b"
+    assert set(data["models"]) == {"qwen2.5-3b", "bge-m3"}
+
+
+def test_list_models_degrades_to_current_only_when_llama_swap_unreachable(monkeypatch):
+    from prisma.server import app as app_module
+    from prisma.utils.config import ChatConfig, ConfigLoader, LLMConfig
+
+    def _raise(*a, **k):
+        raise ConnectionError("no route to host")
+
+    cfg = MagicMock(spec=ConfigLoader)
+    cfg.get_chat_config.return_value = ChatConfig(provider="llama_cpp", model="qwen2.5-3b")
+    cfg.get_llm_config.return_value = LLMConfig(host="localhost:8090")
+    monkeypatch.setattr("prisma.utils.config.ConfigLoader", lambda: cfg)
+    monkeypatch.setattr("requests.get", _raise)
+
+    r = client.get("/models")
+
+    assert r.status_code == 200
+    assert r.json() == {"models": ["qwen2.5-3b"], "current": "qwen2.5-3b"}
+
+
+# ── POST /chats/{slug}/attachments/promote ───────────────────────────────────
+
+def test_promote_asset_media_node_copies_file_and_returns_note_slug(monkeypatch, tmp_path):
+    from prisma.server import app as app_module
+
+    real_vault = VaultService(vault_root=tmp_path / "vault")
+    real_vault.ensure_dirs()
+    chat_slug = real_vault.create_chat(title="Test Chat").slug
+    monkeypatch.setattr(app_module, "_vault", real_vault)
+    indexer = MagicMock()
+    monkeypatch.setattr(app_module, "_indexer", indexer)
+    upload = client.post(
+        f"/chats/{chat_slug}/attachments/upload",
+        files={"file": ("figure.jpg", _JPG_MAGIC, "image/jpeg")},
+    )
+
+    r = client.post(f"/chats/{chat_slug}/attachments/promote", json={
+        "attachment": upload.json()["attachment"], "title": "My Figure",
+    })
+
+    assert r.status_code == 201
+    slug = r.json()["slug"]
+    note = real_vault.get_note(slug)
+    assert note.title == "My Figure"
+    assert note.original_ext == ".jpg"
+    indexer.mark_stale.assert_called_once()
+
+
+def test_promote_inline_media_node_writes_companion_text(monkeypatch, tmp_path):
+    from prisma.server import app as app_module
+
+    real_vault = VaultService(vault_root=tmp_path / "vault")
+    real_vault.ensure_dirs()
+    chat_slug = real_vault.create_chat(title="Test Chat").slug
+    monkeypatch.setattr(app_module, "_vault", real_vault)
+    monkeypatch.setattr(app_module, "_indexer", MagicMock())
+
+    r = client.post(f"/chats/{chat_slug}/attachments/promote", json={
+        "attachment": {"kind": "drawio", "value": "<mxGraphModel/>"},
+    })
+
+    assert r.status_code == 201
+    note = real_vault.get_note(r.json()["slug"])
+    assert note.original_ext == ".drawio"
+    companion = real_vault.find_companion(note.slug)
+    assert companion.read_text(encoding="utf-8") == "<mxGraphModel/>"
+
+
+def test_promote_pdf_attachment_generates_real_md_body(monkeypatch, tmp_path):
+    from prisma.server import app as app_module
+
+    real_vault = VaultService(vault_root=tmp_path / "vault")
+    real_vault.ensure_dirs()
+    chat_slug = real_vault.create_chat(title="Test Chat").slug
+    monkeypatch.setattr(app_module, "_vault", real_vault)
+    monkeypatch.setattr(app_module, "_indexer", MagicMock())
+    monkeypatch.setattr("prisma.services.vault.pdf_bytes_to_md", lambda data: "Extracted PDF text.")
+
+    upload = client.post(
+        f"/chats/{chat_slug}/attachments/upload",
+        files={"file": ("paper.pdf", b"%PDF-1.4 fake pdf bytes", "application/pdf")},
+    )
+    r = client.post(f"/chats/{chat_slug}/attachments/promote", json={
+        "attachment": upload.json()["attachment"],
+    })
+
+    assert r.status_code == 201
+    note = real_vault.get_note(r.json()["slug"])
+    assert note.body == "Extracted PDF text."
+
+
+def test_promote_attachment_404_when_chat_not_found(monkeypatch):
+    from prisma.server import app as app_module
+
+    vault = MagicMock()
+    vault.get_chat.side_effect = FileNotFoundError()
+    monkeypatch.setattr(app_module, "_vault", vault)
+
+    r = client.post("/chats/missing-chat/attachments/promote", json={
+        "attachment": {"kind": "svg", "value": "<svg/>"},
+    })
+
+    assert r.status_code == 404
+
+
+def test_list_models_degrades_for_non_ollama_provider(monkeypatch):
+    from prisma.server import app as app_module
+    from prisma.utils.config import ChatConfig, ConfigLoader, LLMConfig
+
+    cfg = MagicMock(spec=ConfigLoader)
+    cfg.get_chat_config.return_value = ChatConfig(provider="openrouter", model="claude-opus")
+    cfg.get_llm_config.return_value = LLMConfig()
+    monkeypatch.setattr("prisma.utils.config.ConfigLoader", lambda: cfg)
+
+    r = client.get("/models")
+
+    assert r.status_code == 200
+    assert r.json() == {"models": ["claude-opus"], "current": "claude-opus"}
+
+
 # ── POST /chats/{slug}/turns/{index}/regenerate (ADR-019 §6a) ────────────────
 
 def _seeded_regen_vault(tmp_path):

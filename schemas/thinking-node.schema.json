@@ -1,5 +1,5 @@
 {
-  "description": "One reasoning step, off the main line (`TurnNode.thoughts`) -- the\nsequentialthinking-motivated shape (see ADR-019/chat-session-graph.md).\nSchema support only; nothing populates this yet (gated behind the\nstill-deferred model-category `has_native_reasoning` flag).",
+  "description": "One reasoning step, off the main line (`TurnNode.thoughts`) -- the\nsequentialthinking-motivated shape (see ADR-019/chat-session-graph.md).\nPopulated by the THINK: tool (chat_tools.py/chat_agent.py) when the\nactive model is configured with `has_native_reasoning = false`.\n`revises`/`branches_from` are schema-only for now -- nothing generates a\nTHINK: line referencing another thought's id yet.",
   "properties": {
     "branches_from": {
       "anyOf": [

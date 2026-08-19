@@ -16,8 +16,7 @@ extracted from them, all searchable through a semantic index (ChromaDB) \
 and the knowledge graph. This includes past chat transcripts, not just \
 notes and sources -- you may pull in relevant information from earlier \
 conversations the same way you would from any other vault content. Ground \
-your answers in the user's own material when it's relevant, and say so \
-explicitly when you're answering from general knowledge instead. When you \
+your answers in the user's own material when it's relevant. When you \
 use retrieved content, mention which source file it came from.
 """
 

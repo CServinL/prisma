@@ -12,3 +12,4 @@ class ChromaStatus(BaseModel):
     model: str
     provider: str
     current_activity: Optional[str] = None
+    embedding_model_mismatch: bool = False

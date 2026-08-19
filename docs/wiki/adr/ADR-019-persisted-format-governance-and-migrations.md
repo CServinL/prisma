@@ -250,9 +250,9 @@ means a `THINK:`-style marker tool with the same fields could be added to
 `GRAPH_CONTEXT` already work, no new integration surface needed. When to
 advertise it: exactly for models *without* native reasoning (most local
 3B-7B chat models, unlike o1/QwQ/DeepSeek-R1/Qwen3-thinking variants) —
-the natural gate is §3a's deferred model-category work (a
-`has_native_reasoning`-style category flag), not a separate mechanism.
-This matters most precisely where Prisma already lives: local, hardware-
+the natural gate is a `has_native_reasoning`-style model-category flag, not
+a separate mechanism. **Resolved 2026-08-18**: both built — see
+`docs/concepts/chat-session-graph.md#status`. This matters most precisely where Prisma already lives: local, hardware-
 constrained deployments (today's `qwen2.5-3b`/`qwen2.5:7b-32k`) can't just
 swap in a bigger native-reasoning model to get better multi-step answers —
 a `THINK:`-style scaffold is a way to get reasoning-*shaped* behavior out

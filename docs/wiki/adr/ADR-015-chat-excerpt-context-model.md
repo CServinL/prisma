@@ -127,10 +127,21 @@ cservinl's example (`122 / 2000`) used illustrative numbers, not the real
 default. Confirmed meaning: **first number is the current session's actual
 assembled context size** (system prompt + rolling history + Summary + raw
 copy, all counted); **second number is the max allowed for that session**
-— i.e. `ChatAgent`'s `max_history_tokens` budget (`DEFAULT_MAX_HISTORY_TOKENS`,
-currently 16000), not the model's raw hardware context ceiling (32768). The
-label answers "how full is this session's configured budget," not "how
-much of the model's total window is in use."
+— i.e. `ChatAgent`'s `max_history_tokens` budget, not the model's raw
+hardware context ceiling. The label answers "how full is this session's
+configured budget," not "how much of the model's total window is in use."
+
+**Follow-up (2026-08-18): the second number is now derived per backend, not
+a flat constant.** `max_history_tokens` used to default to a flat
+`DEFAULT_MAX_HISTORY_TOKENS = 16000` — calibrated as roughly half of
+qwen2.5:7b-32k's 32768 window specifically, but never recomputed when a
+later config change (e.g. switching `chat.model` to a cloud model with a
+much larger real `context_window`) meant that number no longer matched the
+model actually in use — found live, chat kept truncating history as if
+still on the small local model well after `context_window` itself had been
+updated. `ChatAgent.__init__` now defaults `max_history_tokens` to
+`int(llm.context_window * 0.5)` when not explicitly passed, so it tracks
+whichever backend is actually configured.
 
 Display format: human-readable with `k`/`M` suffixes (e.g. `1.2k / 16k`,
 or `850 / 16k` below 1000), not raw token counts. This is a new formatting

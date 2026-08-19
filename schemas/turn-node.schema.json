@@ -1,5 +1,44 @@
 {
   "$defs": {
+    "AssetMediaNode": {
+      "description": "A media artifact too large/binary to inline (jpg, pdf) -- stored as a\nvault-relative path served via vault/assets/, never base64-inlined into\nthe .sess file. Split from `InlineMediaNode` because the two are\ngenuinely different shapes (`value` vs. `asset_path`) -- same reasoning\n`CitedClaimNode`/`InferenceNode` were split on, not one class with two\nfields where exactly one is always None. `pdf` is the one kind that also\nhas a promotion path to a real vault Note (see VaultService.promote_\nattachment_to_note) -- PDF text is worth extracting/indexing, unlike a\nbare jpg.",
+      "properties": {
+        "asset_path": {
+          "title": "Asset Path",
+          "type": "string"
+        },
+        "caption": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Caption"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "jpg",
+            "pdf"
+          ],
+          "title": "Kind",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "asset_path"
+      ],
+      "title": "AssetMediaNode",
+      "type": "object"
+    },
     "ChatRole": {
       "enum": [
         "user",
@@ -9,7 +48,7 @@
       "type": "string"
     },
     "CitedClaimNode": {
-      "description": "A claim traceable to specific vault document(s) -- `citation`/\n`attribution`/`relational` share this shape (all have real `sources`, a\nmeaningful `faithfulness_checked`), unlike `InferenceNode` below, which\nstructurally has neither. See docs/ontologia.md Axiom 16.",
+      "description": "A claim traceable to specific vault document(s) -- `citation`/\n`paraphrase`/`attribution`/`relational` share this shape (all have real\n`sources`, a meaningful `faithfulness_checked`), unlike `InferenceNode`\nbelow, which structurally has neither. See docs/ontologia.md Axiom 16.\n`citation` (verbatim quote) and `paraphrase` (close restatement) were\nsplit from a single merged `citation` value in schema v4 -- see\n_migrate_chat_v3_to_v4.",
       "properties": {
         "claim_text": {
           "title": "Claim Text",
@@ -41,9 +80,33 @@
           "title": "Kind",
           "type": "string"
         },
+        "qualifier": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Qualifier"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "rebuts": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Rebuts"
+        },
         "relation": {
           "enum": [
             "citation",
+            "paraphrase",
             "attribution",
             "relational"
           ],
@@ -56,6 +119,17 @@
           },
           "title": "Sources",
           "type": "array"
+        },
+        "warrant": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WarrantNode"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
@@ -96,6 +170,40 @@
           "default": "inference",
           "title": "Kind",
           "type": "string"
+        },
+        "qualifier": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Qualifier"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "rebuts": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Rebuts"
+        },
+        "warrant": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WarrantNode"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
@@ -104,6 +212,57 @@
       ],
       "title": "InferenceNode",
       "type": "object"
+    },
+    "InlineMediaNode": {
+      "description": "A media artifact whose content is small, text-based, and stored\ninline -- svg/latex/drawio are all XML or plain-text source, one shape\nfor all three since they're structurally identical, not a class per\nformat. See `AssetMediaNode` for the genuinely different binary case.",
+      "properties": {
+        "caption": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Caption"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "svg",
+            "latex",
+            "drawio"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "value": {
+          "title": "Value",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "value"
+      ],
+      "title": "InlineMediaNode",
+      "type": "object"
+    },
+    "Qualifier": {
+      "description": "Toulmin model's epistemic-strength modifier on a claim -- `tentative`\ndoubles as \"this is a hypothesis, not yet established.\" See\ndocs/concepts/chat-session-graph.md's Argumentation structure section.",
+      "enum": [
+        "certain",
+        "probable",
+        "possible",
+        "tentative"
+      ],
+      "title": "Qualifier",
+      "type": "string"
     },
     "RecallRef": {
       "description": "A `RECALL` hit -- a pointer to another node elsewhere in a session\ngraph, never a duplicate of its content (see ADR-019's storage-vs-\ncontext distinction). Resolved/dereferenced only in the in-memory\ncontext assembly for the turn that recalled it.",
@@ -166,7 +325,7 @@
       "type": "object"
     },
     "ThinkingNode": {
-      "description": "One reasoning step, off the main line (`TurnNode.thoughts`) -- the\nsequentialthinking-motivated shape (see ADR-019/chat-session-graph.md).\nSchema support only; nothing populates this yet (gated behind the\nstill-deferred model-category `has_native_reasoning` flag).",
+      "description": "One reasoning step, off the main line (`TurnNode.thoughts`) -- the\nsequentialthinking-motivated shape (see ADR-019/chat-session-graph.md).\nPopulated by the THINK: tool (chat_tools.py/chat_agent.py) when the\nactive model is configured with `has_native_reasoning = false`.\n`revises`/`branches_from` are schema-only for now -- nothing generates a\nTHINK: line referencing another thought's id yet.",
       "properties": {
         "branches_from": {
           "anyOf": [
@@ -265,6 +424,37 @@
           "title": "Alternates",
           "type": "array"
         },
+        "attached_slugs": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Attached Slugs",
+          "type": "array"
+        },
+        "attachments": {
+          "items": {
+            "discriminator": {
+              "mapping": {
+                "drawio": "#/$defs/InlineMediaNode",
+                "jpg": "#/$defs/AssetMediaNode",
+                "latex": "#/$defs/InlineMediaNode",
+                "pdf": "#/$defs/AssetMediaNode",
+                "svg": "#/$defs/InlineMediaNode"
+              },
+              "propertyName": "kind"
+            },
+            "oneOf": [
+              {
+                "$ref": "#/$defs/InlineMediaNode"
+              },
+              {
+                "$ref": "#/$defs/AssetMediaNode"
+              }
+            ]
+          },
+          "title": "Attachments",
+          "type": "array"
+        },
         "claims": {
           "items": {
             "discriminator": {
@@ -292,6 +482,30 @@
         "id": {
           "title": "Id",
           "type": "string"
+        },
+        "media": {
+          "items": {
+            "discriminator": {
+              "mapping": {
+                "drawio": "#/$defs/InlineMediaNode",
+                "jpg": "#/$defs/AssetMediaNode",
+                "latex": "#/$defs/InlineMediaNode",
+                "pdf": "#/$defs/AssetMediaNode",
+                "svg": "#/$defs/InlineMediaNode"
+              },
+              "propertyName": "kind"
+            },
+            "oneOf": [
+              {
+                "$ref": "#/$defs/InlineMediaNode"
+              },
+              {
+                "$ref": "#/$defs/AssetMediaNode"
+              }
+            ]
+          },
+          "title": "Media",
+          "type": "array"
         },
         "model": {
           "anyOf": [
@@ -340,6 +554,31 @@
         "content"
       ],
       "title": "TurnNode",
+      "type": "object"
+    },
+    "WarrantNode": {
+      "description": "Toulmin model's Warrant -- the reasoning bridge explaining *why* a\nclaim's grounds (`sources`) support that specific claim, often left\nimplicit in informal writing but required explicit in formal academic\nargument. `backing` is the Toulmin Backing: support for the warrant\nitself, structurally identical to `sources` (a list of vault-node\nreferences), so it's a field here rather than its own node type.\nSchema support only -- nothing populates this yet. See\ndocs/concepts/chat-session-graph.md's Argumentation structure section.",
+      "properties": {
+        "backing": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Backing",
+          "type": "array"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        }
+      },
+      "required": [
+        "text"
+      ],
+      "title": "WarrantNode",
       "type": "object"
     }
   },

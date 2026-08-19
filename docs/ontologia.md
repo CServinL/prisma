@@ -188,5 +188,5 @@ Concepts that belong to the domain and are defined here, but whose code support 
   real node/edge graph generalizing `TurnNode.tool_calls`/`alternates`/`claims` (formerly flat,
   resultless summaries) plus a `SessionOrchestrator` component for per-turn selective context
   loading and a `RECALL` tool for pulling in graph nodes the rolling history window already
-  dropped. Still open: `ThinkingNode` population (schema only, gated behind the deferred
-  model-category `has_native_reasoning` flag) — see concepts/chat-session-graph.md#status.
+  dropped. `ThinkingNode` population shipped 2026-08-18 (`THINK:` tool, gated per-model by
+  `has_native_reasoning`) — see concepts/chat-session-graph.md#status.

@@ -1,0 +1,39 @@
+{
+  "description": "A media artifact too large/binary to inline (jpg, pdf) -- stored as a\nvault-relative path served via vault/assets/, never base64-inlined into\nthe .sess file. Split from `InlineMediaNode` because the two are\ngenuinely different shapes (`value` vs. `asset_path`) -- same reasoning\n`CitedClaimNode`/`InferenceNode` were split on, not one class with two\nfields where exactly one is always None. `pdf` is the one kind that also\nhas a promotion path to a real vault Note (see VaultService.promote_\nattachment_to_note) -- PDF text is worth extracting/indexing, unlike a\nbare jpg.",
+  "properties": {
+    "asset_path": {
+      "title": "Asset Path",
+      "type": "string"
+    },
+    "caption": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Caption"
+    },
+    "id": {
+      "title": "Id",
+      "type": "string"
+    },
+    "kind": {
+      "enum": [
+        "jpg",
+        "pdf"
+      ],
+      "title": "Kind",
+      "type": "string"
+    }
+  },
+  "required": [
+    "kind",
+    "asset_path"
+  ],
+  "title": "AssetMediaNode",
+  "type": "object"
+}

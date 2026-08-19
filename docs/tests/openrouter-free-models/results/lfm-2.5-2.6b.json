@@ -1,0 +1,44 @@
+{
+  "model": "liquid/lfm-2.5-2.6b:free",
+  "results": [
+    {
+      "scenario": "single_source_match",
+      "elapsed_s": 1.9,
+      "tool_calls_made": [],
+      "error": null,
+      "raw_reply": "<|tool_call_start|>[SEARCH_VAULT(query='MEMIT paper editing memory GPT models'), RECALL(query='MEMIT paper')]<|tool_call_end|>",
+      "has_markers": false,
+      "marker_count": 0,
+      "has_trailer": false,
+      "trailer_valid": false,
+      "trailer_entry_count": null,
+      "marker_trailer_match": false
+    },
+    {
+      "scenario": "no_results_found",
+      "elapsed_s": 0.7,
+      "tool_calls_made": [],
+      "error": null,
+      "raw_reply": "<|tool_call_start|>[SEARCH_VAULT(query='LLM small RAM memory efficient models'), GRAPH_CONTEXT(query='LLM small RAM memory efficient models')]<|tool_call_end|>",
+      "has_markers": false,
+      "marker_count": 0,
+      "has_trailer": false,
+      "trailer_valid": false,
+      "trailer_entry_count": null,
+      "marker_trailer_match": false
+    },
+    {
+      "scenario": "multi_source_relational",
+      "elapsed_s": 2.5,
+      "tool_calls_made": [],
+      "error": null,
+      "raw_reply": "<|tool_call_start|>[SEARCH_VAULT(query='ROME model editing technique MEMIT'), RECALL(query='ROME model editing MEMIT comparison')]<|tool_call_end|>",
+      "has_markers": false,
+      "marker_count": 0,
+      "has_trailer": false,
+      "trailer_valid": false,
+      "trailer_entry_count": null,
+      "marker_trailer_match": false
+    }
+  ]
+}

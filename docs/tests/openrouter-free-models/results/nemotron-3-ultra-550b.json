@@ -1,0 +1,55 @@
+{
+  "model": "nvidia/nemotron-3-ultra-550b-a55b:free",
+  "results": [
+    {
+      "scenario": "single_source_match",
+      "elapsed_s": 434.3,
+      "tool_calls_made": [
+        "SEARCH_VAULT",
+        "SEARCH_VAULT",
+        "SEARCH_VAULT",
+        "SEARCH_VAULT"
+      ],
+      "error": "hit MAX_TOOL_ITERATIONS=4 without a final answer",
+      "raw_reply": null,
+      "has_markers": false,
+      "marker_count": 0,
+      "has_trailer": false,
+      "trailer_valid": false,
+      "marker_trailer_match": false
+    },
+    {
+      "scenario": "no_results_found",
+      "elapsed_s": 167.6,
+      "tool_calls_made": [
+        "SEARCH_VAULT",
+        "SEARCH_VAULT",
+        "SEARCH_VAULT",
+        "SEARCH_VAULT"
+      ],
+      "error": "hit MAX_TOOL_ITERATIONS=4 without a final answer",
+      "raw_reply": null,
+      "has_markers": false,
+      "marker_count": 0,
+      "has_trailer": false,
+      "trailer_valid": false,
+      "marker_trailer_match": false
+    },
+    {
+      "scenario": "multi_source_relational",
+      "elapsed_s": 131.8,
+      "tool_calls_made": [
+        "SEARCH_VAULT",
+        "SEARCH_VAULT"
+      ],
+      "error": null,
+      "raw_reply": "Based on the sources in your vault, here's how ROME and MEMIT compare:\n\n**ROME (Rank-One Model Editing)** edits a single factual association at a time by identifying the specific MLP layer that stores it and applying a rank-one weight update[^1].\n\n**MEMIT** generalizes ROME to enable thousands of simultaneous edits by distributing parameter updates across multiple layers instead of just one[^2].\n\n**Key differences:**\n- **Scale**: ROME handles one edit at a time; MEMIT scales to thousands of concurrent edits\n- **Layer targeting**: ROME targets a single identified MLP layer; MEMIT distributes updates across multiple layers\n- **Relationship**: MEMIT is explicitly described as a generalization of ROME\n\nBoth techniques operate by modifying MLP weights in transformer models to alter stored factual knowledge, but MEMIT's multi-layer distribution is what enables its mass-editing capability.\n\nFOOTNOTES_JSON: [{\"index\": 1, \"relation\": \"citation\", \"sources\": [\"sources/meng-2022-rome.md\"]}, {\"index\": 2, \"relation\": \"citation\", \"sources\": [\"sources/meng-2023-memit.md\"]}]",
+      "has_markers": true,
+      "marker_count": 2,
+      "has_trailer": true,
+      "trailer_valid": true,
+      "trailer_entry_count": 2,
+      "marker_trailer_match": true
+    }
+  ]
+}

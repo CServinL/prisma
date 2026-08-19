@@ -16,6 +16,26 @@ def test_system_prompt_tool_section_includes_all_markers():
     assert "RECALL:" in text
 
 
+def test_system_prompt_tool_section_hides_think_by_default():
+    assert "THINK:" not in system_prompt_tool_section()
+    assert "THINK:" not in system_prompt_tool_section(has_native_reasoning=True)
+
+
+def test_system_prompt_tool_section_shows_think_for_non_reasoning_models():
+    text = system_prompt_tool_section(has_native_reasoning=False)
+    assert "THINK:" in text
+    # The other three tools stay present regardless -- THINK is additive.
+    assert "SEARCH_VAULT:" in text
+    assert "GRAPH_CONTEXT:" in text
+    assert "RECALL:" in text
+
+
+def test_tool_call_re_matches_think_line():
+    text = "THINK: weighing whether the source actually supports this"
+    matches = TOOL_CALL_RE.findall(text)
+    assert matches == [("THINK", "weighing whether the source actually supports this")]
+
+
 def test_tool_call_re_matches_search_vault_line():
     text = "some preamble\nSEARCH_VAULT: attention mechanisms\nmore text"
     matches = TOOL_CALL_RE.findall(text)
@@ -52,6 +72,7 @@ def test_toolbox_search_vault_returns_wrapped_text_and_raw(vault):
     note.write_text("Attention mechanisms let models weigh input tokens.", encoding="utf-8")
 
     chroma = MagicMock()
+    chroma.embedding_model_mismatch = False
     chroma.query.return_value = [GraphSearchResult(source_file="notes/attention.md", score=0.9)]
     kg = MagicMock()
 
@@ -68,6 +89,7 @@ def test_toolbox_search_vault_returns_wrapped_text_and_raw(vault):
 
 def test_toolbox_search_vault_skips_unreadable_files(vault):
     chroma = MagicMock()
+    chroma.embedding_model_mismatch = False
     chroma.query.return_value = [GraphSearchResult(source_file="notes/missing.md", score=0.5)]
     kg = MagicMock()
 
@@ -121,6 +143,13 @@ def test_toolbox_call_unknown_marker_raises(vault):
     toolbox = ChatToolbox(MagicMock(), MagicMock(), vault)
     with pytest.raises(ValueError, match="unknown tool marker"):
         toolbox.call("NOT_A_TOOL", "query")
+
+
+def test_toolbox_think_returns_ack_with_no_raw(vault):
+    toolbox = ChatToolbox(MagicMock(), MagicMock(), vault)
+    result = toolbox.call("THINK", "checking whether the source actually supports this")
+    assert result.text
+    assert result.raw == []
 
 
 # ── get_node_text() — ADR-017 faithfulness_checked's source-text resolver ────

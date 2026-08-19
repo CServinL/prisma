@@ -11,7 +11,10 @@ prisma/                        # repo root
 │   │   ├── search_agent.py        # Multi-source paper/book search
 │   │   ├── analysis_agent.py      # LLM relevance + deep analysis
 │   │   ├── report_agent.py        # Report synthesis and generation
-│   │   └── zotero_agent.py        # Zotero search and item creation
+│   │   ├── zotero_agent.py        # Zotero search and item creation
+│   │   ├── chat_agent.py          # Bounded, pattern-based tool loop (ADR-014/019) — the chat turn lifecycle
+│   │   ├── session_orchestrator.py # Per-turn context assembly + in-memory session graph builder (ADR-019)
+│   │   └── session_graph.py       # networkx graph construction from a Chat's TurnNode history
 │   ├── integrations/
 │   │   └── zotero/
 │   │       └── client.py          # ZoteroClient (pyzotero-backed, Web API only) + from_config()
@@ -26,24 +29,41 @@ prisma/                        # repo root
 │   │   ├── vault.py               # Vault CRUD: notes, sources, chats, streams
 │   │   ├── stream_runner.py       # Stream refresh execution (search -> dedup -> relevance -> save to Zotero)
 │   │   ├── dedup.py               # Shared duplicate-detection logic (stream_runner + /maintenance/deduplicate)
-│   │   ├── knowledge_graph_service.py  # Native Kùzu-backed knowledge graph indexer (watchdog + Ollama, per-section) — runs inside kg_app.py
+│   │   ├── knowledge_graph_service.py  # Native Kùzu-backed knowledge graph indexer (watchdog, backend-agnostic LLM, per-section) — runs inside kg_app.py
 │   │   ├── knowledge_graph_client.py   # Thin HTTP client app.py uses to reach kg_app.py
-│   │   ├── chroma_service.py      # ChromaDB semantic index (watchdog + nomic-embed-text)
+│   │   ├── chroma_service.py      # ChromaDB semantic index (watchdog, configurable embedding model)
+│   │   ├── chat_llm.py            # Backend-agnostic LLM client (ollama/llama_cpp/openrouter/anthropic — ADR-014)
+│   │   ├── chat_tools.py          # Chat tool registry (SEARCH_VAULT/GRAPH_CONTEXT/RECALL/THINK) + system prompt assembly
+│   │   ├── chat_prompts.py        # User-editable chat system prompt, Excerpt summary prompt
+│   │   ├── chat_render.py         # Chat message → sanitized HTML rendering
+│   │   ├── chat_migration.py      # `prisma migrate-chats-to-sess`-style helpers
+│   │   ├── citation_format.py     # APA formatting for CitedClaimNode.sources / vault Sources (ADR-020)
+│   │   ├── resource_lock.py       # Cross-process GPU/compute-pool lease arbitration (ADR-012)
+│   │   ├── sync_orchestrator.py   # Server/client vault sync decision logic (prisma-desktop's sync engine)
+│   │   ├── injection_defense.py   # wrap_untrusted() — trust-tier fencing for tool results in chat prompts
+│   │   ├── html_sanitize.py       # HTML sanitization for rendered notes/chat content
+│   │   ├── renderer.py            # Markdown/HTML rendering shared by notes and chat
+│   │   ├── source_backfill.py     # `prisma backfill-source-metadata` — retrofits APA fields onto existing Sources
+│   │   ├── rate_limiter.py        # Per-source quota control (search sources, IEEE Xplore, etc.)
 │   │   └── asset_rewrite.py       # Rewrites relative asset URLs to /vault/assets/... (used by notes/view routes)
 │   ├── storage/
 │   │   ├── models/
 │   │   │   ├── agent_models.py          # PaperMetadata, BookMetadata, SearchResult
-│   │   │   ├── vault_models.py          # VaultNode, RenderedNode, VaultListing, StreamStatus
+│   │   │   ├── vault_models.py          # VaultNode/RenderedNode/VaultListing/StreamStatus, and the chat session graph: Chat, TurnNode, ToolCallNode, ThinkingNode, CitedClaimNode/InferenceNode, MediaNode (ADR-019/ADR-020)
 │   │   │   ├── zotero_models.py         # ZoteroItem, ZoteroCollection
+│   │   │   ├── chroma_models.py         # ChromaStatus
+│   │   │   ├── kg_models.py             # KGStatus, GraphQueryResult
+│   │   │   ├── search_models.py         # GraphSearchResult and other search-route response shapes
 │   │   │   ├── api_response_models.py   # Typed API response models (Pydantic)
 │   │   │   └── source_quality.py        # SourceQuality enum, SOURCE_REGISTRY, validation
 │   │   └── pending_queue.py       # Offline write queue (flushed on next online start)
 │   ├── cli/
 │   │   ├── prisma_cli.py          # `serve`/`status`/`reload-config` -- local-machine-only surface, everything else moved to the API (see docs/wiki/cli.md)
 │   │   └── commands/
-│   │       └── auth.py            # prisma auth hash-password
+│   │       ├── auth.py            # prisma auth hash-password
+│   │       └── schema.py          # prisma schema export — commits JSON Schema for every VersionedModel to schemas/
 │   └── utils/
-│       ├── config.py              # YAML config loader, Pydantic-validated models
+│       ├── config.py              # TOML config loader, Pydantic-validated models
 │       └── text.py                # Text utilities (significant_words, etc.)
 └── ui/                        # SvelteKit frontend (source of truth for all clients)
     ├── src/routes/+page.svelte  # Single-page app — vault tree, viewer, Zotero sidebar
@@ -67,7 +87,7 @@ PrismaCoordinator.run_review()
        │      ├─ Google Books API ─────────────┤
        │      └─ (Zotero — dedup only) ────────┘
        │
-       ├─ AnalysisAgent.assess_relevance()  (per paper, via Ollama)
+       ├─ AnalysisAgent.assess_relevance()  (per paper, via the configured [llm] backend)
        │      └─ discard irrelevant papers
        │
        ├─ ZoteroAgent._check_zotero_duplicate_simple()  (per paper)
@@ -180,14 +200,14 @@ Two daemon threads start in the **API process**:
 
 | Service | What it does |
 |---------|--------------|
-| ChromaDB indexer | Watchdog on vault root; on change, embeds changed `.md` files via `nomic-embed-text` and upserts into the ChromaDB **server process** (`chromadb.HttpClient`, not embedded — see ADR-012) at `{vault_root}/chromadb/`. Skips files whose mtime hasn't changed since the last upsert, even if a spurious filesystem event re-queues them. |
+| ChromaDB indexer | Watchdog on vault root; on change, embeds changed `.md` files via the configured `[retrieval]` embedding model (`bge-m3`/`nomic-embed-text`/etc., any Ollama- or llama.cpp-compatible model) and upserts into the ChromaDB **server process** (`chromadb.HttpClient`, not embedded — see ADR-012) at `{vault_root}/chromadb/`. Skips files whose mtime hasn't changed since the last upsert, even if a spurious filesystem event re-queues them. Records which model built the collection (`chromadb/embedding_model.json`) and refuses to read/write against it if the configured model ever drifts, rather than silently mixing embedding spaces. |
 | Stream scheduler | Polls every 5 min; runs active streams whose `next_update` is past. |
 
 One daemon thread starts in the **Knowledge graph process** (`kg_app.py`, its own supervised worker — see ADR-012's follow-up section):
 
 | Service | What it does |
 |---------|--------------|
-| Knowledge graph indexer | Watchdog on vault root; on change, extracts entities/relationships via Ollama **per section** (chunked with `semchunk`, token-budget-aware — not per-file, so no single oversized document can exceed the model's budget) and upserts into an embedded Kùzu graph DB at `{vault_root}/kg-out/`. Owns the sole Kùzu connection for the process's lifetime. `app.py` talks to it over HTTP via `KnowledgeGraphClient`. Replaces the third-party `graphify` dependency — see `TODO.md`. |
+| Knowledge graph indexer | Watchdog on vault root; on change, extracts entities/relationships via the configured `[llm]` backend (Ollama, llama.cpp, or OpenRouter — same backend-agnostic interface chat uses, ADR-014) **per section** (chunked with `semchunk`, token-budget-aware — not per-file, so no single oversized document can exceed the model's budget) and upserts into an embedded Kùzu graph DB at `{vault_root}/kg-out/`. Owns the sole Kùzu connection for the process's lifetime. `app.py` talks to it over HTTP via `KnowledgeGraphClient`. Replaces the third-party `graphify` dependency — see `TODO.md`. |
 
 One daemon thread starts in the **Web process**:
 

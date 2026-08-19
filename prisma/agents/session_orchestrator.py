@@ -16,6 +16,8 @@ ChatAgent's tool-calling loop mechanics:
 """
 from __future__ import annotations
 
+from typing import Callable
+
 import networkx as nx
 
 from prisma.agents.session_graph import build_session_graph
@@ -27,20 +29,46 @@ def _estimate_tokens(text: str) -> int:
     return len(text) // 4  # same rough char/4 heuristic used throughout this codebase
 
 
+# Below this many labels, the vault-overview list is too sparse to be useful
+# priming -- omit the block entirely rather than show a near-empty one.
+_MIN_VAULT_OVERVIEW_ENTITIES = 5
+
+
 class SessionOrchestrator:
-    def __init__(self, system_prompt: str, max_history_tokens: int) -> None:
+    def __init__(
+        self, system_prompt: str, max_history_tokens: int, has_native_reasoning: bool = True,
+        vault_overview: Callable[[], list[str]] | None = None,
+    ) -> None:
         self._system_prompt = system_prompt
         self._max_history_tokens = max_history_tokens
+        self._has_native_reasoning = has_native_reasoning
+        self._vault_overview = vault_overview or (lambda: [])
 
     @property
     def max_history_tokens(self) -> int:
         return self._max_history_tokens
 
     def full_system_prompt(self, excerpt_notes: list[Note]) -> str:
-        parts = [self._system_prompt, system_prompt_tool_section(), system_prompt_footnote_section()]
+        parts = [
+            self._system_prompt,
+            system_prompt_tool_section(self._has_native_reasoning),
+            system_prompt_footnote_section(),
+        ]
+        labels = self._vault_overview()  # resolved fresh every call, not cached at construction
+        if len(labels) >= _MIN_VAULT_OVERVIEW_ENTITIES:
+            parts.append(self._vault_overview_block(labels))
         if excerpt_notes:
             parts.append(self._excerpt_context_block(excerpt_notes))
         return "\n\n".join(parts)
+
+    def _vault_overview_block(self, labels: list[str]) -> str:
+        return (
+            "Your vault's knowledge graph currently centers on: " + ", ".join(labels) + ". "
+            "This is a priming signal, not an exhaustive list -- if a question touches "
+            "any of these (even loosely), the vault likely has directly relevant material "
+            "worth checking with SEARCH_VAULT/GRAPH_CONTEXT before answering from general "
+            "knowledge alone."
+        )
 
     def _excerpt_context_block(self, excerpt_notes: list[Note]) -> str:
         # Deliberately NOT subject to bounded_history's rolling truncation --

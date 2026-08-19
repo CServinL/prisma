@@ -123,7 +123,7 @@ class Source(VaultNodeBase):
     item_type: str | None = None
 
 
-CHAT_SCHEMA_VERSION = 2
+CHAT_SCHEMA_VERSION = 4
 
 
 class ToolCallNode(BaseModel):
@@ -140,8 +140,10 @@ class ToolCallNode(BaseModel):
 class ThinkingNode(BaseModel):
     """One reasoning step, off the main line (`TurnNode.thoughts`) -- the
     sequentialthinking-motivated shape (see ADR-019/chat-session-graph.md).
-    Schema support only; nothing populates this yet (gated behind the
-    still-deferred model-category `has_native_reasoning` flag)."""
+    Populated by the THINK: tool (chat_tools.py/chat_agent.py) when the
+    active model is configured with `has_native_reasoning = false`.
+    `revises`/`branches_from` are schema-only for now -- nothing generates a
+    THINK: line referencing another thought's id yet."""
     id: str = Field(default_factory=_new_id)
     thought: str
     thought_number: int
@@ -149,20 +151,52 @@ class ThinkingNode(BaseModel):
     branches_from: str | None = None  # another ThinkingNode.id this one forks from
 
 
+class Qualifier(str, Enum):
+    """Toulmin model's epistemic-strength modifier on a claim -- `tentative`
+    doubles as "this is a hypothesis, not yet established." See
+    docs/concepts/chat-session-graph.md's Argumentation structure section."""
+    certain = "certain"
+    probable = "probable"
+    possible = "possible"
+    tentative = "tentative"
+
+
+class WarrantNode(BaseModel):
+    """Toulmin model's Warrant -- the reasoning bridge explaining *why* a
+    claim's grounds (`sources`) support that specific claim, often left
+    implicit in informal writing but required explicit in formal academic
+    argument. `backing` is the Toulmin Backing: support for the warrant
+    itself, structurally identical to `sources` (a list of vault-node
+    references), so it's a field here rather than its own node type.
+    Schema support only -- nothing populates this yet. See
+    docs/concepts/chat-session-graph.md's Argumentation structure section."""
+    id: str = Field(default_factory=_new_id)
+    text: str
+    backing: list[str] = Field(default_factory=list)  # Note/Source/Chat slugs
+
+
 class CitedClaimNode(BaseModel):
     """A claim traceable to specific vault document(s) -- `citation`/
-    `attribution`/`relational` share this shape (all have real `sources`, a
-    meaningful `faithfulness_checked`), unlike `InferenceNode` below, which
-    structurally has neither. See docs/ontologia.md Axiom 16."""
+    `paraphrase`/`attribution`/`relational` share this shape (all have real
+    `sources`, a meaningful `faithfulness_checked`), unlike `InferenceNode`
+    below, which structurally has neither. See docs/ontologia.md Axiom 16.
+    `citation` (verbatim quote) and `paraphrase` (close restatement) were
+    split from a single merged `citation` value in schema v4 -- see
+    _migrate_chat_v3_to_v4."""
     id: str = Field(default_factory=_new_id)
     kind: Literal["claim"] = "claim"
     index: int  # sequential per turn, 1-based -- the inline [^N] marker this claim is
     claim_text: str
     sources: list[str] = Field(default_factory=list)  # Note/Source/Chat slugs
-    relation: Literal["citation", "attribution", "relational"]
+    relation: Literal["citation", "paraphrase", "attribution", "relational"]
     # Whether an automated/manual check confirmed the claim accurately
     # represents `sources`. None = not (yet) checked.
     faithfulness_checked: bool | None = None
+    # Toulmin model extension (schema support only, nothing populates these
+    # yet -- see docs/concepts/chat-session-graph.md):
+    qualifier: Qualifier | None = None
+    warrant: WarrantNode | None = None  # containment, like alternates -- at most one
+    rebuts: str | None = None  # another ClaimNode's id this one contradicts/excepts
 
 
 class InferenceNode(BaseModel):
@@ -174,9 +208,58 @@ class InferenceNode(BaseModel):
     kind: Literal["inference"] = "inference"
     index: int  # sequential per turn, 1-based -- the inline [^N] marker this claim is
     claim_text: str
+    # Toulmin model extension -- see CitedClaimNode above.
+    qualifier: Qualifier | None = None
+    warrant: WarrantNode | None = None
+    rebuts: str | None = None
 
 
 ClaimNode = Annotated[CitedClaimNode | InferenceNode, Field(discriminator="kind")]
+
+
+class MediaKind(str, Enum):
+    svg = "svg"
+    latex = "latex"
+    drawio = "drawio"
+    jpg = "jpg"
+    pdf = "pdf"
+
+
+class InlineMediaNode(BaseModel):
+    """A media artifact whose content is small, text-based, and stored
+    inline -- svg/latex/drawio are all XML or plain-text source, one shape
+    for all three since they're structurally identical, not a class per
+    format. See `AssetMediaNode` for the genuinely different binary case."""
+    id: str = Field(default_factory=_new_id)
+    kind: Literal[MediaKind.svg, MediaKind.latex, MediaKind.drawio]
+    value: str
+    caption: str | None = None
+
+
+class AssetMediaNode(BaseModel):
+    """A media artifact too large/binary to inline (jpg, pdf) -- stored as a
+    vault-relative path served via vault/assets/, never base64-inlined into
+    the .sess file. Split from `InlineMediaNode` because the two are
+    genuinely different shapes (`value` vs. `asset_path`) -- same reasoning
+    `CitedClaimNode`/`InferenceNode` were split on, not one class with two
+    fields where exactly one is always None. `pdf` is the one kind that also
+    has a promotion path to a real vault Note (see VaultService.promote_
+    attachment_to_note) -- PDF text is worth extracting/indexing, unlike a
+    bare jpg."""
+    id: str = Field(default_factory=_new_id)
+    kind: Literal[MediaKind.jpg, MediaKind.pdf]
+    asset_path: str
+    caption: str | None = None
+
+
+# A media artifact attached to a turn -- either the assistant's own output
+# (`TurnNode.media`, `PRODUCES` edge) or something a human turn brought in
+# as input (`TurnNode.attachments`, `ATTACHES` edge). Same two concrete
+# types either way; direction is carried by which edge points at it, not by
+# more types. Schema support only -- no generator/renderer pipeline exists
+# for any of the four kinds yet. See docs/concepts/chat-session-graph.md's
+# Media nodes / Attachments sections.
+MediaNode = Annotated[InlineMediaNode | AssetMediaNode, Field(discriminator="kind")]
 
 
 class RecallRef(BaseModel):
@@ -224,6 +307,11 @@ class TurnNode(BaseModel):
     # answers to the same prompt stay comparable, not just the current one.
     alternates: list["TurnNode"] = Field(default_factory=list)
     recalls: list[RecallRef] = Field(default_factory=list)
+    # v3 additions (schema support only, see docs/concepts/chat-session-graph.md):
+    media: list[MediaNode] = Field(default_factory=list)         # assistant output, PRODUCES
+    attachments: list[MediaNode] = Field(default_factory=list)   # human input, ATTACHES
+    attached_slugs: list[str] = Field(default_factory=list)      # human input, REFERENCES
+                                                                   # -- vault Note/Source/Chat slugs
 
 
 def _migrate_message_v1_to_v2(msg: dict) -> dict | TurnNode:
@@ -271,9 +359,33 @@ def _migrate_chat_v1_to_v2(raw: dict) -> dict:
     return raw
 
 
+def _migrate_chat_v2_to_v3(raw: dict) -> dict:
+    """v2 -> v3 (Toulmin extension, MediaNode, attachments) adds only new
+    optional fields with defaults (`qualifier`/`warrant`/`rebuts` on claims;
+    `media`/`attachments`/`attached_slugs` on turns) -- no v2 shape is
+    reinterpreted or restructured, so there is nothing to transform. Kept as
+    an explicit identity step (not a bare MIGRATIONS omission) because
+    VersionedModel requires one callable per version it upgrades through;
+    the no-op *is* the correct migration for a purely-additive bump."""
+    return raw
+
+
+def _migrate_chat_v3_to_v4(raw: dict) -> dict:
+    """v3 -> v4 splits CitedClaimNode.relation's old merged `citation`
+    ("direct quote or close paraphrase") into two distinct values: `citation`
+    (verbatim quote only) and a new `paraphrase`. Old data is genuinely
+    ambiguous -- there's no way to recover after the fact which of the two a
+    v3 `relation: "citation"` claim actually was -- so this deliberately does
+    NOT reinterpret existing data. Old `"citation"` values are left exactly
+    as-is under the new, narrower meaning (the safer of the two readings,
+    not a guess); only new model output can ever produce `"paraphrase"`.
+    No other field changes, so no shape transform is needed here at all."""
+    return raw
+
+
 class Chat(VaultNodeBase, VersionedModel):
     SCHEMA_VERSION = CHAT_SCHEMA_VERSION
-    MIGRATIONS = {1: _migrate_chat_v1_to_v2}
+    MIGRATIONS = {1: _migrate_chat_v1_to_v2, 2: _migrate_chat_v2_to_v3, 3: _migrate_chat_v3_to_v4}
 
     node_type: Literal[NodeType.chat] = NodeType.chat
     messages: list[TurnNode] = Field(default_factory=list)

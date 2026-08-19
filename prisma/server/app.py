@@ -36,7 +36,9 @@ def _t(label: str, _t0=[0.0]):
     _log.info("startup  %+6.2fs  %s", now - _t0[0], label)
 
 _t("importing fastapi")
-from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi import (
+    FastAPI, File, Form, HTTPException, Query, Request, UploadFile, WebSocket, WebSocketDisconnect,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, ValidationError
 from prisma.server.access_log import AccessLogMiddleware
@@ -86,8 +88,8 @@ _t("sync_orchestrator ok")
 _t("importing vault_models")
 from prisma.schema_gov import ContentFormat, RichContent
 from prisma.storage.models.vault_models import (
-    Chat, ChatRole, ClaimNode, NodeType, RecallRef, RenderedNode, ToolCallNode, TurnNode,
-    VaultTreeNode,
+    AssetMediaNode, Chat, ChatRole, ClaimNode, InlineMediaNode, MediaKind, MediaNode, NodeType,
+    RecallRef, RenderedNode, ThinkingNode, ToolCallNode, TurnNode, VaultTreeNode,
 )
 _t("vault_models ok")
 
@@ -345,12 +347,14 @@ def _build_chroma(vault: "VaultService") -> ChromaIndexer:
         return ChromaIndexer(vault)
 
 
-def _chat_blocked_reason(chroma: ChromaIndexer, kg: KnowledgeGraphClient) -> str | None:
+def _chat_blocked_reason(llm: ChatLLM, chroma: ChromaIndexer, kg: KnowledgeGraphClient) -> str | None:
     """Why the shared local-ollama pool might be denying chat's model right
     now — model_affinity makes "busy with a different model" look identical
     to "unreachable" from ChatLLM's own point of view, so this checks the
     two other Ollama callers directly to give a real answer instead of a
     generic failure message."""
+    if llm.config_error:
+        return llm.config_error
     try:
         if kg.status().state == "indexing":
             return "the knowledge graph is currently indexing your vault"
@@ -383,18 +387,19 @@ def _build_chat_agent(vault: "VaultService", chroma: ChromaIndexer, kg: Knowledg
     toolbox = ChatToolbox(chroma, kg, vault)
     return ChatAgent(
         llm, toolbox, system_prompt=load_system_prompt(),
-        blocked_reason=lambda: _chat_blocked_reason(chroma, kg),
+        blocked_reason=lambda: _chat_blocked_reason(llm, chroma, kg),
+        vault_overview=lambda: [e.label for e in kg.top_entities()],
     )
 
 
 def _build_chat_agent_for_model(model: str) -> ChatAgent:
     """One-off ChatAgent for a turn regeneration (ADR-019 §6a) against a
     model other than the chat's currently-configured one -- never replaces
-    `_chat_agent` itself. pool/base_url/context_window are inherited from
-    the current chat config unchanged; there's no per-model config roster
-    yet (that's the deferred model-category work, ADR-019 §3a), so a
-    regeneration against a model with a genuinely different real context
-    window will estimate against the wrong ceiling until that roster exists."""
+    `_chat_agent` itself. pool/base_url/context_window/has_native_reasoning
+    are all inherited from the current chat config unchanged; there's no
+    per-model config roster yet, so a regeneration against a model with a
+    genuinely different real context window (or reasoning capability) will
+    estimate/advertise against the wrong one until that roster exists."""
     from prisma.utils.config import ConfigLoader
     cfg = ConfigLoader()
     chat_config = cfg.get_chat_config().model_copy(update={"model": model})
@@ -402,7 +407,8 @@ def _build_chat_agent_for_model(model: str) -> ChatAgent:
     toolbox = ChatToolbox(_chroma, _indexer, _vault)
     return ChatAgent(
         llm, toolbox, system_prompt=load_system_prompt(),
-        blocked_reason=lambda: _chat_blocked_reason(_chroma, _indexer),
+        blocked_reason=lambda: _chat_blocked_reason(llm, _chroma, _indexer),
+        vault_overview=lambda: [e.label for e in _indexer.top_entities()],
     )
 
 
@@ -559,6 +565,14 @@ class RenderResponse(BaseModel):
 class ChatRequest(BaseModel):
     message: str
     chat_slug: str  # create via POST /chats first — /chat only ever sends a message
+    # v3 (schema-only until now): media/vault-node references the human turn
+    # brought in as input. jpg/pdf/svg/latex/drawio files must already be
+    # uploaded via POST /chats/{slug}/attachments/upload before being
+    # included here -- this field only ever carries the resulting MediaNode
+    # reference, never raw file bytes. svg/latex/drawio can also be built
+    # client-side (pasted source) and included directly with no upload step.
+    attachments: list[MediaNode] = Field(default_factory=list)
+    attached_slugs: list[str] = Field(default_factory=list)
 
 
 class ChatResponse(BaseModel):
@@ -567,6 +581,7 @@ class ChatResponse(BaseModel):
     tool_calls: list[ToolCallNode]
     claims: list[ClaimNode] = []
     recalls: list[RecallRef] = []
+    thoughts: list[ThinkingNode] = []
     html: str = ""
 
 
@@ -751,6 +766,57 @@ def update_chat_system_prompt(req: UpdateChatSystemPromptRequest):
     save_system_prompt(req.content)
     _reload_chat()  # so the running ChatAgent picks up the edit immediately
     return {"content": load_system_prompt()}
+
+
+class ModelsResponse(BaseModel):
+    models: list[str]
+    current: str
+
+
+@app.get("/models", response_model=ModelsResponse)
+def list_models():
+    """Populates the desktop UI's per-turn regenerate model picker
+    (RegenerateTurnRequest.model / _build_chat_agent_for_model already
+    accept any model name — this endpoint only adds discovery, no new
+    capability). Discovery is provider-specific -- `ollama` and `llama_cpp`
+    are NOT interchangeable here despite both being "local providers"
+    elsewhere (chat_llm.py's _resolve_base_url): plain Ollama exposes its
+    own /api/tags ({"models": [{"name": ...}]}), but llama_cpp here means
+    llama-swap (see /opt/llama-swap on anvil/forge), which only speaks the
+    OpenAI-compatible /v1/models ({"data": [{"id": ...}]}) -- llama-swap has
+    no /api/tags at all (found live: 404, silently degraded to
+    models=[current], hiding the picker entirely since it never renders for
+    a single-model list). Other providers (openrouter) have no roster here
+    yet, so `models` degrades to just the currently-configured one rather
+    than a fake/empty list. This does not change which model a chat defaults
+    to going forward -- Chat.model is still always overwritten by
+    _chat_agent.model on every turn (no sticky per-chat override exists yet)."""
+    from prisma.utils.config import ConfigLoader
+    cfg = ConfigLoader()
+    chat_config = cfg.get_chat_config()
+    current = chat_config.model
+    llm_host = cfg.get_llm_config().host
+    if chat_config.provider == "ollama":
+        import requests
+        try:
+            resp = requests.get(f"http://{llm_host}/api/tags", timeout=5)
+            resp.raise_for_status()
+            names = sorted({m["name"] for m in resp.json().get("models", []) if m.get("name")})
+            if names:
+                return ModelsResponse(models=names, current=current)
+        except Exception as exc:
+            _log.debug("list_models: /api/tags query against %s failed: %s", llm_host, exc)
+    elif chat_config.provider == "llama_cpp":
+        import requests
+        try:
+            resp = requests.get(f"http://{llm_host}/v1/models", timeout=5)
+            resp.raise_for_status()
+            names = sorted({m["id"] for m in resp.json().get("data", []) if m.get("id")})
+            if names:
+                return ModelsResponse(models=names, current=current)
+        except Exception as exc:
+            _log.debug("list_models: /v1/models query against %s failed: %s", llm_host, exc)
+    return ModelsResponse(models=[current], current=current)
 
 
 @app.post("/supervisor/restart/{name}")
@@ -1145,7 +1211,10 @@ def chat(req: ChatRequest):
             excerpt_notes.append(_vault.get_note(chat_node.excerpt_slug))
         except FileNotFoundError:
             _log.warning("chat %r: excerpt note %r no longer exists", chat_node.slug, chat_node.excerpt_slug)
-    user_msg = TurnNode(role=ChatRole.user, content=RichContent(format=ContentFormat.markdown, value=req.message))
+    user_msg = TurnNode(
+        role=ChatRole.user, content=RichContent(format=ContentFormat.markdown, value=req.message),
+        attachments=req.attachments, attached_slugs=req.attached_slugs,
+    )
     assistant_msg = _chat_agent.respond(history, req.message, excerpt_notes=excerpt_notes, chat_slug=chat_node.slug)
     # append_messages (not save_chat with the pre-call `history` snapshot)
     # re-reads the chat's *current* messages atomically right before
@@ -1156,8 +1225,122 @@ def chat(req: ChatRequest):
     _activity.info("action=chat slug=%s tool_calls=%d", chat_node.slug, len(assistant_msg.tool_calls))
     return ChatResponse(
         chat_slug=chat_node.slug, reply=assistant_msg.content.value, tool_calls=assistant_msg.tool_calls,
-        claims=assistant_msg.claims, recalls=assistant_msg.recalls, html=_render_chat_html(assistant_msg.content.value),
+        claims=assistant_msg.claims, recalls=assistant_msg.recalls, thoughts=assistant_msg.thoughts,
+        html=_render_chat_html(assistant_msg.content.value),
     )
+
+
+class UploadAttachmentResponse(BaseModel):
+    attachment: MediaNode
+
+
+def _sniff_asset_kind(data: bytes, filename: str | None = None) -> MediaKind | None:
+    if data[:3] == b"\xff\xd8\xff":
+        return MediaKind.jpg
+    if data[:4] == b"%PDF":
+        return MediaKind.pdf
+    # svg/drawio/latex are plain text, not binary -- no fixed magic bytes to
+    # check, so these are judged from real XML/text content instead of
+    # trusting the extension blindly (same posture as jpg/pdf above).
+    # latex has no reliable content marker of its own (a bare formula
+    # snippet has no \documentclass), so it falls back to the filename.
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    head = text.lstrip()[:2000].lower()
+    if "<svg" in head:
+        return MediaKind.svg
+    if "<mxfile" in head or "<mxgraphmodel" in head:
+        return MediaKind.drawio
+    if filename and filename.lower().endswith(".tex"):
+        return MediaKind.latex
+    return None
+
+
+@app.post("/chats/{slug}/attachments/upload", response_model=UploadAttachmentResponse, status_code=201)
+async def upload_chat_attachment(slug: str, file: UploadFile = File(...), caption: Optional[str] = None):
+    """File upload for TurnNode.attachments (v3, docs/concepts/chat-session-
+    graph.md's Attachments section). jpg/pdf are written under the chat's
+    own <slug>-attachments/ dir as an *ephemeral* (L1/L2) AssetMediaNode,
+    served back via the existing GET /vault/assets/{path} route (already in
+    _ALLOWED_ASSET_EXTS). svg/latex/drawio are small text formats -- no
+    ephemeral file, their decoded content is returned directly as an
+    InlineMediaNode, same shape the compose box already builds client-side
+    when pasted rather than uploaded. This does NOT create a vault Note --
+    that's a separate, deliberate action, see POST /chats/{slug}/attachments/promote."""
+    try:
+        chat_node = _vault.get_chat(slug)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"chat not found: {slug!r}")
+    data = await file.read()
+    kind = _sniff_asset_kind(data, file.filename)
+    if kind is None:
+        raise HTTPException(
+            status_code=400, detail="unsupported file — must be a valid jpg, pdf, svg, tex, or drawio file",
+        )
+    if kind in (MediaKind.svg, MediaKind.latex, MediaKind.drawio):
+        return UploadAttachmentResponse(
+            attachment=InlineMediaNode(kind=kind, value=data.decode("utf-8"), caption=caption),
+        )
+    attachments_dir = _vault.default_dirs[NodeType.chat] / f"{chat_node.slug}-attachments"
+    attachments_dir.mkdir(parents=True, exist_ok=True)
+    dest = attachments_dir / f"{uuid.uuid4().hex}.{kind.value}"
+    dest.write_bytes(data)
+    rel_path = dest.relative_to(_vault.root).as_posix()
+    return UploadAttachmentResponse(attachment=AssetMediaNode(kind=kind, asset_path=rel_path, caption=caption))
+
+
+_MEDIA_KIND_FILE_EXT = {
+    MediaKind.svg: ".svg", MediaKind.latex: ".tex", MediaKind.drawio: ".drawio",
+    MediaKind.jpg: ".jpg", MediaKind.pdf: ".pdf",
+}
+
+
+class PromoteAttachmentRequest(BaseModel):
+    attachment: MediaNode
+    title: Optional[str] = None  # None -> auto-generate from kind/caption
+
+
+class PromoteAttachmentResponse(BaseModel):
+    slug: str
+
+
+@app.post("/chats/{slug}/attachments/promote", response_model=PromoteAttachmentResponse, status_code=201)
+def promote_attachment_to_vault(slug: str, req: PromoteAttachmentRequest):
+    """Promotes an ephemeral (L1/L2) attachment -- already uploaded via
+    POST /chats/{slug}/attachments/upload for jpg/pdf, or built client-side
+    for the three inline kinds -- into a real vault Note (L3): indexed,
+    searchable, outlives the chat's own rolling history. A chat keeps
+    referencing the promoted node via TurnNode.attached_slugs (REFERENCES)
+    from here on, not via `attachments` -- that's the point of promoting.
+    Stays plain `type: note`, not auto-set to `source`, same as the existing
+    manual "create Note, drop companion, toggle type badge" flow -- source
+    requires bibliographic fields this endpoint has no way to know."""
+    try:
+        _vault.get_chat(slug)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"chat not found: {slug!r}")
+
+    attachment = req.attachment
+    title = req.title or attachment.caption or f"Attachment ({attachment.kind.value})"
+    note = _vault.create_note(title=title)
+    ext = _MEDIA_KIND_FILE_EXT[attachment.kind]
+    dest = note.path.with_suffix(ext)
+
+    if isinstance(attachment, AssetMediaNode):
+        src = _vault.resolve_within_root(attachment.asset_path)
+        if not src.is_file():
+            raise HTTPException(status_code=404, detail=f"attachment file not found: {attachment.asset_path!r}")
+        dest.write_bytes(src.read_bytes())
+    else:
+        dest.write_text(attachment.value, encoding="utf-8")
+
+    if ext in (".pdf", ".html"):
+        _vault.ensure_md_format(dest)
+    _indexer.mark_stale()
+    _activity.info("action=promote_attachment note_slug=%s kind=%s", note.slug, attachment.kind.value)
+    return PromoteAttachmentResponse(slug=note.slug)
 
 
 @app.post("/chats/{slug}/turns/{index}/regenerate", response_model=Chat)

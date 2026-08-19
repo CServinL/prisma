@@ -1,0 +1,48 @@
+{
+  "model": "nvidia/nemotron-3-nano-30b-a3b:free",
+  "results": [
+    {
+      "scenario": "single_source_match",
+      "elapsed_s": 7.6,
+      "tool_calls_made": [
+        "SEARCH_VAULT"
+      ],
+      "error": null,
+      "raw_reply": "The MEMIT paper proposes a method for directly editing factual associations stored in the weights of large transformer language models such as GPT, allowing modifications to be made without retraining the entire model[^1]. It generalizes the ROME technique by enabling thousands of edits simultaneously, distributing parameter updates across multiple layers rather than confining them to a single layer[^2].\n\nFOOTNOTES_JSON: [{\"index\": 1, \"relation\": \"citation\", \"sources\": [\"sources/meng-2023-memit.md\"]}, {\"index\": 2, \"relation\": \"citation\", \"sources\": [\"sources/meng-2023-memit.md\"]}]",
+      "has_markers": true,
+      "marker_count": 2,
+      "has_trailer": true,
+      "trailer_valid": true,
+      "trailer_entry_count": 2,
+      "marker_trailer_match": true
+    },
+    {
+      "scenario": "no_results_found",
+      "elapsed_s": 15.1,
+      "tool_calls_made": [
+        "SEARCH_VAULT"
+      ],
+      "error": null,
+      "raw_reply": "Running a full\u2011scale LLM on a device with only a few hundred megabytes of RAM is generally not feasible[^1]. However, several compression techniques can shrink the memory requirements enough to run on hardware with 2\u20134\u202fGB of RAM[^2]. For example, 4\u2011bit quantization and CPU\u2011offload pipelines (such as those provided by bitsandbytes or GPTQ) have been shown to enable inference on smartphones with under 1\u202fGB of RAM, though at reduced speed[^3]. Additionally, models specifically designed for tiny footprints\u2014like DistilBERT, TinyLlama, or MobileBERT\u2014can fit under 100\u202fMB and even run on microcontrollers with only a few megabytes of RAM[^4].\n\nFOOTNOTES_JSON: [{\"index\":1,\"relation\":\"ai-inference\",\"sources\":[]},{\"index\":2,\"relation\":\"ai-inference\",\"sources\":[]},{\"index\":3,\"relation\":\"ai-inference\",\"sources\":[]},{\"index\":4,\"relation\":\"ai-inference\",\"sources\":[]}]",
+      "has_markers": true,
+      "marker_count": 4,
+      "has_trailer": true,
+      "trailer_valid": true,
+      "trailer_entry_count": 4,
+      "marker_trailer_match": true
+    },
+    {
+      "scenario": "multi_source_relational",
+      "elapsed_s": 4.9,
+      "tool_calls_made": [],
+      "error": null,
+      "raw_reply": "ROME edits the model by applying a linear transformation to the weight matrices[^1]. MEMIT modifies the model by adding an activation vector to the residual stream[^2]. Both techniques aim to change model behavior without full fine\u2011tuning, but they differ in their underlying mechanisms and the scope of changes they can reliably produce[^3].\n\nFOOTNOTES_JSON: [{\"index\": 1, \"relation\": \"ai-inference\", \"sources\": []}, {\"index\": 2, \"relation\": \"ai-inference\", \"sources\": []}, {\"index\": 3, \"relation\": \"ai-inference\", \"sources\": []}]",
+      "has_markers": true,
+      "marker_count": 3,
+      "has_trailer": true,
+      "trailer_valid": true,
+      "trailer_entry_count": 3,
+      "marker_trailer_match": true
+    }
+  ]
+}

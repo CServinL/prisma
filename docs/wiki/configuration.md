@@ -60,8 +60,14 @@ host = "localhost:11434"               # WSL: use Windows host IP
 provider = "ollama"                    # ollama | openrouter | anthropic
 model = "qwen2.5:7b-32k"
 pool = "local-ollama"                  # must match a compute_pools entry below
-context_window = 32768                 # this backend's real usable context (verify via /api/ps, not a claimed value)
+context_window = 32768                 # this backend's real usable context (verify via /api/ps, not a claimed value).
+                                        # Also drives the session-history budget shown in the UI's context label
+                                        # (ChatAgent defaults that to half of this). Separate from [llm]'s own
+                                        # context_window below -- only [llm]-consuming callers (KG extraction,
+                                        # AnalysisAgent) read that one. Switching chat.model to a backend with a
+                                        # different real window means updating this value too, not just [llm]'s.
 max_tokens = 2000                      # hard cap on generated tokens per completion
+has_native_reasoning = true            # false advertises the THINK: tool to this model (weak/local models only)
 # base_url = ""                        # override the provider's default; omit to derive from provider
 # api_key_env = ""                     # env var holding the API key (omit for local Ollama)
 

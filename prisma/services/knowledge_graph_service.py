@@ -54,6 +54,7 @@ from prisma.storage.models.kg_models import (
     GraphQueryResult,
     KGStatus,
     RankedNode,
+    TopEntity,
 )
 from prisma.storage.models.search_models import DeepSearchCandidate, GraphSearchResult
 from prisma.storage.models.vault_models import NodeType
@@ -65,6 +66,13 @@ _log = logging.getLogger("prisma.knowledge_graph")
 IndexState = Literal["idle", "indexing", "stale"]
 
 DEFAULT_INDEX_EXTENSIONS: tuple[str, ...] = (".md",)
+
+# Deliberately fixed, not a [kg] config knob -- unlike max_entities/
+# max_relationships (tunable because a cloud-routed extraction model changes
+# their cost/quality tradeoff), nothing about this number scales with
+# provider choice. It's chosen for priming effectiveness (a short list
+# primes the model's own associative attention better than a long one).
+TOP_ENTITIES_CACHE_SIZE = 15
 
 _RESOURCE_HOLDER = "kg"  # must match the worker name supervisor.py restarts — this
 # service now runs in its own supervised "kg" process (see kg_app.py and
@@ -444,6 +452,12 @@ class KnowledgeGraphService:
         # "what is the server working on" without grepping kg.log.
         self._current_activity: str | None = None
 
+        # Cache-only mirror of top_entities()'s ranking — recomputed on the
+        # background index thread at the end of each cycle that actually
+        # changed something, never on a request thread. See
+        # _refresh_top_entities()/top_entities().
+        self._top_entities_cache: list[TopEntity] = []
+
         # Knowledge Graph progress page state (replaces an earlier, since
         # reverted, generic "ollama stats" page — this is scoped to what's
         # actually useful: full-sync progress, current file's chunk
@@ -590,6 +604,7 @@ class KnowledgeGraphService:
                     self._conn.execute("MATCH (f:IndexedFile) DETACH DELETE f")
                     self._indexed_cache.clear()
                     self._indexed_model_cache.clear()
+                    self._top_entities_cache = []
                 except Exception as exc:
                     _log.warning("drop_index failed: %s", exc)
             self._state = "stale"
@@ -1311,6 +1326,8 @@ class KnowledgeGraphService:
             if changed:
                 self._last_indexed = datetime.now()
             self._state = "idle"
+        if changed:
+            self._refresh_top_entities()
         if not changed and existing:
             _log.info("knowledge graph incremental update: no real content change — watcher false-positive")
         self._set_activity(None)
@@ -1378,6 +1395,7 @@ class KnowledgeGraphService:
                 self._current_file = None
                 self._current_file_chunks_total = 0
                 self._current_file_chunks_done = 0
+            self._refresh_top_entities()
             self._set_activity(None)
             _log.info("knowledge graph full index done: %d files indexed, %d changed", len(all_files), changed)
         except Exception as exc:
@@ -1458,6 +1476,39 @@ class KnowledgeGraphService:
                 file_scores[source_file] = file_scores.get(source_file, 0.0) + score
         ranked = sorted(file_scores.items(), key=lambda x: -x[1])[:top_k]
         return [GraphSearchResult(source_file=sf, score=score) for sf, score in ranked]
+
+    def _compute_top_entities(self, limit: int = TOP_ENTITIES_CACHE_SIZE) -> list[TopEntity]:
+        """Live Cypher call -- only ever invoked from the background index
+        thread (via _refresh_top_entities()), never from a request handler.
+        top_entities() below is the cache-only read callers actually use."""
+        if self._conn is None:
+            return []
+        try:
+            result = self._conn.execute(
+                "MATCH (e:Entity)-[r:RelatesTo]-(o:Entity) "
+                "WHERE e.trust_tier <> 'chat' AND o.trust_tier <> 'chat' "
+                "RETURN e.id, e.label, count(r) AS degree "
+                "ORDER BY degree DESC LIMIT $limit",
+                {"limit": limit},
+            )
+        except Exception as exc:
+            _log.warning("top_entities computation failed: %s", exc)
+            return []
+        out: list[TopEntity] = []
+        while result.has_next():
+            eid, label, degree = result.get_next()
+            out.append(TopEntity(id=eid, label=label, degree=degree))
+        return out
+
+    def _refresh_top_entities(self) -> None:
+        computed = self._compute_top_entities()
+        with self._lock:
+            self._top_entities_cache = computed
+
+    def top_entities(self, limit: int = TOP_ENTITIES_CACHE_SIZE) -> list[TopEntity]:
+        """Cache-only read, no Kùzu call -- see _refresh_top_entities()."""
+        with self._lock:
+            return self._top_entities_cache[:limit]
 
     # ── Compatibility wrappers ───────────────────────────────────────────────
     # Same names/shapes as GraphifyIndexer's — app.py's call sites (/search,

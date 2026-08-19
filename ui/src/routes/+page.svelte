@@ -88,7 +88,7 @@
   // on `kind`, matching prisma.storage.models.vault_models.ClaimNode.
   // Rendered as an inline [^N] marker in the turn's content plus a list at
   // the end of the turn — see renderContentSegments() below.
-  type ClaimRelation = "citation" | "attribution" | "relational";
+  type ClaimRelation = "citation" | "paraphrase" | "attribution" | "relational";
 
   // v3 (schema-only until the chat-schema-v3 branch): Toulmin argumentation
   // extension. qualifier/warrant/rebuts exist on both claim kinds but
@@ -145,10 +145,8 @@
 
   type MediaOut = InlineMediaOut | AssetMediaOut;
 
-  // ADR-019: schema support only today -- nothing populates a turn's
-  // `thoughts` yet (gated behind the still-deferred `has_native_reasoning`
-  // model-category flag), but the shape is here so rendering doesn't need
-  // to change again once something does.
+  // ADR-019: populated by the THINK: tool when a chat's model is configured
+  // with `has_native_reasoning = false` (chat_tools.py/chat_agent.py).
   interface ThoughtOut {
     id: string;
     thought: string;
@@ -315,6 +313,7 @@
 
   const CLAIM_RELATION_LABEL: Record<ClaimRelation, string> = {
     citation: "citation",
+    paraphrase: "paraphrase",
     attribution: "attribution",
     relational: "relational",
   };
@@ -322,7 +321,7 @@
   // Shared between the inline [^N] marker and the claim-list entry below --
   // both key off this rather than raw `relation`/`kind` so the CSS classes
   // (claim-ref-*, claim-relation-*) stay a single flat namespace covering
-  // both CitedClaimNode's three relations and InferenceNode.
+  // both CitedClaimNode's four relations and InferenceNode.
   function claimStyleKey(c: ClaimOut): string {
     return c.kind === "inference" ? "inference" : c.relation;
   }
@@ -484,6 +483,14 @@
   let dragOverKey = $state<string | null>(null);
   let hoverExpandTimer: ReturnType<typeof setTimeout> | null = null;
   let activeNode = $state<RenderedNode | null>(null);
+  let slugCopied = $state(false);
+
+  async function copyActiveNodeSlug() {
+    if (!activeNode) return;
+    await navigator.clipboard.writeText(activeNode.slug);
+    slugCopied = true;
+    setTimeout(() => { slugCopied = false; }, 2000);
+  }
   // <iframe src="..."> can't carry an Authorization header, so once
   // server.auth.mode is "password" a direct apiBase URL there would just
   // 401 — loaded as a blob URL via apiFetch instead. See the vault-sync
@@ -852,15 +859,13 @@
   }
 
   // v3: attachments pending for the NEXT message, not yet sent -- cleared
-  // once sendChatMessage() actually posts them. jpg/pdf go through
-  // uploadFileAttachment() (ephemeral, L1/L2 -- see POST /chats/{slug}/
-  // attachments/upload) first; svg/latex/drawio need no upload step, built
-  // directly as an InlineMediaOut.
+  // once sendChatMessage() actually posts them. All five kinds (jpg/pdf/
+  // svg/latex/drawio) go through uploadFileAttachment() (POST /chats/{slug}/
+  // attachments/upload) -- no one hand-types SVG/LaTeX/drawio source, so
+  // there's no client-built path, only a real file picker.
   let pendingAttachments = $state<MediaOut[]>([]);
   let pendingAttachedSlugs = $state<string[]>([]);
   let attachmentUploading = $state(false);
-  let showInlineAttachForm = $state<"svg" | "latex" | "drawio" | null>(null);
-  let inlineAttachValue = $state("");
   let slugAttachInput = $state("");
 
   async function uploadFileAttachment(file: File) {
@@ -876,7 +881,7 @@
         const data = await r.json();
         pendingAttachments = [...pendingAttachments, data.attachment];
       } else {
-        alert("Couldn't attach that file — must be a valid jpg or pdf.");
+        alert("Couldn't attach that file — must be a valid jpg, pdf, svg, tex, or drawio file.");
       }
     } finally {
       attachmentUploading = false;
@@ -888,16 +893,6 @@
     const file = input.files?.[0];
     input.value = "";
     if (file) void uploadFileAttachment(file);
-  }
-
-  function addInlineAttachment() {
-    if (!showInlineAttachForm || !inlineAttachValue.trim()) return;
-    // Client-generated id -- the server assigns its own real id once this
-    // gets promoted or otherwise round-trips; this one only needs to be
-    // locally unique for Svelte's #each keying and TS's InlineMediaOut shape.
-    pendingAttachments = [...pendingAttachments, { id: crypto.randomUUID(), kind: showInlineAttachForm, value: inlineAttachValue, caption: null }];
-    inlineAttachValue = "";
-    showInlineAttachForm = null;
   }
 
   function addSlugAttachment() {
@@ -944,7 +939,7 @@
           ...activeChat.messages,
           {
             role: "assistant", content: { format: "md", value: data.reply, rendered_html: data.html ?? null },
-            timestamp: new Date().toISOString(), claims: data.claims ?? [], thoughts: [],
+            timestamp: new Date().toISOString(), claims: data.claims ?? [], thoughts: data.thoughts ?? [],
             tool_calls: data.tool_calls ?? [], recalls: data.recalls ?? [],
           },
         ];
@@ -2057,6 +2052,9 @@
             }}
           >{activeNode.node_type}</button>
           <span class="node-heading">{activeNode.title}</span>
+          <button class="toolbar-btn" title="Copy this item's vault slug" onclick={copyActiveNodeSlug}>
+            {slugCopied ? "Copied" : "Copy slug"}
+          </button>
           {#if activeNode.node_type === "stream"}
             <span class="stream-dot sdot-{activeNode.stream_status}" title={activeNode.stream_status}></span>
             <span class="stream-stat">{activeNode.total_papers ?? 0} papers</span>
@@ -2372,28 +2370,16 @@
                 {/each}
               </div>
             {/if}
-            {#if showInlineAttachForm}
-              <div class="chat-attach-inline-form">
-                <textarea
-                  class="chat-attach-inline-textarea"
-                  placeholder={showInlineAttachForm === "svg" ? "<svg>…</svg>" : showInlineAttachForm === "latex" ? "\\begin{equation}…\\end{equation}" : "<mxGraphModel>…</mxGraphModel>"}
-                  bind:value={inlineAttachValue}
-                ></textarea>
-                <div class="chat-attach-inline-actions">
-                  <button type="button" class="chat-turn-action" onclick={addInlineAttachment} disabled={!inlineAttachValue.trim()}>Add {showInlineAttachForm}</button>
-                  <button type="button" class="chat-turn-action" onclick={() => { showInlineAttachForm = null; inlineAttachValue = ""; }}>Cancel</button>
-                </div>
-              </div>
-            {/if}
             <form class="chat-input-row" onsubmit={(e) => { e.preventDefault(); sendChatMessage(); }}>
               <div class="chat-attach-toolbar">
-                <label class="chat-attach-btn" title="Attach a jpg or pdf">
+                <label class="chat-attach-btn" title="Attach a jpg, pdf, svg, tex, or drawio file">
                   📎
-                  <input type="file" accept=".jpg,.jpeg,.pdf,image/jpeg,application/pdf" hidden onchange={onAttachmentFileChosen} disabled={attachmentUploading || chatSending} />
+                  <input
+                    type="file"
+                    accept=".jpg,.jpeg,.pdf,.svg,.tex,.drawio,image/jpeg,image/svg+xml,application/pdf"
+                    hidden onchange={onAttachmentFileChosen} disabled={attachmentUploading || chatSending}
+                  />
                 </label>
-                <button type="button" class="chat-attach-btn" title="Attach SVG source" onclick={() => (showInlineAttachForm = showInlineAttachForm === "svg" ? null : "svg")}>SVG</button>
-                <button type="button" class="chat-attach-btn" title="Attach LaTeX source" onclick={() => (showInlineAttachForm = showInlineAttachForm === "latex" ? null : "latex")}>TeX</button>
-                <button type="button" class="chat-attach-btn" title="Attach draw.io XML" onclick={() => (showInlineAttachForm = showInlineAttachForm === "drawio" ? null : "drawio")}>Draw</button>
                 <input
                   class="chat-attach-slug-input"
                   type="text"
@@ -4413,6 +4399,7 @@
   }
   .claim-ref:hover { text-decoration: underline; }
   .claim-ref-citation { color: #9ca3af; }
+  .claim-ref-paraphrase { color: #fbbf24; }
   .claim-ref-attribution { color: #60a5fa; }
   .claim-ref-relational { color: #c084fc; }
   .claim-ref-inference { color: #6b7280; }
@@ -4448,6 +4435,7 @@
     border: 1px solid rgba(139, 163, 192, 0.15);
   }
   .claim-box-citation { border-color: rgba(156, 163, 175, 0.3); }
+  .claim-box-paraphrase { border-color: rgba(251, 191, 36, 0.3); }
   .claim-box-attribution { border-color: rgba(96, 165, 250, 0.3); }
   .claim-box-relational { border-color: rgba(192, 132, 252, 0.3); }
   .claim-box-inference { border-color: rgba(107, 114, 128, 0.35); border-style: dashed; }
@@ -4470,6 +4458,10 @@
   .claim-relation-citation {
     background: rgba(156, 163, 175, 0.15);
     color: #9ca3af;
+  }
+  .claim-relation-paraphrase {
+    background: rgba(251, 191, 36, 0.15);
+    color: #fbbf24;
   }
   .claim-relation-attribution {
     background: rgba(96, 165, 250, 0.15);
@@ -4575,28 +4567,6 @@
     padding: 0 3px;
   }
   .chat-pending-chip-remove:hover { color: #f87171; }
-  .chat-attach-inline-form {
-    padding: 8px 18px;
-    background: #080c16;
-    border-top: 1px solid #1a2d4a;
-  }
-  .chat-attach-inline-textarea {
-    width: 100%;
-    min-height: 70px;
-    background: #0d1420;
-    border: 1px solid #1a2d4a;
-    border-radius: 6px;
-    color: #c8ddf0;
-    padding: 8px;
-    font-size: 12px;
-    font-family: "JetBrains Mono", monospace;
-    resize: vertical;
-  }
-  .chat-attach-inline-actions {
-    display: flex;
-    gap: 8px;
-    margin-top: 6px;
-  }
   .chat-attach-toolbar {
     display: flex;
     align-items: center;

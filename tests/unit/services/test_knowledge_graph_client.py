@@ -207,6 +207,21 @@ def test_ranked_nodes_returns_empty_list_when_unreachable():
         assert client.ranked_nodes("q") == []
 
 
+def test_top_entities_passes_limit_and_returns_results():
+    client = KnowledgeGraphClient()
+    with patch("prisma.services.knowledge_graph_client.requests.get",
+               return_value=_mock_response([{"id": "x", "label": "X", "degree": 3}])) as mock_get:
+        result = client.top_entities(limit=10)
+    assert [r.model_dump() for r in result] == [{"id": "x", "label": "X", "degree": 3}]
+    assert mock_get.call_args.kwargs["params"] == {"limit": 10}
+
+
+def test_top_entities_returns_empty_list_when_unreachable():
+    client = KnowledgeGraphClient()
+    with patch("prisma.services.knowledge_graph_client.requests.get", side_effect=requests.ConnectionError("down")):
+        assert client.top_entities() == []
+
+
 def test_query_passes_params_and_returns_results():
     client = KnowledgeGraphClient()
     with patch("prisma.services.knowledge_graph_client.requests.get",

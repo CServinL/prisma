@@ -37,7 +37,7 @@
       "type": "object"
     }
   },
-  "description": "A claim traceable to specific vault document(s) -- `citation`/\n`attribution`/`relational` share this shape (all have real `sources`, a\nmeaningful `faithfulness_checked`), unlike `InferenceNode` below, which\nstructurally has neither. See docs/ontologia.md Axiom 16.",
+  "description": "A claim traceable to specific vault document(s) -- `citation`/\n`paraphrase`/`attribution`/`relational` share this shape (all have real\n`sources`, a meaningful `faithfulness_checked`), unlike `InferenceNode`\nbelow, which structurally has neither. See docs/ontologia.md Axiom 16.\n`citation` (verbatim quote) and `paraphrase` (close restatement) were\nsplit from a single merged `citation` value in schema v4 -- see\n_migrate_chat_v3_to_v4.",
   "properties": {
     "claim_text": {
       "title": "Claim Text",
@@ -95,6 +95,7 @@
     "relation": {
       "enum": [
         "citation",
+        "paraphrase",
         "attribution",
         "relational"
       ],

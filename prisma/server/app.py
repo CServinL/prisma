@@ -89,7 +89,7 @@ _t("importing vault_models")
 from prisma.schema_gov import ContentFormat, RichContent
 from prisma.storage.models.vault_models import (
     AssetMediaNode, Chat, ChatRole, ClaimNode, InlineMediaNode, MediaKind, MediaNode, NodeType,
-    RecallRef, RenderedNode, ToolCallNode, TurnNode, VaultTreeNode,
+    RecallRef, RenderedNode, ThinkingNode, ToolCallNode, TurnNode, VaultTreeNode,
 )
 _t("vault_models ok")
 
@@ -347,12 +347,14 @@ def _build_chroma(vault: "VaultService") -> ChromaIndexer:
         return ChromaIndexer(vault)
 
 
-def _chat_blocked_reason(chroma: ChromaIndexer, kg: KnowledgeGraphClient) -> str | None:
+def _chat_blocked_reason(llm: ChatLLM, chroma: ChromaIndexer, kg: KnowledgeGraphClient) -> str | None:
     """Why the shared local-ollama pool might be denying chat's model right
     now — model_affinity makes "busy with a different model" look identical
     to "unreachable" from ChatLLM's own point of view, so this checks the
     two other Ollama callers directly to give a real answer instead of a
     generic failure message."""
+    if llm.config_error:
+        return llm.config_error
     try:
         if kg.status().state == "indexing":
             return "the knowledge graph is currently indexing your vault"
@@ -385,18 +387,19 @@ def _build_chat_agent(vault: "VaultService", chroma: ChromaIndexer, kg: Knowledg
     toolbox = ChatToolbox(chroma, kg, vault)
     return ChatAgent(
         llm, toolbox, system_prompt=load_system_prompt(),
-        blocked_reason=lambda: _chat_blocked_reason(chroma, kg),
+        blocked_reason=lambda: _chat_blocked_reason(llm, chroma, kg),
+        vault_overview=lambda: [e.label for e in kg.top_entities()],
     )
 
 
 def _build_chat_agent_for_model(model: str) -> ChatAgent:
     """One-off ChatAgent for a turn regeneration (ADR-019 §6a) against a
     model other than the chat's currently-configured one -- never replaces
-    `_chat_agent` itself. pool/base_url/context_window are inherited from
-    the current chat config unchanged; there's no per-model config roster
-    yet (that's the deferred model-category work, ADR-019 §3a), so a
-    regeneration against a model with a genuinely different real context
-    window will estimate against the wrong ceiling until that roster exists."""
+    `_chat_agent` itself. pool/base_url/context_window/has_native_reasoning
+    are all inherited from the current chat config unchanged; there's no
+    per-model config roster yet, so a regeneration against a model with a
+    genuinely different real context window (or reasoning capability) will
+    estimate/advertise against the wrong one until that roster exists."""
     from prisma.utils.config import ConfigLoader
     cfg = ConfigLoader()
     chat_config = cfg.get_chat_config().model_copy(update={"model": model})
@@ -404,7 +407,8 @@ def _build_chat_agent_for_model(model: str) -> ChatAgent:
     toolbox = ChatToolbox(_chroma, _indexer, _vault)
     return ChatAgent(
         llm, toolbox, system_prompt=load_system_prompt(),
-        blocked_reason=lambda: _chat_blocked_reason(_chroma, _indexer),
+        blocked_reason=lambda: _chat_blocked_reason(llm, _chroma, _indexer),
+        vault_overview=lambda: [e.label for e in _indexer.top_entities()],
     )
 
 
@@ -562,11 +566,11 @@ class ChatRequest(BaseModel):
     message: str
     chat_slug: str  # create via POST /chats first — /chat only ever sends a message
     # v3 (schema-only until now): media/vault-node references the human turn
-    # brought in as input. jpg attachments must already be uploaded via
-    # POST /chats/{slug}/attachments/upload before being included here --
-    # this field only ever carries the resulting AssetMediaNode reference,
-    # never raw file bytes. svg/latex/drawio need no upload step (inline
-    # text), built client-side and included directly.
+    # brought in as input. jpg/pdf/svg/latex/drawio files must already be
+    # uploaded via POST /chats/{slug}/attachments/upload before being
+    # included here -- this field only ever carries the resulting MediaNode
+    # reference, never raw file bytes. svg/latex/drawio can also be built
+    # client-side (pasted source) and included directly with no upload step.
     attachments: list[MediaNode] = Field(default_factory=list)
     attached_slugs: list[str] = Field(default_factory=list)
 
@@ -577,6 +581,7 @@ class ChatResponse(BaseModel):
     tool_calls: list[ToolCallNode]
     claims: list[ClaimNode] = []
     recalls: list[RecallRef] = []
+    thoughts: list[ThinkingNode] = []
     html: str = ""
 
 
@@ -1220,40 +1225,64 @@ def chat(req: ChatRequest):
     _activity.info("action=chat slug=%s tool_calls=%d", chat_node.slug, len(assistant_msg.tool_calls))
     return ChatResponse(
         chat_slug=chat_node.slug, reply=assistant_msg.content.value, tool_calls=assistant_msg.tool_calls,
-        claims=assistant_msg.claims, recalls=assistant_msg.recalls, html=_render_chat_html(assistant_msg.content.value),
+        claims=assistant_msg.claims, recalls=assistant_msg.recalls, thoughts=assistant_msg.thoughts,
+        html=_render_chat_html(assistant_msg.content.value),
     )
 
 
 class UploadAttachmentResponse(BaseModel):
-    attachment: AssetMediaNode
+    attachment: MediaNode
 
 
-def _sniff_asset_kind(data: bytes) -> MediaKind | None:
+def _sniff_asset_kind(data: bytes, filename: str | None = None) -> MediaKind | None:
     if data[:3] == b"\xff\xd8\xff":
         return MediaKind.jpg
     if data[:4] == b"%PDF":
         return MediaKind.pdf
+    # svg/drawio/latex are plain text, not binary -- no fixed magic bytes to
+    # check, so these are judged from real XML/text content instead of
+    # trusting the extension blindly (same posture as jpg/pdf above).
+    # latex has no reliable content marker of its own (a bare formula
+    # snippet has no \documentclass), so it falls back to the filename.
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    head = text.lstrip()[:2000].lower()
+    if "<svg" in head:
+        return MediaKind.svg
+    if "<mxfile" in head or "<mxgraphmodel" in head:
+        return MediaKind.drawio
+    if filename and filename.lower().endswith(".tex"):
+        return MediaKind.latex
     return None
 
 
 @app.post("/chats/{slug}/attachments/upload", response_model=UploadAttachmentResponse, status_code=201)
 async def upload_chat_attachment(slug: str, file: UploadFile = File(...), caption: Optional[str] = None):
-    """jpg/pdf upload for TurnNode.attachments (v3, docs/concepts/chat-
-    session-graph.md's Attachments section) -- svg/latex/drawio need no
-    upload step (small inline text, built client-side and sent directly in
-    POST /chat's `attachments`). Written under the chat's own
-    <slug>-attachments/ dir as an *ephemeral* (L1/L2) attachment, served
-    back via the existing GET /vault/assets/{path} route (jpg/pdf already
-    in _ALLOWED_ASSET_EXTS). This does NOT create a vault Note -- that's a
-    separate, deliberate action, see POST /chats/{slug}/attachments/promote."""
+    """File upload for TurnNode.attachments (v3, docs/concepts/chat-session-
+    graph.md's Attachments section). jpg/pdf are written under the chat's
+    own <slug>-attachments/ dir as an *ephemeral* (L1/L2) AssetMediaNode,
+    served back via the existing GET /vault/assets/{path} route (already in
+    _ALLOWED_ASSET_EXTS). svg/latex/drawio are small text formats -- no
+    ephemeral file, their decoded content is returned directly as an
+    InlineMediaNode, same shape the compose box already builds client-side
+    when pasted rather than uploaded. This does NOT create a vault Note --
+    that's a separate, deliberate action, see POST /chats/{slug}/attachments/promote."""
     try:
         chat_node = _vault.get_chat(slug)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail=f"chat not found: {slug!r}")
     data = await file.read()
-    kind = _sniff_asset_kind(data)
+    kind = _sniff_asset_kind(data, file.filename)
     if kind is None:
-        raise HTTPException(status_code=400, detail="unsupported file — must be a valid jpg or pdf")
+        raise HTTPException(
+            status_code=400, detail="unsupported file — must be a valid jpg, pdf, svg, tex, or drawio file",
+        )
+    if kind in (MediaKind.svg, MediaKind.latex, MediaKind.drawio):
+        return UploadAttachmentResponse(
+            attachment=InlineMediaNode(kind=kind, value=data.decode("utf-8"), caption=caption),
+        )
     attachments_dir = _vault.default_dirs[NodeType.chat] / f"{chat_node.slug}-attachments"
     attachments_dir.mkdir(parents=True, exist_ok=True)
     dest = attachments_dir / f"{uuid.uuid4().hex}.{kind.value}"

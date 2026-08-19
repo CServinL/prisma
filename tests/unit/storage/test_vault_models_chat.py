@@ -290,3 +290,29 @@ def test_v2_chat_migrates_to_v3_with_empty_defaults():
     assert claim.qualifier is None
     assert claim.warrant is None
     assert claim.rebuts is None
+
+
+# ── v3 -> v4 migration (relation's citation/paraphrase split) ───────────────
+
+def _v3_chat_raw(**overrides) -> dict:
+    defaults = dict(slug="x", title="X", path="/tmp/x.sess", schema_version=3)
+    defaults.update(overrides)
+    return defaults
+
+
+def test_v3_chat_with_old_citation_relation_migrates_unchanged():
+    # A pre-split "citation" is genuinely ambiguous (quote vs. paraphrase) --
+    # the migration must not reinterpret it, just carry it forward as-is.
+    raw = _v3_chat_raw(messages=[{
+        "role": "assistant", "content": {"format": "md", "value": "answer[^1]"},
+        "timestamp": "2026-08-01T00:00:00",
+        "claims": [{"kind": "claim", "index": 1, "claim_text": "answer", "sources": ["src-a"], "relation": "citation"}],
+    }])
+    c = Chat.model_validate(raw)
+    assert c.schema_version == CHAT_SCHEMA_VERSION
+    assert c.messages[0].claims[0].relation == "citation"
+
+
+def test_cited_claim_node_accepts_paraphrase_relation():
+    claim = CitedClaimNode(index=1, claim_text="restated in different words", sources=["src-a"], relation="paraphrase")
+    assert claim.relation == "paraphrase"

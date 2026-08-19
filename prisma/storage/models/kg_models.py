@@ -107,3 +107,12 @@ class GraphQueryResult(BaseModel):
 
 class OllamaReadyResponse(BaseModel):
     reachable: bool
+
+
+class TopEntity(BaseModel):
+    """One entity in the vault-overview priming block -- top-N by undirected
+    RelatesTo degree (chat-tier excluded). See
+    KnowledgeGraphService.top_entities()."""
+    id: str
+    label: str
+    degree: int

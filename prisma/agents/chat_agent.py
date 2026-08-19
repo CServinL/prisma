@@ -22,21 +22,25 @@ from prisma.schema_gov import ContentFormat, RichContent
 from prisma.services.chat_llm import ChatLLM
 from prisma.services.chat_tools import FOOTNOTES_LINE_RE, TOOL_CALL_RE, TOOLS, ChatToolbox
 from prisma.storage.models.vault_models import (
-    ChatRole, CitedClaimNode, ClaimNode, InferenceNode, Note, RecallRef, ToolCallNode, TurnNode,
+    ChatRole, CitedClaimNode, ClaimNode, InferenceNode, Note, RecallRef, ThinkingNode, ToolCallNode,
+    TurnNode,
 )
 
 _log = logging.getLogger("prisma.chat_agent")
 
 MAX_TOOL_ITERATIONS = 4
 
-# qwen2.5:7b-32k runs at num_ctx=32768 (Qwen2.5-7B's own architectural max —
-# see ADR-014). Reserve generous headroom for the system prompt + tool section
-# (~500 tokens), the current user message, and up to MAX_TOOL_ITERATIONS
-# rounds of tool-result injection (a single search_vault call can return a
-# few thousand tokens of wrapped excerpts) — 16000 tokens for prior history
-# leaves comfortably more than half the window for all of that, verified
-# against the model's real ctx rather than guessed.
-DEFAULT_MAX_HISTORY_TOKENS = 16000
+# Reserve generous headroom for the system prompt + tool section, the
+# current user message, and up to MAX_TOOL_ITERATIONS rounds of tool-result
+# injection (a single search_vault call can return a few thousand tokens of
+# wrapped excerpts) -- half of context_window leaves comfortably more than
+# half the window for all of that. A per-backend fraction rather than one
+# flat constant: the old DEFAULT_MAX_HISTORY_TOKENS=16000 was calibrated as
+# roughly half of qwen2.5:7b-32k's 32768 window specifically, and stayed
+# 16000 even after config.toml's chat.context_window was later set to a
+# cloud model's much larger real window -- nothing recomputed it, so the
+# chat kept truncating history as if it were still on the small local model.
+_HISTORY_FRACTION_OF_CONTEXT_WINDOW = 0.5
 
 # ADR-015's compressed-vs-verbatim threshold. A backend's context_window
 # must be at least this large before verbatim mode is even considered —
@@ -141,10 +145,18 @@ _FAITHFULNESS_SOURCE_CHARS = 3000
 
 _FAITHFULNESS_SYSTEM_PROMPT = (
     "You are a fact-checker. You will be given a CLAIM and one or more SOURCE "
-    "excerpts. Reply with exactly one word: YES if the claim is accurately "
-    "supported by the source(s), NO if it is unsupported, contradicted, or "
-    "not addressed by the source(s) at all."
+    "excerpts. Reply with exactly two tokens separated by a space:\n"
+    "1. YES if the claim's content is accurately supported by the source(s), "
+    "NO if it is unsupported, contradicted, or not addressed at all.\n"
+    "2. Which best fits how the claim relates to the source: citation (an "
+    "exact/verbatim quote), paraphrase (a close restatement, same scope as "
+    "the source), or attribution (a broader synthesis/interpretation that "
+    "goes beyond a close restatement -- use this for hedged language like "
+    "\"could relate to\"/\"may suggest\", not a direct restatement).\n"
+    'Example reply: "YES paraphrase"'
 )
+
+_RELATION_CORRECTIONS = {"citation", "paraphrase", "attribution"}
 
 
 def _build_faithfulness_prompt(claim_text: str, source_texts: list[str]) -> tuple[str, str]:
@@ -152,15 +164,26 @@ def _build_faithfulness_prompt(claim_text: str, source_texts: list[str]) -> tupl
     return _FAITHFULNESS_SYSTEM_PROMPT, f"CLAIM:\n{claim_text}\n\nSOURCE(S):\n{joined}"
 
 
-def _parse_faithfulness_verdict(reply: str | None) -> bool | None:
+def _parse_faithfulness_reply(reply: str | None) -> tuple[bool | None, str | None]:
+    """Token 1: YES/NO verdict, same as before. Token 2 (new): a relation
+    correction, only applied by _verify_claim to single-source claims (a
+    2+-source claim is already structurally forced to "relational" before
+    this ever runs). Absent/unrecognized token 2 means no correction --
+    this keeps every pre-existing single-token "YES"/"NO" reply parsing
+    exactly as it did before, with no correction applied."""
     if reply is None:
-        return None
-    verdict = reply.strip().upper()
-    if verdict.startswith("YES"):
-        return True
-    if verdict.startswith("NO"):
-        return False
-    return None  # unparseable -- don't guess, leave faithfulness_checked at None
+        return None, None
+    tokens = reply.strip().split()
+    if not tokens:
+        return None, None
+    first = tokens[0].upper()
+    verdict = True if first.startswith("YES") else False if first.startswith("NO") else None
+    relation = None
+    if len(tokens) > 1:
+        candidate = tokens[1].strip(".,\"'").lower()
+        if candidate in _RELATION_CORRECTIONS:
+            relation = candidate
+    return verdict, relation
 
 
 class ChatAgent:
@@ -169,12 +192,18 @@ class ChatAgent:
         llm: ChatLLM,
         toolbox: ChatToolbox,
         system_prompt: str,
-        max_history_tokens: int = DEFAULT_MAX_HISTORY_TOKENS,
+        max_history_tokens: int | None = None,
         blocked_reason: Callable[[], str | None] | None = None,
+        vault_overview: Callable[[], list[str]] | None = None,
     ) -> None:
         self._llm = llm
         self._toolbox = toolbox
-        self._orchestrator = SessionOrchestrator(system_prompt, max_history_tokens)
+        if max_history_tokens is None:
+            max_history_tokens = int(llm.context_window * _HISTORY_FRACTION_OF_CONTEXT_WINDOW)
+        self._orchestrator = SessionOrchestrator(
+            system_prompt, max_history_tokens, has_native_reasoning=llm.has_native_reasoning,
+            vault_overview=vault_overview,
+        )
         # Called only when the LLM call fails, to say *why* rather than a
         # generic "couldn't reach it" — most commonly the shared GPU pool is
         # busy with a different model (kg extraction, chroma embedding),
@@ -239,15 +268,28 @@ class ChatAgent:
         what the cited source(s) say? Only meaningful for CitedClaimNode --
         InferenceNode structurally has no sources to check against, passed
         through unchanged. A missing claim_text or unresolvable source slug
-        is a "couldn't check," not a "checked and failed.\""""
+        is a "couldn't check," not a "checked and failed."
+
+        Also corrects `relation` -- self-reported by the model with no
+        verification otherwise, and confirmed live to default to "citation"
+        regardless of whether the claim is actually a close paraphrase or a
+        broader synthesis. A 2+-source claim is definitionally "relational,"
+        forced here without needing the LLM's judgment; single-source
+        claims get the LLM's correction from the same fact-checker call
+        (no second LLM call)."""
         if not isinstance(claim, CitedClaimNode) or not claim.sources or not claim.claim_text:
             return claim
+        if len(claim.sources) >= 2:
+            claim = claim.model_copy(update={"relation": "relational"})
         source_texts = [t for t in (self._toolbox.get_node_text(s) for s in claim.sources) if t]
         if not source_texts:
             return claim
         system_prompt, content = _build_faithfulness_prompt(claim.claim_text, source_texts)
-        verdict = _parse_faithfulness_verdict(self.complete_once(system_prompt, content))
-        return claim.model_copy(update={"faithfulness_checked": verdict})
+        verdict, corrected_relation = _parse_faithfulness_reply(self.complete_once(system_prompt, content))
+        updates = {"faithfulness_checked": verdict}
+        if corrected_relation and len(claim.sources) == 1:
+            updates["relation"] = corrected_relation
+        return claim.model_copy(update=updates)
 
     def _sources_resolve(self, claim: ClaimNode) -> bool:
         """ADR-020: hard-validates CitedClaimNode.sources against real
@@ -283,14 +325,14 @@ class ChatAgent:
 
         tool_calls: list[ToolCallNode] = []
         recalls: list[RecallRef] = []
+        thoughts: list[ThinkingNode] = []
         for _ in range(MAX_TOOL_ITERATIONS):
             # Checked before every completion call, not just the first --
             # bounded_history() caps prior history against max_history_tokens
-            # (a soft session budget, deliberately larger than any one
-            # backend's real ceiling, see DEFAULT_MAX_HISTORY_TOKENS/ADR-015's
-            # "Resolved" section), and the Excerpt block is NEVER subject to
-            # that trim at all -- neither guards the backend's actual
-            # context_window. A tool result injected mid-loop can also push
+            # (a soft session budget, roughly half of context_window, see
+            # ADR-015's "Resolved" section), and the Excerpt block is NEVER
+            # subject to that trim at all -- neither guards the backend's
+            # actual context_window. A tool result injected mid-loop can also push
             # an initially-fitting assembly over the edge. Failing fast here,
             # before ever calling the backend, beats a confusing generic
             # "couldn't reach the model" once it 400s.
@@ -305,7 +347,7 @@ class ChatAgent:
                         "up context from Excerpt buildup, or switch this chat to a model "
                         "with a bigger context window."
                     )),
-                    tool_calls=tool_calls, recalls=recalls, model=self.model,
+                    tool_calls=tool_calls, recalls=recalls, thoughts=thoughts, model=self.model,
                 )
             reply = self._llm.complete(messages)
             if reply is None:
@@ -317,7 +359,7 @@ class ChatAgent:
                         format=ContentFormat.markdown,
                         value=f"Sorry, I couldn't reach the language model just now{detail}. Please try again shortly.",
                     ),
-                    tool_calls=tool_calls, recalls=recalls, model=self.model,
+                    tool_calls=tool_calls, recalls=recalls, thoughts=thoughts, model=self.model,
                 )
             match = TOOL_CALL_RE.search(reply)
             if not match:
@@ -333,7 +375,7 @@ class ChatAgent:
                 claims = [self._verify_claim(c) for c in resolved_claims]
                 return TurnNode(
                     role=ChatRole.assistant, content=RichContent(format=ContentFormat.markdown, value=content),
-                    tool_calls=tool_calls, claims=claims, recalls=recalls, model=self.model,
+                    tool_calls=tool_calls, claims=claims, recalls=recalls, thoughts=thoughts, model=self.model,
                 )
 
             marker, query = match.group(1), match.group(2).strip()
@@ -342,23 +384,30 @@ class ChatAgent:
                 marker, query, session_graph=session_graph, remaining_budget=remaining_budget,
                 chat_slug=chat_slug,
             )
-            tool_calls.append(ToolCallNode(
-                tool=_TOOL_NAME_BY_MARKER[marker], args={"query": query},
-                result=result.text or None, status="ok",
-            ))
-            if marker == "RECALL":
-                # A separate record from tool_calls above (which only says
-                # "RECALL ran") -- this is *which* specific earlier nodes it
-                # actually surfaced, so a future turn's assembly can see what
-                # was already pulled back in without re-searching. chat_slug
-                # carries a cross-chat hit's source chat through (None for a
-                # same-chat hit) -- dropping it here would silently discard
-                # `_recall()`'s cross-chat tagging before it ever reaches the
-                # persisted TurnNode.recalls.
-                recalls.extend(
-                    RecallRef(node_id=item["node_id"], node_kind=item["kind"], chat_slug=item.get("chat_slug"))
-                    for item in result.raw
-                )
+            if marker == "THINK":
+                # Diverted entirely into thoughts, not also tool_calls -- the
+                # UI renders those as two separate groups ("Tool Calls" vs.
+                # "Reasoning"), and a THINK step has nothing to say in the
+                # first that isn't already the whole content of the second.
+                thoughts.append(ThinkingNode(thought=query, thought_number=len(thoughts) + 1))
+            else:
+                tool_calls.append(ToolCallNode(
+                    tool=_TOOL_NAME_BY_MARKER[marker], args={"query": query},
+                    result=result.text or None, status="ok",
+                ))
+                if marker == "RECALL":
+                    # A separate record from tool_calls above (which only says
+                    # "RECALL ran") -- this is *which* specific earlier nodes it
+                    # actually surfaced, so a future turn's assembly can see what
+                    # was already pulled back in without re-searching. chat_slug
+                    # carries a cross-chat hit's source chat through (None for a
+                    # same-chat hit) -- dropping it here would silently discard
+                    # `_recall()`'s cross-chat tagging before it ever reaches the
+                    # persisted TurnNode.recalls.
+                    recalls.extend(
+                        RecallRef(node_id=item["node_id"], node_kind=item["kind"], chat_slug=item.get("chat_slug"))
+                        for item in result.raw
+                    )
             messages.append({"role": "assistant", "content": reply})
             messages.append({
                 "role": "user",
@@ -372,7 +421,7 @@ class ChatAgent:
                 format=ContentFormat.markdown,
                 value="I wasn't able to reach a final answer after checking several sources — could you rephrase?",
             ),
-            tool_calls=tool_calls, recalls=recalls, model=self.model,
+            tool_calls=tool_calls, recalls=recalls, thoughts=thoughts, model=self.model,
         )
 
     def context_usage(self, history: list[TurnNode], excerpt_notes: list[Note] | None = None) -> tuple[int, int]:

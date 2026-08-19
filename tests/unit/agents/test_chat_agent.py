@@ -20,6 +20,7 @@ def _agent(llm=None, toolbox=None, max_history_tokens=16000):
         llm = MagicMock()
         llm.model = "test-model"
         llm.context_window = 1_000_000
+        llm.has_native_reasoning = True
     if toolbox is None:
         # Unconfigured MagicMock.get_node_text() would return a truthy
         # MagicMock, not real text or None -- _verify_claim would then
@@ -111,7 +112,7 @@ def test_respond_passes_a_session_graph_reflecting_history():
 def test_respond_passes_remaining_budget_reflecting_context_window():
     llm = MagicMock()
     llm.model = "test-model"
-    llm.context_window = 1000
+    llm.context_window = 4000  # generous headroom above the real system+tool+footnote prompt size
     llm.complete.side_effect = ["SEARCH_VAULT: x", "final answer"]
     toolbox = MagicMock()
     toolbox.call.return_value = ToolResult(text="hit", raw=[])
@@ -120,7 +121,7 @@ def test_respond_passes_remaining_budget_reflecting_context_window():
     agent.respond(history=[], user_text="short question")
 
     _, call_kwargs = toolbox.call.call_args
-    assert 0 < call_kwargs["remaining_budget"] < 1000
+    assert 0 < call_kwargs["remaining_budget"] < 4000
 
 
 def test_respond_collects_recall_hits_into_recalls():
@@ -204,6 +205,58 @@ def test_respond_non_recall_tool_calls_leave_recalls_empty():
     assert reply.tool_calls[0].tool == "search_vault"
 
 
+def test_respond_records_a_think_step_without_a_tool_calls_entry():
+    llm = MagicMock()
+    llm.model = "test-model"
+    llm.context_window = 1_000_000
+    llm.has_native_reasoning = False
+    llm.complete.side_effect = ["THINK: checking whether the source supports this", "final answer"]
+    toolbox = MagicMock()
+    toolbox.call.return_value = ToolResult(text="(thought recorded)", raw=[])
+    agent = _agent(llm=llm, toolbox=toolbox)
+
+    reply = agent.respond(history=[], user_text="question")
+
+    assert len(reply.thoughts) == 1
+    assert reply.thoughts[0].thought == "checking whether the source supports this"
+    assert reply.thoughts[0].thought_number == 1
+    # Diverted entirely into thoughts -- no duplicate entry under tool_calls.
+    assert reply.tool_calls == []
+
+
+def test_respond_increments_thought_number_across_multiple_think_calls():
+    llm = MagicMock()
+    llm.model = "test-model"
+    llm.context_window = 1_000_000
+    llm.has_native_reasoning = False
+    llm.complete.side_effect = ["THINK: step one", "THINK: step two", "final answer"]
+    toolbox = MagicMock()
+    toolbox.call.return_value = ToolResult(text="(thought recorded)", raw=[])
+    agent = _agent(llm=llm, toolbox=toolbox)
+
+    reply = agent.respond(history=[], user_text="question")
+
+    assert [t.thought_number for t in reply.thoughts] == [1, 2]
+    assert [t.thought for t in reply.thoughts] == ["step one", "step two"]
+
+
+def test_respond_preserves_thoughts_when_max_tool_iterations_exhausted():
+    llm = MagicMock()
+    llm.model = "test-model"
+    llm.context_window = 1_000_000
+    llm.has_native_reasoning = False
+    llm.complete.return_value = "THINK: still working on it"  # never stops thinking
+    toolbox = MagicMock()
+    toolbox.call.return_value = ToolResult(text="(thought recorded)", raw=[])
+    agent = _agent(llm=llm, toolbox=toolbox)
+
+    reply = agent.respond(history=[], user_text="loop forever")
+
+    assert len(reply.thoughts) == MAX_TOOL_ITERATIONS
+    assert reply.tool_calls == []
+    assert "wasn't able to reach a final answer" in reply.content.value
+
+
 def test_respond_returns_fallback_when_llm_unreachable():
     llm = MagicMock()
     llm.model = "test-model"
@@ -246,7 +299,50 @@ def test_respond_fallback_has_no_extra_detail_when_reason_is_none():
     reply = agent.respond(history=[], user_text="hello")
 
     assert reply.content.value == "Sorry, I couldn't reach the language model just now. Please try again shortly."
-    assert reply.tool_calls == []
+
+
+def test_respond_sends_vault_overview_in_the_system_prompt_when_provided():
+    llm = MagicMock()
+    llm.model = "test-model"
+    llm.context_window = 1_000_000
+    llm.has_native_reasoning = True
+    llm.complete.return_value = "final answer"
+    agent = ChatAgent(
+        llm=llm, toolbox=MagicMock(), system_prompt="You are a test assistant.",
+        vault_overview=lambda: ["A", "B", "C", "D", "E"],
+    )
+
+    agent.respond(history=[], user_text="hello")
+
+    sent_messages = llm.complete.call_args[0][0]
+    assert "knowledge graph currently centers on" in sent_messages[0]["content"]
+
+
+def test_max_history_tokens_defaults_to_half_the_context_window_when_omitted():
+    llm = MagicMock()
+    llm.model = "test-model"
+    llm.context_window = 128_000
+    llm.has_native_reasoning = True
+    agent = ChatAgent(llm=llm, toolbox=MagicMock(), system_prompt="You are a test assistant.")
+
+    used, maximum = agent.context_usage(history=[])
+
+    assert maximum == 64_000  # half of 128_000 -- not the old flat 16_000
+
+
+def test_max_history_tokens_explicit_value_is_not_overridden():
+    llm = MagicMock()
+    llm.model = "test-model"
+    llm.context_window = 128_000
+    llm.has_native_reasoning = True
+    agent = ChatAgent(
+        llm=llm, toolbox=MagicMock(), system_prompt="You are a test assistant.",
+        max_history_tokens=5_000,
+    )
+
+    _, maximum = agent.context_usage(history=[])
+
+    assert maximum == 5_000
 
 
 def test_respond_stops_after_max_tool_iterations():
@@ -283,10 +379,11 @@ def test_respond_returns_overflow_message_without_calling_llm_when_assembly_exce
 def test_respond_checks_context_window_again_after_a_tool_result_grows_the_assembly():
     llm = MagicMock()
     llm.model = "test-model"
-    # Fits the initial system+history+user assembly (~680 estimated tokens
+    # Fits the initial system+history+user assembly (~1100 estimated tokens
     # for this agent's system prompt), but not once a big tool result's
-    # text gets appended to messages for the second completion call.
-    llm.context_window = 1000
+    # text (~1000 more estimated tokens) gets appended to messages for the
+    # second completion call.
+    llm.context_window = 1500
     llm.complete.return_value = "SEARCH_VAULT: something"
     toolbox = MagicMock()
     toolbox.call.return_value = ToolResult(text="y" * 4000, raw=[])
@@ -545,6 +642,19 @@ def test_extract_claims_parses_a_well_formed_report():
     assert claims[0].sources == ["attention-paper"]
 
 
+def test_extract_claims_parses_a_paraphrase_relation():
+    reply = (
+        'Attention lets models weigh different input tokens[^1].\n'
+        'FOOTNOTES_JSON: [{"index": 1, "relation": "paraphrase", "sources": ["attention-paper"]}]'
+    )
+
+    _, claims = _extract_claims(reply)
+
+    assert len(claims) == 1
+    assert isinstance(claims[0], CitedClaimNode)
+    assert claims[0].relation == "paraphrase"
+
+
 def test_extract_claims_strips_the_line_even_when_list_is_empty():
     reply = "Just chatting, no claims here.\nFOOTNOTES_JSON: []"
 
@@ -700,6 +810,62 @@ def test_respond_faithfulness_checked_true_when_verifier_says_yes():
     assert verify_messages[0]["role"] == "system"
     assert "fact-checker" in verify_messages[0]["content"].lower()
     assert "Kùzu is embedded, no server process" in verify_messages[1]["content"]
+
+
+def test_respond_corrects_relation_when_verifier_suggests_a_different_one():
+    llm = MagicMock()
+    llm.model = "test-model"
+    llm.context_window = 1_000_000
+    llm.complete.side_effect = [
+        'This could relate to how Kùzu handles concurrency[^1].\n'
+        'FOOTNOTES_JSON: [{"index": 1, "relation": "citation", "sources": ["kg-decision"]}]',
+        "YES attribution",
+    ]
+    toolbox = MagicMock()
+    toolbox.get_node_text.return_value = "Kùzu runs embedded in-process, with no separate server."
+    agent = _agent(llm=llm, toolbox=toolbox)
+
+    reply = agent.respond(history=[], user_text="why Kùzu?")
+
+    assert reply.claims[0].relation == "attribution"
+    assert reply.claims[0].faithfulness_checked is True
+
+
+def test_respond_leaves_relation_unchanged_when_verifier_reply_has_no_relation_token():
+    llm = MagicMock()
+    llm.model = "test-model"
+    llm.context_window = 1_000_000
+    llm.complete.side_effect = [
+        'Kùzu is embedded, no server process[^1].\n'
+        'FOOTNOTES_JSON: [{"index": 1, "relation": "attribution", "sources": ["kg-decision"]}]',
+        "YES",  # old-style single-token reply -- must not crash or guess a relation
+    ]
+    toolbox = MagicMock()
+    toolbox.get_node_text.return_value = "Kùzu runs embedded in-process, with no separate server."
+    agent = _agent(llm=llm, toolbox=toolbox)
+
+    reply = agent.respond(history=[], user_text="why Kùzu?")
+
+    assert reply.claims[0].relation == "attribution"
+    assert reply.claims[0].faithfulness_checked is True
+
+
+def test_respond_forces_relational_for_multi_source_claims_regardless_of_self_report():
+    llm = MagicMock()
+    llm.model = "test-model"
+    llm.context_window = 1_000_000
+    llm.complete.side_effect = [
+        'ROME and MEMIT both edit model weights[^1].\n'
+        'FOOTNOTES_JSON: [{"index": 1, "relation": "citation", "sources": ["rome-paper", "memit-paper"]}]',
+        "YES citation",  # even if the verifier disagrees, source count wins -- structural, not judged
+    ]
+    toolbox = MagicMock()
+    toolbox.get_node_text.return_value = "Some source text."
+    agent = _agent(llm=llm, toolbox=toolbox)
+
+    reply = agent.respond(history=[], user_text="how do ROME and MEMIT compare?")
+
+    assert reply.claims[0].relation == "relational"
 
 
 def test_respond_drops_claim_citing_an_unresolvable_slug():

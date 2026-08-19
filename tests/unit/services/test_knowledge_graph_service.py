@@ -19,6 +19,7 @@ from prisma.services.knowledge_graph_service import (
     _strip_feature_catalog_paragraphs,
     _strip_reference_list_paragraphs,
 )
+from prisma.storage.models.kg_models import TopEntity
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -595,6 +596,83 @@ def test_search_returns_empty_for_no_matching_terms(kg, vault):
         kg._extract_file(f, "note")
 
     assert kg.search("completely unrelated query xyz") == []
+
+
+# ── top_entities (vault-overview priming block) ────────────────────────────────
+
+def test_compute_top_entities_ranks_by_undirected_degree(kg, vault):
+    f = vault.root / "notes" / "a.md"
+    f.write_text("---\ntype: note\n---\ncontent", encoding="utf-8")
+    result = _extraction(
+        nodes=[{"id": "hub", "label": "Hub"}, {"id": "leaf1", "label": "Leaf 1"}, {"id": "leaf2", "label": "Leaf 2"}],
+        edges=[{"source": "hub", "target": "leaf1"}, {"source": "hub", "target": "leaf2"}],
+    )
+
+    with _patch_create(kg, return_value=result), \
+         patch("prisma.services.resource_lock.acquire", return_value=(True, "local-ollama", "req-1")):
+        kg._extract_file(f, "note")
+
+    top = kg._compute_top_entities()
+    assert top[0].id == "hub"
+    assert top[0].degree == 2
+
+
+def test_compute_top_entities_excludes_chat_trust_tier_on_either_endpoint(kg, vault):
+    note_file = vault.root / "notes" / "a.md"
+    note_file.write_text("---\ntype: note\n---\ncontent", encoding="utf-8")
+    note_result = _extraction(
+        nodes=[{"id": "real_entity", "label": "Real Entity"}, {"id": "other_real", "label": "Other Real"}],
+        edges=[{"source": "real_entity", "target": "other_real"}],
+    )
+    chat_file = vault.root / "chats" / "c.md"
+    chat_file.write_text("---\ntype: chat\n---\ncontent", encoding="utf-8")
+    chat_result = _extraction(
+        nodes=[{"id": "chat_entity", "label": "Chat Entity"}],
+        edges=[{"source": "real_entity", "target": "chat_entity"}],
+    )
+
+    with _patch_create(kg, side_effect=[note_result, chat_result]), \
+         patch("prisma.services.resource_lock.acquire", return_value=(True, "local-ollama", "req-1")):
+        kg._extract_file(note_file, "note")
+        kg._extract_file(chat_file, "chat")
+
+    top = kg._compute_top_entities()
+    real = next(e for e in top if e.id == "real_entity")
+    assert real.degree == 1  # only the other_real edge counts, not the chat_entity one
+    assert all(e.id != "chat_entity" for e in top)
+
+
+def test_top_entities_returns_cached_slice_without_querying_kuzu(kg):
+    kg._top_entities_cache = [TopEntity(id="x", label="X", degree=5)]
+    with patch.object(kg._conn, "execute") as mock_execute:
+        result = kg.top_entities()
+    assert result == [TopEntity(id="x", label="X", degree=5)]
+    mock_execute.assert_not_called()
+
+
+def test_full_index_refreshes_top_entities_cache(kg, vault):
+    f = vault.root / "notes" / "a.md"
+    f.write_text("---\ntype: note\n---\ncontent", encoding="utf-8")
+    result = _extraction(
+        nodes=[{"id": "a", "label": "A"}, {"id": "b", "label": "B"}],
+        edges=[{"source": "a", "target": "b"}],
+    )
+
+    with _patch_create(kg, return_value=result), \
+         patch("prisma.services.resource_lock.acquire", return_value=(True, "local-ollama", "req-1")):
+        kg._full_index()
+
+    assert kg.top_entities() != []
+
+
+def test_drop_index_clears_top_entities_cache(kg, vault):
+    kg._top_entities_cache = [TopEntity(id="x", label="X", degree=5)]
+
+    with patch("prisma.services.resource_lock.acquire", return_value=(True, "local-ollama", "req-1")), \
+         patch.object(kg, "_full_index"):  # avoid the real background re-index racing this assertion
+        kg.drop_index()
+
+    assert kg.top_entities() == []
 
 
 # ── Status / lifecycle ────────────────────────────────────────────────────────

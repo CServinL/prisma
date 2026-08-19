@@ -194,6 +194,18 @@ class ChatConfig(BaseModel):
             "knowledge_graph_service.py's _call_ollama_extract num_predict comment)."
         ),
     )
+    has_native_reasoning: bool = Field(
+        True,
+        description=(
+            "Whether this backend already reasons natively (o1/QwQ/DeepSeek-R1/Qwen3-thinking-"
+            "style) — when True, the THINK: marker tool is not advertised in the system prompt. "
+            "Default True: don't add a second self-report protocol on top of an already-"
+            "imperfect one (FOOTNOTES_JSON) unless a specific weak/local model is observed to "
+            "benefit from it. Same single-scalar-on-the-active-backend limitation as "
+            "context_window above: no per-model config roster yet, so a turn regeneration "
+            "against a different model still reads this field's value, not that model's."
+        ),
+    )
 
     @field_validator('provider')
     @classmethod

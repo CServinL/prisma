@@ -90,6 +90,7 @@ model = "qwen2.5:7b-32k"
 pool = "local-ollama"        # must match a compute_pools entry below
 context_window = 32768        # this backend's real usable context (verify via /api/ps, not a claimed value)
 max_tokens = 2000              # hard cap on generated tokens per completion
+has_native_reasoning = true    # false advertises THINK: to this model (weak/local models only — see ChatConfig)
 
 # Retrieval (ChromaDB semantic search)
 [retrieval]

@@ -48,7 +48,7 @@
       "type": "string"
     },
     "CitedClaimNode": {
-      "description": "A claim traceable to specific vault document(s) -- `citation`/\n`attribution`/`relational` share this shape (all have real `sources`, a\nmeaningful `faithfulness_checked`), unlike `InferenceNode` below, which\nstructurally has neither. See docs/ontologia.md Axiom 16.",
+      "description": "A claim traceable to specific vault document(s) -- `citation`/\n`paraphrase`/`attribution`/`relational` share this shape (all have real\n`sources`, a meaningful `faithfulness_checked`), unlike `InferenceNode`\nbelow, which structurally has neither. See docs/ontologia.md Axiom 16.\n`citation` (verbatim quote) and `paraphrase` (close restatement) were\nsplit from a single merged `citation` value in schema v4 -- see\n_migrate_chat_v3_to_v4.",
       "properties": {
         "claim_text": {
           "title": "Claim Text",
@@ -106,6 +106,7 @@
         "relation": {
           "enum": [
             "citation",
+            "paraphrase",
             "attribution",
             "relational"
           ],
@@ -324,7 +325,7 @@
       "type": "object"
     },
     "ThinkingNode": {
-      "description": "One reasoning step, off the main line (`TurnNode.thoughts`) -- the\nsequentialthinking-motivated shape (see ADR-019/chat-session-graph.md).\nSchema support only; nothing populates this yet (gated behind the\nstill-deferred model-category `has_native_reasoning` flag).",
+      "description": "One reasoning step, off the main line (`TurnNode.thoughts`) -- the\nsequentialthinking-motivated shape (see ADR-019/chat-session-graph.md).\nPopulated by the THINK: tool (chat_tools.py/chat_agent.py) when the\nactive model is configured with `has_native_reasoning = false`.\n`revises`/`branches_from` are schema-only for now -- nothing generates a\nTHINK: line referencing another thought's id yet.",
       "properties": {
         "branches_from": {
           "anyOf": [

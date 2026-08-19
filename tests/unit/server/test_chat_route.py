@@ -255,6 +255,69 @@ def test_upload_attachment_writes_file_and_returns_asset_media_node(monkeypatch,
     assert (real_vault.root / attachment["asset_path"]).read_bytes() == _JPG_MAGIC
 
 
+def test_upload_attachment_svg_file_returns_inline_media_node(monkeypatch, tmp_path):
+    from prisma.server import app as app_module
+
+    real_vault = VaultService(vault_root=tmp_path / "vault")
+    real_vault.ensure_dirs()
+    chat_slug = real_vault.create_chat(title="Test Chat").slug
+    monkeypatch.setattr(app_module, "_vault", real_vault)
+    svg_bytes = b'<svg xmlns="http://www.w3.org/2000/svg"><circle r="5"/></svg>'
+
+    r = client.post(
+        f"/chats/{chat_slug}/attachments/upload",
+        files={"file": ("diagram.svg", svg_bytes, "image/svg+xml")},
+    )
+
+    assert r.status_code == 201
+    attachment = r.json()["attachment"]
+    assert attachment["kind"] == "svg"
+    assert attachment["value"] == svg_bytes.decode("utf-8")
+    assert "asset_path" not in attachment
+    # No ephemeral file written -- svg is returned inline, not to disk.
+    assert not (real_vault.root / f"chats/{chat_slug}-attachments").exists()
+
+
+def test_upload_attachment_drawio_file_returns_inline_media_node(monkeypatch, tmp_path):
+    from prisma.server import app as app_module
+
+    real_vault = VaultService(vault_root=tmp_path / "vault")
+    real_vault.ensure_dirs()
+    chat_slug = real_vault.create_chat(title="Test Chat").slug
+    monkeypatch.setattr(app_module, "_vault", real_vault)
+    drawio_bytes = b'<mxfile><diagram name="Page-1"></diagram></mxfile>'
+
+    r = client.post(
+        f"/chats/{chat_slug}/attachments/upload",
+        files={"file": ("flow.drawio", drawio_bytes, "application/octet-stream")},
+    )
+
+    assert r.status_code == 201
+    attachment = r.json()["attachment"]
+    assert attachment["kind"] == "drawio"
+    assert attachment["value"] == drawio_bytes.decode("utf-8")
+
+
+def test_upload_attachment_tex_file_falls_back_to_filename(monkeypatch, tmp_path):
+    from prisma.server import app as app_module
+
+    real_vault = VaultService(vault_root=tmp_path / "vault")
+    real_vault.ensure_dirs()
+    chat_slug = real_vault.create_chat(title="Test Chat").slug
+    monkeypatch.setattr(app_module, "_vault", real_vault)
+    tex_bytes = b"E = mc^2"  # a bare formula snippet, no \documentclass marker
+
+    r = client.post(
+        f"/chats/{chat_slug}/attachments/upload",
+        files={"file": ("formula.tex", tex_bytes, "text/plain")},
+    )
+
+    assert r.status_code == 201
+    attachment = r.json()["attachment"]
+    assert attachment["kind"] == "latex"
+    assert attachment["value"] == "E = mc^2"
+
+
 def test_upload_attachment_rejects_non_jpg_bytes(monkeypatch, tmp_path):
     from prisma.server import app as app_module
 

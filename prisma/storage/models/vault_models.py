@@ -123,7 +123,7 @@ class Source(VaultNodeBase):
     item_type: str | None = None
 
 
-CHAT_SCHEMA_VERSION = 3
+CHAT_SCHEMA_VERSION = 4
 
 
 class ToolCallNode(BaseModel):
@@ -140,8 +140,10 @@ class ToolCallNode(BaseModel):
 class ThinkingNode(BaseModel):
     """One reasoning step, off the main line (`TurnNode.thoughts`) -- the
     sequentialthinking-motivated shape (see ADR-019/chat-session-graph.md).
-    Schema support only; nothing populates this yet (gated behind the
-    still-deferred model-category `has_native_reasoning` flag)."""
+    Populated by the THINK: tool (chat_tools.py/chat_agent.py) when the
+    active model is configured with `has_native_reasoning = false`.
+    `revises`/`branches_from` are schema-only for now -- nothing generates a
+    THINK: line referencing another thought's id yet."""
     id: str = Field(default_factory=_new_id)
     thought: str
     thought_number: int
@@ -175,15 +177,18 @@ class WarrantNode(BaseModel):
 
 class CitedClaimNode(BaseModel):
     """A claim traceable to specific vault document(s) -- `citation`/
-    `attribution`/`relational` share this shape (all have real `sources`, a
-    meaningful `faithfulness_checked`), unlike `InferenceNode` below, which
-    structurally has neither. See docs/ontologia.md Axiom 16."""
+    `paraphrase`/`attribution`/`relational` share this shape (all have real
+    `sources`, a meaningful `faithfulness_checked`), unlike `InferenceNode`
+    below, which structurally has neither. See docs/ontologia.md Axiom 16.
+    `citation` (verbatim quote) and `paraphrase` (close restatement) were
+    split from a single merged `citation` value in schema v4 -- see
+    _migrate_chat_v3_to_v4."""
     id: str = Field(default_factory=_new_id)
     kind: Literal["claim"] = "claim"
     index: int  # sequential per turn, 1-based -- the inline [^N] marker this claim is
     claim_text: str
     sources: list[str] = Field(default_factory=list)  # Note/Source/Chat slugs
-    relation: Literal["citation", "attribution", "relational"]
+    relation: Literal["citation", "paraphrase", "attribution", "relational"]
     # Whether an automated/manual check confirmed the claim accurately
     # represents `sources`. None = not (yet) checked.
     faithfulness_checked: bool | None = None
@@ -365,9 +370,22 @@ def _migrate_chat_v2_to_v3(raw: dict) -> dict:
     return raw
 
 
+def _migrate_chat_v3_to_v4(raw: dict) -> dict:
+    """v3 -> v4 splits CitedClaimNode.relation's old merged `citation`
+    ("direct quote or close paraphrase") into two distinct values: `citation`
+    (verbatim quote only) and a new `paraphrase`. Old data is genuinely
+    ambiguous -- there's no way to recover after the fact which of the two a
+    v3 `relation: "citation"` claim actually was -- so this deliberately does
+    NOT reinterpret existing data. Old `"citation"` values are left exactly
+    as-is under the new, narrower meaning (the safer of the two readings,
+    not a guess); only new model output can ever produce `"paraphrase"`.
+    No other field changes, so no shape transform is needed here at all."""
+    return raw
+
+
 class Chat(VaultNodeBase, VersionedModel):
     SCHEMA_VERSION = CHAT_SCHEMA_VERSION
-    MIGRATIONS = {1: _migrate_chat_v1_to_v2, 2: _migrate_chat_v2_to_v3}
+    MIGRATIONS = {1: _migrate_chat_v1_to_v2, 2: _migrate_chat_v2_to_v3, 3: _migrate_chat_v3_to_v4}
 
     node_type: Literal[NodeType.chat] = NodeType.chat
     messages: list[TurnNode] = Field(default_factory=list)

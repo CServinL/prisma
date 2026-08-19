@@ -32,6 +32,7 @@ from prisma.storage.models.kg_models import (
     RankedNode,
     StatusResponse,
     TaintFileResponse,
+    TopEntity,
 )
 
 _LOG_PATHS = _log_setup.configure()
@@ -173,6 +174,13 @@ def ranked_nodes(q: str = Query(...), top_k: int = Query(20)):
 @app.get("/query", response_model=list[GraphQueryResult])
 def query(q: str = Query(...), budget: int = Query(1500)):
     return _kg.query(q, budget=budget)
+
+
+@app.get("/top_entities", response_model=list[TopEntity])
+def top_entities(limit: int = Query(15)):
+    """Cached ranking only -- no live Cypher call on this request path, see
+    KnowledgeGraphService.top_entities()."""
+    return _kg.top_entities(limit=limit)
 
 
 @app.get("/ollama_ready", response_model=OllamaReadyResponse)

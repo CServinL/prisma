@@ -277,11 +277,16 @@ No new node types — this reuses both shapes already on the table, only adding 
 
 **Two real endpoints, not just schema — fully implemented, both directions of the flow:**
 
-- `POST /chats/{slug}/attachments/upload` — multipart, `jpg`/`pdf` only, kind sniffed by magic
-  bytes (not the filename/content-type header). Writes an *ephemeral* file under
-  `<chats_dir>/<slug>-attachments/`, returns an `AssetMediaNode` the client then includes in its
-  next `POST /chat` call. `svg`/`latex`/`drawio` skip this endpoint entirely — small inline text,
-  built client-side, sent directly as `ChatRequest.attachments`.
+- `POST /chats/{slug}/attachments/upload` — multipart, all five kinds. `jpg`/`pdf` sniffed by
+  magic bytes; `svg`/`drawio` by real XML content (`<svg`/`<mxfile`); `latex` (no reliable content
+  marker of its own — a bare formula snippet has no `\documentclass`) falls back to the filename
+  extension. `jpg`/`pdf` write an *ephemeral* file under `<chats_dir>/<slug>-attachments/` and
+  return an `AssetMediaNode`; `svg`/`latex`/`drawio` are small text, decoded and returned directly
+  as an `InlineMediaNode`, no file written. Either way the client includes the response in its
+  next `POST /chat` call. `svg`/`latex`/`drawio` can also skip this endpoint entirely and be built
+  client-side (pasted source) instead of uploaded as a file — added 2026-08-18 alongside real file
+  upload, after cservinl pointed out nobody hand-writes SVG/LaTeX/drawio source; pasting was
+  originally the *only* path for these three, which was the actual gap.
 - `POST /chats/{slug}/attachments/promote` — the L1/L2 → L3 step described below. Takes any
   attachment (an already-uploaded `AssetMediaNode`, or a client-built `InlineMediaNode`) and
   writes it as a real vault [Note](note.md) with a companion file
@@ -573,12 +578,28 @@ remaining code) — `CHAT_SCHEMA_VERSION = 3`, backend, and frontend, all three 
   `svg`/`latex`/`drawio` never render as an actual diagram/formula, only as code. Neither has a
   generator either (nothing produces `media`, the assistant-output side, at all).
 
-Still genuinely open from the 2026-08-05 pass, not just undocumented:
+**Implemented 2026-08-18, same branch — `CHAT_SCHEMA_VERSION = 4`:**
 
-- **`ThinkingNode` population.** The schema, `REASONS`/`REVISES`/`BRANCHES_FROM` edges, and
-  `graph_for()`'s handling of them all exist — nothing produces a `ThinkingNode` yet. Gated behind
-  the still-deferred model-category `has_native_reasoning` flag (ADR-019 §3a), out of scope until
-  that flag lands.
+- **`ThinkingNode` population.** `has_native_reasoning: bool` (default `True`) added to
+  `ChatConfig`, threaded through the same read-only property chain `context_window` already
+  uses (`ChatLLM` → `SessionOrchestrator` → `ChatAgent`) — no new plumbing pattern. A `THINK:`
+  marker tool (`chat_tools.py`'s `TOOLS` registry) is advertised in the system prompt only when
+  `has_native_reasoning` is `False`; `respond()` diverts a matched `THINK:` line entirely into
+  `TurnNode.thoughts` (not also `tool_calls`, unlike `RECALL`'s dual bookkeeping — a THINK step
+  has nothing distinct to say in both places). `revises`/`branches_from` are still schema-only —
+  nothing generates a `THINK:` line referencing another thought's id yet.
+- **`relation` taxonomy split**: `CitedClaimNode.relation`'s old merged `citation` ("direct quote
+  or close paraphrase") split into `citation` (verbatim quote) and a new `paraphrase` (close
+  restatement). `_migrate_chat_v3_to_v4` is a deliberate no-op — old `"citation"` data is
+  genuinely ambiguous and is left as-is under the narrower meaning, not reinterpreted. Frontend
+  gained a 5th `.claim-box-*`/`.claim-ref-*`/`.claim-relation-*` color variant (amber) alongside
+  the existing four.
+- **"Copy vault slug" button** on the vault item viewer toolbar (`navigator.clipboard.writeText`
+  — first clipboard usage in this frontend) — pairs with the chat compose box's pre-existing
+  `vault slug…` attach input, which already accepted a pasted slug with no validation.
+
+Still genuinely open:
+
 - **`RECALL` relevance-ranking quality** — cosine similarity over `embed_texts()` vectors is the
   current ranking; nothing about the taxonomy or storage model would need to change if the ranking
   approach itself is later revisited, since ranking is purely an in-memory concern at query time.

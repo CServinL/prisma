@@ -1507,3 +1507,31 @@ nice-to-have (promoting an uploaded PDF attachment into a vault Note needs the s
 Not touched: the ~68 pre-existing hand-written `.md` files the user separately backfilled by hand
 in a parallel session — this fix doesn't retroactively regenerate those, only new promotions from
 here on.
+
+## Deferred idea: horizontal node-graph view of a chat session (2026-08-18)
+
+Raised by cservinl after a day of live-testing the chat session graph (ADR-019/v2-v4,
+`chat-schema-v3-toulmin-media-attachments` branch): the vertical chat view is the only way to
+see a session today, but it doesn't show the session *as a graph* — tool calls, reasoning
+steps, claims, and regeneration attempts all render as sub-panels nested under their turn, not
+as visibly distinct, connected nodes.
+
+**The ask**: an alternative session view — same underlying data, different layout — where the
+main line (`TurnNode`s) runs left-to-right as a horizontal timeline instead of top-to-bottom
+chat, and every node (tool call, reasoning step, claim, regeneration alternate) renders as its
+own connected node off the turn that produced it, not a collapsed sub-panel. Each node keeps
+the same controls the vertical view already has (delete, regenerate, pin). Purpose, in
+cservinl's words: to actually *evaluate* how the graph forms turn over turn, and how nodes —
+especially `RECALL` hits and regeneration `alternates` — get reused/referenced back into the
+main line, which is hard to follow from the vertical view alone.
+
+Not scoped or designed yet. Likely candidates for a first pass, not decided:
+- Reuse `session_graph.py`'s existing `build_session_graph()` (`networkx.MultiDiGraph`) as the
+  data source — it already has every node/edge type this view would need; this would be a new
+  renderer consuming the same graph, not a new backend representation.
+- Frontend: a genuinely new rendering mode in `+page.svelte` (or a split-out component, given
+  that file's already-flagged size — see the 2026-08-18 docs-vs-code audit's finding #14), most
+  likely a real graph-layout library rather than hand-rolled positioning, given RECALL/alternate
+  edges can point backward/sideways across turns, not just linearly forward.
+- Open question: does this replace the vertical view as a toggleable mode on the same chat, or
+  live as a separate page/route? Not decided — needs its own design pass before implementation.

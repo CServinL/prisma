@@ -79,7 +79,8 @@ ever talks to `ZoteroClient`.
 
 ## Smart Tags Applied to Saved Items
 
-When Prisma saves a paper to Zotero it applies:
+Only via `POST /review`'s `auto_save_papers` config flag (`coordinator.py`) — a paper that
+passes the confidence threshold there gets tagged:
 
 | Tag | Example | Meaning |
 |-----|---------|---------|
@@ -88,9 +89,12 @@ When Prisma saves a paper to Zotero it applies:
 | `Source-<name>` | `Source-arxiv` | Where the paper was found |
 | `Topic-<topic>` | `Topic-neural networks` | The search topic |
 
-For research streams, additional smart tags are applied:
+**Research Streams do not apply any tags** (`stream_runner.py` saves via
+`ZoteroClient.add_paper()`, which sends `tags: []`) — the richer per-stream/methodology/
+recency tagging model sketched below is defined in the ontology only, not built. See
+[SmartTag](../concepts/smart-tag.md#not-yet-implemented).
 
-| Tag | Meaning |
+| Tag (not implemented) | Meaning |
 |-----|---------|
 | `prisma-<stream-id>` | Identifies the stream |
 | `prisma-auto` | Added automatically |

@@ -41,7 +41,7 @@ to the end.
 | `index` | int | Sequential per turn, 1-based — the superscript number shown inline |
 | `claim_text` | str | The specific span of the turn's content this claim covers — extracted deterministically (the sentence preceding the `[^N]` marker), not model self-reported. Used as `faithfulness_checked`'s verification input; not separately rendered |
 | `sources` | list[str] | Vault node slugs (`Note`/`Source`) this claim ties to |
-| `relation` | `citation` \| `attribution` \| `relational` | What kind of sourcing this claim has — see below |
+| `relation` | `citation` \| `paraphrase` \| `attribution` \| `relational` | What kind of sourcing this claim has — see below. Self-reported by the model, then corrected post-hoc by the same LLM-judge call that sets `faithfulness_checked` (single-source claims) or forced structurally (2+ sources always become `relational`) — not purely self-reported |
 | `faithfulness_checked` | bool \| None | Whether an automated check confirmed the claim accurately represents the cited source(s): `True`/`False` from an LLM-judge verification call run automatically every turn, `None` when there was nothing to check (no `claim_text`, or an unresolvable source slug). Orthogonal to `relation`, not a relation value itself |
 | `qualifier` | `Qualifier` \| None | Toulmin model's epistemic-strength modifier — `certain`\|`probable`\|`possible`\|`tentative` (the last also covers "this is a hypothesis"). Schema only, v3 — nothing populates it yet |
 | `warrant` | `WarrantNode` \| None | Toulmin model's Warrant — the reasoning bridge explaining *why* `sources` support this specific claim. `{id, text, backing: list[str]}`; `backing` is Toulmin's Backing (support for the warrant itself), same shape as `sources` since it's the same kind of thing. Schema only, v3 |
@@ -49,9 +49,10 @@ to the end.
 
 | `relation` value | Meaning | `sources` |
 |---|---|---|
-| `citation` | Direct quote or close paraphrase of a specific passage | exactly one |
-| `attribution` | Synthesized/paraphrased from one specific document, not verbatim | exactly one |
-| `relational` | Claim connects or synthesizes across multiple documents (this is what the knowledge graph's `GRAPH_CONTEXT` chat tool inherently produces) | two or more |
+| `citation` | An exact/verbatim quote of a specific passage | exactly one |
+| `paraphrase` | A close restatement in different words, same scope as the source | exactly one |
+| `attribution` | Broader synthesis/interpretation from one specific document, going beyond a close restatement (e.g. hedged language: "could relate to," "may suggest") | exactly one |
+| `relational` | Claim connects or synthesizes across multiple documents (this is what the knowledge graph's `GRAPH_CONTEXT` chat tool inherently produces, and what any 2+-source claim is forced to regardless of self-report) | two or more |
 
 ### `InferenceNode`
 
@@ -119,3 +120,15 @@ argumentation elements (Claim/Grounds already existed as this class/`sources`) �
 Schema and migration only — nothing in `ChatAgent`'s self-reporting (`_claim_from_raw`,
 `FOOTNOTES_JSON:`) produces these fields yet, and the UI renders them only if present (no styling
 work needed later once something does populate them).
+
+Split further, and verified (2026-08-18, `CHAT_SCHEMA_VERSION=4`): `citation`'s old merged meaning
+("direct quote or close paraphrase") split into `citation` (verbatim quote only) and a new
+`paraphrase` value — confirmed live that the model defaults everything to `citation` regardless of
+this distinction, so `relation` is no longer purely self-reported. `_verify_claim` (the same call
+that already produces `faithfulness_checked`) now also corrects `relation`: a 2+-source claim is
+forced to `relational` unconditionally (structural, no LLM judgment needed — `relational` is
+definitionally "2+ sources"), and a single-source claim's `citation`/`paraphrase`/`attribution`
+choice is corrected by the same fact-checker LLM call, extended to return a second token instead
+of firing a separate call. `_migrate_chat_v3_to_v4` is a deliberate no-op — old `relation:
+"citation"` data is genuinely ambiguous (quote vs. paraphrase, unrecoverable after the fact) and
+is left as-is under the new, narrower meaning rather than reinterpreted.

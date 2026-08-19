@@ -8,9 +8,11 @@ Prisma uses **Pydantic v2** for all internal data models. Every API response, se
 |------|--------|
 | `storage/models/agent_models.py` | `PaperMetadata`, `BookMetadata`, `SearchResult`, `CoordinatorResult` |
 | `storage/models/zotero_models.py` | `ZoteroItem`, `ZoteroCreator`, `ZoteroTag`, `ZoteroCollection`, `ZoteroSearchQuery` |
-| `storage/models/research_stream_models.py` | `ResearchStream`, `StreamStatus`, `RefreshFrequency`, `SmartTag`, `StreamUpdateResult` |
+| `storage/models/vault_models.py` | Vault nodes (`Note`, `Source`, `Stream`, `StreamStatus`, `RefreshFrequency`) and the chat session graph (`Chat`, `TurnNode`, `ToolCallNode`, `ThinkingNode`, `CitedClaimNode`/`InferenceNode`, `MediaNode`) — see [Chat Session Graph](#chat-session-graph) below and `docs/concepts/chat-session-graph.md` for the full design |
 | `storage/models/api_response_models.py` | `OpenLibraryResponse`, `SemanticScholarResponse`, `GoogleBooksResponse`, `ArXivEntry`, `LLMRelevanceResult` |
 | `storage/models/source_quality.py` | `SourceQuality`, `SourceMetadata`, `AcademicValidationCriteria`, `SOURCE_REGISTRY` |
+| `storage/models/chroma_models.py` | `ChromaStatus` |
+| `storage/models/kg_models.py` | `KGStatus`, `GraphQueryResult` |
 
 ---
 
@@ -109,6 +111,36 @@ CoordinatorResult(
     warnings=[]
 )
 ```
+
+---
+
+## Chat Session Graph
+
+A `Chat` is stored as pure JSON (`.sess` files, `CHAT_SCHEMA_VERSION`, versioned via
+`schema_gov.VersionedModel` with a migration chain), not `.md` — full design in
+`docs/concepts/chat-session-graph.md`. **`thoughts`/`ThinkingNode`, `relation="paraphrase"`,
+and `CHAT_SCHEMA_VERSION=4` below are not yet merged to `main`** (branch
+`chat-schema-v3-toulmin-media-attachments`) — everything else on this page is. `Chat.messages` is a main line of `TurnNode`s; everything
+else (tool calls, reasoning, claims, media) is a typed branch off the turn that produced it,
+built with `SessionOrchestrator`/`session_graph.py` into an in-memory `networkx.MultiDiGraph` per
+active session, not stored as explicit edge objects on disk:
+
+```python
+TurnNode(
+    role=ChatRole.assistant,
+    content=RichContent(format=ContentFormat.markdown, value="..."),
+    tool_calls=[ToolCallNode(tool="search_vault", args={"query": "..."}, result="...", status="ok")],
+    thoughts=[ThinkingNode(thought="...", thought_number=1)],       # THINK: tool, gated by has_native_reasoning
+    claims=[CitedClaimNode(index=1, claim_text="...", sources=["some-slug"], relation="citation")],
+    recalls=[RecallRef(node_id="...", node_kind="turn")],           # RECALL tool hits
+    alternates=[...],                                                # prior regeneration attempts
+)
+```
+
+`relation` on `CitedClaimNode` is one of `citation` (verbatim quote), `paraphrase` (close
+restatement), `attribution` (paraphrased/synthesized), or `relational` (connects 2+ sources);
+content the model can't trace to any source becomes an `InferenceNode` instead (no `relation`
+field — the `kind` discriminator already says so).
 
 ---
 

@@ -34,15 +34,21 @@ active feature work, not "is this usable yet." Core pipeline:
 
 ## Phase 2 — Conversational Chat & On-Demand Knowledge Graphs
 
-- **Chat** — ✅ Done. Ask Prisma questions about your vault (papers, notes,
-  sources); answers are grounded via ChromaDB semantic retrieval + native
-  knowledge-graph context, synthesized by a backend-agnostic LLM interface
-  (Ollama today, OpenRouter/Anthropic-capable by design — ADR-014), with
-  tool-calling, injection sanitization, and trust tiers (chat content is
-  never citable as fact material). Chat sessions persist to the vault
-  (`chats/`) with a pinning/Excerpt model (ADR-015) that compresses or
-  keeps pinned turns verbatim depending on the backend's real context
-  budget. Full architecture in `TODO.md`'s "Chat module" section.
+- **Chat** — ✅ Done on `main`: ask Prisma questions about your vault (papers, notes,
+  sources), grounded via ChromaDB semantic retrieval + native knowledge-graph context,
+  synthesized by a backend-agnostic LLM interface (Ollama, llama.cpp, or OpenRouter —
+  ADR-014), with tool-calling (`SEARCH_VAULT`/`GRAPH_CONTEXT`/`RECALL`), injection
+  sanitization, and trust tiers (chat content is never citable as fact material). Chat
+  sessions persist to the vault (`chats/*.sess`, pure JSON, versioned) as a session graph,
+  not flat prose — a main line of turns with tool calls and per-claim citations as branches
+  off each one, plus a pinning/Excerpt model (ADR-015) that compresses or keeps pinned turns
+  verbatim depending on the backend's real context budget.
+  Also on `main`: per-claim citations with real APA formatting (ADR-020, PR #74).
+  **Not yet merged** (branch `chat-schema-v3-toulmin-media-attachments`,
+  `CHAT_SCHEMA_VERSION=4`): the `THINK` tool + reasoning-step branches, Toulmin argumentation
+  fields, media attachments, and the `citation`/`paraphrase` relation split — see
+  `docs/concepts/chat-session-graph.md`'s Status section for exactly what's shipped vs. still
+  on that branch.
 - **Native knowledge graph module** — ✅ Done. Entity/relationship extraction
   (Instructor-based structured LLM output, ADR-016) and storage (Kùzu, an
   embedded graph DB) are no longer a third-party dependency — see ADR-013

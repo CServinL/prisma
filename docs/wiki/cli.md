@@ -83,6 +83,53 @@ prisma auth hash-password
 
 ---
 
+## `prisma schema export`
+
+Regenerates `schemas/*.schema.json` (committed JSON Schema for every
+persisted `VersionedModel` — `Chat`, `Note`, `Source`, etc.) from the
+current Pydantic models (ADR-019). Run and commit the result whenever a
+persisted model's shape changes; `tests/unit/storage/test_schema_export.py`
+fails the build otherwise (drift check against the committed files).
+
+```bash
+prisma schema export
+```
+
+---
+
+## One-time migrations
+
+Both dry-run by default (report only, write nothing) — pass `--apply` to
+actually write.
+
+### `prisma migrate-chats-to-sess`
+
+Converts `vault/chats/*.md` (markdown transcript + embedded `prisma:meta`
+JSON comment, the pre-ADR-019 format) to pure-JSON `.sess` files. In
+practice this rarely needs running by hand — `Chat`'s `VersionedModel`
+migration chain upgrades an old file lazily on load — but this command lets
+you upgrade an entire vault up front instead.
+
+```bash
+prisma migrate-chats-to-sess [--vault PATH] [--apply] [--remove-md]
+```
+
+`--remove-md` (only with `--apply`) deletes the source `.md` once its
+`.sess` is written successfully; kept by default.
+
+### `prisma backfill-source-metadata`
+
+Re-fetches `journal`/`volume`/`issue`/`pages`/`publisher`/`item_type` from
+Zotero for Sources imported before those fields existed on `Source`
+(ADR-020's APA citation formatting), using each Source's already-stored
+`zotero_key`.
+
+```bash
+prisma backfill-source-metadata [--vault PATH] [--apply]
+```
+
+---
+
 ## Moved to the API (2026-07-27)
 
 `prisma review`, `prisma streams`, and `prisma zotero` were removed — each

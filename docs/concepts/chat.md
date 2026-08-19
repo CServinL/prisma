@@ -220,9 +220,6 @@ directly. A legacy `.md`-with-`<!-- prisma:meta {...} -->`-comment reader surviv
 
 ## Not yet implemented
 
-- **Thinking-step population** — `TurnNode.thoughts`/`ThinkingNode` ship as schema (ADR-019,
-  2026-08-05), but nothing produces them yet; gated behind the still-deferred model-category
-  `has_native_reasoning` flag. See [Chat session graph](chat-session-graph.md#status).
 - **Toulmin claim population** — `qualifier`/`warrant`/`rebuts` ship as schema (v3, 2026-08-17)
   and render if present, but `ChatAgent`'s self-reporting doesn't produce them yet.
 - **Media rendering** — `svg`/`latex`/`drawio` (both `media` and `attachments`) render as an

@@ -919,6 +919,25 @@ def auth_login(req: LoginRequest, request: Request):
     )
 
 
+@app.post("/auth/refresh", response_model=LoginResponse)
+def auth_refresh():
+    """Slides the session forward without a password reprompt. Reached only
+    when AuthMiddleware has already accepted the caller's current token as
+    valid (not just well-formed but unexpired) -- a token past its own exp
+    never gets this far, so this only renews a session still alive, not a
+    dead one. Callers (prisma-desktop's startup auth check) fall back to the
+    login screen when this itself 401s."""
+    from datetime import datetime, timezone
+
+    from prisma.utils.config import ConfigLoader
+    auth_cfg = ConfigLoader().get_server_config().auth
+    token, expires_at = issue_token(auth_cfg.password_hash, auth_cfg.session_ttl_hours)
+    return LoginResponse(
+        token=token,
+        expires_at=datetime.fromtimestamp(expires_at, tz=timezone.utc).isoformat(),
+    )
+
+
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket, client_id: str | None = Query(None)):
     # Echo the "bearer" subprotocol back when the client offered one (see

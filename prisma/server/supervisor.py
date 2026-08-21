@@ -1174,7 +1174,17 @@ def main(
     chroma_dir = vault_root / ".vault-files" / "chromadb"
     chroma_dir.mkdir(parents=True, exist_ok=True)
 
-    api_cmd = [_venv_bin("uvicorn"), "prisma.server.app:app", "--host", host, "--port", str(api_port)]
+    # --proxy-headers makes uvicorn trust X-Forwarded-Proto/-Host from a
+    # TLS-terminating reverse proxy when building any absolute URL --
+    # otherwise request.url.scheme always reflects the plain-HTTP
+    # connection the proxy makes to this pod, breaking things like the
+    # trailing-slash redirect on web_app's /app mount. --forwarded-allow-ips=*
+    # trusts this since only the deployment's own ingress reaches these
+    # pods -- see auth.py's separate trusted_proxies for the equivalent
+    # app-level zone-classification trust.
+    _proxy_header_flags = ["--proxy-headers", "--forwarded-allow-ips", "*"]
+
+    api_cmd = [_venv_bin("uvicorn"), "prisma.server.app:app", "--host", host, "--port", str(api_port), *_proxy_header_flags]
     if reload:
         api_cmd.append("--reload")
 
@@ -1185,7 +1195,7 @@ def main(
         # before that finishes, orphaning whatever it was still cleaning up.
         "api": Worker("api", api_cmd, stop_timeout=10.0,
                       env={"PRISMA_SUPERVISOR_PORT": str(supervisor_port), "PRISMA_KG_PORT": str(kg_port)}),
-        "web": Worker("web", [_venv_bin("uvicorn"), "prisma.server.web_app:app", "--host", host, "--port", str(web_port)]),
+        "web": Worker("web", [_venv_bin("uvicorn"), "prisma.server.web_app:app", "--host", host, "--port", str(web_port), *_proxy_header_flags]),
         "chroma": Worker("chroma", [
             _venv_bin("chroma"), "run",
             "--path", str(chroma_dir),

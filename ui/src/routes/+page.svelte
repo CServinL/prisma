@@ -638,8 +638,15 @@
   function toggleSection(key: string) {
     const opening = !sectionOpen[key];
     sectionOpen = { ...sectionOpen, [key]: opening };
-    if (key === "zotero" && opening && zoteroStatus?.available) {
-      loadZoteroCollections().then(() => loadZoteroItems());
+    if (key === "zotero" && opening) {
+      // Re-check status on every open, not just act on whatever
+      // loadZoteroStatus() last happened to return -- that value can be
+      // stale (fetched once at bootstrap, never polled since), so opening
+      // the section while it reads "unavailable" must retry rather than
+      // just trust the cached flag.
+      loadZoteroStatus().then(() => {
+        if (zoteroStatus?.available) loadZoteroCollections().then(() => loadZoteroItems());
+      });
     }
   }
 
@@ -655,6 +662,7 @@
     connectWS();
     await Promise.all([loadTree(), loadHome(), loadStreams(), loadChats(), loadZoteroStatus(), loadAvailableModels()]);
     pollStatus();
+    pollZoteroStatus();
   }
 
   async function ping(): Promise<boolean> {
@@ -1110,6 +1118,22 @@
   function pollStatus() {
     fetchStatus();
     setInterval(fetchStatus, 10_000);
+  }
+
+  // Independent from pollStatus's 10s loop -- Zotero's Web API has its own
+  // failure modes (rate limits, outages) unrelated to whether this server
+  // itself is up, and doesn't need checking nearly as often. Also
+  // self-heals the open panel: a transition to available while the
+  // section happens to be open refreshes its collections/items without
+  // requiring the user to click anything.
+  function pollZoteroStatus() {
+    setInterval(async () => {
+      const wasAvailable = zoteroStatus?.available ?? false;
+      await loadZoteroStatus();
+      if (!wasAvailable && zoteroStatus?.available && sectionOpen.zotero) {
+        loadZoteroCollections().then(() => loadZoteroItems());
+      }
+    }, 10 * 60_000);
   }
 
   async function fetchStatus() {

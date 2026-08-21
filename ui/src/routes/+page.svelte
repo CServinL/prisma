@@ -660,7 +660,11 @@
   async function ping(): Promise<boolean> {
     try {
       const r = await apiFetch(`${apiBase}/health`, { signal: AbortSignal.timeout(2000) });
-      return r.ok;
+      // A 401 still proves the server is up (apiFetch's onAuthRequired
+      // already fired to show the login screen) -- only a real network
+      // failure (caught below) or a genuine server-side error means
+      // "offline".
+      return r.ok || r.status === 401;
     } catch { return false; }
   }
 
@@ -1112,6 +1116,11 @@
     const wasOnline = serverOnline;
     try {
       const r = await apiFetch(`${apiBase}/status`, { signal: AbortSignal.timeout(3000) });
+      // Same reasoning as ping() above: a 401 means "up, but needs login"
+      // (already handled by apiFetch's onAuthRequired), not "offline" --
+      // leave serverOnline as-is rather than flipping it false and hiding
+      // the login screen behind the "server not running" empty state.
+      if (r.status === 401) return;
       if (!r.ok) { serverOnline = false; serverStatus = null; return; }
       const s: ServerStatus = await r.json();
       serverOnline = true;

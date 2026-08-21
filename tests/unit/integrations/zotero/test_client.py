@@ -252,6 +252,46 @@ def test_get_all_collections_paginates_via_everything():
     c._client.everything.assert_called_once_with("page1_query_result")
 
 
+def test_get_collections_excludes_deleted():
+    c = _client()
+    c._client.collections.return_value = [
+        {"key": "C1", "version": 1, "data": {"name": "Live Stream"}, "library": {}},
+        {"key": "C2", "version": 1, "data": {"name": "Dead Stream", "deleted": True}, "library": {}},
+    ]
+    result = c.get_collections()
+    assert [col.key for col in result] == ["C1"]
+
+
+def test_get_all_collections_excludes_deleted():
+    # Regression: Zotero's own API keeps listing a collection with
+    # `data.deleted: true` after it's deleted (desktop or web) -- it never
+    # drops out of this endpoint on its own. Without filtering it here,
+    # ensure_collection() could match a deleted collection by name and hand
+    # it back as live, routing a stream's saves into a phantom collection.
+    c = _client()
+    c._client.collections.return_value = "page1_query_result"
+    c._client.everything.return_value = [
+        {"key": "C1", "version": 1, "data": {"name": "My Stream"}, "library": {}},
+        {"key": "C2", "version": 1, "data": {"name": "My Stream", "deleted": True}, "library": {}},
+    ]
+    result = c.get_all_collections()
+    assert [col.key for col in result] == ["C1"]
+
+
+def test_ensure_collection_ignores_a_deleted_collection_with_the_same_name():
+    c = _client()
+    c._client.everything.side_effect = lambda x: x
+    c._client.collections.return_value = [
+        {"key": "OLD", "version": 1, "data": {"name": "My Stream", "deleted": True}, "library": {}},
+    ]
+    c._client.create_collections.return_value = {
+        "successful": {"0": {"key": "NEW", "version": 1, "data": {"name": "My Stream"}}}
+    }
+    result = c.ensure_collection("My Stream")
+    assert result.key == "NEW"
+    c._client.create_collections.assert_called_once()
+
+
 def test_ensure_collection_raises_when_creation_fails():
     # Regression: ensure_collection() used to return None on a failed
     # create_collection(), and callers (e.g. stream_runner.py) immediately

@@ -213,7 +213,7 @@ class ZoteroClient:
         try:
             raw = self._client.collections(limit=limit)
             logger.info(f"Retrieved {len(raw)} collections")
-            return [ZoteroCollection.from_zotero_data(c) for c in raw]
+            return [ZoteroCollection.from_zotero_data(c) for c in raw if not c.get("data", {}).get("deleted")]
         except Exception as e:
             logger.error(f"Failed to retrieve collections: {e}")
             raise ZoteroClientError(f"Failed to retrieve collections: {e}")
@@ -222,11 +222,18 @@ class ZoteroClient:
         """Every collection in the library, paginating past pyzotero's
         default per-request limit -- get_collections()'s 100-item cap let
         ensure_collection() miss an existing collection past page 1 and
-        create a duplicate for any library with >100 collections."""
+        create a duplicate for any library with >100 collections.
+
+        Filters out collections Zotero still lists with `data.deleted: true`
+        -- deleting a collection (desktop or web) doesn't remove it from this
+        endpoint, only flags it. Without this, ensure_collection() could
+        match a deleted collection by name and hand it back as if it were
+        live, routing a stream's saves into a phantom collection."""
         try:
             raw = self._client.everything(self._client.collections())
-            logger.info(f"Retrieved {len(raw)} collections (full library)")
-            return [ZoteroCollection.from_zotero_data(c) for c in raw]
+            live = [c for c in raw if not c.get("data", {}).get("deleted")]
+            logger.info(f"Retrieved {len(live)} collections (full library, {len(raw) - len(live)} deleted excluded)")
+            return [ZoteroCollection.from_zotero_data(c) for c in live]
         except Exception as e:
             logger.error(f"Failed to retrieve all collections: {e}")
             raise ZoteroClientError(f"Failed to retrieve all collections: {e}")

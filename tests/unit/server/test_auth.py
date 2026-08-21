@@ -131,6 +131,36 @@ def test_login_rejects_wrong_password(password_mode_config):
     assert r.status_code == 401
 
 
+# ── /auth/refresh ──────────────────────────────────────────────────────────────
+
+def test_refresh_slides_a_valid_session_forward(password_mode_config):
+    client = _client_from("192.168.1.50")
+    login = client.post("/auth/login", json={"password": "s3cret"})
+    token = login.json()["token"]
+
+    r = client.post("/auth/refresh", headers={"Authorization": f"Bearer {token}"})
+    assert r.status_code == 200
+    new_token = r.json()["token"]
+    # A fresh token, not just an echo of the old one -- proves this issued a
+    # new session rather than validating and handing the same one back.
+    assert new_token != token
+    r2 = client.get("/status", headers={"Authorization": f"Bearer {new_token}"})
+    assert r2.status_code == 200
+
+
+def test_refresh_rejects_a_dead_token(password_mode_config):
+    # AuthMiddleware gates /auth/refresh the same as any other authenticated
+    # route -- no token reaches the handler itself, so refresh can never
+    # revive a genuinely expired or garbage session, only extend a live one.
+    r = _client_from("192.168.1.50").post("/auth/refresh", headers={"Authorization": "Bearer garbage"})
+    assert r.status_code == 401
+
+
+def test_refresh_rejects_with_no_token(password_mode_config):
+    r = _client_from("192.168.1.50").post("/auth/refresh")
+    assert r.status_code == 401
+
+
 def test_wan_zone_always_rejected(password_mode_config):
     r = _client_from("8.8.8.8").get("/status")
     assert r.status_code == 403

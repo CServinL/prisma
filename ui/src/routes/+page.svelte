@@ -3157,7 +3157,7 @@
 
   .spinner-sm {
     position: absolute;
-    right: 6px;
+    right: 28px;
     width: 10px; height: 10px;
     border: 1.5px solid #1a3a6a;
     border-top-color: #4a9eff;
@@ -5093,7 +5093,7 @@
   /* ── Deep search ─────────────────────────────────────────────────────────── */
   .deep-btn {
     position: absolute;
-    right: 28px;
+    right: 8px;
     background: none;
     border: none;
     color: #2a5aaa;

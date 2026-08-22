@@ -500,6 +500,11 @@ class VaultTreeNode(BaseModel):
 
 class RenderedNode(BaseModel):
     slug: str
+    # Vault-relative POSIX path (e.g. "sources/foo.md") -- disambiguates
+    # `slug` (a bare filename stem, shared across folders on collision) for
+    # UI display and the "copy slug" action's serialized dir--name form.
+    # Never the absolute filesystem path.
+    path: str
     title: str
     node_type: NodeType
     html: str

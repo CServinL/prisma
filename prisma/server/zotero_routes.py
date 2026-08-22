@@ -184,7 +184,8 @@ def build_zotero_router(
                 source = vault.get_source(slug)
                 html, broken_links, broken_citations = vault_render(source.body, vault)
                 return RenderedNode(
-                    slug=source.slug, title=source.title, node_type=source.node_type,
+                    slug=source.slug, path=str(source.path.relative_to(vault.root).as_posix()),
+                    title=source.title, node_type=source.node_type,
                     html=html, broken_links=broken_links, broken_citations=broken_citations,
                 )
 
@@ -222,7 +223,8 @@ def build_zotero_router(
         _activity.info("action=import_zotero key=%s slug=%s title=%r", key, source.slug, source.title)
         html, broken_links, broken_citations = vault_render(source.body, vault)
         return RenderedNode(
-            slug=source.slug, title=source.title, node_type=source.node_type,
+            slug=source.slug, path=str(source.path.relative_to(vault.root).as_posix()),
+            title=source.title, node_type=source.node_type,
             html=html, broken_links=broken_links, broken_citations=broken_citations,
         )
 

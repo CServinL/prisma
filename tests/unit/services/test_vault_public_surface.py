@@ -61,6 +61,24 @@ class TestFindFile:
     def test_returns_none_when_not_found(self, vault):
         assert vault.find_file("does-not-exist") is None
 
+    def test_finds_md_file_by_serialized_dir_slug(self, vault):
+        # "sources--paper" -- the same dir--name encoding move_node()
+        # returns, and what the UI's "Copy slug" button now copies.
+        sources_dir = vault.root / "sources"
+        sources_dir.mkdir(parents=True, exist_ok=True)
+        (sources_dir / "paper.md").write_text("---\ntype: source\n---\nBody.", encoding="utf-8")
+        found = vault.find_file("sources--paper")
+        assert found is not None
+        assert found == sources_dir / "paper.md"
+
+    def test_bare_slug_still_resolves_when_a_dir_slug_also_exists(self, vault):
+        # Existing bare-name [[wiki-links]] must keep resolving exactly as
+        # before -- the dir--name decode is additive, not a replacement.
+        sources_dir = vault.root / "sources"
+        sources_dir.mkdir(parents=True, exist_ok=True)
+        (sources_dir / "paper.md").write_text("---\ntype: source\n---\nBody.", encoding="utf-8")
+        assert vault.find_file("paper") == sources_dir / "paper.md"
+
 
 class TestNodeTypeFromFrontmatter:
     def test_recognized_type(self, vault):

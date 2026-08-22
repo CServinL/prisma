@@ -1081,10 +1081,7 @@ class VaultService:
         if path is None:
             raise FileNotFoundError(f"node not found: {slug!r}")
         old_rel = str(path.relative_to(self.root))
-        # Normalise without resolving symlinks — resolve() follows them out of vault
-        dest = (self.root / dest_dir).absolute()
-        if ".." in Path(dest_dir).parts:
-            raise ValueError("destination outside vault")
+        dest = self.resolve_within_root(dest_dir)
         dest.mkdir(parents=True, exist_ok=True)
         new_path = dest / path.name
         if new_path.exists() and new_path != path:
@@ -1149,9 +1146,7 @@ class VaultService:
         return rel
 
     def create_dir(self, rel_path: str) -> None:
-        if ".." in Path(rel_path).parts:
-            raise ValueError("path outside vault")
-        (self.root / rel_path).mkdir(parents=True, exist_ok=True)
+        self.resolve_within_root(rel_path).mkdir(parents=True, exist_ok=True)
 
     # ── Path-based access (sync) ─────────────────────────────────────────────
     # Used by /sync/* — unlike the rest of this class, the desktop client

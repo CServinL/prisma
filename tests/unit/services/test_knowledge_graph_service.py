@@ -532,6 +532,40 @@ def test_delete_file_removes_nodes(kg, vault):
         assert kg._indexed_hash("notes/gone.md") is None
 
 
+# ── Rename ────────────────────────────────────────────────────────────────────
+
+def test_rename_file_relabels_without_reextracting(kg, vault):
+    old = vault.root / "notes" / "old-name.md"
+    old.write_text("---\ntype: note\n---\nContent.", encoding="utf-8")
+    result = _extraction(nodes=[{"id": "moved_node", "label": "Moved"}])
+
+    with _patch_create(kg, return_value=result) as mock_create, \
+         patch("prisma.services.resource_lock.acquire", return_value=(True, "local-ollama", "req-1")):
+        kg._extract_file(old, "note")
+        calls_before_move = mock_create.call_count
+
+        new = vault.root / "notes" / "new-name.md"
+        old.rename(new)
+        assert kg._rename_file(old, new) is True
+
+        # The entity survives under the new path, with no extra extraction
+        # call -- a rename must not trigger re-extraction of unchanged content.
+        assert mock_create.call_count == calls_before_move
+
+    query = kg._conn.execute("MATCH (e:Entity {id: 'moved_node'}) RETURN e.source_file")
+    assert query.has_next()
+    assert query.get_next()[0] == "notes/new-name.md"
+    with kg._lock:
+        assert kg._indexed_hash("notes/old-name.md") is None
+        assert kg._indexed_hash("notes/new-name.md") is not None
+
+
+def test_rename_file_returns_false_when_old_path_was_never_indexed(kg, vault):
+    old = vault.root / "notes" / "never-indexed.md"
+    new = vault.root / "notes" / "still-never-indexed.md"
+    assert kg._rename_file(old, new) is False
+
+
 # ── Trust tier ────────────────────────────────────────────────────────────────
 
 @pytest.mark.parametrize("node_type,expected_tier", [

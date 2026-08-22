@@ -492,6 +492,10 @@ class KnowledgeGraphService:
 
         self._lock = threading.Lock()
         self._pending: set[Path] = set()
+        # (old, new) pairs from a watcher-observed move -- drained and
+        # relabeled (see _rename_file) before _pending's own extract pass,
+        # so a plain move never triggers a re-extraction.
+        self._pending_renames: list[tuple[Path, Path]] = []
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._observer: Observer | None = None
@@ -1227,6 +1231,45 @@ class KnowledgeGraphService:
             _log.warning("delete failed for %s: %s", rel, exc)
             return False
 
+    def _rename_file(self, old_path: Path, new_path: Path) -> bool:
+        """A vault move/rename doesn't change content -- relabel this
+        file's existing Entity/RelatesTo/IndexedFile rows to the new path
+        instead of deleting and letting the next cycle re-extract from
+        scratch (a real LLM call for content that hasn't changed). A no-op
+        (falls through to the normal delete+extract path) unless the old
+        path was actually indexed -- nothing to relabel otherwise."""
+        try:
+            old_rel = str(old_path.relative_to(self._vault.root))
+            new_rel = str(new_path.relative_to(self._vault.root))
+        except ValueError:
+            return False
+        with self._lock:
+            if old_rel not in self._indexed_cache:
+                return False
+            try:
+                self._conn.execute(
+                    "MATCH (e:Entity {source_file: $old}) SET e.source_file = $new", {"old": old_rel, "new": new_rel}
+                )
+                self._conn.execute(
+                    "MATCH ()-[r:RelatesTo {source_file: $old}]->() SET r.source_file = $new",
+                    {"old": old_rel, "new": new_rel},
+                )
+                # IndexedFile.source_file is its primary key -- Kùzu doesn't
+                # allow SET on a primary key column, only delete + insert.
+                self._conn.execute("MATCH (f:IndexedFile {source_file: $old}) DETACH DELETE f", {"old": old_rel})
+                content_hash = self._indexed_cache.pop(old_rel)
+                model = self._indexed_model_cache.pop(old_rel, None)
+                self._conn.execute(
+                    "MERGE (f:IndexedFile {source_file: $new}) SET f.content_hash = $hash, f.extracted_by = $model",
+                    {"new": new_rel, "hash": content_hash, "model": model},
+                )
+                self._indexed_cache[new_rel] = content_hash
+                self._indexed_model_cache[new_rel] = model
+                return True
+            except Exception as exc:
+                _log.warning("rename failed for %s -> %s: %s", old_rel, new_rel, exc)
+                return False
+
     def _trust_tier_for(self, path: Path) -> str:
         try:
             body = path.read_text(encoding="utf-8", errors="replace")
@@ -1300,8 +1343,16 @@ class KnowledgeGraphService:
         self._full_index()
         while not self._stop_event.is_set():
             with self._lock:
+                renames = self._pending_renames.copy()
+                self._pending_renames.clear()
                 pending = self._pending.copy()
                 self._pending.clear()
+            for old_path, new_path in renames:
+                if not self._rename_file(old_path, new_path):
+                    # Not previously indexed (or the relabel itself failed)
+                    # -- fall back to treating it as a fresh file so it
+                    # still gets extracted rather than silently dropped.
+                    pending.add(new_path)
             if pending:
                 self._process_pending(pending)
             self._stop_event.wait(timeout=60)
@@ -1576,6 +1627,22 @@ class _VaultChangeHandler(FileSystemEventHandler):
 
     def on_any_event(self, event: FileSystemEvent) -> None:
         if event.is_directory:
+            return
+        if event.event_type == "moved":
+            # dest_path only exists on FileMovedEvent -- on_any_event's
+            # declared FileSystemEvent type doesn't have it, hence getattr
+            # rather than a direct attribute access.
+            dest = Path(str(getattr(event, "dest_path", "")))
+            src = Path(str(event.src_path))
+            src_relevant = self._service.is_relevant_path(src)
+            dest_relevant = self._service.is_relevant_path(dest)
+            with self._service._lock:
+                if src_relevant and dest_relevant:
+                    self._service._pending_renames.append((src, dest))
+                elif dest_relevant:
+                    self._service._pending.add(dest)  # moved into scope -- extract as new
+                elif src_relevant:
+                    self._service._pending.add(src)  # moved out of scope -- old entry gets cleaned up
             return
         path = Path(str(event.src_path))
         if not self._service.is_relevant_path(path):

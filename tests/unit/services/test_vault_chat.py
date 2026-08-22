@@ -196,7 +196,8 @@ def test_delete_node_removes_a_chat(vault):
 
 def test_rename_node_renames_a_chat_file_and_title(vault):
     chat = vault.create_chat("Original Title")
-    new_slug = vault.rename_node(chat.slug, "New Title")
+    new_slug, old_rel, new_rel = vault.rename_node(chat.slug, "New Title")
+    assert old_rel is None and new_rel is None  # .sess isn't part of the sync protocol
 
     assert not (vault.root / "chats" / f"{chat.slug}.sess").exists()
     reloaded = vault.get_chat(new_slug)

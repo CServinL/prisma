@@ -498,6 +498,49 @@ class VaultTreeNode(BaseModel):
     stream_status: StreamStatus | None = None
 
 
+class VaultRef(BaseModel):
+    """A parsed reference to a vault node -- separates the `vault:` scheme,
+    the containing directory, and the bare filename stem, however the
+    reference was originally written (see ADR-021):
+
+    - `vault:/dir/name` -- the copy/paste interchange form ("Copy slug"'s
+      output, and a valid `[[wiki-link]]` target).
+    - `dir--name` -- the compound-slug encoding `move_node()` already
+      produces server-side and `find_file()`/`_find_md()` decode; this is
+      what actually travels as a REST URL path segment (a real `/` isn't
+      URL-path-segment-safe, so this is the API-facing form).
+    - a bare `name` -- the plain slug, no folder.
+
+    One parser handles all three so callers don't each reimplement the
+    `vault:` prefix strip / `--`-vs-`/` split by hand."""
+    dir: str = ""  # "" for a top-level file; "/"-joined for nested folders
+    name: str
+
+    @classmethod
+    def parse(cls, raw: str) -> "VaultRef":
+        raw = raw.strip()
+        if raw.startswith("vault:/"):
+            parts = raw[len("vault:/"):].strip("/").split("/")
+        elif "--" in raw:
+            parts = raw.split("--")
+        else:
+            parts = [raw]
+        return cls(dir="/".join(parts[:-1]), name=parts[-1])
+
+    @property
+    def compound_slug(self) -> str:
+        """The dir--name form -- API/find_file()-facing."""
+        if not self.dir:
+            return self.name
+        return "--".join(self.dir.split("/")) + "--" + self.name
+
+    @property
+    def uri(self) -> str:
+        """The vault:/dir/name form -- copy/paste and wiki-link-facing."""
+        prefix = f"{self.dir}/" if self.dir else ""
+        return f"vault:/{prefix}{self.name}"
+
+
 class RenderedNode(BaseModel):
     slug: str
     # Vault-relative POSIX path (e.g. "sources/foo.md") -- disambiguates

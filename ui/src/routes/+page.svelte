@@ -489,17 +489,19 @@
   let slugCopied = $state(false);
 
   // The bare `slug` alone is ambiguous when two files in different
-  // folders share a filename stem -- this reuses the same dir--name
-  // encoding move_node() already produces server-side, which find_file()
-  // can also decode back to the exact file (including as a [[wiki-link]]).
-  function serializedSlug(node: RenderedNode): string {
-    const dir = node.path.includes("/") ? node.path.slice(0, node.path.lastIndexOf("/")) : "";
-    return dir ? `${dir.replace(/\//g, "--")}--${node.slug}` : node.slug;
+  // folders share a filename stem -- this is the vault:/dir/name
+  // interchange form (ADR-021, mirrors the Python VaultRef.uri), safe to
+  // paste as a [[wiki-link]] (renderer.py's VaultRef.parse() decodes it
+  // back to the dir--name compound slug find_file() resolves).
+  function vaultUri(node: RenderedNode): string {
+    return node.path.includes("/")
+      ? `vault:/${node.path.slice(0, node.path.lastIndexOf("/"))}/${node.slug}`
+      : `vault:/${node.slug}`;
   }
 
   async function copyActiveNodeSlug() {
     if (!activeNode) return;
-    await navigator.clipboard.writeText(serializedSlug(activeNode));
+    await navigator.clipboard.writeText(vaultUri(activeNode));
     slugCopied = true;
     setTimeout(() => { slugCopied = false; }, 2000);
   }

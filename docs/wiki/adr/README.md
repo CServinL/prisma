@@ -24,4 +24,4 @@ Each ADR documents a significant design decision: what was decided, why, and wha
 | [ADR-018](ADR-018-chat-compaction-points.md) | Chat Compaction Points — bounding long-chat context growth beyond what pinning/Excerpt cap today | Superseded |
 | [ADR-019](ADR-019-persisted-format-governance-and-migrations.md) | Persisted-Format Governance & Migrations — `.sess` pure-JSON chat storage, `VersionedModel` migrations, chat-as-session-graph (`TurnNode`/`SessionOrchestrator`/`RECALL`) | Implemented |
 | [ADR-020](ADR-020-apa-citation-formatting.md) | APA Citation Formatting — slug↔APA converters, `Source` metadata completeness, validator, referencing-to-slug enforcement | Implemented |
-| [ADR-021](ADR-021-vault-node-identifiers.md) | Vault Node Identifiers — bare `slug`, vault-relative `path`, serialized `dir--name` compound slug | Implemented |
+| [ADR-021](ADR-021-vault-node-identifiers.md) | Vault Node Identifiers — bare `slug`, vault-relative `path`, `vault:` interchange URI (`VaultRef`) | Implemented |

@@ -314,11 +314,24 @@ class VaultService:
                     yield Path(dirpath) / fname
 
     def _find_md(self, slug: str) -> Path | None:
-        """Find a .md file whose slug matches. Does NOT find .html files."""
+        """Find a .md file whose slug matches -- either the bare stem, or a
+        dir--name compound slug encoding its folder (ADR-021; the same
+        encoding move_node() produces). Does NOT find .html files.
+
+        This is the single source of truth for .md resolution -- get_source()/
+        get_note() call this directly rather than find_file(), so the
+        compound-slug decode has to live here, not just in find_file()
+        (found live: it used to live only in find_file(), which get_any()
+        calls once to sniff node_type and then discards, re-resolving via
+        get_source()/get_note() -> this method, silently missing the decode)."""
         slug_norm = _file_slug(slug).lower()
         for path in self.iter_files():
             if _file_slug(path.stem).lower() == slug_norm:
                 return path
+        if "--" in slug:
+            candidate = (self.root / slug.replace("--", "/")).with_suffix(".md")
+            if candidate.exists():
+                return candidate
         return None
 
     def _find_sess(self, slug: str) -> Path | None:
@@ -336,17 +349,16 @@ class VaultService:
         return None
 
     def find_file(self, slug: str) -> Path | None:
-        """Find a .md or .html file whose slug matches."""
+        """Find a .md or .html file whose slug matches. _find_md() already
+        covers the .md-including-compound-slug case; the .html compound
+        decode still needs to live here since there's no dedicated
+        _find_html() equivalent."""
         md = self._find_md(slug)
         if md is not None:
             return md
         # Path-relative slugs encode '/' as '--' (e.g. "papers--bricken2003--index")
         if "--" in slug:
-            base = self.root / slug.replace("--", "/")
-            md_candidate = base.with_suffix(".md")
-            if md_candidate.exists():
-                return md_candidate
-            html_candidate = base.with_suffix(".html")
+            html_candidate = (self.root / slug.replace("--", "/")).with_suffix(".html")
             if html_candidate.exists():
                 return html_candidate
         slug_norm = _file_slug(slug).lower()

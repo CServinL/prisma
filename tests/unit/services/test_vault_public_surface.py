@@ -227,3 +227,54 @@ class TestUpdateSourceBibliographicFields:
     def test_raises_file_not_found_for_missing_slug(self, vault):
         with pytest.raises(FileNotFoundError):
             vault.update_source_bibliographic_fields("does-not-exist", journal="X")
+
+
+class TestMoveNodeRejectsPathTraversal:
+    # Regression: move_node()'s own ad hoc guard only rejected ".." components
+    # via `".." in Path(dest_dir).parts`, never `Path(dest_dir).is_absolute()`.
+    # `self.root / "/etc/cron.d"` discards the left operand entirely (Python's
+    # PurePath truediv semantics for an absolute right operand), so an
+    # absolute dest_dir sailed straight through to `dest.mkdir(...)` and
+    # `path.rename(new_path)`, physically moving the file outside the vault.
+    def test_absolute_dest_dir_is_rejected(self, vault, tmp_path):
+        note = vault.create_note("Note A")
+        outside = tmp_path / "outside"
+
+        with pytest.raises(ValueError):
+            vault.move_node(note.slug, dest_dir=str(outside))
+
+        assert not outside.exists()
+        assert vault.find_file(note.slug) is not None
+
+    def test_dotdot_dest_dir_is_still_rejected(self, vault):
+        note = vault.create_note("Note A")
+
+        with pytest.raises(ValueError):
+            vault.move_node(note.slug, dest_dir="../../escaped")
+
+    def test_relative_dest_dir_still_moves_the_file(self, vault):
+        note = vault.create_note("Note A")
+
+        new_slug, old_rel, new_rel = vault.move_node(note.slug, dest_dir="sources")
+
+        assert (vault.root / new_rel).exists()
+        assert new_rel.startswith("sources/")
+
+
+class TestCreateDirRejectsPathTraversal:
+    def test_absolute_path_is_rejected(self, vault, tmp_path):
+        outside = tmp_path / "outside"
+
+        with pytest.raises(ValueError):
+            vault.create_dir(str(outside))
+
+        assert not outside.exists()
+
+    def test_dotdot_path_is_still_rejected(self, vault):
+        with pytest.raises(ValueError):
+            vault.create_dir("../../escaped")
+
+    def test_relative_path_still_creates_the_dir(self, vault):
+        vault.create_dir("notes/subdir")
+
+        assert (vault.root / "notes" / "subdir").is_dir()

@@ -1586,8 +1586,14 @@ class TaintNodeResponse(BaseModel):
 @app.post("/nodes/{slug}/move", response_model=SlugResponse)
 def move_node(slug: str, req: MoveRequest):
     try:
-        new_slug = _vault.move_node(slug, req.dest_dir)
+        new_slug, old_rel, new_rel = _vault.move_node(slug, req.dest_dir)
         _indexer.mark_stale()
+        # Without this, a connected desktop client's local sync mirror never
+        # learns the old path is gone -- its still-present stale copy can
+        # get pushed back up as a "new" file, duplicating the move (found
+        # live 2026-08-21).
+        broadcast({"type": "vault_change", "action": "sync_delete", "path": old_rel})
+        broadcast({"type": "vault_change", "action": "sync_write", "path": new_rel})
         return {"slug": new_slug}
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -1597,8 +1603,11 @@ def move_node(slug: str, req: MoveRequest):
 @app.post("/nodes/{slug}/rename", response_model=SlugResponse)
 def rename_node(slug: str, req: RenameRequest):
     try:
-        new_slug = _vault.rename_node(slug, req.title)
+        new_slug, old_rel, new_rel = _vault.rename_node(slug, req.title)
         _indexer.mark_stale()
+        if old_rel and new_rel:  # None for a chat rename -- .sess isn't synced at all
+            broadcast({"type": "vault_change", "action": "sync_delete", "path": old_rel})
+            broadcast({"type": "vault_change", "action": "sync_write", "path": new_rel})
         return {"slug": new_slug}
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -1628,10 +1637,14 @@ class OkResponse(BaseModel):
 @app.delete("/nodes/{slug}", response_model=OkResponse)
 def delete_node(slug: str):
     try:
-        _vault.delete_node(slug)
+        rel = _vault.delete_node(slug)
         _indexer.mark_stale()
         _activity.info("action=delete_node slug=%s", slug)
-        broadcast({"type": "vault_change", "action": "delete", "slug": slug})
+        # "slug" alone isn't enough -- pull.rs's vault_change handler only
+        # ever reads msg.path, so a broadcast without it was silently
+        # ignored by every connected desktop client's sync engine.
+        if rel:
+            broadcast({"type": "vault_change", "action": "sync_delete", "path": rel})
         return {"ok": True}
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))

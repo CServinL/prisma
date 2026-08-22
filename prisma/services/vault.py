@@ -1055,10 +1055,16 @@ class VaultService:
 
     # ── Node operations ───────────────────────────────────────────────────────
 
-    def move_node(self, slug: str, dest_dir: str) -> str:
+    def move_node(self, slug: str, dest_dir: str) -> tuple[str, str, str]:
+        """Returns (new_slug, old_rel_path, new_rel_path). The two rel paths
+        are for the caller (app.py's route) to broadcast a vault_change over
+        WS -- without that, a connected desktop client's local sync mirror
+        never learns the old path is gone, and can end up pushing its still-
+        present stale copy back up as a "new" file, duplicating the move."""
         path = self.find_file(slug)
         if path is None:
             raise FileNotFoundError(f"node not found: {slug!r}")
+        old_rel = str(path.relative_to(self.root))
         # Normalise without resolving symlinks — resolve() follows them out of vault
         dest = (self.root / dest_dir).absolute()
         if ".." in Path(dest_dir).parts:
@@ -1074,9 +1080,14 @@ class VaultService:
             if companion.exists():
                 companion.rename(dest / companion.name)
         rel = new_path.relative_to(self.root)
-        return str(rel.with_suffix("")).replace("/", "--").replace("\\", "--")
+        new_slug = str(rel.with_suffix("")).replace("/", "--").replace("\\", "--")
+        return new_slug, old_rel, str(rel)
 
-    def rename_node(self, slug: str, new_title: str) -> str:
+    def rename_node(self, slug: str, new_title: str) -> tuple[str, str | None, str | None]:
+        """Returns (new_slug, old_rel_path, new_rel_path) -- the last two are
+        None for a chat (.sess isn't part of the sync protocol at all, see
+        _safe_sync_path, so there's nothing to broadcast); see move_node's
+        docstring for why the caller needs these for a .md rename."""
         sess_path = self._find_sess(slug)
         if sess_path is not None:
             new_stem = _slugify(new_title)
@@ -1090,10 +1101,11 @@ class VaultService:
                 chat.model_copy(update={"title": new_title, "slug": new_slug, "modified_at": datetime.utcnow()}),
                 new_path,
             )
-            return new_slug
+            return new_slug, None, None
         path = self._find_md(slug)
         if path is None:
             raise FileNotFoundError(f"node not found: {slug!r}")
+        old_rel = str(path.relative_to(self.root))
         new_stem = _slugify(new_title)
         new_path = path.parent / f"{new_stem}.md"
         if new_path.exists() and new_path != path:
@@ -1103,16 +1115,22 @@ class VaultService:
         fm["title"] = new_title
         path.rename(new_path)
         new_path.write_text(_render_frontmatter(fm) + body, encoding="utf-8")
-        return _file_slug(new_stem)
+        return _file_slug(new_stem), old_rel, str(new_path.relative_to(self.root))
 
-    def delete_node(self, slug: str) -> None:
+    def delete_node(self, slug: str) -> str | None:
+        """Returns the deleted file's vault-relative path, or None for a
+        chat (.sess isn't part of the sync protocol, see move_node's
+        docstring for why the caller needs this for a synced file)."""
         path = self.find_file(slug) or self._find_sess(slug)
         if path is None:
             raise FileNotFoundError(f"node not found: {slug!r}")
+        is_synced = path.suffix != ".sess"
+        rel = str(path.relative_to(self.root)) if is_synced else None
         path.unlink()
         companion = path.with_suffix(".md") if path.suffix == ".html" else None
         if companion and companion.exists():
             companion.unlink()
+        return rel
 
     def create_dir(self, rel_path: str) -> None:
         if ".." in Path(rel_path).parts:

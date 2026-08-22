@@ -43,6 +43,19 @@ def test_render_reports_broken_wikilink(vault):
     assert "broken-wikilink" in html
 
 
+def test_render_resolves_a_vault_uri_wikilink(vault):
+    # ADR-021's copy/paste interchange form -- what "Copy slug" now
+    # produces -- must itself work as a pasted-back [[wiki-link]].
+    sources_dir = vault.root / "sources"
+    sources_dir.mkdir(parents=True, exist_ok=True)
+    (sources_dir / "paper.md").write_text("---\ntype: source\n---\nBody.", encoding="utf-8")
+    html, broken_links, _ = render("See [[vault:/sources/paper]] for details.", vault)
+    assert broken_links == []
+    assert 'href="#note:sources--paper"' in html
+    # The visible label keeps the vault: form the author actually typed.
+    assert ">vault:/sources/paper<" in html
+
+
 def test_render_strips_a_script_tag_embedded_in_note_body(vault):
     # Python-Markdown passes raw inline HTML through untouched by design --
     # this is exactly what html_sanitize.sanitize_html exists to catch

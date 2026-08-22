@@ -1,4 +1,4 @@
-# ADR-021: Vault Node Identifiers — Slug, Path, and Serialized Compound Slug
+# ADR-021: Vault Node Identifiers — Slug, Path, and `vault:` URI
 
 **Date:** 2026-08-22
 **Author:** CServinL
@@ -31,26 +31,45 @@ unchanged, the other two are additive:
    new field on `RenderedNode` (`prisma/storage/models/vault_models.py`). Read-only,
    disambiguation-only. Never the absolute filesystem path — that would leak local disk
    layout and isn't portable between the server and any client.
-3. **Serialized compound slug** — `dir--dir--name` (e.g. `sources--nuextract-test-attention`),
-   built by joining `path`'s directory with `slug` using `--` as the separator. This is the
-   *same* encoding `move_node()` has produced server-side since ADR's original tree design
-   (`str(rel.with_suffix("")).replace("/", "--")`) — not a new scheme, just a second place
-   that now produces and consumes it. The UI's "Copy slug" button copies this form instead
-   of the bare `slug`, so what actually ends up on the clipboard is disambiguating.
+3. **`vault:` URI** — `vault:/dir/name` (e.g. `vault:/sources/nuextract-test-attention`), the
+   copy/paste **interchange** form: what "Copy slug" now copies, and a valid
+   `[[wiki-link]]` target. A real `/` is fine here since this is markdown text a person
+   pastes or a regex parses — never a raw URL path segment (a literal `/` there would
+   collide with FastAPI's own route-segment matching; `%2F`-encoding it doesn't reliably
+   round-trip either, confirmed live against this deployment).
 
-## What resolves a compound slug, and what doesn't
+Internally, both new forms funnel through one parser rather than each caller hand-rolling
+prefix-stripping and separator-swapping: **`VaultRef`** (`prisma/storage/models/vault_models.py`),
+a small Pydantic model with a `.parse(raw)` classmethod accepting any of the three forms
+(`vault:/dir/name`, `dir--name`, or a bare `name`) and normalizing to `(dir, name)`. Its
+`.compound_slug` property (`dir--name`, `--`-joined) is the form that actually travels as a
+REST URL path segment — reusing the *same* encoding `move_node()` has produced server-side
+since the original tree design (`str(rel.with_suffix("")).replace("/", "--")`), not a new
+scheme. Its `.uri` property reconstructs the `vault:` form for display.
 
-`find_file()` (`prisma/services/vault.py`) already had a `--`-decode branch, but it only
-ever tried `.html`. Extended to try `.md` first, then `.html` — since `slug_exists()` (used
-by `renderer.py`'s `_resolve_wikilinks`) calls `find_file()` too, a compound slug is now
-also a **valid `[[wiki-link]]` target**, not just a copy/paste convenience. This is strictly
-additive: the existing bare-stem branch is untouched, so every `[[existing-link]]` already
-in the vault keeps resolving exactly as it did before this change.
+## What resolves a `vault:` link, and what doesn't
+
+`renderer.py`'s `_resolve_wikilinks`/`_resolve_transclusions` run every matched `[[...]]`
+through `VaultRef.parse(raw).compound_slug` before checking `vault.slug_exists()`/
+`vault.body_of()` — so a `vault:` URI is decoded to its compound slug and resolved exactly
+like one typed directly. The visible link label keeps whatever the author actually typed
+(`raw`), only the `href`/lookup uses the normalized form.
+
+**A bug found and fixed while building this**: `find_file()` (`prisma/services/vault.py`)
+already had a `--`-decode branch, but only for `.html`. Extending it to `.md` looked
+sufficient — until testing the real `GET /notes/{slug}` endpoint (not just `find_file()` in
+isolation) showed a 404 anyway. Root cause: `get_any()` calls `find_file()` **once**, only
+to sniff `node_type` from frontmatter, then **discards** that resolved path and re-resolves
+by re-dispatching to `get_source()`/`get_note()` — both of which call `self._find_md(slug)`
+**directly**, bypassing `find_file()` (and its decode) entirely. The fix belongs in
+`_find_md()` itself, not `find_file()`: it's the single function every .md-resolving path
+actually goes through. `find_file()` still layers its own `.html`-only decode on top for the
+one type `_find_md()` doesn't cover.
 
 Not every vault content type supports either link form — this table is the complete,
 honest picture, not an implied "everything works":
 
-| Format | Bare-slug link (`[[name]]`) | Serialized link (`[[dir--name]]`) |
+| Format | Bare-slug link (`[[name]]`) | `vault:` URI link (`[[vault:/dir/name]]`) |
 |---|---|---|
 | `.md` (notes/sources) | yes (existing) | yes (new, this ADR) |
 | `.html` (+ companion `.md`) | yes (existing) | yes (existing, unchanged) |
@@ -85,14 +104,14 @@ by design before this change.
 
 ### Negative
 - Two valid ways now exist to link to the same `.md`/`.html` file (`[[name]]` and
-  `[[dir--name]]`) — a minor surface-area increase or `find_file()` to reason about, though
-  the decode order (bare-stem first via `_find_md`, then the `--`-decode branch) keeps the
-  behavior deterministic.
-- The serialized form isn't sanitized character-by-character the way `_file_slug()`
-  sanitizes a bare stem — a folder name with spaces or accented characters produces an
-  uglier (but still round-trippable) compound slug. Not addressed here; `move_node()` never
-  sanitized its own output either, so this isn't a regression, just an existing rough edge
-  inherited by the new copy-slug path too.
+  `[[vault:/dir/name]]`) — a minor surface-area increase for `_find_md()`/`find_file()` to
+  reason about, though the decode order (bare-stem first, then the `--`-decode branch) keeps
+  the behavior deterministic.
+- Neither `VaultRef` nor `move_node()` sanitizes path components character-by-character the
+  way `_file_slug()` sanitizes a bare stem — a folder name with spaces or accented characters
+  produces an uglier (but still round-trippable) compound slug/URI. Not addressed here;
+  `move_node()` never sanitized its own output either, so this isn't a regression, just an
+  existing rough edge inherited by the new copy-slug path too.
 
 ## Related
 

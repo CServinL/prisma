@@ -8,6 +8,7 @@ from docu_craft.workflow import graph as _workflow
 
 from prisma.services.html_sanitize import sanitize_html
 from prisma.services.vault import VaultService
+from prisma.storage.models.vault_models import VaultRef
 
 # Load once at import time — avoids yaml._yaml C-extension crash on repeated calls
 _THEME = ThemeManager.load("prisma")
@@ -38,11 +39,12 @@ def _resolve_transclusions(body: str, vault: VaultService, depth: int = 0) -> tu
         return body, broken
 
     def replace(m: re.Match) -> str:
-        slug, section = m.group(1).strip(), m.group(2)
+        raw, section = m.group(1).strip(), m.group(2)
+        slug = VaultRef.parse(raw).compound_slug
         content = vault.body_of(slug)
         if content is None:
-            broken.append(slug)
-            return f'<span class="broken-transclusion">⚠ ![[{slug}]] not found</span>'
+            broken.append(raw)
+            return f'<span class="broken-transclusion">⚠ ![[{raw}]] not found</span>'
         if section:
             content = _extract_section(content, section) or content
         resolved, child_broken = _resolve_transclusions(content, vault, depth + 1)
@@ -74,12 +76,15 @@ def _resolve_wikilinks(body: str, vault: VaultService) -> tuple[str, list[str]]:
     broken: list[str] = []
 
     def replace(m: re.Match) -> str:
-        slug, section = m.group(1).strip(), m.group(2)
+        raw, section = m.group(1).strip(), m.group(2)
+        slug = VaultRef.parse(raw).compound_slug
         anchor = f"#{section}" if section else ""
         if vault.slug_exists(slug):
-            return f'<a class="wikilink" href="#note:{slug}{anchor}">{slug}</a>'
-        broken.append(slug)
-        return f'<span class="broken-wikilink">⚠ [[{slug}]]</span>'
+            # href carries the resolvable slug for navigation; the visible
+            # label keeps whatever the author actually typed (raw).
+            return f'<a class="wikilink" href="#note:{slug}{anchor}">{raw}</a>'
+        broken.append(raw)
+        return f'<span class="broken-wikilink">⚠ [[{raw}]]</span>'
 
     return _WIKILINK_RE.sub(replace, body), broken
 

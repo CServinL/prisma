@@ -80,6 +80,29 @@ class TestFindFile:
         assert vault.find_file("paper") == sources_dir / "paper.md"
 
 
+class TestGetAnyResolvesCompoundSlugs:
+    # Regression: find_file() had the dir--name decode, but get_any()
+    # (the real GET /notes/{slug} path) discards find_file()'s resolved
+    # path after sniffing node_type, and re-resolves via get_source()/
+    # get_note() -> _find_md() directly -- which didn't have the decode
+    # until it moved there. A find_file()-only test wouldn't have caught
+    # this; get_any() is what the API route actually calls.
+
+    def test_get_any_resolves_a_compound_slug_for_a_source(self, vault):
+        sources_dir = vault.root / "sources"
+        sources_dir.mkdir(parents=True, exist_ok=True)
+        (sources_dir / "paper.md").write_text("---\ntype: source\n---\nBody.", encoding="utf-8")
+        node = vault.get_any("sources--paper")
+        assert node.slug == "paper"
+
+    def test_get_any_resolves_a_compound_slug_for_a_note(self, vault):
+        notes_dir = vault.root / "notes"
+        notes_dir.mkdir(parents=True, exist_ok=True)
+        (notes_dir / "idea.md").write_text("---\ntype: note\n---\nBody.", encoding="utf-8")
+        node = vault.get_any("notes--idea")
+        assert node.slug == "idea"
+
+
 class TestNodeTypeFromFrontmatter:
     def test_recognized_type(self, vault):
         assert vault.node_type_from_frontmatter({"type": "source"}) == NodeType.source

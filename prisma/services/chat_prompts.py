@@ -1,15 +1,27 @@
-"""Chat system prompt — user-editable, not baked into code or config.toml.
+"""Chat system prompt — fixed in source, not persisted to disk.
 
-Lives at ~/.config/prisma/chat_system_prompt.md as plain text (no YAML
-frontmatter — it's a config artifact, not a vault node). Materialized with
-the default on first use so the file always exists and is discoverable for
-editing, same bootstrap pattern as config.toml itself.
+Split into two layers:
+
+- CHAT_SYSTEM_PROMPT (below): the base prompt, a plain code constant. Always
+  reflects whatever's in the current release -- there is deliberately no
+  on-disk copy of this to go stale. The old design wrote this to
+  ~/.config/prisma/chat_system_prompt.md the first time it materialized and
+  read only that file forever after; a deployment that had already
+  materialized the file before some later improvement to this constant would
+  never see that improvement, silently, with nothing to signal the drift.
+  Confirmed live on 2026-08-22: the deployed file was still whatever this
+  constant said on 2026-07-25, untouched by several code releases since.
+- The user prompt (chat_user_prompt.md, load_user_prompt/save_user_prompt
+  below): genuinely user-owned, blank by default, layered on top by
+  build_system_prompt(). A user's customization here can never shadow a
+  future improvement to CHAT_SYSTEM_PROMPT, because it's additive, not a
+  full replacement.
 """
 from __future__ import annotations
 
 from pathlib import Path
 
-DEFAULT_CHAT_SYSTEM_PROMPT = """\
+CHAT_SYSTEM_PROMPT = """\
 You are Prisma, a research assistant with access to the user's personal \
 knowledge vault: notes, saved papers, and a knowledge graph of concepts \
 extracted from them, all searchable through a semantic index (ChromaDB) \
@@ -46,31 +58,45 @@ conclusions from this alone, without needing the raw turns.
 """
 
 
-def _prompt_path() -> Path:
-    return Path.home() / ".config" / "prisma" / "chat_system_prompt.md"
+def _user_prompt_path() -> Path:
+    return Path.home() / ".config" / "prisma" / "chat_user_prompt.md"
 
 
 def _excerpt_summary_prompt_path() -> Path:
     return Path.home() / ".config" / "prisma" / "excerpt_summary_prompt.md"
 
 
-def load_system_prompt() -> str:
-    path = _prompt_path()
-    if path.exists():
-        return path.read_text(encoding="utf-8").strip()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(DEFAULT_CHAT_SYSTEM_PROMPT, encoding="utf-8")
-    return DEFAULT_CHAT_SYSTEM_PROMPT.strip()
+def load_user_prompt() -> str:
+    """Blank by default -- unlike the old chat_system_prompt.md, nothing is
+    ever auto-materialized here. An unwritten file and an empty save() both
+    mean "no standing user instructions," so there's nothing worth putting
+    on disk until the user actually saves something."""
+    path = _user_prompt_path()
+    if not path.exists():
+        return ""
+    return path.read_text(encoding="utf-8").strip()
 
 
-def save_system_prompt(content: str) -> None:
+def save_user_prompt(content: str) -> None:
     """User-facing edit path (Settings page's "Chat instructions" panel) --
     caller is still responsible for calling POST /reload/chat afterwards so
     the running ChatAgent picks it up, same as any manual edit of this file
     always required."""
-    path = _prompt_path()
+    path = _user_prompt_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content.strip() + "\n", encoding="utf-8")
+    stripped = content.strip()
+    path.write_text(stripped + "\n" if stripped else "", encoding="utf-8")
+
+
+def build_system_prompt() -> str:
+    """CHAT_SYSTEM_PROMPT (fixed, code-owned) plus the user's own additive
+    instructions layered on top, if any -- see this module's docstring for
+    why these are two separate layers rather than one editable file."""
+    base = CHAT_SYSTEM_PROMPT.strip()
+    user = load_user_prompt()
+    if not user:
+        return base
+    return f"{base}\n\nThe user has also added these standing instructions -- follow them too:\n{user}"
 
 
 def load_excerpt_summary_prompt() -> str:

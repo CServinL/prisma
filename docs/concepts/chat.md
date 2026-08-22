@@ -151,12 +151,21 @@ that pushes an otherwise-fitting turn over the edge is caught too.
 
 ## System prompt
 
-Chat's system prompt is user-editable, not baked into code or `config.toml` — it lives at
-`~/.config/prisma/chat_system_prompt.md` (materialized with a sensible default on first use)
-and is editable from the Settings page. It's a place for standing preferences ("always answer
-in Spanish"), not one-off requests, which belong in the chat itself. The tool-calling and
-claim-marker instructions are separate, always-appended sections generated from code (not
-part of this file), since they're tied to the exact marker syntax the parser expects.
+Chat's system prompt is two layers (`chat_prompts.py`), kept deliberately separate so a user
+customization can never shadow a future improvement to the base prompt:
+
+- `CHAT_SYSTEM_PROMPT` — fixed in code, not persisted to disk, always reflects the current
+  release. The old design wrote this to `~/.config/prisma/chat_system_prompt.md` the first
+  time it materialized and read only that file forever after; a deployment that had already
+  materialized the file before some later prompt improvement would never see it, silently.
+- The user prompt — `~/.config/prisma/chat_user_prompt.md`, blank by default, editable from
+  the Settings page's "Chat instructions" panel (`GET`/`PUT /chat/user-prompt`). A place for
+  standing preferences ("keep answers under 200 words"), not one-off requests, which belong in
+  the chat itself. Layered on top of `CHAT_SYSTEM_PROMPT` by `build_system_prompt()`.
+
+The tool-calling and claim-marker instructions are separate, always-appended sections
+generated from code (not part of either prompt layer), since they're tied to the exact marker
+syntax the parser expects.
 
 ## Model selection
 

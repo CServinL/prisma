@@ -125,7 +125,7 @@ A `SessionOrchestrator` assembles context per turn: a cheap default (system prom
 
 ### Chat instructions
 
-Settings → **Chat instructions** is a standing, user-edited system prompt — CLAUDE.md-style: preferences and rules that apply to every chat, every turn ("always answer in Spanish," tone, things to always/never do), not one-off requests (those belong in the chat itself). Manual only — the assistant never writes to it. Backed by `GET`/`PUT /chat/system-prompt`, which persists to `~/.config/prisma/chat_system_prompt.md` and applies immediately (no restart).
+Settings → **Chat instructions** is a standing, user-edited layer on top of the fixed base system prompt — CLAUDE.md-style: preferences and rules that apply to every chat, every turn ("keep answers under 200 words," tone, things to always/never do), not one-off requests (those belong in the chat itself). Manual only — the assistant never writes to it, and blank by default. Backed by `GET`/`PUT /chat/user-prompt`, which persists to `~/.config/prisma/chat_user_prompt.md` and applies immediately (no restart). The base prompt itself (`chat_prompts.CHAT_SYSTEM_PROMPT`) is fixed in code, not editable here — see `docs/concepts/chat.md`'s "System prompt" section for why the two are kept separate.
 
 ---
 

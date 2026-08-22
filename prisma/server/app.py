@@ -37,7 +37,8 @@ def _t(label: str, _t0=[0.0]):
 
 _t("importing fastapi")
 from fastapi import (
-    FastAPI, File, Form, HTTPException, Query, Request, UploadFile, WebSocket, WebSocketDisconnect,
+    BackgroundTasks, FastAPI, File, Form, HTTPException, Query, Request, UploadFile, WebSocket,
+    WebSocketDisconnect,
 )
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, ValidationError
@@ -820,12 +821,31 @@ def list_models():
 
 
 @app.post("/supervisor/restart/{name}")
-def restart_worker(name: str):
+def restart_worker(name: str, background_tasks: BackgroundTasks):
     """Proxies to the supervisor's own POST /supervisor/restart/{name} —
     lets the UI restart a single worker process (api/web/chroma/kg) without
     needing direct access to the supervisor's loopback-only control port,
     same pattern as resource_lock.status()/process_status() already use for
-    read-only supervisor data on /status."""
+    read-only supervisor data on /status.
+
+    name == "api" is a self-restart: this very process is what's serving
+    the request. Calling resource_lock.restart_worker() synchronously here
+    would have the supervisor kill this process while it's still blocked
+    waiting on that call's own response, so the request never completes and
+    the caller sees a dropped connection instead of a real answer -- and in
+    an ingress-fronted/LAN deployment the frontend has no way to reach the
+    supervisor's loopback-only control port directly to work around it
+    (previously attempted client-side via a supervisorBase() port rewrite,
+    which only ever worked for local dev where the browser and server share
+    localhost). BackgroundTasks defers the actual restart_worker() call
+    until *after* this handler's response has been sent, so the client gets
+    a real 200 back before the api process goes down.
+    """
+    if name == "api":
+        background_tasks.add_task(
+            resource_lock.restart_worker, "127.0.0.1", resource_lock.default_port(), name,
+        )
+        return {"status": "restarting"}
     return resource_lock.restart_worker(
         "127.0.0.1", resource_lock.default_port(), name,
     )

@@ -273,7 +273,6 @@
   const DEFAULT_API = "http://127.0.0.1:8765";
   const DEFAULT_API_PORT = 8765;
   const DEFAULT_WEB_PORT = 8766;
-  const DEFAULT_SUPERVISOR_PORT = 8760;
 
   // serverStatus.llm_backend.provider values -> display label (see app.py's
   // /status: only ever "ollama" or "llama_cpp", the two local providers it
@@ -1221,27 +1220,15 @@
   let reloading = $state(false);
   let reloadScope = $state<ReloadScope>("all");
 
-  function supervisorBase(): string {
-    try {
-      const url = new URL(apiBase);
-      url.port = String(DEFAULT_SUPERVISOR_PORT);
-      return url.origin;
-    } catch {
-      return `http://127.0.0.1:${DEFAULT_SUPERVISOR_PORT}`;
-    }
-  }
-
   async function restartWorker(name: WorkerName): Promise<void> {
-    // Restarting "api" by proxying through the api process itself would
-    // kill the very process handling this request before it can respond —
-    // hit the supervisor's own loopback control port directly instead
-    // (same reasoning the old code hit webBase directly for UI reloads
-    // rather than proxying those through the api process either).
-    if (name === "api") {
-      await fetch(`${supervisorBase()}/supervisor/restart/api`, { method: "POST" });
-    } else {
-      await apiFetch(`${apiBase}/supervisor/restart/${name}`, { method: "POST" });
-    }
+    // The "api" self-restart race (this process dying mid-request before it
+    // can respond) is now handled server-side via BackgroundTasks -- see
+    // app.py's restart_worker(). No client-side special-casing needed here;
+    // the supervisor's control port is loopback-only on the server host and
+    // was never reachable from the browser in any deployed (LAN/ingress)
+    // context anyway, only in local dev where browser and server share
+    // localhost.
+    await apiFetch(`${apiBase}/supervisor/restart/${name}`, { method: "POST" });
   }
 
   async function reloadServer() {

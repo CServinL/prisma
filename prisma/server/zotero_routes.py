@@ -148,21 +148,31 @@ def build_zotero_router(
         synced, failed = PendingWriteQueue().flush(get_zotero())
         return SyncPendingResponse(synced=synced, failed=failed, pending_before=pending_before)
 
-    @router.get("/items", response_model=list[ZoteroItem])
+    @router.get("/items")
     def zotero_items(collection: Optional[str] = Query(None), q: Optional[str] = Query(None)):
         """When both are given, get_collection_items(key, query=q) passes q
         straight through to Zotero's own server-side `q` search (matches across
         title/creators/abstract/etc., not just a client-side title substring)
-        scoped to the collection in one API call."""
+        scoped to the collection in one API call.
+
+        Serializes via ZoteroItem.to_dict() rather than the bare model: with no
+        response_model, FastAPI's default alias-based serialization would emit
+        Zotero's own raw field names (itemType, abstractNote, ...) and drop
+        authors/year entirely, since those are computed @property accessors,
+        not declared Pydantic fields -- to_dict() is the one place both get
+        materialized into the response.
+        """
         zotero = get_zotero()
         try:
             if collection:
-                return zotero.get_collection_items(collection, query=q or None)
-            if q:
-                return zotero.search_items(q)
-            return zotero.get_all_items()
+                items = zotero.get_collection_items(collection, query=q or None)
+            elif q:
+                items = zotero.search_items(q)
+            else:
+                items = zotero.get_all_items()
         except Exception as e:
             raise HTTPException(status_code=503, detail=str(e))
+        return [item.to_dict() for item in items]
 
     @router.post("/import/{key}", response_model=RenderedNode, status_code=201)
     def zotero_import(key: str):

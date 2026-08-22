@@ -104,6 +104,27 @@ def test_zotero_items_passes_query_through_when_scoped_to_collection(monkeypatch
     mock_zotero.get_collection_items.assert_called_once_with("COLL1", query="neural networks")
 
 
+def test_zotero_items_response_includes_authors_and_year(monkeypatch):
+    # Regression: response_model=list[ZoteroItem] serialized via FastAPI's
+    # default alias-based dump, which emits Zotero's raw field names
+    # (itemType, abstractNote, ...) and silently drops `authors`/`year`
+    # since those are computed @property accessors, not declared Pydantic
+    # fields -- the UI's item list reads exactly these two fields.
+    from prisma.server import app as app_mod
+
+    mock_zotero = MagicMock()
+    mock_zotero.get_all_items.return_value = [_item(authors=("Ada Lovelace",))]
+    monkeypatch.setattr(app_mod, "_zotero", mock_zotero)
+
+    r = client.get("/zotero/items")
+    assert r.status_code == 200
+    body = r.json()
+    assert body[0]["authors"] == ["Ada Lovelace"]
+    assert body[0]["year"] == 2024
+    assert body[0]["title"] == "T"
+    assert body[0]["key"] == "K1"
+
+
 def test_sync_pending_online_flushes_queue(monkeypatch):
     class _NonEmptyQueue:
         def __init__(self, *a, **kw):

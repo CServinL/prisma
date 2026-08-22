@@ -1432,34 +1432,34 @@
   let syncDiffInfo = $state<SyncDiffInfo | null>(null);
   let syncDiffLoading = $state(false);
 
-  let chatSystemPrompt = $state("");
-  let chatSystemPromptLoading = $state(false);
-  let chatSystemPromptSaving = $state(false);
-  let chatSystemPromptSaved = $state(false);
+  let chatUserPrompt = $state("");
+  let chatUserPromptLoading = $state(false);
+  let chatUserPromptSaving = $state(false);
+  let chatUserPromptSaved = $state(false);
 
-  async function loadChatSystemPrompt() {
-    chatSystemPromptLoading = true;
+  async function loadChatUserPrompt() {
+    chatUserPromptLoading = true;
     try {
-      const r = await apiFetch(`${apiBase}/chat/system-prompt`);
-      chatSystemPrompt = (await r.json()).content;
+      const r = await apiFetch(`${apiBase}/chat/user-prompt`);
+      chatUserPrompt = (await r.json()).content;
     } catch { /* leave the field blank rather than clobber a load-in-progress edit */ }
-    chatSystemPromptLoading = false;
+    chatUserPromptLoading = false;
   }
 
-  async function saveChatSystemPrompt() {
-    chatSystemPromptSaving = true;
-    chatSystemPromptSaved = false;
+  async function saveChatUserPrompt() {
+    chatUserPromptSaving = true;
+    chatUserPromptSaved = false;
     try {
-      const r = await apiFetch(`${apiBase}/chat/system-prompt`, {
+      const r = await apiFetch(`${apiBase}/chat/user-prompt`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ content: chatSystemPrompt }),
+        body: JSON.stringify({ content: chatUserPrompt }),
       });
-      chatSystemPrompt = (await r.json()).content;
-      chatSystemPromptSaved = true;
-      setTimeout(() => { chatSystemPromptSaved = false; }, 2000);
+      chatUserPrompt = (await r.json()).content;
+      chatUserPromptSaved = true;
+      setTimeout(() => { chatUserPromptSaved = false; }, 2000);
     } catch { /* button label falls back to "Save" below; no toast system to report the failure through */ }
-    chatSystemPromptSaving = false;
+    chatUserPromptSaving = false;
   }
 
   async function refreshSyncInfo() {
@@ -1491,7 +1491,7 @@
   // desktop and plain web UI alike) — the file it reads/writes lives on
   // whichever machine is running `prisma serve`, not the client.
   $effect(() => {
-    if (showSettings) loadChatSystemPrompt();
+    if (showSettings) loadChatUserPrompt();
   });
 
   async function loadSettings() {
@@ -2786,24 +2786,24 @@
                 <span class="resource-pool-name">Chat instructions</span>
               </div>
               <textarea
-                class="chat-system-prompt-input"
+                class="chat-user-prompt-input"
                 rows="8"
-                bind:value={chatSystemPrompt}
-                disabled={chatSystemPromptLoading}
+                bind:value={chatUserPrompt}
+                disabled={chatUserPromptLoading}
                 placeholder="Standing instructions and preferences for the chat assistant — tone, language, things to always/never do…"
               ></textarea>
               <span class="setting-hint">
-                Applies to every chat, every turn — this is the assistant's system prompt. It already has
-                access to your notes, sources, past chats, and the knowledge graph, so it can pull in
-                relevant material on its own; use this box for standing preferences (e.g. "always answer in
-                Spanish") rather than one-off requests, which belong in the chat itself.
+                Applies to every chat, every turn — added on top of the assistant's built-in instructions,
+                which already give it access to your notes, sources, past chats, and the knowledge graph, so
+                it can pull in relevant material on its own; use this box for standing preferences (e.g.
+                "keep answers under 200 words") rather than one-off requests, which belong in the chat itself.
               </span>
               <button
                 class="btn-primary"
-                onclick={saveChatSystemPrompt}
-                disabled={chatSystemPromptLoading || chatSystemPromptSaving}
+                onclick={saveChatUserPrompt}
+                disabled={chatUserPromptLoading || chatUserPromptSaving}
               >
-                {chatSystemPromptSaving ? "Saving…" : chatSystemPromptSaved ? "Saved" : "Save"}
+                {chatUserPromptSaving ? "Saving…" : chatUserPromptSaved ? "Saved" : "Save"}
               </button>
             </div>
 
@@ -5016,7 +5016,7 @@
     flex-shrink: 0;
   }
 
-  .chat-system-prompt-input {
+  .chat-user-prompt-input {
     width: 100%;
     padding: 10px 12px;
     background: #0d1320;
@@ -5030,8 +5030,8 @@
     outline: none;
     margin-bottom: 8px;
   }
-  .chat-system-prompt-input:focus { border-color: #4a9eff; }
-  .chat-system-prompt-input:disabled { opacity: 0.6; }
+  .chat-user-prompt-input:focus { border-color: #4a9eff; }
+  .chat-user-prompt-input:disabled { opacity: 0.6; }
 
   .setting-hint {
     font-size: 10px;
@@ -5039,7 +5039,7 @@
     line-height: 1.5;
   }
   .setting-hint-error { color: #f87171; }
-  .chat-system-prompt-input + .setting-hint {
+  .chat-user-prompt-input + .setting-hint {
     display: block;
     margin-bottom: 10px;
   }

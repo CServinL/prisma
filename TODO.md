@@ -514,7 +514,7 @@ cservinl (2026-07-03): the model generates excessively long, example-heavy
 answers by default, filling the rolling-history budget (`max_history_tokens`)
 much faster than necessary — fewer real turns fit before
 `_bounded_history` starts dropping the oldest ones. Needs prompt-level
-constraints in `DEFAULT_CHAT_SYSTEM_PROMPT`
+constraints in `CHAT_SYSTEM_PROMPT`
 (`prisma/services/chat_prompts.py`), something like:
 - "Don't generate examples/code samples unless explicitly asked for one."
 - Other brevity guidance to discourage padding out answers with

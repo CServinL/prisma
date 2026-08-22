@@ -97,7 +97,7 @@ _t("vault_models ok")
 _t("importing chat")
 from prisma.agents.chat_agent import ChatAgent
 from prisma.services.chat_llm import ChatLLM
-from prisma.services.chat_prompts import load_excerpt_summary_prompt, load_system_prompt, save_system_prompt
+from prisma.services.chat_prompts import build_system_prompt, load_excerpt_summary_prompt, load_user_prompt, save_user_prompt
 from prisma.services.chat_tools import ChatToolbox
 _t("chat ok")
 
@@ -387,7 +387,7 @@ def _build_chat_agent(vault: "VaultService", chroma: ChromaIndexer, kg: Knowledg
     llm = ChatLLM(cfg.get_chat_config(), ollama_host=cfg.get_llm_config().host)
     toolbox = ChatToolbox(chroma, kg, vault)
     return ChatAgent(
-        llm, toolbox, system_prompt=load_system_prompt(),
+        llm, toolbox, system_prompt=build_system_prompt(),
         blocked_reason=lambda: _chat_blocked_reason(llm, chroma, kg),
         vault_overview=lambda: [e.label for e in kg.top_entities()],
     )
@@ -407,7 +407,7 @@ def _build_chat_agent_for_model(model: str) -> ChatAgent:
     llm = ChatLLM(chat_config, ollama_host=cfg.get_llm_config().host)
     toolbox = ChatToolbox(_chroma, _indexer, _vault)
     return ChatAgent(
-        llm, toolbox, system_prompt=load_system_prompt(),
+        llm, toolbox, system_prompt=build_system_prompt(),
         blocked_reason=lambda: _chat_blocked_reason(llm, _chroma, _indexer),
         vault_overview=lambda: [e.label for e in _indexer.top_entities()],
     )
@@ -746,27 +746,29 @@ def reload_chat():
     return {"status": "reloaded"}
 
 
-class ChatSystemPromptResponse(BaseModel):
+class ChatUserPromptResponse(BaseModel):
     content: str
 
 
-class UpdateChatSystemPromptRequest(BaseModel):
+class UpdateChatUserPromptRequest(BaseModel):
     content: str
 
 
-@app.get("/chat/system-prompt", response_model=ChatSystemPromptResponse)
-def get_chat_system_prompt():
-    """Settings page's "Chat instructions" panel — same file `chat_prompts.py`
-    materializes at ~/.config/prisma/chat_system_prompt.md and ChatAgent is
-    built from; this just makes it readable/editable without shelling in."""
-    return {"content": load_system_prompt()}
+@app.get("/chat/user-prompt", response_model=ChatUserPromptResponse)
+def get_chat_user_prompt():
+    """Settings page's "Chat instructions" panel. This is only the user's
+    own additive layer (chat_user_prompt.md, blank by default) -- the fixed
+    base system prompt (chat_prompts.CHAT_SYSTEM_PROMPT) lives in code, not
+    disk, and isn't editable here. See chat_prompts.py's module docstring
+    for why the split exists."""
+    return {"content": load_user_prompt()}
 
 
-@app.put("/chat/system-prompt", response_model=ChatSystemPromptResponse)
-def update_chat_system_prompt(req: UpdateChatSystemPromptRequest):
-    save_system_prompt(req.content)
+@app.put("/chat/user-prompt", response_model=ChatUserPromptResponse)
+def update_chat_user_prompt(req: UpdateChatUserPromptRequest):
+    save_user_prompt(req.content)
     _reload_chat()  # so the running ChatAgent picks up the edit immediately
-    return {"content": load_system_prompt()}
+    return {"content": load_user_prompt()}
 
 
 class ModelsResponse(BaseModel):

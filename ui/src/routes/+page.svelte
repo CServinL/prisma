@@ -1280,7 +1280,9 @@
               const ri = await apiFetch(`${apiBase}/zotero/items?${params}`);
               if (ri.ok) zoteroItems = await ri.json();
             } finally { zoteroLoading = false; }
-            sectionOpen = { ...sectionOpen, zotero: true };
+            // Prepares the collection/items data only -- does not force
+            // the panel open, which would override a user's explicit
+            // close every time this stream re-renders.
           }
         }
       }

@@ -347,7 +347,17 @@
   function _defaultApiBase(): string {
     if (typeof window === "undefined") return DEFAULT_API;
     const url = new URL(window.location.origin);
-    url.port = String(DEFAULT_API_PORT);
+    // Local dev serves the API and the UI on two different ports
+    // (8765/8766) -- detected here by the well-known dev web port, the
+    // only case needing this override. Any other origin (an
+    // ingress-fronted deployment routing both by path on one port, e.g.
+    // a LAN server behind a reverse proxy) already IS the API's own
+    // origin -- forcing 8765 there pointed the browser/PWA client at a
+    // port the deployment never exposes at all, and every request just
+    // failed silently as "server offline".
+    if (url.port === String(DEFAULT_WEB_PORT)) {
+      url.port = String(DEFAULT_API_PORT);
+    }
     return url.origin;
   }
 

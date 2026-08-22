@@ -200,6 +200,31 @@ def test_query_returns_ranked_file_scores(indexer, vault):
     assert abs(result[1].score - 0.5) < 1e-6
 
 
+def test_query_drops_hits_below_relevance_floor(indexer, vault):
+    # Regression: query() used to always return its top_k nearest neighbors
+    # even when none of them were actually related to the question -- a
+    # vault with nothing on-topic would still hand back its "least bad"
+    # matches, which downstream (chat_tools.py's search_vault) had no way to
+    # tell apart from a real hit. Distance 0.9 -> score 0.1, well under
+    # _MIN_RELEVANCE_SCORE, so this should be filtered out entirely rather
+    # than ranked in.
+    col = _mock_chroma_collection()
+    col.count.return_value = 3
+    col.query.return_value = {
+        "metadatas": [[{"path": "notes/unrelated.md", "chunk": 0}]],
+        "distances": [[0.9]],
+    }
+    client = _mock_chroma_client(col)
+    embed = [[0.1] * 768]
+    with patch("chromadb.HttpClient", return_value=client):
+        with patch("prisma.services.chroma_service.resource_lock.acquire", return_value=(True, "local-ollama", "req-1")), \
+             patch("prisma.services.chroma_service.resource_lock.release"), \
+             patch("prisma.services.chroma_service._embed_texts", return_value=embed):
+            result = indexer.query("something the vault has nothing on", top_k=5)
+
+    assert result == []
+
+
 def test_upsert_file_updates_manifest(indexer, vault, tmp_path):
     md_file = vault.root / "notes" / "test.md"
     md_file.parent.mkdir(parents=True, exist_ok=True)

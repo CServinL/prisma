@@ -432,16 +432,25 @@
   let _wsRetry = 0;
 
   // ── UI dev hot-reload (polling the Web process — dev-only, self-contained) ───
+  // GET /ui/dev/version only exists meaningfully for a local `prisma serve`
+  // running from source (web_app.py's watcher never starts against a baked
+  // image with no ui/src -- version stays 0 forever). It also isn't reachable
+  // at all through an ingress-fronted deployment: the ingress only proxies
+  // the /app prefix to the Web process, so this root-level route falls into
+  // the API's catch-all and 401s there every 2s for no benefit. Gate on the
+  // same local-dev heuristic _defaultApiBase() already uses.
   let _devBuildVersion: number | null = null;
-  setInterval(async () => {
-    try {
-      const r = await fetch(`${webBase}/ui/dev/version`);
-      if (!r.ok) return;
-      const { version } = await r.json();
-      if (_devBuildVersion === null) { _devBuildVersion = version; return; }
-      if (version !== _devBuildVersion) window.location.reload();
-    } catch {}
-  }, 2000);
+  if (typeof window !== "undefined" && window.location.port === String(DEFAULT_WEB_PORT)) {
+    setInterval(async () => {
+      try {
+        const r = await fetch(`${webBase}/ui/dev/version`);
+        if (!r.ok) return;
+        const { version } = await r.json();
+        if (_devBuildVersion === null) { _devBuildVersion = version; return; }
+        if (version !== _devBuildVersion) window.location.reload();
+      } catch {}
+    }, 2000);
+  }
 
   let viewFormat = $state<"html" | "md">("html");
   let tree = $state<VaultTreeNode[]>([]);

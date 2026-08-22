@@ -91,6 +91,7 @@ def render_note(vault: VaultService, slug: str, request: Request, format: str = 
 
     rn = RenderedNode(
         slug=slug,
+        path=str(node_path.relative_to(vault.root).as_posix()) if node_path else "",
         title=node.title,
         node_type=node.node_type,
         html=html,
@@ -226,9 +227,14 @@ def build_notes_router(
         note = vault.create_note(req.title, req.body, req.tags)
         mark_stale_fn()
         _activity.info("action=create_note slug=%s title=%r", note.slug, note.title)
-        broadcast_fn({"type": "vault_change", "action": "create", "slug": note.slug})
+        rel = str(note.path.relative_to(vault.root).as_posix())
+        # "slug" alone isn't enough -- pull.rs's vault_change handler only
+        # ever reads msg.path, so a broadcast without it was silently
+        # ignored by every connected desktop client's sync engine.
+        broadcast_fn({"type": "vault_change", "action": "create", "path": rel})
         html, broken_links, broken_citations = vault_render(note.body, vault)
-        return RenderedNode(slug=note.slug, title=note.title, node_type=note.node_type,
+        return RenderedNode(slug=note.slug, path=rel,
+                            title=note.title, node_type=note.node_type,
                             html=html, broken_links=broken_links, broken_citations=broken_citations)
 
     @router.put("/{slug}", response_model=RenderedNode)
@@ -239,9 +245,11 @@ def build_notes_router(
         except FileNotFoundError:
             raise HTTPException(status_code=404, detail=f"note not found: {slug!r}")
         mark_stale_fn()
-        broadcast_fn({"type": "vault_change", "action": "save", "slug": slug})
+        rel = str(note.path.relative_to(vault.root).as_posix())
+        broadcast_fn({"type": "vault_change", "action": "save", "path": rel})
         html, broken_links, broken_citations = vault_render(note.body, vault)
-        return RenderedNode(slug=note.slug, title=note.title, node_type=note.node_type,
+        return RenderedNode(slug=note.slug, path=rel,
+                            title=note.title, node_type=note.node_type,
                             html=html, broken_links=broken_links, broken_citations=broken_citations)
 
     return router

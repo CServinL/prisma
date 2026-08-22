@@ -342,9 +342,13 @@ class VaultService:
             return md
         # Path-relative slugs encode '/' as '--' (e.g. "papers--bricken2003--index")
         if "--" in slug:
-            candidate = (self.root / slug.replace("--", "/")).with_suffix(".html")
-            if candidate.exists():
-                return candidate
+            base = self.root / slug.replace("--", "/")
+            md_candidate = base.with_suffix(".md")
+            if md_candidate.exists():
+                return md_candidate
+            html_candidate = base.with_suffix(".html")
+            if html_candidate.exists():
+                return html_candidate
         slug_norm = _file_slug(slug).lower()
         for path in self.iter_files(extensions=(".html",)):
             if _file_slug(path.stem).lower() == slug_norm:

@@ -1556,7 +1556,7 @@ Your research workspace.
 {recent_lines or "_Nothing yet — create a note or run a stream._"}
 """
         html, broken_links, broken_citations = vault_render(dashboard_md, _vault)
-    return RenderedNode(slug="home", title="Home", node_type=NodeType.note,
+    return RenderedNode(slug="home", path="", title="Home", node_type=NodeType.note,
                         html=html, broken_links=[], broken_citations=[])
 
 

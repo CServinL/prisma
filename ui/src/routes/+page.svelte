@@ -210,6 +210,9 @@
 
   interface RenderedNode {
     slug: string;
+    // Vault-relative POSIX path (e.g. "sources/foo.md") -- disambiguates
+    // `slug` (a bare filename stem, shared across folders on collision).
+    path: string;
     title: string;
     node_type: NodeType;
     html: string;
@@ -485,9 +488,18 @@
   let activeNode = $state<RenderedNode | null>(null);
   let slugCopied = $state(false);
 
+  // The bare `slug` alone is ambiguous when two files in different
+  // folders share a filename stem -- this reuses the same dir--name
+  // encoding move_node() already produces server-side, which find_file()
+  // can also decode back to the exact file (including as a [[wiki-link]]).
+  function serializedSlug(node: RenderedNode): string {
+    const dir = node.path.includes("/") ? node.path.slice(0, node.path.lastIndexOf("/")) : "";
+    return dir ? `${dir.replace(/\//g, "--")}--${node.slug}` : node.slug;
+  }
+
   async function copyActiveNodeSlug() {
     if (!activeNode) return;
-    await navigator.clipboard.writeText(activeNode.slug);
+    await navigator.clipboard.writeText(serializedSlug(activeNode));
     slugCopied = true;
     setTimeout(() => { slugCopied = false; }, 2000);
   }
@@ -2085,7 +2097,10 @@
             }}
           >{activeNode.node_type}</button>
           <span class="node-heading">{activeNode.title}</span>
-          <button class="toolbar-btn" title="Copy this item's vault slug" onclick={copyActiveNodeSlug}>
+          {#if activeNode.path.includes("/")}
+            <span class="node-breadcrumb" title={activeNode.path}>{activeNode.path.slice(0, activeNode.path.lastIndexOf("/"))} /</span>
+          {/if}
+          <button class="toolbar-btn" title="Copy this item's vault slug (includes its folder, to disambiguate)" onclick={copyActiveNodeSlug}>
             {slugCopied ? "Copied" : "Copy slug"}
           </button>
           {#if activeNode.node_type === "stream"}
@@ -3813,6 +3828,13 @@
     text-overflow: ellipsis;
     white-space: nowrap;
     flex: 1;
+  }
+
+  .node-breadcrumb {
+    font-size: 11px;
+    color: #5a7a9a;
+    white-space: nowrap;
+    flex-shrink: 0;
   }
 
   .html-frame {

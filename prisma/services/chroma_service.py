@@ -17,6 +17,17 @@ _log = logging.getLogger("prisma.chroma")
 
 _RESOURCE_HOLDER = "api"  # must match the worker name supervisor.py restarts, so a crash releases our leases
 
+# Below this cosine score, a hit is closer to noise than to a real match --
+# chroma's HNSW index always returns its top_k nearest neighbors even when
+# none of them are actually related to the query (a vault with no IoT/NPU
+# papers still returns its 5 "least distant" chunks for that query). Without
+# this floor, query() can never come back empty for a genuinely-uncovered
+# topic, which breaks the whole downstream contract chat_tools.py/chat_agent.py
+# are built on: "(no results found)" is supposed to be what tells the model
+# to fall back to its own knowledge and mark it ai-inference (ADR-017)
+# instead of writing citations against unrelated documents.
+_MIN_RELEVANCE_SCORE = 0.5
+
 
 def _embed_texts(
     texts: list[str], model: str, base_url: str = "http://localhost:11434", provider: str = "ollama",
@@ -248,6 +259,7 @@ class ChromaIndexer:
             if score > file_scores.get(path, 0.0):
                 file_scores[path] = score
         ranked = sorted(file_scores.items(), key=lambda x: -x[1])[:top_k]
+        ranked = [(sf, score) for sf, score in ranked if score >= _MIN_RELEVANCE_SCORE]
         _log.info("chroma query: q=%r chunks_searched=%d files_returned=%d", question[:60], total, len(ranked))
         return [GraphSearchResult(source_file=sf, score=score) for sf, score in ranked]
 

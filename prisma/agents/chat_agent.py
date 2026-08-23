@@ -114,7 +114,23 @@ def _extract_claims(reply: str) -> tuple[str, list[ClaimNode]]:
     case the model discusses the format itself earlier in its answer."""
     matches = list(FOOTNOTES_LINE_RE.finditer(reply))
     if not matches:
-        return reply.strip(), []
+        # The model skipped the FOOTNOTES_JSON line entirely -- not "[]",
+        # just absent. system_prompt_footnote_section() requires this line
+        # on every reply, even a trivial one ("do not omit it"), so this is
+        # always a protocol violation, never a legitimate empty case (that
+        # path is handled below, once JSON parses to []). Silently returning
+        # zero claims here would violate ADR-017's own stated invariant --
+        # "an unmarked substantive claim is treated exactly as badly as a
+        # factual error" -- by doing precisely that: letting the content
+        # through with no trust signal and no [^N] marker for the UI's
+        # References block to key off. Wrap the whole reply as one
+        # unattributed ai-inference claim instead, so the reader still sees
+        # it was never traced to a document.
+        content = reply.strip()
+        if not content:
+            return content, []
+        _log.warning("chat claims: model omitted FOOTNOTES_JSON entirely, wrapping reply as ai-inference")
+        return f"{content} [^1]", [InferenceNode(index=1, claim_text=content)]
     last = matches[-1]
     content = (reply[: last.start()] + reply[last.end():]).strip()
     try:

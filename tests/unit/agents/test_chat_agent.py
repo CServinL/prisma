@@ -59,7 +59,9 @@ def test_respond_returns_direct_answer_with_no_tool_call():
     reply = agent.respond(history=[], user_text="What does LLM stand for?")
 
     assert reply.role == ChatRole.assistant
-    assert reply.content.value == "LLM stands for Large Language Model."
+    # No FOOTNOTES_JSON line in the mocked reply -- _extract_claims wraps it
+    # as a single ai-inference claim rather than dropping attribution silently.
+    assert reply.content.value == "LLM stands for Large Language Model. [^1]"
     assert reply.tool_calls == []
 
 
@@ -82,7 +84,7 @@ def test_respond_calls_tool_then_returns_final_answer():
     assert call_args == ("SEARCH_VAULT", "attention mechanisms")
     assert "session_graph" in call_kwargs
     assert "remaining_budget" in call_kwargs
-    assert reply.content.value == "Based on your notes, attention mechanisms let models weigh tokens."
+    assert reply.content.value == "Based on your notes, attention mechanisms let models weigh tokens. [^1]"
 
 
 # ── SessionOrchestrator integration (ADR-019 §35/36) ──────────────────────────
@@ -664,16 +666,30 @@ def test_extract_claims_strips_the_line_even_when_list_is_empty():
     assert claims == []
 
 
-def test_extract_claims_returns_unchanged_when_line_missing():
+def test_extract_claims_wraps_reply_as_inference_when_line_missing():
     # A model that ignores the instruction entirely must not lose its
     # answer -- this is the single most important fallback in the whole
     # feature, since claim attribution is new prompting complexity layered
-    # on an existing, already-working chat loop.
+    # on an existing, already-working chat loop. But it also must not pass
+    # through with zero trust signal (ADR-017: an unmarked substantive claim
+    # is exactly as bad as a factual error) -- confirmed live in production,
+    # a real chat turn skipped FOOTNOTES_JSON entirely and its factual
+    # content rendered with no [^N] marker and no References block at all.
     reply = "No footnote line at all here."
 
     content, claims = _extract_claims(reply)
 
-    assert content == "No footnote line at all here."
+    assert content == "No footnote line at all here. [^1]"
+    assert len(claims) == 1
+    assert claims[0].kind == "inference"
+    assert claims[0].index == 1
+    assert claims[0].claim_text == "No footnote line at all here."
+
+
+def test_extract_claims_returns_no_claims_for_empty_reply():
+    content, claims = _extract_claims("   ")
+
+    assert content == ""
     assert claims == []
 
 
@@ -731,7 +747,7 @@ def test_respond_final_answer_populates_claims():
     assert reply.claims[0].sources == ["kg-decision"]
 
 
-def test_respond_final_answer_with_no_footnotes_line_has_empty_claims():
+def test_respond_final_answer_with_no_footnotes_line_is_wrapped_as_inference():
     llm = MagicMock()
     llm.model = "test-model"
     llm.context_window = 1_000_000
@@ -740,7 +756,8 @@ def test_respond_final_answer_with_no_footnotes_line_has_empty_claims():
 
     reply = agent.respond(history=[], user_text="hello")
 
-    assert reply.claims == []
+    assert len(reply.claims) == 1
+    assert reply.claims[0].kind == "inference"
 
 
 def test_system_prompt_includes_footnote_instructions():

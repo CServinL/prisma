@@ -152,11 +152,15 @@ def _extract_claims(reply: str) -> tuple[str, list[ClaimNode]]:
     return content, claims
 
 
-# Grounding tools -- the only two that can put real vault content in front
-# of the model. RECALL/THINK don't count: RECALL surfaces this session's own
-# prior turns (not vault documents), and THINK never touches the vault at
-# all.
-_GROUNDING_TOOLS = {"search_vault", "graph_context"}
+# Grounding tools -- the only ones that can put real, citable content in
+# front of the model. RECALL/THINK don't count: RECALL surfaces this
+# session's own prior turns (not vault/Zotero documents), and THINK never
+# looks anything up at all. zotero_search belongs here too -- a resolvable
+# zotero:<item_key> source (chat_tools.py's _zotero_search) is exactly as
+# citable as a vault slug; leaving it out would make a turn that only
+# called SEARCH_VAULT (empty) and ZOTERO_SEARCH (real hits) look
+# ungrounded, forcing valid Zotero-cited claims into one inference block.
+_GROUNDING_TOOLS = {"search_vault", "graph_context", "zotero_search"}
 
 
 def _turn_had_no_grounding(tool_calls: list["ToolCallNode"]) -> bool:

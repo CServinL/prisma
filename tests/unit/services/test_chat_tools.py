@@ -469,7 +469,8 @@ def test_call_unknown_marker_raises():
         toolbox.call("NOT_A_TOOL", "x")
 
 
-# ── zotero_search (reaches Zotero bookmarks the vault import boundary means
+# ── zotero_search (reaches Zotero bookmarks the vault's import boundary
+# would otherwise hide from SEARCH_VAULT entirely) ───────────────────────
 
 def _item(key: str, title: str, abstract: str | None, year: str | None = "2024") -> ZoteroItem:
     return ZoteroItem(

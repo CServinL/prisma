@@ -789,6 +789,18 @@ def test_turn_had_no_grounding_false_when_no_grounding_tool_was_called():
     assert _turn_had_no_grounding(tool_calls) is False
 
 
+def test_turn_had_no_grounding_false_when_zotero_search_returned_content():
+    # Copilot review on PR #97: search_vault empty + zotero_search real
+    # hits must not be forced into one inference block -- zotero_search is
+    # just as much a grounding tool as search_vault/graph_context.
+    tool_calls = [
+        ToolCallNode(tool="search_vault", args={"query": "x"}, result=None, status="ok"),
+        ToolCallNode(tool="zotero_search", args={"query": "x"}, result="a Zotero abstract", status="ok"),
+    ]
+
+    assert _turn_had_no_grounding(tool_calls) is False
+
+
 def test_respond_overrides_self_report_when_grounding_tool_returns_nothing():
     llm = MagicMock()
     llm.model = "test-model"

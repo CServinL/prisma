@@ -1073,26 +1073,39 @@ class Supervisor:
                     # finishes, with no fast_deaths/backoff bookkeeping
                     # touched for an event that was never a crash.
                     continue
+                if w.is_alive():
+                    w._restart_lock.release()
+                    continue  # finished restarting between the check above and acquiring the lock
+                if w.uptime() < self._FAST_DEATH_THRESHOLD:
+                    fast_deaths[name] += 1
+                else:
+                    fast_deaths[name] = 0
+                if fast_deaths[name] >= self._MAX_FAST_DEATHS:
+                    log.error(
+                        "%s crash-looped %d times, each within %.0fs of starting -- giving up "
+                        "(likely a config error, not a transient crash); fix it and "
+                        "POST /supervisor/restart/%s to try again",
+                        name, fast_deaths[name], self._FAST_DEATH_THRESHOLD, name,
+                    )
+                    self._given_up.add(name)
+                    w._restart_lock.release()
+                    continue
+                delay = backoff[name]
+                log.warning("%s died unexpectedly — restarting in %.0fs", name, delay)
+                # Released before the backoff sleep, not held through it -- a
+                # manual restart (an operator's POST /supervisor/restart/
+                # {name}) must stay responsive even while this worker is
+                # mid-backoff, which can be up to _MAX_BACKOFF=30s. Re-
+                # acquired and re-checked below before actually restarting,
+                # in case a manual restart already fixed it during the wait.
+                w._restart_lock.release()
+                if self._stop_event.wait(timeout=delay):
+                    break
+                if not w._restart_lock.acquire(blocking=False):
+                    continue
                 try:
                     if w.is_alive():
-                        continue  # finished restarting between the check above and acquiring the lock
-                    if w.uptime() < self._FAST_DEATH_THRESHOLD:
-                        fast_deaths[name] += 1
-                    else:
-                        fast_deaths[name] = 0
-                    if fast_deaths[name] >= self._MAX_FAST_DEATHS:
-                        log.error(
-                            "%s crash-looped %d times, each within %.0fs of starting -- giving up "
-                            "(likely a config error, not a transient crash); fix it and "
-                            "POST /supervisor/restart/%s to try again",
-                            name, fast_deaths[name], self._FAST_DEATH_THRESHOLD, name,
-                        )
-                        self._given_up.add(name)
-                        continue
-                    delay = backoff[name]
-                    log.warning("%s died unexpectedly — restarting in %.0fs", name, delay)
-                    if self._stop_event.wait(timeout=delay):
-                        break
+                        continue  # a manual restart already fixed it during the backoff wait
                     w._do_restart()
                     backoff[name] = min(delay * 2, self._MAX_BACKOFF)
                     # Whatever that worker was doing (including any resource lease

@@ -106,3 +106,42 @@ def test_monitor_loop_does_not_pile_on_a_restart_already_in_progress():
 
     assert worker.restart_calls == 0
     assert "api" not in sup._given_up
+
+
+def test_monitor_loop_releases_the_lock_during_its_backoff_wait():
+    # Copilot review on PR #97: monitor_loop() used to hold _restart_lock
+    # across the whole backoff sleep (up to Supervisor._MAX_BACKOFF=30s),
+    # which would make a manual POST /supervisor/restart/{name} -- an
+    # operator's own action -- block for the full delay even though it's
+    # not the crash-detected restart at all. Checked here by having the
+    # fake stop_event's wait() (monitor_loop's backoff sleep) itself try a
+    # non-blocking acquire: it must succeed, proving the lock isn't held
+    # during that window.
+    class _CheckingEvent(_FakeEvent):
+        def __init__(self) -> None:
+            super().__init__()
+            self.acquired_during_wait: bool | None = None
+
+        def wait(self, timeout: float | None = None) -> bool:
+            # Distinguish the backoff-delay wait (starts at 1.0, doubling)
+            # from the outer poll-interval wait (a flat Supervisor.
+            # _POLL_INTERVAL=2.0) so this specifically checks the window
+            # Copilot's review was about, not just "eventually unlocked."
+            if timeout is not None and timeout != Supervisor._POLL_INTERVAL:
+                self.acquired_during_wait = worker._restart_lock.acquire(blocking=False)
+                if self.acquired_during_wait:
+                    worker._restart_lock.release()
+            return self._flag
+
+    worker = _FakeWorker(uptime=0.5)
+    sup = Supervisor({"api": worker}, MagicMock())
+    event = _CheckingEvent()
+    sup._stop_event = event
+
+    t = threading.Thread(target=sup.monitor_loop, daemon=True)
+    t.start()
+    time.sleep(0.2)
+    sup._stop_event.set()
+    t.join(timeout=1.0)
+
+    assert event.acquired_during_wait is True

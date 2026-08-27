@@ -2,10 +2,10 @@
 from pathlib import Path
 from unittest.mock import MagicMock
 
-from prisma.agents.chat_agent import MAX_TOOL_ITERATIONS, ChatAgent, _extract_claims
+from prisma.agents.chat_agent import MAX_TOOL_ITERATIONS, ChatAgent, _extract_claims, _turn_had_no_grounding
 from prisma.schema_gov import RichContent
 from prisma.services.chat_tools import ToolResult
-from prisma.storage.models.vault_models import ChatRole, CitedClaimNode, InferenceNode, Note, TurnNode
+from prisma.storage.models.vault_models import ChatRole, CitedClaimNode, InferenceNode, Note, ToolCallNode, TurnNode
 
 
 def _msg(role: ChatRole, text: str) -> TurnNode:
@@ -758,6 +758,82 @@ def test_respond_final_answer_with_no_footnotes_line_is_wrapped_as_inference():
 
     assert len(reply.claims) == 1
     assert reply.claims[0].kind == "inference"
+
+
+# ── deterministic no-grounding override ──────────────────────────────────
+# Confirmed live in production (2026-08-27): a grounding tool call that came
+# back empty still let unmarked or wrongly-marked content through, three
+# different ways depending on what the model's self-report happened to look
+# like that turn. Fixed by deriving the classification from ToolCallNode
+# data ChatAgent itself built, instead of trusting the model's self-report
+# in this one case -- see _turn_had_no_grounding()'s docstring.
+
+def test_turn_had_no_grounding_true_when_grounding_tool_returned_nothing():
+    tool_calls = [ToolCallNode(tool="search_vault", args={"query": "x"}, result=None, status="ok")]
+
+    assert _turn_had_no_grounding(tool_calls) is True
+
+
+def test_turn_had_no_grounding_false_when_grounding_tool_returned_content():
+    tool_calls = [ToolCallNode(tool="search_vault", args={"query": "x"}, result="a hit", status="ok")]
+
+    assert _turn_had_no_grounding(tool_calls) is False
+
+
+def test_turn_had_no_grounding_false_when_no_grounding_tool_was_called():
+    # RECALL isn't a grounding tool (session history, not vault documents) --
+    # a turn that only ever called RECALL is left to the existing self-report
+    # path, same as one that called no tool at all.
+    tool_calls = [ToolCallNode(tool="recall", args={"query": "x"}, result=None, status="ok")]
+
+    assert _turn_had_no_grounding(tool_calls) is False
+
+
+def test_respond_overrides_self_report_when_grounding_tool_returns_nothing():
+    llm = MagicMock()
+    llm.model = "test-model"
+    llm.context_window = 1_000_000
+    llm.complete.side_effect = [
+        "SEARCH_VAULT: low-resource LLMs",
+        'It seems there are no notes on this. I can share general knowledge if you want.\n'
+        'FOOTNOTES_JSON: []',
+    ]
+    toolbox = MagicMock()
+    toolbox.call.return_value = ToolResult(text="", raw=[])  # nothing found
+    agent = _agent(llm=llm, toolbox=toolbox)
+
+    reply = agent.respond(history=[], user_text="low-resource LLMs?")
+
+    assert reply.content.value == (
+        "It seems there are no notes on this. I can share general knowledge if you want. [^1]"
+    )
+    assert len(reply.claims) == 1
+    assert reply.claims[0].kind == "inference"
+    assert reply.claims[0].claim_text == (
+        "It seems there are no notes on this. I can share general knowledge if you want."
+    )
+
+
+def test_respond_does_not_override_when_grounding_tool_returns_content():
+    llm = MagicMock()
+    llm.model = "test-model"
+    llm.context_window = 1_000_000
+    llm.complete.side_effect = [
+        "SEARCH_VAULT: kuzu",
+        'Kùzu was chosen for its embedded mode[^1].\n'
+        'FOOTNOTES_JSON: [{"index": 1, "relation": "attribution", "sources": ["kg-decision"]}]',
+    ]
+    toolbox = MagicMock()
+    toolbox.call.return_value = ToolResult(text="Kùzu docs excerpt", raw=[])
+    toolbox.slug_resolves.return_value = True
+    toolbox.get_node_text.return_value = None  # skip faithfulness_checked, see _agent()'s docstring
+    agent = _agent(llm=llm, toolbox=toolbox)
+
+    reply = agent.respond(history=[], user_text="why Kùzu?")
+
+    assert reply.content.value == "Kùzu was chosen for its embedded mode[^1]."
+    assert len(reply.claims) == 1
+    assert reply.claims[0].sources == ["kg-decision"]
 
 
 def test_system_prompt_includes_footnote_instructions():

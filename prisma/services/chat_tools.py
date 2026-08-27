@@ -13,6 +13,7 @@ god_nodes, surprising_connections, suggest_questions, deferred for later.
 """
 from __future__ import annotations
 
+import logging
 import re
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -29,6 +30,9 @@ from prisma.storage.models.vault_models import Chat
 
 if TYPE_CHECKING:
     import networkx as nx
+    from prisma.integrations.zotero.client import ZoteroClient
+
+_log = logging.getLogger("prisma.chat_tools")
 
 _EXCERPT_CHARS = 800
 
@@ -46,6 +50,12 @@ class ToolSpec(BaseModel):
     marker: str
     description: str
     hidden_when_native_reasoning: bool = False
+    # ZOTERO_SEARCH only makes sense when a Zotero library is actually
+    # configured and reachable (online mode) -- see system_prompt_tool_
+    # section()'s zotero_available param and app.py's two ChatToolbox
+    # construction sites, which decide this per request/reload from
+    # _zotero.is_available().
+    hidden_when_zotero_unavailable: bool = False
 
 
 TOOLS: list[ToolSpec] = [
@@ -93,6 +103,20 @@ TOOLS: list[ToolSpec] = [
         ),
         hidden_when_native_reasoning=True,
     ),
+    ToolSpec(
+        name="zotero_search",
+        marker="ZOTERO_SEARCH",
+        description=(
+            "Searches the user's whole Zotero library (title/author/text, via "
+            "Zotero's own search) — including items never imported into the "
+            "vault. SEARCH_VAULT only covers what's already been deliberately "
+            "imported (see docs/wiki/architecture.md on the Zotero/vault "
+            "boundary); call this too when SEARCH_VAULT comes back empty and "
+            "the question is the kind a saved paper might answer — a bookmarked "
+            "abstract can be useful even before anyone imports the full item."
+        ),
+        hidden_when_zotero_unavailable=True,
+    ),
 ]
 
 TOOL_CALL_RE = re.compile(
@@ -109,8 +133,12 @@ TOOL_CALL_RE = re.compile(
 FOOTNOTES_LINE_RE = re.compile(r"^FOOTNOTES_JSON:\s*(.+)$", re.MULTILINE)
 
 
-def system_prompt_tool_section(has_native_reasoning: bool = True) -> str:
-    visible = [t for t in TOOLS if not (t.hidden_when_native_reasoning and has_native_reasoning)]
+def system_prompt_tool_section(has_native_reasoning: bool = True, zotero_available: bool = False) -> str:
+    visible = [
+        t for t in TOOLS
+        if not (t.hidden_when_native_reasoning and has_native_reasoning)
+        and not (t.hidden_when_zotero_unavailable and not zotero_available)
+    ]
     lines = [
         "You have tools you may call by writing a line in exactly this "
         "format, and nothing else on that line:",
@@ -128,9 +156,13 @@ def system_prompt_tool_section(has_native_reasoning: bool = True) -> str:
         "Only skip straight to answering, with no tool line, for messages "
         "with no factual content to check at all: greetings, thanks, or a "
         "question about this conversation itself. If SEARCH_VAULT (and "
-        "GRAPH_CONTEXT, if relevant) come back empty, you may still answer "
-        "from your own knowledge -- just mark that content ai-inference "
-        "below, every time, with no exceptions."
+        "GRAPH_CONTEXT, if relevant) come back empty or irrelevant, say so "
+        "plainly and stop there -- do not fall back to answering from your "
+        "own general knowledge. Only answer from your own knowledge when "
+        "the user has explicitly asked for your opinion, take, or analysis "
+        "(e.g. \"what do you think\", \"in your opinion\") -- and even "
+        "then, mark that content ai-inference below, every time, with no "
+        "exceptions."
     )
     return "\n".join(lines)
 
@@ -203,10 +235,28 @@ class ChatToolbox:
     already-constructed service instances (same ones app.py's other
     endpoints use) rather than constructing its own."""
 
-    def __init__(self, chroma: ChromaIndexer, kg: KnowledgeGraphClient, vault: VaultService) -> None:
+    def __init__(
+        self, chroma: ChromaIndexer, kg: KnowledgeGraphClient, vault: VaultService,
+        zotero: "ZoteroClient | None" = None,
+    ) -> None:
         self._chroma = chroma
         self._kg = kg
         self._vault = vault
+        # None when Zotero isn't configured/reachable (offline mode, or no
+        # library set up at all) -- app.py only advertises ZOTERO_SEARCH to
+        # the model (system_prompt_tool_section's zotero_available) when
+        # this is set, so _zotero_search below should never actually be
+        # reached while it's None, but stays defensive rather than assuming.
+        self._zotero = zotero
+
+    @property
+    def zotero_available(self) -> bool:
+        """Whether ZOTERO_SEARCH should be advertised to the model at all --
+        system_prompt_tool_section()'s zotero_available param reads this
+        (via ChatAgent, see its __init__) rather than callers having to keep
+        a second, separately-passed bool in sync with whatever `zotero`
+        this toolbox was actually constructed with."""
+        return self._zotero is not None
 
     def call(
         self, marker: str, query: str, *,
@@ -221,6 +271,8 @@ class ChatToolbox:
             return self._recall(query, session_graph, remaining_budget, chat_slug)
         if marker == "THINK":
             return self._think(query)
+        if marker == "ZOTERO_SEARCH":
+            return self._zotero_search(query)
         raise ValueError(f"unknown tool marker: {marker!r}")
 
     def _think(self, query: str) -> ToolResult:
@@ -236,10 +288,17 @@ class ChatToolbox:
         """Resolves a footnote's `sources` slug back to plain text, for
         ADR-017's faithfulness_checked verification (ChatAgent._verify_footnote).
         Covers the same node types footnotes/wiki-links can point to --
-        Note/Source's `body`, or a Chat's full message transcript joined.
-        Returns None on a missing/unresolvable slug rather than raising, so
-        one stale or hallucinated slug doesn't break verification for the
-        other footnotes in the same turn."""
+        Note/Source's `body`, or a Chat's full message transcript joined, plus
+        `zotero:<item_key>` (see _zotero_search) since a Zotero bookmark has
+        no vault slug to resolve any other way. Returns None on a missing/
+        unresolvable slug rather than raising, so one stale or hallucinated
+        slug doesn't break verification for the other footnotes in the same
+        turn."""
+        if slug.startswith("zotero:"):
+            if self._zotero is None:
+                return None
+            item = self._zotero.get_item(slug.removeprefix("zotero:"))
+            return item.abstract_note if item else None
         try:
             node = self._vault.get_any(slug)
         except FileNotFoundError:
@@ -253,7 +312,13 @@ class ChatToolbox:
         vault nodes -- existence only, unlike get_node_text() above, which
         also treats an empty-body node as unresolved (wrong check here: a
         real but currently-empty Note is still a real slug, just not
-        useful as faithfulness-check input)."""
+        useful as faithfulness-check input). A `zotero:<item_key>` entry
+        (see _zotero_search) resolves against the Zotero library instead --
+        it was never going to be a vault slug in the first place."""
+        if slug.startswith("zotero:"):
+            if self._zotero is None:
+                return False
+            return self._zotero.get_item(slug.removeprefix("zotero:")) is not None
         try:
             self._vault.get_any(slug)
             return True
@@ -289,6 +354,38 @@ class ChatToolbox:
             wrap_untrusted(Path(i["source_file"]).stem, i["text"]) for i in items if i["text"]
         )
         return ToolResult(text=wrapped, raw=items)
+
+    def _zotero_search(self, query: str, limit: int = 5) -> ToolResult:
+        """Reaches into the whole Zotero library -- including bookmarks never
+        deliberately imported into the vault (see CLAUDE.md's "Zotero is the
+        bookmark layer... vault is the second brain" boundary), so a paper
+        the user saved but hasn't brought into the vault yet is still
+        findable here even though SEARCH_VAULT would never see it.
+        `self._zotero` is None whenever this shouldn't have been reachable
+        at all (see __init__) -- defensive, not the expected path, since
+        app.py only advertises ZOTERO_SEARCH when a client is configured."""
+        if self._zotero is None:
+            return ToolResult(
+                text="(Zotero is not configured/reachable right now -- tell the user this "
+                     "needs attention, don't guess at an answer instead)",
+                raw=[],
+            )
+        try:
+            items = self._zotero.search_items(query, limit=limit)
+        except Exception as exc:
+            _log.warning("zotero_search failed: %s", exc)
+            return ToolResult(text="(Zotero search failed -- try again, or search the vault instead)", raw=[])
+        parts, raw = [], []
+        for item in items:
+            if not item.abstract_note:
+                continue
+            authors = ", ".join(item.authors) or "unknown author"
+            header = f"{item.title or '(untitled)'} -- {authors}"
+            if item.year:
+                header += f" ({item.year})"
+            parts.append(wrap_untrusted(f"zotero:{item.key}", f"{header}\n\n{item.abstract_note}"))
+            raw.append({"key": item.key, "title": item.title, "year": item.year})
+        return ToolResult(text="\n\n".join(parts), raw=raw)
 
     def _graph_context(self, query: str, budget: int = 1500) -> ToolResult:
         results = self._kg.query(query, budget=budget)

@@ -37,12 +37,13 @@ _MIN_VAULT_OVERVIEW_ENTITIES = 5
 class SessionOrchestrator:
     def __init__(
         self, system_prompt: str, max_history_tokens: int, has_native_reasoning: bool = True,
-        vault_overview: Callable[[], list[str]] | None = None,
+        vault_overview: Callable[[], list[str]] | None = None, zotero_available: bool = False,
     ) -> None:
         self._system_prompt = system_prompt
         self._max_history_tokens = max_history_tokens
         self._has_native_reasoning = has_native_reasoning
         self._vault_overview = vault_overview or (lambda: [])
+        self._zotero_available = zotero_available
 
     @property
     def max_history_tokens(self) -> int:
@@ -51,7 +52,7 @@ class SessionOrchestrator:
     def full_system_prompt(self, excerpt_notes: list[Note]) -> str:
         parts = [
             self._system_prompt,
-            system_prompt_tool_section(self._has_native_reasoning),
+            system_prompt_tool_section(self._has_native_reasoning, self._zotero_available),
             system_prompt_footnote_section(),
         ]
         labels = self._vault_overview()  # resolved fresh every call, not cached at construction

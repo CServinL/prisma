@@ -223,6 +223,37 @@ _CHAT_RESPONSE_ONLY_FIELDS = {
 }
 
 
+def _resolve_system_prompts(pool: list[str], messages: list[TurnNode]) -> tuple[list[str], list[TurnNode]]:
+    """Dedupes each message's transient `system_prompt_text` (set fresh by
+    ChatAgent.respond(), excluded from the persisted .sess -- see
+    TurnNode.system_prompt_index's field comment) against `pool`, extending
+    it with any text not already present, and returns messages with
+    `system_prompt_index` resolved to point at the right pool entry. A
+    message with no `system_prompt_text` (a user turn, or an
+    already-persisted assistant turn loaded back from disk --
+    `system_prompt_text` never round-trips through a save/load cycle)
+    passes through with its existing `system_prompt_index` untouched.
+    Recurses into `alternates` -- a regenerated turn's fresh attempt can
+    carry its own new text even though the demoted previous attempt it
+    displaces into `alternates` is already resolved."""
+    pool = list(pool)
+
+    def resolve_one(m: TurnNode) -> TurnNode:
+        update: dict = {}
+        if m.system_prompt_text is not None:
+            try:
+                idx = pool.index(m.system_prompt_text)
+            except ValueError:
+                pool.append(m.system_prompt_text)
+                idx = len(pool) - 1
+            update["system_prompt_index"] = idx
+        if m.alternates:
+            update["alternates"] = [resolve_one(a) for a in m.alternates]
+        return m.model_copy(update=update) if update else m
+
+    return pool, [resolve_one(m) for m in messages]
+
+
 def load_chat_session(path: Path) -> Chat:
     raw = json.loads(path.read_text(encoding="utf-8"))
     return Chat.model_validate({**raw, "path": path})
@@ -617,7 +648,8 @@ class VaultService:
             if path is None:
                 raise FileNotFoundError(f"chat not found: {slug!r}")
             chat = load_chat_session(path)
-            update = {"messages": messages, "modified_at": datetime.utcnow()}
+            pool, resolved_messages = _resolve_system_prompts(chat.system_prompts, messages)
+            update = {"messages": resolved_messages, "system_prompts": pool, "modified_at": datetime.utcnow()}
             if model is not None:
                 update["model"] = model
             save_chat_session(chat.model_copy(update=update), path)
@@ -637,7 +669,8 @@ class VaultService:
             if path is None:
                 raise FileNotFoundError(f"chat not found: {slug!r}")
             chat = load_chat_session(path)
-            update = {"messages": chat.messages + new_messages, "modified_at": datetime.utcnow()}
+            pool, resolved_new = _resolve_system_prompts(chat.system_prompts, new_messages)
+            update = {"messages": chat.messages + resolved_new, "system_prompts": pool, "modified_at": datetime.utcnow()}
             if model is not None:
                 update["model"] = model
             save_chat_session(chat.model_copy(update=update), path)

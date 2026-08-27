@@ -7,6 +7,7 @@ from prisma.services.chat_tools import TOOL_CALL_RE, ChatToolbox, system_prompt_
 from prisma.services.vault import VaultService
 from prisma.storage.models.kg_models import GraphQueryResult
 from prisma.storage.models.search_models import GraphSearchResult
+from prisma.storage.models.zotero_models import ZoteroCreator, ZoteroItem
 
 
 def test_system_prompt_tool_section_includes_all_markers():
@@ -25,6 +26,20 @@ def test_system_prompt_tool_section_shows_think_for_non_reasoning_models():
     text = system_prompt_tool_section(has_native_reasoning=False)
     assert "THINK:" in text
     # The other three tools stay present regardless -- THINK is additive.
+    assert "SEARCH_VAULT:" in text
+    assert "GRAPH_CONTEXT:" in text
+    assert "RECALL:" in text
+
+
+def test_system_prompt_tool_section_hides_zotero_search_by_default():
+    assert "ZOTERO_SEARCH:" not in system_prompt_tool_section()
+    assert "ZOTERO_SEARCH:" not in system_prompt_tool_section(zotero_available=False)
+
+
+def test_system_prompt_tool_section_shows_zotero_search_when_available():
+    text = system_prompt_tool_section(zotero_available=True)
+    assert "ZOTERO_SEARCH:" in text
+    # Additive, same as THINK -- the rest stay present regardless.
     assert "SEARCH_VAULT:" in text
     assert "GRAPH_CONTEXT:" in text
     assert "RECALL:" in text
@@ -452,3 +467,106 @@ def test_call_unknown_marker_raises():
     toolbox = ChatToolbox(MagicMock(), MagicMock(), MagicMock())
     with pytest.raises(ValueError):
         toolbox.call("NOT_A_TOOL", "x")
+
+
+# ── zotero_search (reaches Zotero bookmarks the vault import boundary means
+
+def _item(key: str, title: str, abstract: str | None, year: str | None = "2024") -> ZoteroItem:
+    return ZoteroItem(
+        key=key, item_type="journalArticle", title=title, abstract_note=abstract, date=year,
+        creators=[ZoteroCreator(creator_type="author", first_name="Ada", last_name="Lovelace")],
+    )
+
+
+def test_zotero_available_false_when_no_client_configured(vault):
+    toolbox = ChatToolbox(MagicMock(), MagicMock(), vault)
+    assert toolbox.zotero_available is False
+
+
+def test_zotero_available_true_when_client_given(vault):
+    toolbox = ChatToolbox(MagicMock(), MagicMock(), vault, zotero=MagicMock())
+    assert toolbox.zotero_available is True
+
+
+def test_zotero_search_returns_placeholder_when_not_configured(vault):
+    toolbox = ChatToolbox(MagicMock(), MagicMock(), vault)
+    result = toolbox.call("ZOTERO_SEARCH", "quantization")
+    assert result.raw == []
+    assert "not configured" in result.text
+
+
+def test_zotero_search_wraps_each_item_under_its_zotero_key(vault):
+    zotero = MagicMock()
+    zotero.search_items.return_value = [_item("ABC123", "1-bit quantization", "Extreme quantization reduces memory.")]
+    toolbox = ChatToolbox(MagicMock(), MagicMock(), vault, zotero=zotero)
+
+    result = toolbox.call("ZOTERO_SEARCH", "quantization")
+
+    assert 'path="zotero:ABC123"' in result.text
+    assert "Extreme quantization reduces memory." in result.text
+    assert result.raw == [{"key": "ABC123", "title": "1-bit quantization", "year": 2024}]
+
+
+def test_zotero_search_skips_items_with_no_abstract(vault):
+    zotero = MagicMock()
+    zotero.search_items.return_value = [_item("NOABS", "No abstract here", None)]
+    toolbox = ChatToolbox(MagicMock(), MagicMock(), vault, zotero=zotero)
+
+    result = toolbox.call("ZOTERO_SEARCH", "anything")
+
+    assert result.text == ""
+    assert result.raw == []
+
+
+def test_zotero_search_degrades_on_api_error(vault):
+    zotero = MagicMock()
+    zotero.search_items.side_effect = RuntimeError("Zotero API down")
+    toolbox = ChatToolbox(MagicMock(), MagicMock(), vault, zotero=zotero)
+
+    result = toolbox.call("ZOTERO_SEARCH", "anything")
+
+    assert result.raw == []
+    assert "failed" in result.text
+
+
+def test_get_node_text_resolves_a_zotero_item(vault):
+    zotero = MagicMock()
+    zotero.get_item.return_value = _item("ABC123", "Title", "The abstract text.")
+    toolbox = ChatToolbox(MagicMock(), MagicMock(), vault, zotero=zotero)
+
+    assert toolbox.get_node_text("zotero:ABC123") == "The abstract text."
+    zotero.get_item.assert_called_once_with("ABC123")
+
+
+def test_get_node_text_returns_none_for_zotero_when_not_configured(vault):
+    toolbox = ChatToolbox(MagicMock(), MagicMock(), vault)
+    assert toolbox.get_node_text("zotero:ABC123") is None
+
+
+def test_get_node_text_returns_none_for_unknown_zotero_key(vault):
+    zotero = MagicMock()
+    zotero.get_item.return_value = None
+    toolbox = ChatToolbox(MagicMock(), MagicMock(), vault, zotero=zotero)
+
+    assert toolbox.get_node_text("zotero:MISSING") is None
+
+
+def test_slug_resolves_true_for_a_real_zotero_item(vault):
+    zotero = MagicMock()
+    zotero.get_item.return_value = _item("ABC123", "Title", "abstract")
+    toolbox = ChatToolbox(MagicMock(), MagicMock(), vault, zotero=zotero)
+
+    assert toolbox.slug_resolves("zotero:ABC123") is True
+
+
+def test_slug_resolves_false_for_a_missing_zotero_item(vault):
+    zotero = MagicMock()
+    zotero.get_item.return_value = None
+    toolbox = ChatToolbox(MagicMock(), MagicMock(), vault, zotero=zotero)
+
+    assert toolbox.slug_resolves("zotero:MISSING") is False
+
+
+def test_slug_resolves_false_for_zotero_prefix_when_not_configured(vault):
+    toolbox = ChatToolbox(MagicMock(), MagicMock(), vault)
+    assert toolbox.slug_resolves("zotero:ABC123") is False

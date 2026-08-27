@@ -123,7 +123,7 @@ class Source(VaultNodeBase):
     item_type: str | None = None
 
 
-CHAT_SCHEMA_VERSION = 4
+CHAT_SCHEMA_VERSION = 5
 
 
 class ToolCallNode(BaseModel):
@@ -298,6 +298,27 @@ class TurnNode(BaseModel):
     # specific historical reply" once the config changes mid-chat, which
     # matters when comparing model quality across a test session.
     model: str | None = None
+    # Index into Chat.system_prompts -- the exact, fully-assembled system
+    # prompt sent to the model for this turn (build_system_prompt()'s base
+    # layer + user layer + the tool/footnote sections, see chat_prompts.py/
+    # chat_tools.py). None for user messages. Same reproducibility rationale
+    # as `model` above, and for the same reason that field can't be read off
+    # Chat.model: the base prompt is a code constant that changes across
+    # releases, and the user layer (chat_user_prompt.md) can be edited
+    # mid-conversation -- without this, there is no way to know after the
+    # fact what instructions actually produced a given historical reply. An
+    # index into a chat-level pool rather than the text itself, so a
+    # long-running chat with a stable prompt doesn't duplicate that text on
+    # every single turn -- VaultService's _resolve_system_prompts() is what
+    # turns system_prompt_text (below) into this index at save time.
+    system_prompt_index: int | None = None
+    # Transient carrier for the text above, set by ChatAgent.respond() --
+    # excluded from the persisted .sess entirely (never round-trips through
+    # disk) so a raw TurnNode fresh off respond() and a TurnNode just loaded
+    # from disk look the same to any code that doesn't specifically care
+    # about the difference: both have this as None, and the real, resolved
+    # answer lives in system_prompt_index + Chat.system_prompts.
+    system_prompt_text: str | None = Field(default=None, exclude=True)
     tool_calls: list[ToolCallNode] = Field(default_factory=list)
     thoughts: list[ThinkingNode] = Field(default_factory=list)
     claims: list[ClaimNode] = Field(default_factory=list)
@@ -383,12 +404,34 @@ def _migrate_chat_v3_to_v4(raw: dict) -> dict:
     return raw
 
 
+def _migrate_chat_v4_to_v5(raw: dict) -> dict:
+    """v4 -> v5 adds Chat.system_prompts (a deduplicated pool of every
+    distinct system prompt text used across this chat's turns) and
+    TurnNode.system_prompt_index (an index into that pool) -- another
+    purely-additive change, same "the no-op is the correct migration"
+    reasoning as _migrate_chat_v2_to_v3. Old turns simply have no record of
+    what system prompt produced them (true regardless of whether this
+    function exists), there is nothing to backfill."""
+    return raw
+
+
 class Chat(VaultNodeBase, VersionedModel):
     SCHEMA_VERSION = CHAT_SCHEMA_VERSION
-    MIGRATIONS = {1: _migrate_chat_v1_to_v2, 2: _migrate_chat_v2_to_v3, 3: _migrate_chat_v3_to_v4}
+    MIGRATIONS = {
+        1: _migrate_chat_v1_to_v2, 2: _migrate_chat_v2_to_v3, 3: _migrate_chat_v3_to_v4,
+        4: _migrate_chat_v4_to_v5,
+    }
 
     node_type: Literal[NodeType.chat] = NodeType.chat
     messages: list[TurnNode] = Field(default_factory=list)
+    # Deduplicated pool of every distinct system prompt text used across
+    # this chat's turns -- messages[].system_prompt_index points into this,
+    # rather than each assistant turn carrying its own copy of what's
+    # usually the same, unchanged text turn after turn. See
+    # TurnNode.system_prompt_index's field comment, and
+    # VaultService._resolve_system_prompts() for how new turns get pooled
+    # into this on save.
+    system_prompts: list[str] = Field(default_factory=list)
     context_slugs: list[str] = Field(default_factory=list)
     model: str = "llama3"
     # Indices into `messages` that are currently pinned — same identity

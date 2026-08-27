@@ -235,10 +235,26 @@ class ChromaIndexer:
             return []
         if self._embedding_model_mismatch:
             return []
-        with resource_lock.lease(self._supervisor_host, self._supervisor_port, holder=_RESOURCE_HOLDER, model=self._model) as granted:
+        # priority="interactive": this is a live chat turn waiting on a
+        # reply, not background indexing -- without this it defaults to
+        # "background" (lease()'s own default) and queues behind the
+        # indexer's own embedding work for the *same* model on a shared
+        # pool, competing for the same unprivileged capacity tier instead of
+        # the interactive reservation ResourceManager.acquire() already
+        # carves out (see config.toml's background_max_concurrent). RECALL
+        # (chat_tools.py) already gets this right; this call was the one
+        # place that didn't. Confirmed live 2026-08-27: the exact same query
+        # returned real results one run and an empty list moments later,
+        # with the indexer's background embedding activity as the only
+        # thing that changed -- not a relevance difference, a starved lease
+        # silently indistinguishable from "genuinely nothing relevant."
+        with resource_lock.lease(
+            self._supervisor_host, self._supervisor_port, holder=_RESOURCE_HOLDER, model=self._model,
+            priority="interactive",
+        ) as granted:
             embeddings = _embed_texts([question], self._model, self._base_url, self._provider) if granted else None
         if not embeddings:
-            _log.error("Error de busqueda vectorial, no puedo realizar busquedas vectoriales sin acceso a el mismo modelo que se uso para indexar")
+            _log.error("vector search unavailable -- could not reach the embedding model used to build the vault index")
             return []
         try:
             results = self._collection.query(

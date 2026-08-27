@@ -385,7 +385,7 @@ def _build_chat_agent(vault: "VaultService", chroma: ChromaIndexer, kg: Knowledg
     from prisma.utils.config import ConfigLoader
     cfg = ConfigLoader()
     llm = ChatLLM(cfg.get_chat_config(), ollama_host=cfg.get_llm_config().host)
-    toolbox = ChatToolbox(chroma, kg, vault)
+    toolbox = ChatToolbox(chroma, kg, vault, zotero=_zotero if _zotero.is_available() else None)
     return ChatAgent(
         llm, toolbox, system_prompt=build_system_prompt(),
         blocked_reason=lambda: _chat_blocked_reason(llm, chroma, kg),
@@ -405,7 +405,7 @@ def _build_chat_agent_for_model(model: str) -> ChatAgent:
     cfg = ConfigLoader()
     chat_config = cfg.get_chat_config().model_copy(update={"model": model})
     llm = ChatLLM(chat_config, ollama_host=cfg.get_llm_config().host)
-    toolbox = ChatToolbox(_chroma, _indexer, _vault)
+    toolbox = ChatToolbox(_chroma, _indexer, _vault, zotero=_zotero if _zotero.is_available() else None)
     return ChatAgent(
         llm, toolbox, system_prompt=build_system_prompt(),
         blocked_reason=lambda: _chat_blocked_reason(llm, _chroma, _indexer),
@@ -423,10 +423,12 @@ _t("building indexer")
 _indexer = KnowledgeGraphClient(port=_kg_port())
 _t("building chroma")
 _chroma = _build_chroma(_vault)
-_t("building chat agent")
-_chat_agent = _build_chat_agent(_vault, _chroma, _indexer)
 _t("building zotero")
 _zotero = _build_zotero()
+# Built after _zotero, not before -- _build_chat_agent() reads _zotero.is_
+# available() to decide whether to advertise ZOTERO_SEARCH to the model.
+_t("building chat agent")
+_chat_agent = _build_chat_agent(_vault, _chroma, _indexer)
 _t("module-level init done")
 
 from prisma.utils.config import ConfigLoader as _ConfigLoader

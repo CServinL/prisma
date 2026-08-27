@@ -225,6 +225,27 @@ def test_query_drops_hits_below_relevance_floor(indexer, vault):
     assert result == []
 
 
+def test_query_leases_with_interactive_priority(indexer, vault):
+    # Confirmed live 2026-08-27: query() used to lease with no priority at
+    # all, defaulting to "background" -- the same unprivileged tier as
+    # ChromaIndexer's own background embedding work, so a live chat turn's
+    # search could get starved by the indexer and come back empty for a
+    # reason that had nothing to do with relevance. SEARCH_VAULT is a live
+    # turn waiting on a reply, same as RECALL (which already passes this
+    # correctly) -- it must never queue behind bulk background work.
+    col = _mock_chroma_collection()
+    col.count.return_value = 1
+    col.query.return_value = {"metadatas": [[{"path": "notes/a.md", "chunk": 0}]], "distances": [[0.1]]}
+    client = _mock_chroma_client(col)
+    with patch("chromadb.HttpClient", return_value=client), \
+         patch("prisma.services.chroma_service.resource_lock.acquire", return_value=(True, "local-embeddings", "req-1")) as acquire, \
+         patch("prisma.services.chroma_service.resource_lock.release"), \
+         patch("prisma.services.chroma_service._embed_texts", return_value=[[0.1] * 768]):
+        indexer.query("anything", top_k=5)
+
+    assert acquire.call_args.kwargs["priority"] == "interactive"
+
+
 def test_upsert_file_updates_manifest(indexer, vault, tmp_path):
     md_file = vault.root / "notes" / "test.md"
     md_file.parent.mkdir(parents=True, exist_ok=True)

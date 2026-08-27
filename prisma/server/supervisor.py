@@ -480,6 +480,16 @@ class Worker:
         self._stop_timeout = stop_timeout
         self._env = {**os.environ, **env} if env else None
         self._started_at: float | None = None
+        # Held for the whole stop()+start() sequence of a restart, by
+        # whichever path is doing it (a manual POST /supervisor/restart/{name}
+        # here, or monitor_loop()'s own crash-detected restart) -- without
+        # this, the two race: is_alive() is False for the whole window
+        # between stop() and start() finishing, which looks identical to "it
+        # crashed" from monitor_loop()'s side even when the restart was
+        # deliberate. Confirmed live 2026-08-27: 3 manual hot-patch restarts
+        # each triggered one extra "died unexpectedly" restart from
+        # monitor_loop within ~1-2s, silently doubling restart_count.
+        self._restart_lock = threading.Lock()
 
     def start(self) -> None:
         # Own session — a signal to the supervisor's terminal doesn't propagate
@@ -508,6 +518,15 @@ class Worker:
             self.proc.kill()
 
     def restart(self) -> None:
+        with self._restart_lock:
+            self._do_restart()
+
+    def _do_restart(self) -> None:
+        """The actual stop+start+count sequence -- always called with
+        _restart_lock already held, either by restart() (a manual request)
+        or by monitor_loop() (a crash-detected restart). Never call this
+        directly; call restart() or go through monitor_loop()'s own
+        lock-guarded path instead."""
         self.stop()
         self.start()
         self.restart_count += 1
@@ -1044,6 +1063,19 @@ class Supervisor:
                     backoff[name] = 1.0
                     fast_deaths[name] = 0
                     continue
+                if not w._restart_lock.acquire(blocking=False):
+                    # A manual restart (Worker.restart(), the POST
+                    # /supervisor/restart/{name} handler) is already in
+                    # progress for this exact worker -- this not-alive
+                    # reading is that restart's own stop()-to-start() window,
+                    # not an unexpected crash. Skip it this cycle; the next
+                    # poll sees it running again once the manual restart
+                    # finishes, with no fast_deaths/backoff bookkeeping
+                    # touched for an event that was never a crash.
+                    continue
+                if w.is_alive():
+                    w._restart_lock.release()
+                    continue  # finished restarting between the check above and acquiring the lock
                 if w.uptime() < self._FAST_DEATH_THRESHOLD:
                     fast_deaths[name] += 1
                 else:
@@ -1056,18 +1088,33 @@ class Supervisor:
                         name, fast_deaths[name], self._FAST_DEATH_THRESHOLD, name,
                     )
                     self._given_up.add(name)
+                    w._restart_lock.release()
                     continue
                 delay = backoff[name]
                 log.warning("%s died unexpectedly — restarting in %.0fs", name, delay)
+                # Released before the backoff sleep, not held through it -- a
+                # manual restart (an operator's POST /supervisor/restart/
+                # {name}) must stay responsive even while this worker is
+                # mid-backoff, which can be up to _MAX_BACKOFF=30s. Re-
+                # acquired and re-checked below before actually restarting,
+                # in case a manual restart already fixed it during the wait.
+                w._restart_lock.release()
                 if self._stop_event.wait(timeout=delay):
                     break
-                w.restart()
-                backoff[name] = min(delay * 2, self._MAX_BACKOFF)
-                # Whatever that worker was doing (including any resource lease
-                # it held) is gone now that it's restarted — release its leases
-                # so a legitimately new request isn't blocked forever by one
-                # that no longer exists.
-                self.resources.release_all_held_by(name)
+                if not w._restart_lock.acquire(blocking=False):
+                    continue
+                try:
+                    if w.is_alive():
+                        continue  # a manual restart already fixed it during the backoff wait
+                    w._do_restart()
+                    backoff[name] = min(delay * 2, self._MAX_BACKOFF)
+                    # Whatever that worker was doing (including any resource lease
+                    # it held) is gone now that it's restarted — release its leases
+                    # so a legitimately new request isn't blocked forever by one
+                    # that no longer exists.
+                    self.resources.release_all_held_by(name)
+                finally:
+                    w._restart_lock.release()
             self.resources.reap()
             self._stop_event.wait(timeout=self._POLL_INTERVAL)
 

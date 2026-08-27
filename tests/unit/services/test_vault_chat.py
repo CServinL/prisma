@@ -170,6 +170,72 @@ def test_append_messages_raises_for_missing_chat(vault):
         vault.append_messages("does-not-exist", [_msg(ChatRole.user, "x")])
 
 
+# ── system_prompt pooling (Chat.system_prompts / TurnNode.system_prompt_index) ──
+
+def test_append_messages_pools_a_fresh_system_prompt_and_sets_the_index(vault):
+    chat = vault.create_chat("Test Session")
+
+    updated = vault.append_messages(chat.slug, [
+        _msg(ChatRole.user, "hi"),
+        _msg(ChatRole.assistant, "hello", system_prompt_text="You are Prisma."),
+    ])
+
+    assert updated.system_prompts == ["You are Prisma."]
+    assert updated.messages[0].system_prompt_index is None  # user turn
+    assert updated.messages[1].system_prompt_index == 0
+    # The transient field itself never round-trips -- confirms the .sess
+    # file doesn't carry the raw text a second time alongside the pool.
+    assert updated.messages[1].system_prompt_text is None
+
+
+def test_append_messages_reuses_the_pool_entry_for_identical_prompt_text(vault):
+    chat = vault.create_chat("Test Session")
+    vault.append_messages(chat.slug, [
+        _msg(ChatRole.assistant, "first reply", system_prompt_text="You are Prisma."),
+    ])
+
+    updated = vault.append_messages(chat.slug, [
+        _msg(ChatRole.assistant, "second reply", system_prompt_text="You are Prisma."),
+    ])
+
+    assert updated.system_prompts == ["You are Prisma."]  # not duplicated
+    assert updated.messages[0].system_prompt_index == 0
+    assert updated.messages[1].system_prompt_index == 0
+
+
+def test_append_messages_adds_a_new_pool_entry_for_a_changed_prompt(vault):
+    chat = vault.create_chat("Test Session")
+    vault.append_messages(chat.slug, [
+        _msg(ChatRole.assistant, "first reply", system_prompt_text="You are Prisma v1."),
+    ])
+
+    updated = vault.append_messages(chat.slug, [
+        _msg(ChatRole.assistant, "second reply", system_prompt_text="You are Prisma v2."),
+    ])
+
+    assert updated.system_prompts == ["You are Prisma v1.", "You are Prisma v2."]
+    assert updated.messages[0].system_prompt_index == 0
+    assert updated.messages[1].system_prompt_index == 1
+
+
+def test_save_chat_pools_a_regenerated_alternates_own_prompt_text(vault):
+    chat = vault.create_chat("Test Session")
+    vault.append_messages(chat.slug, [
+        _msg(ChatRole.assistant, "original", system_prompt_text="You are Prisma v1."),
+    ])
+    loaded = vault.get_chat(chat.slug)
+    original = loaded.messages[0]  # system_prompt_text is None post-load, index already set
+
+    regenerated = _msg(ChatRole.assistant, "better answer", system_prompt_text="You are Prisma v2.")
+    regenerated = regenerated.model_copy(update={"alternates": [original]})
+
+    updated = vault.save_chat(chat.slug, [regenerated])
+
+    assert updated.system_prompts == ["You are Prisma v1.", "You are Prisma v2."]
+    assert updated.messages[0].system_prompt_index == 1
+    assert updated.messages[0].alternates[0].system_prompt_index == 0
+
+
 def test_get_any_dispatches_chat_type_to_get_chat(vault):
     chat = vault.create_chat("Test Session")
     result = vault.get_any(chat.slug)

@@ -529,6 +529,30 @@
         "role": {
           "$ref": "#/$defs/ChatRole"
         },
+        "system_prompt_index": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "System Prompt Index"
+        },
+        "system_prompt_text": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "System Prompt Text"
+        },
         "thoughts": {
           "items": {
             "$ref": "#/$defs/ThinkingNode"
@@ -677,6 +701,13 @@
     "slug": {
       "title": "Slug",
       "type": "string"
+    },
+    "system_prompts": {
+      "items": {
+        "type": "string"
+      },
+      "title": "System Prompts",
+      "type": "array"
     },
     "tags": {
       "items": {

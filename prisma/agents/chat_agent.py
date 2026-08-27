@@ -152,6 +152,37 @@ def _extract_claims(reply: str) -> tuple[str, list[ClaimNode]]:
     return content, claims
 
 
+# Grounding tools -- the only ones that can put real, citable content in
+# front of the model. RECALL/THINK don't count: RECALL surfaces this
+# session's own prior turns (not vault/Zotero documents), and THINK never
+# looks anything up at all. zotero_search belongs here too -- a resolvable
+# zotero:<item_key> source (chat_tools.py's _zotero_search) is exactly as
+# citable as a vault slug; leaving it out would make a turn that only
+# called SEARCH_VAULT (empty) and ZOTERO_SEARCH (real hits) look
+# ungrounded, forcing valid Zotero-cited claims into one inference block.
+_GROUNDING_TOOLS = {"search_vault", "graph_context", "zotero_search"}
+
+
+def _turn_had_no_grounding(tool_calls: list["ToolCallNode"]) -> bool:
+    """True when a grounding tool was called this turn but came back with
+    nothing usable -- in that case no CitedClaimNode the model self-reports
+    can possibly be valid, because there is nothing it could have cited.
+    Classification is derived structurally here instead of trusting the
+    model's self-report for this one case, which real production traffic
+    has shown to fail three different ways: omitting FOOTNOTES_JSON
+    entirely, reporting an empty array while still answering ungrounded,
+    and marking pure "nothing found" filler as ai-inference right alongside
+    actual claims. Deliberately narrow -- a turn where no grounding tool was
+    called at all (a greeting, "thanks", a question about this chat itself)
+    is left to the existing self-report path, since forcing every trivial
+    reply into a visible inference block would be noise, not signal. This
+    is meant to work the same way regardless of which model is configured
+    (ADR-014) -- it reads the already-structured ToolCallNode data
+    ChatAgent itself built, not anything the model had to get right."""
+    called = [tc for tc in tool_calls if tc.tool in _GROUNDING_TOOLS]
+    return bool(called) and not any(tc.result for tc in called)
+
+
 # ADR-017's faithfulness_checked hook: is a sourced footnote's claim_text
 # actually supported by the vault content it cites? Same "cheap prefilter,
 # LLM call only when it matters" spirit as services/dedup.py's level 4→5
@@ -218,7 +249,7 @@ class ChatAgent:
             max_history_tokens = int(llm.context_window * _HISTORY_FRACTION_OF_CONTEXT_WINDOW)
         self._orchestrator = SessionOrchestrator(
             system_prompt, max_history_tokens, has_native_reasoning=llm.has_native_reasoning,
-            vault_overview=vault_overview,
+            vault_overview=vault_overview, zotero_available=toolbox.zotero_available,
         )
         # Called only when the LLM call fails, to say *why* rather than a
         # generic "couldn't reach it" — most commonly the shared GPU pool is
@@ -328,7 +359,8 @@ class ChatAgent:
         `history`), so callers that don't have a slug yet (tests, one-off
         completions) can simply omit it: `RECALL` degrades to its original
         single-chat behavior, not an error."""
-        messages = [{"role": "system", "content": self._orchestrator.full_system_prompt(excerpt_notes or [])}]
+        system_prompt_text = self._orchestrator.full_system_prompt(excerpt_notes or [])
+        messages = [{"role": "system", "content": system_prompt_text}]
         for m in self._orchestrator.bounded_history(history):
             messages.append({"role": m.role.value, "content": m.content.value})
         messages.append({"role": "user", "content": user_text})
@@ -363,7 +395,7 @@ class ChatAgent:
                         "up context from Excerpt buildup, or switch this chat to a model "
                         "with a bigger context window."
                     )),
-                    tool_calls=tool_calls, recalls=recalls, thoughts=thoughts, model=self.model,
+                    tool_calls=tool_calls, recalls=recalls, thoughts=thoughts, model=self.model, system_prompt_text=system_prompt_text,
                 )
             reply = self._llm.complete(messages)
             if reply is None:
@@ -375,11 +407,20 @@ class ChatAgent:
                         format=ContentFormat.markdown,
                         value=f"Sorry, I couldn't reach the language model just now{detail}. Please try again shortly.",
                     ),
-                    tool_calls=tool_calls, recalls=recalls, thoughts=thoughts, model=self.model,
+                    tool_calls=tool_calls, recalls=recalls, thoughts=thoughts, model=self.model, system_prompt_text=system_prompt_text,
                 )
             match = TOOL_CALL_RE.search(reply)
             if not match:
                 content, claims = _extract_claims(reply)
+                if _turn_had_no_grounding(tool_calls) and content.strip():
+                    # No tool call this turn could have grounded anything --
+                    # override the model's self-report (whatever it was)
+                    # with a single claim covering the whole reply, rather
+                    # than trust per-sentence markers it had no way to
+                    # ground correctly. See _turn_had_no_grounding().
+                    content = _FOOTNOTE_MARKER_RE.sub("", content).strip()
+                    claims = [InferenceNode(index=1, claim_text=content)]
+                    content = f"{content} [^1]"
                 resolved_claims, dropped = [], 0
                 for c in claims:
                     if self._sources_resolve(c):
@@ -391,7 +432,7 @@ class ChatAgent:
                 claims = [self._verify_claim(c) for c in resolved_claims]
                 return TurnNode(
                     role=ChatRole.assistant, content=RichContent(format=ContentFormat.markdown, value=content),
-                    tool_calls=tool_calls, claims=claims, recalls=recalls, thoughts=thoughts, model=self.model,
+                    tool_calls=tool_calls, claims=claims, recalls=recalls, thoughts=thoughts, model=self.model, system_prompt_text=system_prompt_text,
                 )
 
             marker, query = match.group(1), match.group(2).strip()
@@ -437,7 +478,7 @@ class ChatAgent:
                 format=ContentFormat.markdown,
                 value="I wasn't able to reach a final answer after checking several sources — could you rephrase?",
             ),
-            tool_calls=tool_calls, recalls=recalls, thoughts=thoughts, model=self.model,
+            tool_calls=tool_calls, recalls=recalls, thoughts=thoughts, model=self.model, system_prompt_text=system_prompt_text,
         )
 
     def context_usage(self, history: list[TurnNode], excerpt_notes: list[Note] | None = None) -> tuple[int, int]:

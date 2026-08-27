@@ -956,6 +956,13 @@
 
   async function sendChatMessage() {
     if (!activeChat || !chatInput.trim() || chatSending) return;
+    // A slug pasted/typed into the attach-slug box only reaches
+    // pendingAttachedSlugs on Enter (addSlugAttachment(), below) -- with no
+    // button and no visual cue that Enter is required, going straight to
+    // the main message box and submitting from there silently dropped
+    // whatever was left sitting unconfirmed. Committing it here too means
+    // "type/paste a slug, then send your message" just works.
+    addSlugAttachment();
     const text = chatInput;
     const slug = activeChat.slug;
     const attachments = pendingAttachments;

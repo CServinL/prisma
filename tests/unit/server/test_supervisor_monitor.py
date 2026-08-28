@@ -87,12 +87,8 @@ def test_monitor_loop_does_not_give_up_on_slow_deaths():
 
 
 def test_monitor_loop_does_not_pile_on_a_restart_already_in_progress():
-    # Confirmed live 2026-08-27: POST /supervisor/restart/{name} (Worker.
-    # restart()) races with this loop -- a worker is not-alive for the whole
-    # window between its stop() and start(), indistinguishable from a real
-    # crash unless the two coordinate. Simulated here by holding the lock
-    # for the loop's entire run, exactly as a manual restart's `with
-    # self._restart_lock:` would.
+    # A held lock simulates a manual restart's stop()-to-start() window,
+    # where the worker looks not-alive without having actually crashed.
     worker = _FakeWorker(uptime=0.5)
     worker._restart_lock.acquire()
     sup = Supervisor({"api": worker}, MagicMock())
@@ -109,24 +105,14 @@ def test_monitor_loop_does_not_pile_on_a_restart_already_in_progress():
 
 
 def test_monitor_loop_releases_the_lock_during_its_backoff_wait():
-    # Copilot review on PR #97: monitor_loop() used to hold _restart_lock
-    # across the whole backoff sleep (up to Supervisor._MAX_BACKOFF=30s),
-    # which would make a manual POST /supervisor/restart/{name} -- an
-    # operator's own action -- block for the full delay even though it's
-    # not the crash-detected restart at all. Checked here by having the
-    # fake stop_event's wait() (monitor_loop's backoff sleep) itself try a
-    # non-blocking acquire: it must succeed, proving the lock isn't held
-    # during that window.
+    # Otherwise a manual restart blocks for the whole backoff delay.
     class _CheckingEvent(_FakeEvent):
         def __init__(self) -> None:
             super().__init__()
             self.acquired_during_wait: bool | None = None
 
         def wait(self, timeout: float | None = None) -> bool:
-            # Distinguish the backoff-delay wait (starts at 1.0, doubling)
-            # from the outer poll-interval wait (a flat Supervisor.
-            # _POLL_INTERVAL=2.0) so this specifically checks the window
-            # Copilot's review was about, not just "eventually unlocked."
+            # Skip the flat _POLL_INTERVAL wait -- only the backoff wait matters here.
             if timeout is not None and timeout != Supervisor._POLL_INTERVAL:
                 self.acquired_during_wait = worker._restart_lock.acquire(blocking=False)
                 if self.acquired_during_wait:
@@ -145,3 +131,45 @@ def test_monitor_loop_releases_the_lock_during_its_backoff_wait():
     t.join(timeout=1.0)
 
     assert event.acquired_during_wait is True
+
+
+class _RecoverableFakeWorker(_FakeWorker):
+    """Can be flipped from crash-looping to healthy. Stays not-alive for
+    two more checks after that -- monitor_loop calls is_alive() twice per
+    cycle, and one reading alone gets absorbed without ever reaching the
+    fast_deaths-increment path."""
+
+    def __init__(self, uptime: float) -> None:
+        super().__init__(uptime)
+        self.healthy = False
+        self._not_alive_checks_remaining_after_healthy = 0
+
+    def is_alive(self) -> bool:
+        if self.healthy and self._not_alive_checks_remaining_after_healthy > 0:
+            self._not_alive_checks_remaining_after_healthy -= 1
+            return False
+        return self.healthy
+
+
+def test_manual_restart_reset_prevents_immediate_re_give_up():
+    worker = _RecoverableFakeWorker(uptime=0.5)
+    sup = Supervisor({"api": worker}, MagicMock())
+    _run_until_given_up(sup, "api")
+    assert "api" in sup._given_up
+    assert sup._fast_deaths["api"] >= Supervisor._MAX_FAST_DEATHS
+
+    # Mirrors supervisor.py's do_POST restart handler.
+    worker.healthy = True
+    worker._not_alive_checks_remaining_after_healthy = 2
+    sup._given_up.discard("api")
+    sup._fast_deaths["api"] = 0
+    sup._backoff["api"] = 1.0
+
+    sup._stop_event = _FakeEvent()
+    t = threading.Thread(target=sup.monitor_loop, daemon=True)
+    t.start()
+    time.sleep(0.2)
+    sup._stop_event.set()
+    t.join(timeout=1.0)
+
+    assert "api" not in sup._given_up

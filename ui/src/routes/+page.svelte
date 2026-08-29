@@ -300,6 +300,10 @@
   type ContentSegment = { text: string } | { claimIndex: number };
 
   const FOOTNOTE_MARKER_RE = /\[\^(\d+)\]/g;
+  // Only the trailing marker chat_agent.py's no-grounding override appends
+  // ("{content} [^1]") -- unlike FOOTNOTE_MARKER_RE, doesn't touch a literal
+  // "[^N]" the model happened to write mid-message.
+  const TRAILING_FOOTNOTE_MARKER_RE = /[ \t]*\[\^\d+\][ \t]*$/;
 
   function renderContentSegments(content: string): ContentSegment[] {
     const segments: ContentSegment[] = [];
@@ -346,6 +350,15 @@
   const ZOTERO_SOURCE_PREFIX = "zotero:";
   function isZoteroSource(source: string): boolean {
     return source.startsWith(ZOTERO_SOURCE_PREFIX);
+  }
+
+  // chat_agent.py's no-grounding override always sets claim_text to the
+  // full reply, unlike an ordinary mid-answer sentence tag -- that's what
+  // distinguishes "the whole turn is inference" from "one sentence in it
+  // is."
+  function isWholeTurnInference(content: string, claims: ClaimOut[]): boolean {
+    if (claims.length !== 1 || claims[0].kind !== "inference") return false;
+    return content.replace(TRAILING_FOOTNOTE_MARKER_RE, "").trim() === claims[0].claim_text.trim();
   }
 
   // Collapsed-by-default toggle line summarizing a turn's process
@@ -2242,6 +2255,7 @@
                 <div class="empty-state"><p class="text-body">Ask anything about your vault.</p></div>
               {/if}
               {#each activeChat.messages as msg, i (i)}
+                {@const wholeTurnInference = msg.claims?.length ? isWholeTurnInference(msg.content.value, msg.claims) : false}
                 <div class="chat-turn chat-turn-{msg.role}" id="chat-turn-{i}">
                   <div class="chat-turn-header">
                     <span class="chat-turn-role">{msg.role === "user" ? "You" : "Prisma"}</span>
@@ -2336,18 +2350,25 @@
                       </div>
                     {/if}
                   {/if}
-                  <div class="chat-turn-content text-body">
-                    {#each renderContentSegments(msg.content.value) as seg}
-                      {#if "text" in seg}{seg.text}{:else}
-                        {@const claim = msg.claims?.find(c => c.index === seg.claimIndex)}
-                        <button
-                          class="claim-ref claim-ref-{claim ? claimStyleKey(claim) : ''}"
-                          title="Jump to claim {seg.claimIndex}"
-                          onclick={() => document.getElementById(`chat-turn-${i}-claim-${seg.claimIndex}`)?.scrollIntoView({ behavior: "smooth", block: "nearest" })}
-                        >{seg.claimIndex}</button>
-                      {/if}
-                    {/each}
-                  </div>
+                  {#if wholeTurnInference}
+                    <div class="chat-turn-content chat-turn-content-inference text-body">
+                      <div class="chat-turn-content-inference-label">AI inference — not from your vault</div>
+                      {msg.content.value.replace(TRAILING_FOOTNOTE_MARKER_RE, "")}
+                    </div>
+                  {:else}
+                    <div class="chat-turn-content text-body">
+                      {#each renderContentSegments(msg.content.value) as seg}
+                        {#if "text" in seg}{seg.text}{:else}
+                          {@const claim = msg.claims?.find(c => c.index === seg.claimIndex)}
+                          <button
+                            class="claim-ref claim-ref-{claim ? claimStyleKey(claim) : ''}"
+                            title="Jump to claim {seg.claimIndex}"
+                            onclick={() => document.getElementById(`chat-turn-${i}-claim-${seg.claimIndex}`)?.scrollIntoView({ behavior: "smooth", block: "nearest" })}
+                          >{seg.claimIndex}</button>
+                        {/if}
+                      {/each}
+                    </div>
+                  {/if}
                   {#if msg.media?.length || msg.attachments?.length || msg.attached_slugs?.length}
                     <div class="chat-media-list">
                       {#each msg.media ?? [] as m}{@render mediaItem(m, "produced")}{/each}
@@ -2381,7 +2402,7 @@
                       </div>
                     {/if}
                   {/if}
-                  {#if msg.claims?.length}
+                  {#if msg.claims?.length && !wholeTurnInference}
                     <div class="chat-claims">
                       <div class="chat-claims-heading">References</div>
                       <ol class="chat-claims-list">
@@ -4386,6 +4407,19 @@
     line-height: 1.6;
     white-space: pre-wrap;
     overflow-wrap: anywhere;
+  }
+  .chat-turn-content-inference {
+    border: 1px dashed rgba(107, 114, 128, 0.35);
+    border-radius: 6px;
+    background: rgba(107, 114, 128, 0.06);
+    padding: 8px 10px;
+  }
+  .chat-turn-content-inference-label {
+    color: #9ba4b0;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    margin-bottom: 4px;
   }
   .chat-regen-model-picker {
     max-width: 130px;

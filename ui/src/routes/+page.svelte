@@ -300,6 +300,10 @@
   type ContentSegment = { text: string } | { claimIndex: number };
 
   const FOOTNOTE_MARKER_RE = /\[\^(\d+)\]/g;
+  // Only the trailing marker chat_agent.py's no-grounding override appends
+  // ("{content} [^1]") -- unlike FOOTNOTE_MARKER_RE, doesn't touch a literal
+  // "[^N]" the model happened to write mid-message.
+  const TRAILING_FOOTNOTE_MARKER_RE = /\s*\[\^\d+\]\s*$/;
 
   function renderContentSegments(content: string): ContentSegment[] {
     const segments: ContentSegment[] = [];
@@ -354,7 +358,7 @@
   // is."
   function isWholeTurnInference(content: string, claims: ClaimOut[]): boolean {
     if (claims.length !== 1 || claims[0].kind !== "inference") return false;
-    return content.replace(FOOTNOTE_MARKER_RE, "").trim() === claims[0].claim_text.trim();
+    return content.replace(TRAILING_FOOTNOTE_MARKER_RE, "").trim() === claims[0].claim_text.trim();
   }
 
   // Collapsed-by-default toggle line summarizing a turn's process
@@ -2348,7 +2352,7 @@
                   {#if msg.claims?.length && isWholeTurnInference(msg.content.value, msg.claims)}
                     <div class="chat-turn-content chat-turn-content-inference text-body">
                       <div class="chat-turn-content-inference-label">AI inference — not from your vault</div>
-                      {msg.content.value.replace(FOOTNOTE_MARKER_RE, "").trim()}
+                      {msg.content.value.replace(TRAILING_FOOTNOTE_MARKER_RE, "").trim()}
                     </div>
                   {:else}
                     <div class="chat-turn-content text-body">

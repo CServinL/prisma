@@ -2255,6 +2255,7 @@
                 <div class="empty-state"><p class="text-body">Ask anything about your vault.</p></div>
               {/if}
               {#each activeChat.messages as msg, i (i)}
+                {@const wholeTurnInference = msg.claims?.length ? isWholeTurnInference(msg.content.value, msg.claims) : false}
                 <div class="chat-turn chat-turn-{msg.role}" id="chat-turn-{i}">
                   <div class="chat-turn-header">
                     <span class="chat-turn-role">{msg.role === "user" ? "You" : "Prisma"}</span>
@@ -2349,10 +2350,10 @@
                       </div>
                     {/if}
                   {/if}
-                  {#if msg.claims?.length && isWholeTurnInference(msg.content.value, msg.claims)}
+                  {#if wholeTurnInference}
                     <div class="chat-turn-content chat-turn-content-inference text-body">
                       <div class="chat-turn-content-inference-label">AI inference — not from your vault</div>
-                      {msg.content.value.replace(TRAILING_FOOTNOTE_MARKER_RE, "").trim()}
+                      {msg.content.value.replace(TRAILING_FOOTNOTE_MARKER_RE, "")}
                     </div>
                   {:else}
                     <div class="chat-turn-content text-body">
@@ -2401,7 +2402,7 @@
                       </div>
                     {/if}
                   {/if}
-                  {#if msg.claims?.length && !isWholeTurnInference(msg.content.value, msg.claims)}
+                  {#if msg.claims?.length && !wholeTurnInference}
                     <div class="chat-claims">
                       <div class="chat-claims-heading">References</div>
                       <ol class="chat-claims-list">

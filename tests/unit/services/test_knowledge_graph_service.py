@@ -14,6 +14,7 @@ from prisma.services.knowledge_graph_service import (
     KnowledgeGraphService,
     Node,
     _extraction_system_prompt,
+    _KUZU_BUFFER_POOL_SIZE_BYTES,
     _sanitize_escape_sequences,
     _strip_dense_data_paragraphs,
     _strip_feature_catalog_paragraphs,
@@ -48,6 +49,30 @@ def _extraction(nodes=None, edges=None) -> Extraction:
 
 def _patch_create(kg, **kwargs):
     return patch.object(kg._instructor_client.chat.completions, "create", **kwargs)
+
+
+# ── Kùzu buffer pool sizing ───────────────────────────────────────────────────
+# Confirmed live 2026-08-28: kuzu.Database()'s own default (buffer_pool_size=0,
+# left unset) is "~80% of system memory" -- read off /proc/meminfo, which
+# inside a container reports the host node's total memory, not the
+# container's actual cgroup limit. The kg worker held ~3GB RSS against a
+# 35MB on-disk database as a result. Must always pass an explicit, bounded
+# value instead of trusting Kùzu's own auto-sizing.
+
+def test_ensure_connection_passes_a_bounded_buffer_pool_size(vault, tmp_path):
+    import kuzu
+
+    service = KnowledgeGraphService(vault, kg_dir=tmp_path / "kg-out")
+    # A spy, not a full mock -- _ensure_connection also runs real schema-
+    # creation queries against the connection right after constructing the
+    # Database, so this needs a genuine (tiny, tmp_path-backed) Kùzu
+    # instance underneath, not a MagicMock standing in for query results.
+    with patch("kuzu.Database", wraps=kuzu.Database) as spy_database:
+        service._ensure_connection()
+
+    spy_database.assert_called_once()
+    assert spy_database.call_args.kwargs["buffer_pool_size"] == _KUZU_BUFFER_POOL_SIZE_BYTES
+    assert _KUZU_BUFFER_POOL_SIZE_BYTES > 0
 
 
 # ── configurable entity/relationship caps ─────────────────────────────────────

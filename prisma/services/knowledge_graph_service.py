@@ -65,6 +65,16 @@ _log = logging.getLogger("prisma.knowledge_graph")
 
 IndexState = Literal["idle", "indexing", "stale"]
 
+# Kùzu's own default (buffer_pool_size=0) is "~80% of system memory," read
+# off /proc/meminfo -- inside a container that's the host node's total, not
+# the pod's actual cgroup limit (values.yaml's 4Gi). A fixed pool below
+# ~2GiB fails to even open this database ("Buffer manager exception:
+# Unable to allocate memory!"), likely WAL-replay overhead rather than
+# on-disk size (an empty database opens fine at 512MiB). 2560MiB keeps
+# headroom above the smallest working value while leaving room in the 4Gi
+# pod for the other processes sharing it.
+_KUZU_BUFFER_POOL_SIZE_BYTES = 2560 * 1024 * 1024  # MiB, not decimal MB
+
 DEFAULT_INDEX_EXTENSIONS: tuple[str, ...] = (".md",)
 
 # Deliberately fixed, not a [kg] config knob -- unlike max_entities/
@@ -792,7 +802,7 @@ class KnowledgeGraphService:
             return
         import kuzu
         self._kg_dir.mkdir(parents=True, exist_ok=True)
-        self._db = kuzu.Database(str(self._kg_dir / "db"))
+        self._db = kuzu.Database(str(self._kg_dir / "db"), buffer_pool_size=_KUZU_BUFFER_POOL_SIZE_BYTES)
         self._conn = kuzu.Connection(self._db)
         self._conn.execute(
             "CREATE NODE TABLE IF NOT EXISTS Entity("

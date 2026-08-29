@@ -65,27 +65,15 @@ _log = logging.getLogger("prisma.knowledge_graph")
 
 IndexState = Literal["idle", "indexing", "stale"]
 
-# Kùzu's own default (buffer_pool_size=0, left unset) is "~80% of system
-# memory" -- it reads that off /proc/meminfo, which inside a container
-# reports the *host node's* total memory, not the container's actual cgroup
-# limit (cgroups don't rewrite /proc/meminfo by default). Confirmed live on
-# Forge 2026-08-28: the kg worker held ~3GB RSS against a 35MB on-disk
-# database (kg-out/db + kg-out/db.wal) -- ~80% of the node's real 28GB, not
-# remotely proportionate to this process's actual data or its pod's 4Gi
-# resources limit (values.yaml).
-#
-# NOT proportionate to on-disk size, though -- opening this exact live
-# database (35MB on disk) against a fixed buffer pool failed below ~2GB
-# ("Buffer manager exception: Unable to allocate memory! The buffer pool is
-# full and no memory could be freed!"), confirmed live: 512MB and 1024MB
-# both failed to even open it, 2048MB succeeded. WAL replay on startup is
-# the likely reason -- opening a brand-new empty database at 512MB worked
-# fine in the same test, so this isn't Kùzu's baseline footprint, it's
-# specific to recovering this database's state. 2560MB keeps real headroom
-# above the smallest value confirmed to work, while still leaving the rest
-# of the pod's 4Gi for the api/web/chroma processes sharing it -- nowhere
-# near the ~80%-of-28GB the unset default was actually reaching for.
-_KUZU_BUFFER_POOL_SIZE_BYTES = 2560 * 1024 * 1024
+# Kùzu's own default (buffer_pool_size=0) is "~80% of system memory," read
+# off /proc/meminfo -- inside a container that's the host node's total, not
+# the pod's actual cgroup limit (values.yaml's 4Gi). A fixed pool below
+# ~2GiB fails to even open this database ("Buffer manager exception:
+# Unable to allocate memory!"), likely WAL-replay overhead rather than
+# on-disk size (an empty database opens fine at 512MiB). 2560MiB keeps
+# headroom above the smallest working value while leaving room in the 4Gi
+# pod for the other processes sharing it.
+_KUZU_BUFFER_POOL_SIZE_BYTES = 2560 * 1024 * 1024  # MiB, not decimal MB
 
 DEFAULT_INDEX_EXTENSIONS: tuple[str, ...] = (".md",)
 

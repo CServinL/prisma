@@ -343,8 +343,9 @@
   // A CitedClaimNode.sources entry is normally a vault slug (openNode()
   // resolves it there) -- zotero_search's results use "zotero:<item_key>"
   // instead, since a Zotero bookmark the user hasn't imported has no slug.
+  const ZOTERO_SOURCE_PREFIX = "zotero:";
   function isZoteroSource(source: string): boolean {
-    return source.startsWith("zotero:");
+    return source.startsWith(ZOTERO_SOURCE_PREFIX);
   }
 
   // Collapsed-by-default toggle line summarizing a turn's process
@@ -878,7 +879,10 @@
     const slugs = new Set<string>();
     for (const msg of messages) {
       for (const claim of msg.claims ?? []) {
-        if (claim.kind === "claim") for (const s of claim.sources) if (!isZoteroSource(s)) slugs.add(s);
+        if (claim.kind !== "claim") continue;
+        for (const s of claim.sources) {
+          if (!isZoteroSource(s)) slugs.add(s);
+        }
       }
     }
     const missing = [...slugs].filter(s => !(s in apaCitations));
@@ -2399,7 +2403,7 @@
                               <div class="claim-warrant" title="Toulmin warrant — why the grounds support this claim">
                                 <span class="claim-warrant-label">Warrant:</span> {claim.warrant.text}
                                 {#if claim.warrant.backing.length}
-                                  <span class="claim-warrant-backing">(backed by {#each claim.warrant.backing as s, si}{#if si > 0}, {/if}{#if isZoteroSource(s)}<span class="claim-source-zotero">📚 {s.slice(7)}</span>{:else}<button class="claim-source-link" onclick={() => openNode(s)}>{s}</button>{/if}{/each})</span>
+                                  <span class="claim-warrant-backing">(backed by {#each claim.warrant.backing as s, si}{#if si > 0}, {/if}{#if isZoteroSource(s)}<span class="claim-source-zotero">📚 {s.slice(ZOTERO_SOURCE_PREFIX.length)}</span>{:else}<button class="claim-source-link" onclick={() => openNode(s)}>{s}</button>{/if}{/each})</span>
                                 {/if}
                               </div>
                             {/if}
@@ -2413,7 +2417,7 @@
                             {/if}
                             {#if claim.kind === "claim" && claim.sources.length}
                               <div class="claim-sources">
-                                {#each claim.sources as slug, si}{#if si > 0}, {/if}{#if isZoteroSource(slug)}<span class="claim-source-zotero" title="From the user's Zotero library, not the vault">📚 {slug.slice(7)}</span>{:else}<button class="claim-source-link" onclick={() => openNode(slug)}>{slug}</button>{/if}{/each}
+                                {#each claim.sources as slug, si}{#if si > 0}, {/if}{#if isZoteroSource(slug)}<span class="claim-source-zotero" title="From the user's Zotero library, not the vault">📚 {slug.slice(ZOTERO_SOURCE_PREFIX.length)}</span>{:else}<button class="claim-source-link" onclick={() => openNode(slug)}>{slug}</button>{/if}{/each}
                               </div>
                               {#each claim.sources as slug}
                                 {#if apaCitations[slug]}

@@ -480,15 +480,8 @@ class Worker:
         self._stop_timeout = stop_timeout
         self._env = {**os.environ, **env} if env else None
         self._started_at: float | None = None
-        # Held for the whole stop()+start() sequence of a restart, by
-        # whichever path is doing it (a manual POST /supervisor/restart/{name}
-        # here, or monitor_loop()'s own crash-detected restart) -- without
-        # this, the two race: is_alive() is False for the whole window
-        # between stop() and start() finishing, which looks identical to "it
-        # crashed" from monitor_loop()'s side even when the restart was
-        # deliberate. Confirmed live 2026-08-27: 3 manual hot-patch restarts
-        # each triggered one extra "died unexpectedly" restart from
-        # monitor_loop within ~1-2s, silently doubling restart_count.
+        # Prevents a manual restart and monitor_loop()'s crash detection
+        # from both restarting the same not-alive window.
         self._restart_lock = threading.Lock()
 
     def start(self) -> None:
@@ -1036,6 +1029,8 @@ class Supervisor:
         self.resources = resources
         self._stop_event = threading.Event()
         self._given_up: set[str] = set()
+        self._backoff: dict[str, float] = {name: 1.0 for name in workers}
+        self._fast_deaths: dict[str, int] = {name: 0 for name in workers}
 
     def start_all(self) -> None:
         for w in self.workers.values():
@@ -1051,8 +1046,6 @@ class Supervisor:
             w.stop()
 
     def monitor_loop(self) -> None:
-        backoff = {name: 1.0 for name in self.workers}
-        fast_deaths = {name: 0 for name in self.workers}
         while not self._stop_event.is_set():
             for name, w in self.workers.items():
                 if self._stop_event.is_set():
@@ -1060,8 +1053,8 @@ class Supervisor:
                 if name in self._given_up:
                     continue
                 if w.is_alive():
-                    backoff[name] = 1.0
-                    fast_deaths[name] = 0
+                    self._backoff[name] = 1.0
+                    self._fast_deaths[name] = 0
                     continue
                 if not w._restart_lock.acquire(blocking=False):
                     # A manual restart (Worker.restart(), the POST
@@ -1077,20 +1070,20 @@ class Supervisor:
                     w._restart_lock.release()
                     continue  # finished restarting between the check above and acquiring the lock
                 if w.uptime() < self._FAST_DEATH_THRESHOLD:
-                    fast_deaths[name] += 1
+                    self._fast_deaths[name] += 1
                 else:
-                    fast_deaths[name] = 0
-                if fast_deaths[name] >= self._MAX_FAST_DEATHS:
+                    self._fast_deaths[name] = 0
+                if self._fast_deaths[name] >= self._MAX_FAST_DEATHS:
                     log.error(
                         "%s crash-looped %d times, each within %.0fs of starting -- giving up "
                         "(likely a config error, not a transient crash); fix it and "
                         "POST /supervisor/restart/%s to try again",
-                        name, fast_deaths[name], self._FAST_DEATH_THRESHOLD, name,
+                        name, self._fast_deaths[name], self._FAST_DEATH_THRESHOLD, name,
                     )
                     self._given_up.add(name)
                     w._restart_lock.release()
                     continue
-                delay = backoff[name]
+                delay = self._backoff[name]
                 log.warning("%s died unexpectedly — restarting in %.0fs", name, delay)
                 # Released before the backoff sleep, not held through it -- a
                 # manual restart (an operator's POST /supervisor/restart/
@@ -1107,7 +1100,7 @@ class Supervisor:
                     if w.is_alive():
                         continue  # a manual restart already fixed it during the backoff wait
                     w._do_restart()
-                    backoff[name] = min(delay * 2, self._MAX_BACKOFF)
+                    self._backoff[name] = min(delay * 2, self._MAX_BACKOFF)
                     # Whatever that worker was doing (including any resource lease
                     # it held) is gone now that it's restarted — release its leases
                     # so a legitimately new request isn't blocked forever by one
@@ -1170,6 +1163,10 @@ def _make_handler(supervisor: Supervisor):
                 w.restart()
                 supervisor.resources.release_all_held_by(name)
                 supervisor._given_up.discard(name)
+                # Otherwise stale counts re-trip _MAX_FAST_DEATHS on the
+                # next poll regardless of whether the worker is healthy.
+                supervisor._fast_deaths[name] = 0
+                supervisor._backoff[name] = 1.0
                 self._json(200, {"status": "restarted", "worker": name})
             elif self.path == "/supervisor/resources/acquire":
                 body = self._read_json_body()

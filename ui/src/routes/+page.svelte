@@ -303,7 +303,7 @@
   // Only the trailing marker chat_agent.py's no-grounding override appends
   // ("{content} [^1]") -- unlike FOOTNOTE_MARKER_RE, doesn't touch a literal
   // "[^N]" the model happened to write mid-message.
-  const TRAILING_FOOTNOTE_MARKER_RE = /\s*\[\^\d+\]\s*$/;
+  const TRAILING_FOOTNOTE_MARKER_RE = /[ \t]*\[\^\d+\][ \t]*$/;
 
   function renderContentSegments(content: string): ContentSegment[] {
     const segments: ContentSegment[] = [];

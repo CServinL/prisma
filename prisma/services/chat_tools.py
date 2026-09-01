@@ -148,6 +148,15 @@ def system_prompt_tool_section(has_native_reasoning: bool = True, zotero_availab
     lines.append("")
     for t in visible:
         lines.append(f"- {t.marker} — {t.description}")
+    give_up_line = (
+        "If SEARCH_VAULT (and GRAPH_CONTEXT, if relevant) come back empty "
+        "or irrelevant, "
+        + ("call ZOTERO_SEARCH before giving up -- only once that also "
+           "comes back empty or irrelevant should you " if zotero_available
+           else "")
+        + "say so plainly and stop there -- do not fall back to answering "
+        "from your own general knowledge."
+    )
     lines.append(
         "\nFor any question with actual factual content -- even one that "
         "sounds like general knowledge -- call SEARCH_VAULT first, before "
@@ -155,10 +164,8 @@ def system_prompt_tool_section(has_native_reasoning: bool = True, zotero_availab
         "have relevant notes you have no way of knowing about otherwise. "
         "Only skip straight to answering, with no tool line, for messages "
         "with no factual content to check at all: greetings, thanks, or a "
-        "question about this conversation itself. If SEARCH_VAULT (and "
-        "GRAPH_CONTEXT, if relevant) come back empty or irrelevant, say so "
-        "plainly and stop there -- do not fall back to answering from your "
-        "own general knowledge. Only answer from your own knowledge when "
+        f"question about this conversation itself. {give_up_line} "
+        "Only answer from your own knowledge when "
         "the user has explicitly asked for your opinion, take, or analysis "
         "(e.g. \"what do you think\", \"in your opinion\") -- and even "
         "then, mark that content ai-inference below, every time, with no "

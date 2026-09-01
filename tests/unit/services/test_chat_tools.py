@@ -45,6 +45,17 @@ def test_system_prompt_tool_section_shows_zotero_search_when_available():
     assert "RECALL:" in text
 
 
+def test_give_up_instruction_routes_through_zotero_search_when_available():
+    text = system_prompt_tool_section(zotero_available=True)
+    assert "call ZOTERO_SEARCH before giving up" in text
+
+
+def test_give_up_instruction_skips_zotero_search_when_unavailable():
+    text = system_prompt_tool_section(zotero_available=False)
+    assert "ZOTERO_SEARCH before giving up" not in text
+    assert "come back empty or irrelevant, say so plainly and stop there" in text
+
+
 def test_tool_call_re_matches_think_line():
     text = "THINK: weighing whether the source actually supports this"
     matches = TOOL_CALL_RE.findall(text)

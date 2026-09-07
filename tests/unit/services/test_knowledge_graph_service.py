@@ -757,13 +757,19 @@ def test_refresh_surprising_connections_populates_cache_from_two_documents(kg, v
     a_file.write_text("---\ntype: note\n---\ncontent", encoding="utf-8")
     b_file = vault.root / "notes" / "b.md"
     b_file.write_text("---\ntype: note\n---\ncontent", encoding="utf-8")
+    # Distinct ids ("a_bridge"/"b_bridge") with a shared label, matching
+    # what real extraction actually produces (see kg_queries.
+    # surprising_connections' docstring) -- reusing one literal "bridge" id
+    # across both files would be the same physical node touched twice, not
+    # two documents' separate instances of a shared concept, and now gets
+    # correctly excluded rather than falsely counted as a bridge.
     a_result = _extraction(
-        nodes=[{"id": "a", "label": "A"}, {"id": "bridge", "label": "Bridge"}],
-        edges=[{"source": "a", "target": "bridge", "relation": "cites"}],
+        nodes=[{"id": "a", "label": "A"}, {"id": "a_bridge", "label": "Bridge"}],
+        edges=[{"source": "a", "target": "a_bridge", "relation": "cites"}],
     )
     b_result = _extraction(
-        nodes=[{"id": "c", "label": "C"}],
-        edges=[{"source": "bridge", "target": "c", "relation": "extends"}],
+        nodes=[{"id": "c", "label": "C"}, {"id": "b_bridge", "label": "Bridge"}],
+        edges=[{"source": "b_bridge", "target": "c", "relation": "extends"}],
     )
 
     with _patch_create(kg, side_effect=[a_result, b_result]), \
@@ -772,17 +778,18 @@ def test_refresh_surprising_connections_populates_cache_from_two_documents(kg, v
         kg._extract_file(b_file, "note")
 
     # Hub cache deliberately left empty rather than computed for real: with
-    # only 3 entities in this fixture, a real _refresh_top_entities() would
-    # put all of them (including "bridge") in the top-15 cache, which would
-    # then hub-exclude the very link this test is checking for -- an
-    # artifact of the fixture's small size, not a real hub. The hub-exclusion
-    # logic itself (given a real, larger hub set) is covered directly in
-    # test_kg_queries.py's test_surprising_connections_excludes_hub_mediated_links.
+    # only 4 entities in this fixture, a real _refresh_top_entities() would
+    # put all of them (including both bridge instances) in the top-15
+    # cache, which would then hub-exclude the very link this test is
+    # checking for -- an artifact of the fixture's small size, not a real
+    # hub. The hub-exclusion logic itself (given a real, larger hub set) is
+    # covered directly in test_kg_queries.py's
+    # test_surprising_connections_excludes_hub_mediated_links.
     kg._top_entities_cache = []
     kg._refresh_surprising_connections()
 
     links = kg.surprising_connections()
-    assert links and links[0].bridge == "bridge"
+    assert links and links[0].bridge == "Bridge"
 
 
 def test_drop_index_clears_surprising_connections_cache(kg):

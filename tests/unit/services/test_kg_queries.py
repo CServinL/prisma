@@ -176,30 +176,35 @@ def test_expand_node_empty_id_is_empty(conn):
 
 # ── surprising_connections ────────────────────────────────────────────────────
 # "Emerges from the KG itself, with no prior knowledge of it anywhere" (cservinl's
-# definition): a 2-hop link where the two hops came from different documents, the
+# definition): a link where the two hops came from different documents, the
 # endpoints don't already share a document, and no document ever asserted a
-# direct edge between them.
+# direct edge between them. Bridges by normalised *label*, not entity id (PR
+# #104 review): real extraction mints a document-scoped id per
+# `_extraction_system_prompt`'s `{stem}_{entity}` format, so the same concept
+# in two documents is always two different ids -- these fixtures use distinct
+# ids with a shared label throughout, matching what production extraction
+# actually produces, not a single id manually reused across documents.
 
 def test_surprising_connections_finds_cross_document_bridge(kg, conn):
-    _add(kg, "notes/a.md", "note", [{"id": "a", "label": "A"}, {"id": "bridge", "label": "Bridge"}],
-         [{"source": "a", "target": "bridge", "relation": "cites"}])
-    _add(kg, "notes/b.md", "note", [{"id": "c", "label": "C"}],
-         [{"source": "bridge", "target": "c", "relation": "extends"}])
+    _add(kg, "notes/a.md", "note", [{"id": "a", "label": "A"}, {"id": "a_bridge", "label": "Bridge"}],
+         [{"source": "a", "target": "a_bridge", "relation": "cites"}])
+    _add(kg, "notes/b.md", "note", [{"id": "c", "label": "C"}, {"id": "b_bridge", "label": "Bridge"}],
+         [{"source": "b_bridge", "target": "c", "relation": "extends"}])
 
     results = kg_queries.surprising_connections(conn, hub_ids=set())
 
     assert len(results) == 1
     link = results[0]
-    assert link.bridge == "bridge"
+    assert link.bridge == "Bridge"  # the shared label (as-cased in the data), not either instance's id
     assert {link.entity_a, link.entity_b} == {"a", "c"}
     assert {link.relation_a, link.relation_b} == {"cites", "extends"}
 
 
 def test_surprising_connections_excludes_directly_asserted_pairs(kg, conn):
-    _add(kg, "notes/a.md", "note", [{"id": "a", "label": "A"}, {"id": "bridge", "label": "Bridge"}],
-         [{"source": "a", "target": "bridge", "relation": "cites"}])
-    _add(kg, "notes/b.md", "note", [{"id": "c", "label": "C"}],
-         [{"source": "bridge", "target": "c", "relation": "extends"},
+    _add(kg, "notes/a.md", "note", [{"id": "a", "label": "A"}, {"id": "a_bridge", "label": "Bridge"}],
+         [{"source": "a", "target": "a_bridge", "relation": "cites"}])
+    _add(kg, "notes/b.md", "note", [{"id": "c", "label": "C"}, {"id": "b_bridge", "label": "Bridge"}],
+         [{"source": "b_bridge", "target": "c", "relation": "extends"},
           {"source": "a", "target": "c", "relation": "already_known"}])
 
     assert kg_queries.surprising_connections(conn, hub_ids=set()) == []
@@ -219,21 +224,45 @@ def test_surprising_connections_excludes_same_document_hops(kg, conn):
 
 def test_surprising_connections_excludes_endpoints_sharing_a_document(kg, conn):
     _add(kg, "notes/shared.md", "note", [{"id": "a", "label": "A"}, {"id": "c", "label": "C"}])
-    _add(kg, "notes/x.md", "note", [{"id": "bridge", "label": "Bridge"}],
-         [{"source": "a", "target": "bridge", "relation": "cites"}])
-    _add(kg, "notes/y.md", "note", [],
-         [{"source": "bridge", "target": "c", "relation": "extends"}])
+    _add(kg, "notes/x.md", "note", [{"id": "x_bridge", "label": "Bridge"}],
+         [{"source": "a", "target": "x_bridge", "relation": "cites"}])
+    _add(kg, "notes/y.md", "note", [{"id": "y_bridge", "label": "Bridge"}],
+         [{"source": "y_bridge", "target": "c", "relation": "extends"}])
 
     assert kg_queries.surprising_connections(conn, hub_ids=set()) == []
 
 
 def test_surprising_connections_excludes_hub_mediated_links(kg, conn):
-    _add(kg, "notes/a.md", "note", [{"id": "a", "label": "A"}, {"id": "bridge", "label": "Bridge"}],
-         [{"source": "a", "target": "bridge", "relation": "cites"}])
-    _add(kg, "notes/b.md", "note", [{"id": "c", "label": "C"}],
-         [{"source": "bridge", "target": "c", "relation": "extends"}])
+    # Hub exclusion is per-instance (by id), not per-label: excluding
+    # a_bridge's specific id leaves only b_bridge in the "bridge" label
+    # group -- one entry can't form a pair, so the result is empty exactly
+    # as if the whole label had been excluded.
+    _add(kg, "notes/a.md", "note", [{"id": "a", "label": "A"}, {"id": "a_bridge", "label": "Bridge"}],
+         [{"source": "a", "target": "a_bridge", "relation": "cites"}])
+    _add(kg, "notes/b.md", "note", [{"id": "c", "label": "C"}, {"id": "b_bridge", "label": "Bridge"}],
+         [{"source": "b_bridge", "target": "c", "relation": "extends"}])
 
-    assert kg_queries.surprising_connections(conn, hub_ids={"bridge"}) == []
+    assert kg_queries.surprising_connections(conn, hub_ids={"a_bridge"}) == []
+
+
+def test_surprising_connections_excludes_the_same_physical_node_seen_twice(kg, conn):
+    # Bug found while fixing the label-bridging change above: an entity with
+    # degree >= 2 shows up twice in its OWN label group (once per edge that
+    # touches it, from the undirected scan) -- without a same-node check,
+    # that looked like "two different documents' instances sharing a
+    # label" when it's really just one real node connecting two neighbours
+    # directly, which expand_node already covers and isn't "surprising".
+    _add(
+        kg, "notes/a.md", "note",
+        [{"id": "a", "label": "A"}, {"id": "neighbour1", "label": "N1"}],
+        [{"source": "a", "target": "neighbour1", "relation": "cites"}],
+    )
+    _add(
+        kg, "notes/b.md", "note",
+        [{"id": "neighbour2", "label": "N2"}],
+        [{"source": "a", "target": "neighbour2", "relation": "already_known"}],
+    )
+    assert kg_queries.surprising_connections(conn, hub_ids=set()) == []
 
 
 def test_surprising_connections_none_conn_is_empty():
@@ -242,10 +271,10 @@ def test_surprising_connections_none_conn_is_empty():
 
 def test_surprising_connections_respects_limit(kg, conn):
     for i in range(3):
-        _add(kg, f"notes/a{i}.md", "note", [{"id": f"a{i}", "label": f"A{i}"}, {"id": f"bridge{i}", "label": "Bridge"}],
-             [{"source": f"a{i}", "target": f"bridge{i}", "relation": "cites"}])
-        _add(kg, f"notes/b{i}.md", "note", [{"id": f"c{i}", "label": f"C{i}"}],
-             [{"source": f"bridge{i}", "target": f"c{i}", "relation": "extends"}])
+        _add(kg, f"notes/a{i}.md", "note", [{"id": f"a{i}", "label": f"A{i}"}, {"id": f"a{i}_bridge", "label": "Bridge"}],
+             [{"source": f"a{i}", "target": f"a{i}_bridge", "relation": "cites"}])
+        _add(kg, f"notes/b{i}.md", "note", [{"id": f"c{i}", "label": f"C{i}"}, {"id": f"b{i}_bridge", "label": "Bridge"}],
+             [{"source": f"b{i}_bridge", "target": f"c{i}", "relation": "extends"}])
 
     assert len(kg_queries.surprising_connections(conn, hub_ids=set(), limit=2)) == 2
 

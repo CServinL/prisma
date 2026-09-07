@@ -165,12 +165,17 @@ class TimelineEntry(BaseModel):
 
 
 class SurprisingConnection(BaseModel):
-    """A 2-hop link between two entities that no single document ever
-    asserted directly -- see kg_queries.surprising_connections() for the
-    exact definition (cservinl: "emerges from the KG itself, with no prior
-    knowledge of it anywhere"). `bridge` is the middle entity the two hops
-    share; excluded from being a cached top_entity (a hub bridging
-    everything is the *least* surprising kind of link)."""
+    """A link between two entities (`entity_a`/`entity_b`, real entity ids)
+    that no single document ever asserted directly -- see
+    kg_queries.surprising_connections() for the exact definition (cservinl:
+    "emerges from the KG itself, with no prior knowledge of it anywhere").
+
+    `bridge` is a **label**, not an entity id: the two hops are asserted by
+    two different documents' own entity instances (each with its own
+    `{stem}_{entity}` id -- see `_extraction_system_prompt`), which share
+    the same normalised concept name but are never literally the same
+    graph node. There is no single id to report, since two distinct
+    instances participated -- the label is what they have in common."""
     entity_a: str
     entity_b: str
     bridge: str

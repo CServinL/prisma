@@ -112,7 +112,82 @@ class OllamaReadyResponse(BaseModel):
 class TopEntity(BaseModel):
     """One entity in the vault-overview priming block -- top-N by undirected
     RelatesTo degree (chat-tier excluded). See
-    KnowledgeGraphService.top_entities()."""
+    KnowledgeGraphService.top_entities().
+
+    `source_file`/`sample_relations` are populated only by the richer
+    `god_nodes()` path (kg_queries.god_nodes); the cache-only
+    `top_entities()` priming read leaves them at their defaults, so a
+    payload without them still validates on both ends of the wire."""
     id: str
     label: str
     degree: int
+    source_file: str | None = None
+    sample_relations: list[str] = []
+
+
+class ExpandNodeResponse(BaseModel):
+    """One-hop neighbourhood of a single Entity — the neighbours plus the
+    RelatesTo edges connecting them to the queried node. Mirrors
+    EntitiesForFileResponse's shape (chat-tier neighbours excluded)."""
+    entities: list[EntityInfo]
+    edges: list[EdgeInfo]
+
+
+class AuthorSummary(BaseModel):
+    """Distinct `Entity.author` value grouped across the vault — how many
+    source files name that author, plus a few example entity ids."""
+    author: str
+    file_count: int
+    sample_entities: list[str] = []
+
+
+class OrphanEntity(BaseModel):
+    id: str
+    label: str
+    source_file: str | None = None
+
+
+class VaultHealthResponse(BaseModel):
+    """First-cut vault health: entities with zero RelatesTo edges. Full
+    disconnected-cluster detection (connected components) is a noted stretch
+    follow-up, not part of this cut."""
+    orphans: list[OrphanEntity]
+    orphan_count: int
+
+
+class TimelineEntry(BaseModel):
+    """An entity whose `source_file` resolves to a Source with a `year` —
+    the year comes from vault frontmatter (VaultService), not the graph."""
+    id: str
+    label: str
+    source_file: str | None = None
+    year: int | None = None
+
+
+class SurprisingConnection(BaseModel):
+    """A 2-hop link between two entities that no single document ever
+    asserted directly -- see kg_queries.surprising_connections() for the
+    exact definition (cservinl: "emerges from the KG itself, with no prior
+    knowledge of it anywhere"). `bridge` is the middle entity the two hops
+    share; excluded from being a cached top_entity (a hub bridging
+    everything is the *least* surprising kind of link)."""
+    entity_a: str
+    entity_b: str
+    bridge: str
+    relation_a: str
+    relation_b: str
+    score: float
+
+
+class ReadSourceResponse(BaseModel):
+    """A bounded slice of one vault document's own raw text — never the
+    whole file. `mode` is one of summary/section/ripgrep."""
+    slug: str
+    mode: str
+    query: str | None = None
+    text: str
+    # section mode: every heading found, so a missed `query` still tells the
+    # caller what it could have asked for.
+    available_sections: list[str] = []
+    # ripgrep mode: total matching lines (the returned text is capped).
+    match_count: int | None = None

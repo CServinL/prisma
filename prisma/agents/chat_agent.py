@@ -15,15 +15,15 @@ import logging
 import re
 from typing import Callable, Literal
 
-from pydantic import ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from prisma.agents.session_orchestrator import SessionOrchestrator
 from prisma.schema_gov import ContentFormat, RichContent
 from prisma.services.chat_llm import ChatLLM
 from prisma.services.chat_tools import FOOTNOTES_LINE_RE, TOOL_CALL_RE, TOOLS, ChatToolbox
 from prisma.storage.models.vault_models import (
-    ChatRole, CitedClaimNode, ClaimNode, InferenceNode, Note, RecallRef, ThinkingNode, ToolCallNode,
-    TurnNode,
+    ChatRole, CitedClaimNode, CitedRelation, ClaimNode, InferenceNode, Note, RecallRef, ThinkingNode,
+    ToolCallNode, TurnNode,
 )
 
 _log = logging.getLogger("prisma.chat_agent")
@@ -84,25 +84,41 @@ def _extract_claim_texts(content: str) -> dict[int, str]:
     return claims
 
 
-def _claim_from_raw(item: dict, claim_texts: dict[int, str]) -> ClaimNode | None:
+class _RawFootnote(BaseModel):
+    """One FOOTNOTES_JSON self-report entry as the model emits it, validated
+    on parse -- same typed-block discipline `Extraction` applies to KG
+    output, rather than hand-indexing an untyped dict. The model was taught
+    `relation` (including the CitedClaimNode-absent value "ai-inference"),
+    never `kind`, so `relation` is what `_claim_from_raw` keys off. Extra
+    keys are ignored, not rejected: an LLM self-report drifts, and a
+    stray field must not sink an otherwise-valid entry."""
+    model_config = ConfigDict(extra="ignore")
+    index: int
+    # The relation vocabulary is validated here by Pydantic, not by letting
+    # a bad value fall through to CitedClaimNode and fail there -- an
+    # unknown relation ("not-a-real-relation") fails model_validate, so
+    # _claim_from_raw returns None. After the "ai-inference" branch below,
+    # this narrows to exactly CitedClaimNode.relation's type.
+    relation: CitedRelation | Literal["ai-inference"]
+    sources: list[str] = Field(default_factory=list)
+    claim_text: str | None = None
+
+
+def _claim_from_raw(item: object, claim_texts: dict[int, str]) -> ClaimNode | None:
     """One FOOTNOTES_JSON self-reported entry -> a CitedClaimNode or
-    InferenceNode, keyed off `relation` (the self-report has no `kind`
-    field -- the model was never taught that vocabulary, only `relation`,
-    see system_prompt_footnote_section())."""
+    InferenceNode. `item` is a raw `json.loads` element (any shape) --
+    `_RawFootnote.model_validate` is the boundary that rejects a
+    non-conforming entry (missing/typo'd index/relation, wrong types) as None."""
     try:
-        index = int(item["index"])
-        relation = item["relation"]
-    except (KeyError, TypeError, ValueError):
-        return None
-    claim_text = item.get("claim_text") or claim_texts.get(index) or ""
-    if relation == "ai-inference":
-        return InferenceNode(index=index, claim_text=claim_text)
-    try:
-        return CitedClaimNode(
-            index=index, claim_text=claim_text, sources=item.get("sources", []), relation=relation,
-        )
+        raw = _RawFootnote.model_validate(item)
     except ValidationError:
         return None
+    claim_text = raw.claim_text or claim_texts.get(raw.index) or ""
+    if raw.relation == "ai-inference":
+        return InferenceNode(index=raw.index, claim_text=claim_text)
+    return CitedClaimNode(
+        index=raw.index, claim_text=claim_text, sources=raw.sources, relation=raw.relation,
+    )
 
 
 def _extract_claims(reply: str) -> tuple[str, list[ClaimNode]]:
@@ -153,14 +169,13 @@ def _extract_claims(reply: str) -> tuple[str, list[ClaimNode]]:
 
 
 # Grounding tools -- the only ones that can put real, citable content in
-# front of the model. RECALL/THINK don't count: RECALL surfaces this
-# session's own prior turns (not vault/Zotero documents), and THINK never
-# looks anything up at all. zotero_search belongs here too -- a resolvable
-# zotero:<item_key> source (chat_tools.py's _zotero_search) is exactly as
-# citable as a vault slug; leaving it out would make a turn that only
-# called SEARCH_VAULT (empty) and ZOTERO_SEARCH (real hits) look
-# ungrounded, forcing valid Zotero-cited claims into one inference block.
-_GROUNDING_TOOLS = {"search_vault", "graph_context", "zotero_search"}
+# front of the model. Derived from ToolSpec.grounding, not hand-maintained:
+# RECALL (this session's own prior turns, not documents) and THINK (looks
+# nothing up) are not grounding; SEARCH_VAULT/GRAPH_CONTEXT/EXPAND_NODE/
+# GOD_NODES/SURPRISING_CONNECTIONS/READ_SOURCE/ZOTERO_SEARCH are. A resolvable zotero:<item_key>
+# source is exactly as citable as a vault slug, so a turn that only called
+# SEARCH_VAULT (empty) + ZOTERO_SEARCH (real hits) still counts as grounded.
+_GROUNDING_TOOLS = {t.name for t in TOOLS if t.grounding}
 
 
 def _turn_had_no_grounding(tool_calls: list["ToolCallNode"]) -> bool:
@@ -333,7 +348,9 @@ class ChatAgent:
             return claim
         system_prompt, content = _build_faithfulness_prompt(claim.claim_text, source_texts)
         verdict, corrected_relation = _parse_faithfulness_reply(self.complete_once(system_prompt, content))
-        updates = {"faithfulness_checked": verdict}
+        # Heterogeneous by design (bool|None verdict + str relation), and
+        # `model_copy(update=)` takes exactly this shape.
+        updates: dict[str, object] = {"faithfulness_checked": verdict}
         if corrected_relation and len(claim.sources) == 1:
             updates["relation"] = corrected_relation
         return claim.model_copy(update=updates)

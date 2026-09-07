@@ -21,6 +21,7 @@ from pydantic import BaseModel
 from prisma.services.asset_rewrite import asset_prefix, rewrite_html
 from prisma.services.renderer import render as vault_render
 from prisma.services.vault import VaultService
+from prisma.storage.models.kg_models import ReadSourceResponse
 from prisma.storage.models.vault_models import NodeType, RenderedNode, Source, Stream, VaultListing
 
 _activity = logging.getLogger("prisma.activity")
@@ -148,6 +149,23 @@ def build_notes_router(
     @router.get("/{slug}", response_model=RenderedNode)
     def get_note(slug: str, request: Request, format: str = "html"):
         return render_note(get_vault(), slug, request, format)
+
+    @router.get("/{slug}/read", response_model=ReadSourceResponse)
+    def read_note_source(
+        slug: str,
+        mode: str = Query("summary", pattern="^(summary|section|ripgrep)$"),
+        query: Optional[str] = Query(None),
+    ):
+        """Bounded, addressable read of one vault document's own raw text
+        (no graph involvement) — the REST surface for chat's READ_SOURCE
+        tool. `mode`: summary (leading excerpt), section (heading-matched
+        slice), ripgrep (matching lines + context). Every mode returns a
+        bounded slice, never the whole file."""
+        from prisma.services.source_reader import read_source
+        try:
+            return read_source(get_vault(), slug, mode=mode, query=query)
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail=f"node not found: {slug!r}")
 
     @router.get("/{slug}/view")
     def view_html(slug: str, request: Request):

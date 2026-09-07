@@ -19,12 +19,17 @@ import logging
 import requests
 
 from prisma.storage.models.kg_models import (
+    AuthorSummary,
     DeadLetterEntry,
     EntitiesForFileResponse,
+    ExpandNodeResponse,
     GraphQueryResult,
     KGStatus,
     RankedNode,
+    SurprisingConnection,
+    TimelineEntry,
     TopEntity,
+    VaultHealthResponse,
 )
 from prisma.storage.models.search_models import DeepSearchCandidate, GraphSearchResult
 
@@ -107,6 +112,37 @@ class KnowledgeGraphClient:
         if data is None:
             return []
         return [TopEntity.model_validate(d) for d in data]
+
+    # ── Phase A retrieval capabilities (mirror kg_app.py's routes) ─────────
+
+    def expand_node(self, node_id: str) -> ExpandNodeResponse:
+        data = self._get("/expand_node", params={"id": node_id})
+        return ExpandNodeResponse.model_validate(data) if data else ExpandNodeResponse(entities=[], edges=[])
+
+    def god_nodes(self, limit: int = 15) -> list[TopEntity]:
+        data = self._get("/god_nodes", params={"limit": limit}) or []
+        return [TopEntity.model_validate(d) for d in data]
+
+    def surprising_connections(self, limit: int = 15) -> list[SurprisingConnection]:
+        # Cache-only on the kg side too (KnowledgeGraphService.surprising_
+        # connections()) -- same short-timeout reasoning as top_entities()
+        # above.
+        data = self._get("/surprising_connections", params={"limit": limit}, timeout=2.0)
+        if data is None:
+            return []
+        return [SurprisingConnection.model_validate(d) for d in data]
+
+    def authors(self, limit: int = 100) -> list[AuthorSummary]:
+        data = self._get("/authors", params={"limit": limit}) or []
+        return [AuthorSummary.model_validate(d) for d in data]
+
+    def vault_health(self) -> VaultHealthResponse:
+        data = self._get("/vault_health")
+        return VaultHealthResponse.model_validate(data) if data else VaultHealthResponse(orphans=[], orphan_count=0)
+
+    def timeline(self, question: str) -> list[TimelineEntry]:
+        data = self._get("/timeline", params={"q": question}) or []
+        return [TimelineEntry.model_validate(d) for d in data]
 
     def _ollama_ready(self) -> bool:
         # Also polled on every /status request — see status()'s comment.

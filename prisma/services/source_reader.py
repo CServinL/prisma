@@ -1,0 +1,108 @@
+"""Bounded, addressable reads of a single vault document's own raw text.
+
+No Kùzu/graph involvement at all — this is the "read the actual file"
+counterpart to the graph-derived retrieval in `kg_queries.py`. Every mode
+returns a bounded slice, never the whole file (the flat whole-file dump
+TODO.md's 2026-07-02 note rejected).
+
+Modes:
+  - summary  — leading excerpt, same shape `ChatToolbox._search_vault` uses,
+               just addressable by exact slug instead of via a ChromaDB hit.
+  - section  — naive heading-split of the markdown body; returns the section
+               whose heading contains `query` (case-insensitive).
+  - ripgrep  — literal-or-regex line search within the raw text, matching
+               lines with a few lines of context each — a grep scoped to
+               one file.
+"""
+from __future__ import annotations
+
+import re
+
+from prisma.services.vault import VaultService
+from prisma.storage.models.kg_models import ReadSourceResponse
+
+_EXCERPT_CHARS = 2000
+_SECTION_MAX_CHARS = 4000
+_RIPGREP_CONTEXT_LINES = 2
+_RIPGREP_MAX_MATCHES = 20
+
+_HEADING_RE = re.compile(r"^#{1,6}\s+(.*)$")
+
+
+def read_source(
+    vault: VaultService, slug: str, mode: str = "summary", query: str | None = None,
+) -> ReadSourceResponse:
+    path = vault.find_file(slug)
+    if path is None:
+        raise FileNotFoundError(slug)
+    raw = path.read_text(encoding="utf-8", errors="replace")
+
+    if mode == "summary":
+        return ReadSourceResponse(slug=slug, mode="summary", text=raw[:_EXCERPT_CHARS])
+    if mode == "section":
+        return _read_section(slug, raw, (query or "").strip())
+    if mode == "ripgrep":
+        return _read_ripgrep(slug, raw, query or "")
+    raise ValueError(f"unknown read mode: {mode!r}")
+
+
+def _strip_frontmatter(raw: str) -> str:
+    if raw.startswith("---"):
+        end = raw.find("\n---", 3)
+        if end != -1:
+            nl = raw.find("\n", end + 1)
+            return raw[nl + 1:] if nl != -1 else ""
+    return raw
+
+
+def _read_section(slug: str, raw: str, query: str) -> ReadSourceResponse:
+    lines = _strip_frontmatter(raw).splitlines()
+    sections: list[tuple[str, list[str]]] = []
+    heading: str | None = None
+    buf: list[str] = []
+    for line in lines:
+        m = _HEADING_RE.match(line)
+        if m:
+            if heading is not None:
+                sections.append((heading, buf))
+            heading = m.group(1).strip()
+            buf = [line]
+        else:
+            buf.append(line)
+    if heading is not None:
+        sections.append((heading, buf))
+
+    headings = [h for h, _ in sections]
+    if query:
+        for h, body_lines in sections:
+            if query.lower() in h.lower():
+                return ReadSourceResponse(
+                    slug=slug, mode="section", query=query,
+                    text="\n".join(body_lines)[:_SECTION_MAX_CHARS],
+                    available_sections=headings,
+                )
+    return ReadSourceResponse(
+        slug=slug, mode="section", query=query or None, text="", available_sections=headings,
+    )
+
+
+def _read_ripgrep(slug: str, raw: str, query: str) -> ReadSourceResponse:
+    if not query:
+        return ReadSourceResponse(slug=slug, mode="ripgrep", query=None, text="", match_count=0)
+    try:
+        pattern = re.compile(query, re.IGNORECASE)
+    except re.error:
+        pattern = re.compile(re.escape(query), re.IGNORECASE)
+    lines = raw.splitlines()
+    hit_indices = [i for i, line in enumerate(lines) if pattern.search(line)]
+    blocks: list[str] = []
+    for i in hit_indices[:_RIPGREP_MAX_MATCHES]:
+        lo = max(0, i - _RIPGREP_CONTEXT_LINES)
+        hi = min(len(lines), i + _RIPGREP_CONTEXT_LINES + 1)
+        blocks.append("\n".join(
+            f"{j + 1}{':' if j == i else '-'}{lines[j]}" for j in range(lo, hi)
+        ))
+    return ReadSourceResponse(
+        slug=slug, mode="ripgrep", query=query,
+        text="\n--\n".join(blocks), match_count=len(hit_indices),
+    )

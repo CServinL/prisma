@@ -20,7 +20,7 @@ from prisma.services.knowledge_graph_service import (
     _strip_feature_catalog_paragraphs,
     _strip_reference_list_paragraphs,
 )
-from prisma.storage.models.kg_models import TopEntity
+from prisma.storage.models.kg_models import SurprisingConnection, TopEntity
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -732,6 +732,69 @@ def test_drop_index_clears_top_entities_cache(kg, vault):
         kg.drop_index()
 
     assert kg.top_entities() == []
+
+
+# ── surprising_connections (background-cached, like top_entities above) ────────
+
+def test_surprising_connections_returns_cached_slice_without_querying_kuzu(kg):
+    kg._surprising_connections_cache = [
+        SurprisingConnection(entity_a="a", entity_b="c", bridge="b", relation_a="cites", relation_b="extends", score=0.8),
+    ]
+    with patch.object(kg._conn, "execute") as mock_execute:
+        result = kg.surprising_connections()
+    assert result[0].bridge == "b"
+    mock_execute.assert_not_called()
+
+
+def test_refresh_surprising_connections_populates_cache_from_two_documents(kg, vault):
+    # Sequential, deterministic _extract_file calls (not _full_index()'s
+    # concurrent path -- side_effect order isn't guaranteed to match file
+    # order once extraction fans out across threads, same reasoning
+    # test_compute_top_entities_excludes_chat_trust_tier_on_either_endpoint
+    # above already relies on). _refresh_top_entities() must run first: it
+    # populates the hub-exclusion set _refresh_surprising_connections() reads.
+    a_file = vault.root / "notes" / "a.md"
+    a_file.write_text("---\ntype: note\n---\ncontent", encoding="utf-8")
+    b_file = vault.root / "notes" / "b.md"
+    b_file.write_text("---\ntype: note\n---\ncontent", encoding="utf-8")
+    a_result = _extraction(
+        nodes=[{"id": "a", "label": "A"}, {"id": "bridge", "label": "Bridge"}],
+        edges=[{"source": "a", "target": "bridge", "relation": "cites"}],
+    )
+    b_result = _extraction(
+        nodes=[{"id": "c", "label": "C"}],
+        edges=[{"source": "bridge", "target": "c", "relation": "extends"}],
+    )
+
+    with _patch_create(kg, side_effect=[a_result, b_result]), \
+         patch("prisma.services.resource_lock.acquire", return_value=(True, "local-ollama", "req-1")):
+        kg._extract_file(a_file, "note")
+        kg._extract_file(b_file, "note")
+
+    # Hub cache deliberately left empty rather than computed for real: with
+    # only 3 entities in this fixture, a real _refresh_top_entities() would
+    # put all of them (including "bridge") in the top-15 cache, which would
+    # then hub-exclude the very link this test is checking for -- an
+    # artifact of the fixture's small size, not a real hub. The hub-exclusion
+    # logic itself (given a real, larger hub set) is covered directly in
+    # test_kg_queries.py's test_surprising_connections_excludes_hub_mediated_links.
+    kg._top_entities_cache = []
+    kg._refresh_surprising_connections()
+
+    links = kg.surprising_connections()
+    assert links and links[0].bridge == "bridge"
+
+
+def test_drop_index_clears_surprising_connections_cache(kg):
+    kg._surprising_connections_cache = [
+        SurprisingConnection(entity_a="a", entity_b="c", bridge="b", relation_a="cites", relation_b="extends", score=0.8),
+    ]
+
+    with patch("prisma.services.resource_lock.acquire", return_value=(True, "local-ollama", "req-1")), \
+         patch.object(kg, "_full_index"):  # avoid the real background re-index racing this assertion
+        kg.drop_index()
+
+    assert kg.surprising_connections() == []
 
 
 # ── Status / lifecycle ────────────────────────────────────────────────────────

@@ -212,7 +212,9 @@ def test_top_entities_passes_limit_and_returns_results():
     with patch("prisma.services.knowledge_graph_client.requests.get",
                return_value=_mock_response([{"id": "x", "label": "X", "degree": 3}])) as mock_get:
         result = client.top_entities(limit=10)
-    assert [r.model_dump() for r in result] == [{"id": "x", "label": "X", "degree": 3}]
+    assert [r.model_dump() for r in result] == [
+        {"id": "x", "label": "X", "degree": 3, "source_file": None, "sample_relations": []}
+    ]
     assert mock_get.call_args.kwargs["params"] == {"limit": 10}
 
 
@@ -241,3 +243,107 @@ def test_start_stop_are_safe_no_ops():
     client = KnowledgeGraphClient()
     client.start()
     client.stop()  # must not raise, no HTTP calls expected
+
+
+# ── Phase A retrieval capability mirror methods ──────────────────────────────
+
+def test_expand_node_forwards_id_and_returns_response():
+    client = KnowledgeGraphClient()
+    payload = {"entities": [{"id": "n1", "label": "N1"}], "edges": [{"source": "c", "relation": "cites", "target": "n1"}]}
+    with patch("prisma.services.knowledge_graph_client.requests.get",
+               return_value=_mock_response(payload)) as mock_get:
+        result = client.expand_node("center")
+    assert result.entities[0].id == "n1"
+    assert result.edges[0].relation == "cites"
+    assert mock_get.call_args.kwargs["params"] == {"id": "center"}
+
+
+def test_expand_node_empty_shape_when_unreachable():
+    client = KnowledgeGraphClient()
+    with patch("prisma.services.knowledge_graph_client.requests.get", side_effect=requests.ConnectionError("down")):
+        result = client.expand_node("x")
+    assert result.entities == [] and result.edges == []
+
+
+def test_god_nodes_passes_limit_and_returns_rich_entities():
+    client = KnowledgeGraphClient()
+    payload = [{"id": "h", "label": "H", "degree": 5, "source_file": "sources/a.md", "sample_relations": ["cites"]}]
+    with patch("prisma.services.knowledge_graph_client.requests.get",
+               return_value=_mock_response(payload)) as mock_get:
+        result = client.god_nodes(limit=20)
+    assert result[0].source_file == "sources/a.md"
+    assert result[0].sample_relations == ["cites"]
+    assert mock_get.call_args.kwargs["params"] == {"limit": 20}
+
+
+def test_god_nodes_empty_when_unreachable():
+    client = KnowledgeGraphClient()
+    with patch("prisma.services.knowledge_graph_client.requests.get", side_effect=requests.ConnectionError("down")):
+        assert client.god_nodes() == []
+
+
+def test_surprising_connections_passes_limit_and_returns_links():
+    client = KnowledgeGraphClient()
+    payload = [{"entity_a": "a", "entity_b": "c", "bridge": "b", "relation_a": "cites",
+                "relation_b": "extends", "score": 0.8}]
+    with patch("prisma.services.knowledge_graph_client.requests.get",
+               return_value=_mock_response(payload)) as mock_get:
+        result = client.surprising_connections(limit=5)
+    assert result[0].bridge == "b"
+    assert mock_get.call_args.kwargs["params"] == {"limit": 5}
+
+
+def test_surprising_connections_empty_when_unreachable():
+    client = KnowledgeGraphClient()
+    with patch("prisma.services.knowledge_graph_client.requests.get", side_effect=requests.ConnectionError("down")):
+        assert client.surprising_connections() == []
+
+
+def test_authors_passes_limit_and_returns_summaries():
+    client = KnowledgeGraphClient()
+    payload = [{"author": "Ada Lovelace", "file_count": 3, "sample_entities": ["e1", "e2"]}]
+    with patch("prisma.services.knowledge_graph_client.requests.get",
+               return_value=_mock_response(payload)) as mock_get:
+        result = client.authors(limit=50)
+    assert result[0].author == "Ada Lovelace" and result[0].file_count == 3
+    assert mock_get.call_args.kwargs["params"] == {"limit": 50}
+
+
+def test_authors_empty_when_unreachable():
+    client = KnowledgeGraphClient()
+    with patch("prisma.services.knowledge_graph_client.requests.get", side_effect=requests.ConnectionError("down")):
+        assert client.authors() == []
+
+
+def test_vault_health_returns_response():
+    client = KnowledgeGraphClient()
+    payload = {"orphans": [{"id": "o1", "label": "O1", "source_file": "notes/a.md"}], "orphan_count": 1}
+    with patch("prisma.services.knowledge_graph_client.requests.get",
+               return_value=_mock_response(payload)) as mock_get:
+        result = client.vault_health()
+    assert result.orphan_count == 1
+    assert result.orphans[0].id == "o1"
+    assert mock_get.call_args[0][0].endswith("/vault_health")
+
+
+def test_vault_health_empty_shape_when_unreachable():
+    client = KnowledgeGraphClient()
+    with patch("prisma.services.knowledge_graph_client.requests.get", side_effect=requests.ConnectionError("down")):
+        result = client.vault_health()
+    assert result.orphans == [] and result.orphan_count == 0
+
+
+def test_timeline_forwards_query_and_returns_entries():
+    client = KnowledgeGraphClient()
+    payload = [{"id": "e1", "label": "Transformers", "source_file": "sources/a.md", "year": 2017}]
+    with patch("prisma.services.knowledge_graph_client.requests.get",
+               return_value=_mock_response(payload)) as mock_get:
+        result = client.timeline("transformers")
+    assert result[0].year == 2017
+    assert mock_get.call_args.kwargs["params"] == {"q": "transformers"}
+
+
+def test_timeline_empty_when_unreachable():
+    client = KnowledgeGraphClient()
+    with patch("prisma.services.knowledge_graph_client.requests.get", side_effect=requests.ConnectionError("down")):
+        assert client.timeline("q") == []

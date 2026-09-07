@@ -49,6 +49,14 @@ class ToolSpec(BaseModel):
     name: str
     marker: str
     description: str
+    # `ChatToolbox` method name this marker dispatches to — resolved via
+    # getattr in `call()`, so a new tool is one TOOLS entry + one method,
+    # not also an edit to a hardcoded if/elif chain.
+    handler: str
+    # True for tools that can put real, citable document content in front of
+    # the model (search/graph/zotero/read_source/...). `chat_agent.py`'s
+    # `_GROUNDING_TOOLS` is derived from this, not hand-maintained.
+    grounding: bool = False
     hidden_when_native_reasoning: bool = False
     # ZOTERO_SEARCH only makes sense when a Zotero library is actually
     # configured and reachable (online mode) -- see system_prompt_tool_
@@ -62,6 +70,8 @@ TOOLS: list[ToolSpec] = [
     ToolSpec(
         name="search_vault",
         marker="SEARCH_VAULT",
+        handler="_search_vault",
+        grounding=True,
         description=(
             "Semantic search over the vault's ChromaDB embedding index — finds "
             "notes/sources/chats by meaning, not just keyword match. Default "
@@ -71,6 +81,8 @@ TOOLS: list[ToolSpec] = [
     ToolSpec(
         name="graph_context",
         marker="GRAPH_CONTEXT",
+        handler="_graph_context",
+        grounding=True,
         description=(
             "Traverses the Knowledge Graph (KG) — entities and relationships "
             "extracted across the whole vault — to answer questions about how "
@@ -80,8 +92,62 @@ TOOLS: list[ToolSpec] = [
         ),
     ),
     ToolSpec(
+        name="expand_node",
+        marker="EXPAND_NODE",
+        handler="_expand_node",
+        grounding=True,
+        description=(
+            "Given one knowledge-graph entity id (as shown in a GRAPH_CONTEXT "
+            "or GOD_NODES result), returns its direct one-hop neighbours and "
+            "the relationships to them. Call to follow a specific thread after "
+            "a broader tool named an entity worth drilling into. "
+            "Format: EXPAND_NODE: <entity_id>"
+        ),
+    ),
+    ToolSpec(
+        name="god_nodes",
+        marker="GOD_NODES",
+        handler="_god_nodes",
+        grounding=True,
+        description=(
+            "Lists the most-connected hub entities across the whole vault — "
+            "the things everything else relates to. Call for broad/orienting "
+            "questions with no specific narrow target (\"what are the big "
+            "themes in my notes about X\"), or to orient before diving into "
+            "specifics. The query text is ignored; write GOD_NODES: -"
+        ),
+    ),
+    ToolSpec(
+        name="surprising_connections",
+        marker="SURPRISING_CONNECTIONS",
+        handler="_surprising_connections",
+        grounding=True,
+        description=(
+            "Lists 2-hop links between entities that no single document ever "
+            "stated directly — connections that only emerge from the graph "
+            "itself. Call when the user explicitly asks for unexpected/"
+            "creative connections, or when direct search results seem too "
+            "narrow/obvious for what's being asked. The query text is "
+            "ignored; write SURPRISING_CONNECTIONS: -"
+        ),
+    ),
+    ToolSpec(
+        name="read_source",
+        marker="READ_SOURCE",
+        handler="_read_source",
+        grounding=True,
+        description=(
+            "Reads a bounded leading excerpt of one specific vault document, "
+            "addressed by its exact slug. Last resort — only when a specific "
+            "document is clearly central and SEARCH_VAULT/GRAPH_CONTEXT "
+            "haven't given enough of its actual text. Never call by default. "
+            "Format: READ_SOURCE: <slug>"
+        ),
+    ),
+    ToolSpec(
         name="recall",
         marker="RECALL",
+        handler="_recall",
         description=(
             "Searches THIS conversation's own history — earlier turns, tool "
             "results, and claims — for something you saw before but that "
@@ -93,6 +159,7 @@ TOOLS: list[ToolSpec] = [
     ToolSpec(
         name="think",
         marker="THINK",
+        handler="_think",
         description=(
             "Externalizes one reasoning step before you answer — write down "
             "what you're weighing, checking, or ruling out. Call it as many "
@@ -106,6 +173,8 @@ TOOLS: list[ToolSpec] = [
     ToolSpec(
         name="zotero_search",
         marker="ZOTERO_SEARCH",
+        handler="_zotero_search",
+        grounding=True,
         description=(
             "Searches the user's whole Zotero library (title/author/text, via "
             "Zotero's own search) — including items never imported into the "
@@ -123,6 +192,8 @@ TOOL_CALL_RE = re.compile(
     r"^(" + "|".join(re.escape(t.marker) for t in TOOLS) + r"):\s*(.+)$",
     re.MULTILINE,
 )
+
+_SPEC_BY_MARKER: dict[str, ToolSpec] = {t.marker: t for t in TOOLS}
 
 # ADR-017 claim attribution. Same pattern-based convention as tool calls
 # (ADR-014's appendix found free-text markers more reliable than native
@@ -270,17 +341,15 @@ class ChatToolbox:
         session_graph: "nx.MultiDiGraph | None" = None, remaining_budget: int = 4000,
         chat_slug: str | None = None,
     ) -> ToolResult:
-        if marker == "SEARCH_VAULT":
-            return self._search_vault(query)
-        if marker == "GRAPH_CONTEXT":
-            return self._graph_context(query)
-        if marker == "RECALL":
+        spec = _SPEC_BY_MARKER.get(marker)
+        if spec is None:
+            raise ValueError(f"unknown tool marker: {marker!r}")
+        if spec.handler == "_recall":
+            # The only handler needing session context, not just the query
+            # text -- kept as a narrow special case rather than widening
+            # every handler's signature.
             return self._recall(query, session_graph, remaining_budget, chat_slug)
-        if marker == "THINK":
-            return self._think(query)
-        if marker == "ZOTERO_SEARCH":
-            return self._zotero_search(query)
-        raise ValueError(f"unknown tool marker: {marker!r}")
+        return getattr(self, spec.handler)(query)
 
     def _think(self, query: str) -> ToolResult:
         # No external lookup, unlike the other tools -- THINK is a
@@ -408,6 +477,71 @@ class ChatToolbox:
         else:
             wrapped = ""
         return ToolResult(text=wrapped, raw=[r.model_dump() for r in results])
+
+    def _expand_node(self, query: str) -> ToolResult:
+        """One-hop graph traversal from a specific entity id — the neighbours
+        and the relationships to them. Same graph-derived attribution as
+        GRAPH_CONTEXT (wrapped as `knowledge-graph`)."""
+        node_id = query.strip()
+        resp = self._kg.expand_node(node_id)
+        if not resp.entities:
+            return ToolResult(text=f"(no neighbours found for entity {node_id!r})", raw=[])
+        rels_by_target: dict[str, set[str]] = {}
+        for edge in resp.edges:
+            rels_by_target.setdefault(edge.target, set()).add(edge.relation)
+        lines = [f"{node_id} connects to:"]
+        for e in resp.entities:
+            rels = ", ".join(sorted(rels_by_target.get(e.id, set())))
+            lines.append(f"- {e.label} ({e.id})" + (f" [{rels}]" if rels else ""))
+        wrapped = wrap_untrusted("knowledge-graph", "\n".join(lines))
+        return ToolResult(text=wrapped, raw=[resp.model_dump()])
+
+    def _god_nodes(self, query: str) -> ToolResult:
+        """Highly-connected hub entities across the whole vault. The query
+        text is ignored (there's nothing to filter by) — this is an
+        orienting primitive."""
+        entities = self._kg.god_nodes(limit=15)
+        if not entities:
+            return ToolResult(text="(the knowledge graph has no connected entities yet)", raw=[])
+        slugs = list(dict.fromkeys(
+            Path(e.source_file).stem for e in entities if e.source_file
+        ))
+        lines = [
+            f"- {e.label} ({e.degree} connections)"
+            + (f" — e.g. {', '.join(e.sample_relations)}" if e.sample_relations else "")
+            for e in entities
+        ]
+        header = f"Sources: {', '.join(slugs)}\n\n" if slugs else ""
+        wrapped = wrap_untrusted("knowledge-graph", header + "\n".join(lines))
+        return ToolResult(text=wrapped, raw=[e.model_dump() for e in entities])
+
+    def _surprising_connections(self, query: str) -> ToolResult:
+        """2-hop links between entities that no single document ever
+        asserted directly — cached, background-computed (see
+        KnowledgeGraphService.surprising_connections()). The query text is
+        ignored, same as GOD_NODES."""
+        links = self._kg.surprising_connections(limit=15)
+        if not links:
+            return ToolResult(text="(no surprising connections found yet)", raw=[])
+        lines = [
+            f"- {c.entity_a} --[{c.relation_a}]--> {c.bridge} --[{c.relation_b}]--> {c.entity_b}"
+            for c in links
+        ]
+        wrapped = wrap_untrusted("knowledge-graph", "\n".join(lines))
+        return ToolResult(text=wrapped, raw=[c.model_dump() for c in links])
+
+    def _read_source(self, query: str) -> ToolResult:
+        """Bounded leading excerpt of one vault document, addressed by slug.
+        The chat tool only exposes summary mode — section/ripgrep are for
+        the REST surface (GET /notes/{slug}/read)."""
+        from prisma.services.source_reader import read_source
+        slug = query.strip()
+        try:
+            resp = read_source(self._vault, slug, mode="summary")
+        except FileNotFoundError:
+            return ToolResult(text=f"(no vault document with slug {slug!r})", raw=[])
+        wrapped = wrap_untrusted(slug, resp.text) if resp.text else ""
+        return ToolResult(text=wrapped, raw=[resp.model_dump()])
 
     # ── RECALL (ADR-019, docs/concepts/chat-session-graph.md) ───────────────
 

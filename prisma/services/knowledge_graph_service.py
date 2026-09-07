@@ -42,18 +42,19 @@ from pydantic import BaseModel
 from watchdog.events import FileSystemEventHandler, FileSystemEvent
 from watchdog.observers import Observer
 
-from prisma.services import resource_lock
+from prisma.services import kg_queries, resource_lock
 from prisma.services.injection_defense import wrap_untrusted
 from prisma.services.vault import VaultService
 from prisma.storage.models.kg_models import (
+    AuthorSummary,
     DeadLetterEntry,
     DroppedChunkInfo,
-    EdgeInfo,
     EntitiesForFileResponse,
-    EntityInfo,
     GraphQueryResult,
     KGStatus,
     RankedNode,
+    SurprisingConnection,
+    TimelineEntry,
     TopEntity,
 )
 from prisma.storage.models.search_models import DeepSearchCandidate, GraphSearchResult
@@ -468,6 +469,12 @@ class KnowledgeGraphService:
         # _refresh_top_entities()/top_entities().
         self._top_entities_cache: list[TopEntity] = []
 
+        # Cache-only mirror of surprising_connections()'s ranking -- same
+        # background-thread-only refresh discipline as _top_entities_cache
+        # above, and for the same reason: 2-hop enumeration is materially
+        # heavier than a flat scan, so it must never run on a request thread.
+        self._surprising_connections_cache: list[SurprisingConnection] = []
+
         # Knowledge Graph progress page state (replaces an earlier, since
         # reverted, generic "ollama stats" page — this is scoped to what's
         # actually useful: full-sync progress, current file's chunk
@@ -619,6 +626,7 @@ class KnowledgeGraphService:
                     self._indexed_cache.clear()
                     self._indexed_model_cache.clear()
                     self._top_entities_cache = []
+                    self._surprising_connections_cache = []
                 except Exception as exc:
                     _log.warning("drop_index failed: %s", exc)
             self._state = "stale"
@@ -1389,6 +1397,7 @@ class KnowledgeGraphService:
             self._state = "idle"
         if changed:
             self._refresh_top_entities()
+            self._refresh_surprising_connections()
         if not changed and existing:
             _log.info("knowledge graph incremental update: no real content change — watcher false-positive")
         self._set_activity(None)
@@ -1457,6 +1466,7 @@ class KnowledgeGraphService:
                 self._current_file_chunks_total = 0
                 self._current_file_chunks_done = 0
             self._refresh_top_entities()
+            self._refresh_surprising_connections()
             self._set_activity(None)
             _log.info("knowledge graph full index done: %d files indexed, %d changed", len(all_files), changed)
         except Exception as exc:
@@ -1480,86 +1490,35 @@ class KnowledgeGraphService:
         """Raw entities/edges extracted from one specific file — for
         inspecting extraction quality directly (search/ranked_nodes only
         ever return file-level scores, never the underlying nodes)."""
-        if self._conn is None:
-            return EntitiesForFileResponse(entities=[], edges=[])
-        entities: list[EntityInfo] = []
-        try:
-            result = self._conn.execute(
-                "MATCH (e:Entity {source_file: $rel}) "
-                "RETURN e.id, e.label, e.file_type, e.trust_tier, e.source_location",
-                {"rel": rel_path},
-            )
-            while result.has_next():
-                eid, label, file_type, trust_tier, source_location = result.get_next()
-                entities.append(EntityInfo(
-                    id=eid, label=label, file_type=file_type,
-                    trust_tier=trust_tier, source_location=source_location,
-                ))
-        except Exception as exc:
-            _log.warning("entities_for_file failed for %s: %s", rel_path, exc)
-            return EntitiesForFileResponse(entities=[], edges=[])
-        edges: list[EdgeInfo] = []
-        try:
-            result = self._conn.execute(
-                "MATCH (a:Entity)-[r:RelatesTo {source_file: $rel}]->(b:Entity) "
-                "RETURN a.id, r.relation, b.id, r.confidence, r.confidence_score",
-                {"rel": rel_path},
-            )
-            while result.has_next():
-                src, relation, dst, confidence, confidence_score = result.get_next()
-                edges.append(EdgeInfo(
-                    source=src, relation=relation, target=dst,
-                    confidence=confidence, confidence_score=confidence_score,
-                ))
-        except Exception as exc:
-            _log.warning("entities_for_file edges failed for %s: %s", rel_path, exc)
-        return EntitiesForFileResponse(entities=entities, edges=edges, extracted_by=self.indexed_model(rel_path))
+        return kg_queries.entities_for_file(self._conn, rel_path, self.indexed_model(rel_path))
 
     def search(self, question: str, top_k: int = 20) -> list[GraphSearchResult]:
-        terms = [t.lower() for t in re.findall(r"[a-zA-Z0-9_]+", question) if len(t) > 2]
-        if not terms or self._conn is None:
-            return []
-        try:
-            result = self._conn.execute(
-                "MATCH (e:Entity) WHERE e.trust_tier <> 'chat' RETURN e.id, e.label, e.source_file"
-            )
-        except Exception as exc:
-            _log.warning("search failed: %s", exc)
-            return []
-        file_scores: dict[str, float] = {}
-        while result.has_next():
-            eid, label, source_file = result.get_next()
-            if not source_file:
-                continue
-            haystack = f"{eid} {label}".lower()
-            score = sum(1.0 for t in terms if t in haystack)
-            if score > 0:
-                file_scores[source_file] = file_scores.get(source_file, 0.0) + score
-        ranked = sorted(file_scores.items(), key=lambda x: -x[1])[:top_k]
-        return [GraphSearchResult(source_file=sf, score=score) for sf, score in ranked]
+        return kg_queries.search(self._conn, question, top_k=top_k)
 
     def _compute_top_entities(self, limit: int = TOP_ENTITIES_CACHE_SIZE) -> list[TopEntity]:
         """Live Cypher call -- only ever invoked from the background index
         thread (via _refresh_top_entities()), never from a request handler.
         top_entities() below is the cache-only read callers actually use."""
-        if self._conn is None:
-            return []
-        try:
-            result = self._conn.execute(
-                "MATCH (e:Entity)-[r:RelatesTo]-(o:Entity) "
-                "WHERE e.trust_tier <> 'chat' AND o.trust_tier <> 'chat' "
-                "RETURN e.id, e.label, count(r) AS degree "
-                "ORDER BY degree DESC LIMIT $limit",
-                {"limit": limit},
-            )
-        except Exception as exc:
-            _log.warning("top_entities computation failed: %s", exc)
-            return []
-        out: list[TopEntity] = []
-        while result.has_next():
-            eid, label, degree = result.get_next()
-            out.append(TopEntity(id=eid, label=label, degree=degree))
-        return out
+        return kg_queries.compute_top_entities(self._conn, limit)
+
+    # ── Phase A retrieval capabilities (delegated to kg_queries) ──────────────
+    # Live Cypher on the request path, same as entities_for_file/search above —
+    # these are explicit tool/endpoint calls, not the per-turn priming read.
+
+    def expand_node(self, node_id: str):
+        return kg_queries.expand_node(self._conn, node_id)
+
+    def god_nodes(self, limit: int = TOP_ENTITIES_CACHE_SIZE) -> list[TopEntity]:
+        return kg_queries.god_nodes(self._conn, limit)
+
+    def authors(self, limit: int = 100) -> list[AuthorSummary]:
+        return kg_queries.authors(self._conn, limit)
+
+    def vault_health(self):
+        return kg_queries.vault_health(self._conn)
+
+    def timeline(self, question: str) -> list[TimelineEntry]:
+        return kg_queries.timeline(self._conn, self._vault, question)
 
     def _refresh_top_entities(self) -> None:
         computed = self._compute_top_entities()
@@ -1570,6 +1529,25 @@ class KnowledgeGraphService:
         """Cache-only read, no Kùzu call -- see _refresh_top_entities()."""
         with self._lock:
             return self._top_entities_cache[:limit]
+
+    def _refresh_surprising_connections(self) -> None:
+        """Background-thread-only, like _refresh_top_entities() above --
+        2-hop enumeration is materially heavier than the flat scan
+        _compute_top_entities() runs. Reads the just-refreshed
+        _top_entities_cache for its hub-exclusion set rather than
+        recomputing degree separately -- both caches are refreshed from the
+        same call site (see _process_pending/_full_index), so this is
+        always the current cycle's top-entity list, not a stale one."""
+        with self._lock:
+            hub_ids = {e.id for e in self._top_entities_cache}
+        computed = kg_queries.surprising_connections(self._conn, hub_ids)
+        with self._lock:
+            self._surprising_connections_cache = computed
+
+    def surprising_connections(self, limit: int = TOP_ENTITIES_CACHE_SIZE) -> list[SurprisingConnection]:
+        """Cache-only read, no Kùzu call -- see _refresh_surprising_connections()."""
+        with self._lock:
+            return self._surprising_connections_cache[:limit]
 
     # ── Compatibility wrappers ───────────────────────────────────────────────
     # Same names/shapes as GraphifyIndexer's — app.py's call sites (/search,

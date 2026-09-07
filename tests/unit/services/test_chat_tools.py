@@ -484,6 +484,135 @@ def test_call_unknown_marker_raises():
         toolbox.call("NOT_A_TOOL", "x")
 
 
+# ── EXPAND_NODE / GOD_NODES / READ_SOURCE (Phase A) ──────────────────────────
+# Three-layer coverage per tool: system-prompt visibility, TOOL_CALL_RE match,
+# ChatToolbox.call() behaviour.
+
+from prisma.storage.models.kg_models import ExpandNodeResponse, TopEntity  # noqa: E402
+from prisma.storage.models.kg_models import EdgeInfo, EntityInfo  # noqa: E402
+from prisma.storage.models.kg_models import SurprisingConnection  # noqa: E402
+
+
+@pytest.mark.parametrize("marker", ["EXPAND_NODE:", "GOD_NODES:", "SURPRISING_CONNECTIONS:", "READ_SOURCE:"])
+def test_new_tools_advertised_in_system_prompt(marker):
+    assert marker in system_prompt_tool_section()
+
+
+@pytest.mark.parametrize("marker,query", [
+    ("EXPAND_NODE", "bricken2023_sparse_autoencoders"),
+    ("GOD_NODES", "-"),
+    ("SURPRISING_CONNECTIONS", "-"),
+    ("READ_SOURCE", "attention-is-all-you-need"),
+])
+def test_tool_call_re_matches_new_markers(marker, query):
+    assert TOOL_CALL_RE.findall(f"{marker}: {query}") == [(marker, query)]
+
+
+def test_toolbox_expand_node_lists_neighbours_with_relations(vault):
+    kg = MagicMock()
+    kg.expand_node.return_value = ExpandNodeResponse(
+        entities=[EntityInfo(id="n1", label="Neighbour One"), EntityInfo(id="n2", label="Neighbour Two")],
+        edges=[
+            EdgeInfo(source="center", relation="cites", target="n1"),
+            EdgeInfo(source="center", relation="extends", target="n2"),
+        ],
+    )
+    toolbox = ChatToolbox(MagicMock(), kg, vault)
+
+    result = toolbox.call("EXPAND_NODE", "center")
+
+    kg.expand_node.assert_called_once_with("center")
+    assert "Neighbour One (n1) [cites]" in result.text
+    assert 'path="knowledge-graph"' in result.text
+    assert result.raw[0]["entities"][0]["id"] == "n1"
+
+
+def test_toolbox_expand_node_empty_when_no_neighbours(vault):
+    kg = MagicMock()
+    kg.expand_node.return_value = ExpandNodeResponse(entities=[], edges=[])
+    toolbox = ChatToolbox(MagicMock(), kg, vault)
+
+    result = toolbox.call("EXPAND_NODE", "lonely")
+
+    assert "no neighbours" in result.text
+    assert result.raw == []
+
+
+def test_toolbox_god_nodes_lists_hubs_with_sources_header(vault):
+    kg = MagicMock()
+    kg.god_nodes.return_value = [
+        TopEntity(id="h1", label="Hub One", degree=7, source_file="sources/a.md",
+                  sample_relations=["cites", "builds_on"]),
+        TopEntity(id="h2", label="Hub Two", degree=3, source_file="notes/b.md"),
+    ]
+    toolbox = ChatToolbox(MagicMock(), kg, vault)
+
+    result = toolbox.call("GOD_NODES", "-")
+
+    assert "Hub One (7 connections) — e.g. cites, builds_on" in result.text
+    assert "Sources: a, b" in result.text
+    assert len(result.raw) == 2
+
+
+def test_toolbox_god_nodes_empty_graph(vault):
+    kg = MagicMock()
+    kg.god_nodes.return_value = []
+    toolbox = ChatToolbox(MagicMock(), kg, vault)
+
+    result = toolbox.call("GOD_NODES", "-")
+
+    assert "no connected entities" in result.text
+
+
+def test_toolbox_surprising_connections_lists_links(vault):
+    kg = MagicMock()
+    kg.surprising_connections.return_value = [
+        SurprisingConnection(entity_a="a", entity_b="c", bridge="b",
+                              relation_a="cites", relation_b="extends", score=0.8),
+    ]
+    toolbox = ChatToolbox(MagicMock(), kg, vault)
+
+    result = toolbox.call("SURPRISING_CONNECTIONS", "-")
+
+    kg.surprising_connections.assert_called_once_with(limit=15)
+    assert "a --[cites]--> b --[extends]--> c" in result.text
+    assert 'path="knowledge-graph"' in result.text
+    assert len(result.raw) == 1
+
+
+def test_toolbox_surprising_connections_empty(vault):
+    kg = MagicMock()
+    kg.surprising_connections.return_value = []
+    toolbox = ChatToolbox(MagicMock(), kg, vault)
+
+    result = toolbox.call("SURPRISING_CONNECTIONS", "-")
+
+    assert "no surprising connections" in result.text
+    assert result.raw == []
+
+
+def test_toolbox_read_source_returns_wrapped_excerpt(vault):
+    note = vault.root / "notes" / "big-paper.md"
+    note.parent.mkdir(parents=True, exist_ok=True)
+    note.write_text("---\ntype: note\n---\nThe transformer uses self-attention.", encoding="utf-8")
+    toolbox = ChatToolbox(MagicMock(), MagicMock(), vault)
+
+    result = toolbox.call("READ_SOURCE", "big-paper")
+
+    assert 'path="big-paper"' in result.text
+    assert "self-attention" in result.text
+    assert result.raw[0]["mode"] == "summary"
+
+
+def test_toolbox_read_source_missing_slug(vault):
+    toolbox = ChatToolbox(MagicMock(), MagicMock(), vault)
+
+    result = toolbox.call("READ_SOURCE", "does-not-exist")
+
+    assert "no vault document" in result.text
+    assert result.raw == []
+
+
 # ── zotero_search (reaches Zotero bookmarks the vault's import boundary
 # would otherwise hide from SEARCH_VAULT entirely) ───────────────────────
 

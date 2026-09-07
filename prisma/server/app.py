@@ -490,6 +490,7 @@ from prisma.server.notes_routes import build_notes_router  # noqa: E402
 from prisma.server.streams_routes import build_streams_router, StreamScheduler  # noqa: E402
 from prisma.server.zotero_routes import build_zotero_router  # noqa: E402
 from prisma.server.admin_routes import build_admin_router  # noqa: E402
+from prisma.server.graph_routes import build_graph_router  # noqa: E402
 from prisma.server.search_routes import build_search_router  # noqa: E402
 def _update_client_baseline(client_id: str, path: str, content_hash: str, mtime: float) -> None:
     with _client_baseline_lock:
@@ -535,6 +536,10 @@ app.include_router(build_zotero_router(
 
 app.include_router(build_admin_router(
     get_indexer=lambda: _indexer,
+))
+
+app.include_router(build_graph_router(
+    get_client=lambda: _indexer,
 ))
 
 app.include_router(build_search_router(

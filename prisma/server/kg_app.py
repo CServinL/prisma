@@ -21,9 +21,11 @@ from prisma.server import log_setup as _log_setup
 from prisma.services.knowledge_graph_service import KnowledgeGraphService
 from prisma.services.vault import VaultService
 from prisma.storage.models.kg_models import (
+    AuthorSummary,
     ClearDeadLettersResponse,
     DeadLetterEntry,
     EntitiesForFileResponse,
+    ExpandNodeResponse,
     GraphQueryResult,
     GraphSearchResult,
     KGStatus,
@@ -31,8 +33,11 @@ from prisma.storage.models.kg_models import (
     OllamaReadyResponse,
     RankedNode,
     StatusResponse,
+    SurprisingConnection,
     TaintFileResponse,
+    TimelineEntry,
     TopEntity,
+    VaultHealthResponse,
 )
 
 _LOG_PATHS = _log_setup.configure()
@@ -186,3 +191,44 @@ def top_entities(limit: int = Query(15)):
 @app.get("/ollama_ready", response_model=OllamaReadyResponse)
 def ollama_ready():
     return {"reachable": _kg._ollama_ready()}
+
+
+# ── Phase A retrieval capabilities (see kg_queries.py) — live Cypher, same
+# pass-through pattern as /search and /entities_for_file above. ────────────────
+
+@app.get("/expand_node", response_model=ExpandNodeResponse)
+def expand_node(id: str = Query(...)):
+    """One-hop neighbourhood of a single entity id."""
+    return _kg.expand_node(id)
+
+
+@app.get("/god_nodes", response_model=list[TopEntity])
+def god_nodes(limit: int = Query(15)):
+    """Most-connected hub entities, with each one's source_file and up to 3
+    sample relation strings (richer than /top_entities' cache read)."""
+    return _kg.god_nodes(limit=limit)
+
+
+@app.get("/surprising_connections", response_model=list[SurprisingConnection])
+def surprising_connections(limit: int = Query(15)):
+    """Cached ranking only -- no live Cypher on this request path, see
+    KnowledgeGraphService.surprising_connections()."""
+    return _kg.surprising_connections(limit=limit)
+
+
+@app.get("/authors", response_model=list[AuthorSummary])
+def authors(limit: int = Query(100)):
+    """Distinct Entity.author values grouped across the vault."""
+    return _kg.authors(limit=limit)
+
+
+@app.get("/vault_health", response_model=VaultHealthResponse)
+def vault_health():
+    """Entities with zero RelatesTo edges (first-cut vault health)."""
+    return _kg.vault_health()
+
+
+@app.get("/timeline", response_model=list[TimelineEntry])
+def timeline(q: str = Query(...)):
+    """Entities matching `q`, joined to their Source.year, sorted chronologically."""
+    return _kg.timeline(q)

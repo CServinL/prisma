@@ -212,3 +212,49 @@ def test_get_apa_citations_registered_before_slug_route(client, vault):
     r = client.get("/notes/apa?slugs=whatever")
     assert r.status_code == 200
     assert isinstance(r.json(), dict)
+
+
+# ── GET /notes/{slug}/read (READ_SOURCE's REST surface) ──────────────────────
+
+_SECTIONED_DOC = (
+    "---\ntype: note\ntitle: Doc\n---\n"
+    "intro line\n\n"
+    "## Methods\nA closed-form update.\n\n"
+    "## Results\nAccuracy improved by 4 points.\n"
+)
+
+
+def test_read_summary_mode_default(client, vault):
+    vault.create_note("Doc", body="The transformer uses self-attention.")
+    r = client.get("/notes/doc/read")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["mode"] == "summary"
+    assert "self-attention" in body["text"]
+
+
+def test_read_section_mode(client, vault):
+    (vault.default_dirs[NodeType.note] / "doc.md").write_text(_SECTIONED_DOC, encoding="utf-8")
+    r = client.get("/notes/doc/read", params={"mode": "section", "query": "results"})
+    assert r.status_code == 200
+    body = r.json()
+    assert "Accuracy improved" in body["text"]
+    assert body["available_sections"] == ["Methods", "Results"]
+
+
+def test_read_ripgrep_mode(client, vault):
+    (vault.default_dirs[NodeType.note] / "doc.md").write_text(_SECTIONED_DOC, encoding="utf-8")
+    r = client.get("/notes/doc/read", params={"mode": "ripgrep", "query": "closed-form"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["match_count"] == 1
+    assert "closed-form update" in body["text"]
+
+
+def test_read_rejects_unknown_mode(client, vault):
+    vault.create_note("Doc", body="text")
+    assert client.get("/notes/doc/read", params={"mode": "bogus"}).status_code == 422
+
+
+def test_read_missing_slug_is_404(client):
+    assert client.get("/notes/nope/read").status_code == 404

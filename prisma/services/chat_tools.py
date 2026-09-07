@@ -532,7 +532,7 @@ class ChatToolbox:
 
     def _read_source(self, query: str) -> ToolResult:
         """Bounded leading excerpt of one vault document, addressed by slug.
-        The chat tool only exposes summary mode — section/ripgrep are for
+        The chat tool only exposes summary mode — section/literal are for
         the REST surface (GET /notes/{slug}/read)."""
         from prisma.services.source_reader import read_source
         slug = query.strip()

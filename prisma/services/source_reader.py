@@ -10,7 +10,7 @@ Modes:
                just addressable by exact slug instead of via a ChromaDB hit.
   - section  — naive heading-split of the markdown body; returns the section
                whose heading contains `query` (case-insensitive).
-  - ripgrep  — literal, case-insensitive line search within the raw text,
+  - literal  — literal, case-insensitive line search within the raw text,
                matching lines with a few lines of context each — a grep
                scoped to one file. Literal-only, not a regex engine: `query`
                is REST-caller-controlled (see GET /notes/{slug}/read), and
@@ -28,14 +28,14 @@ from prisma.storage.models.kg_models import ReadSourceResponse
 
 _EXCERPT_CHARS = 2000
 _SECTION_MAX_CHARS = 4000
-_RIPGREP_CONTEXT_LINES = 2
-_RIPGREP_MAX_MATCHES = 20
-# Bounds on top of _RIPGREP_MAX_MATCHES -- that caps how many blocks are
+_LITERAL_CONTEXT_LINES = 2
+_LITERAL_MAX_MATCHES = 20
+# Bounds on top of _LITERAL_MAX_MATCHES -- that caps how many blocks are
 # considered, not their size. A single arbitrarily long line (a minified
 # blob, a data URI) could otherwise still make the joined `text` return
 # megabytes despite the match-count cap (found in PR #104 review).
-_RIPGREP_MAX_LINE_CHARS = 500
-_RIPGREP_MAX_TOTAL_CHARS = 8000
+_LITERAL_MAX_LINE_CHARS = 500
+_LITERAL_MAX_TOTAL_CHARS = 8000
 
 _HEADING_RE = re.compile(r"^#{1,6}\s+(.*)$")
 
@@ -57,13 +57,13 @@ def read_source(
             text = f.read(_EXCERPT_CHARS)
         return ReadSourceResponse(slug=slug, mode="summary", text=text)
 
-    # section/ripgrep genuinely need the whole document -- a heading or a
+    # section/literal genuinely need the whole document -- a heading or a
     # match can be anywhere in it.
     raw = path.read_text(encoding="utf-8", errors="replace")
     if mode == "section":
         return _read_section(slug, raw, (query or "").strip())
-    if mode == "ripgrep":
-        return _read_ripgrep(slug, raw, query or "")
+    if mode == "literal":
+        return _read_literal(slug, raw, query or "")
     raise ValueError(f"unknown read mode: {mode!r}")
 
 
@@ -107,27 +107,27 @@ def _read_section(slug: str, raw: str, query: str) -> ReadSourceResponse:
     )
 
 
-def _read_ripgrep(slug: str, raw: str, query: str) -> ReadSourceResponse:
+def _read_literal(slug: str, raw: str, query: str) -> ReadSourceResponse:
     if not query:
-        return ReadSourceResponse(slug=slug, mode="ripgrep", query=None, text="", match_count=0)
+        return ReadSourceResponse(slug=slug, mode="literal", query=None, text="", match_count=0)
     needle = query.lower()
     lines = raw.splitlines()
     hit_indices = [i for i, line in enumerate(lines) if needle in line.lower()]
-    truncated = len(hit_indices) > _RIPGREP_MAX_MATCHES
+    truncated = len(hit_indices) > _LITERAL_MAX_MATCHES
     blocks: list[str] = []
     used = 0
-    for i in hit_indices[:_RIPGREP_MAX_MATCHES]:
-        lo = max(0, i - _RIPGREP_CONTEXT_LINES)
-        hi = min(len(lines), i + _RIPGREP_CONTEXT_LINES + 1)
+    for i in hit_indices[:_LITERAL_MAX_MATCHES]:
+        lo = max(0, i - _LITERAL_CONTEXT_LINES)
+        hi = min(len(lines), i + _LITERAL_CONTEXT_LINES + 1)
         block = "\n".join(
-            f"{j + 1}{':' if j == i else '-'}{lines[j][:_RIPGREP_MAX_LINE_CHARS]}" for j in range(lo, hi)
+            f"{j + 1}{':' if j == i else '-'}{lines[j][:_LITERAL_MAX_LINE_CHARS]}" for j in range(lo, hi)
         )
-        if used + len(block) > _RIPGREP_MAX_TOTAL_CHARS:
+        if used + len(block) > _LITERAL_MAX_TOTAL_CHARS:
             truncated = True
             break
         blocks.append(block)
         used += len(block)
     return ReadSourceResponse(
-        slug=slug, mode="ripgrep", query=query,
+        slug=slug, mode="literal", query=query,
         text="\n--\n".join(blocks), match_count=len(hit_indices), truncated=truncated,
     )

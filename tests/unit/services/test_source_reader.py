@@ -78,97 +78,97 @@ def test_section_no_query_lists_headings_only(vault):
     assert resp.available_sections == ["Methods", "Results"]
 
 
-# ── ripgrep ───────────────────────────────────────────────────────────────────
+# ── literal ───────────────────────────────────────────────────────────────────
 
-def test_ripgrep_returns_matching_lines_with_context(vault):
+def test_literal_returns_matching_lines_with_context(vault):
     body = "\n".join(f"line {i}" for i in range(20)) + "\nTARGET here\n" + "\n".join(f"tail {i}" for i in range(5))
     _write(vault, "doc", body)
-    resp = read_source(vault, "doc", mode="ripgrep", query="TARGET")
+    resp = read_source(vault, "doc", mode="literal", query="TARGET")
     assert resp.match_count == 1
     assert "TARGET here" in resp.text
     assert "line 19" in resp.text  # 2 lines of leading context
     assert "tail 0" in resp.text   # 2 lines of trailing context
 
 
-def test_ripgrep_marks_the_hit_line_with_a_colon(vault):
+def test_literal_marks_the_hit_line_with_a_colon(vault):
     _write(vault, "doc", "alpha\nbeta needle gamma\ndelta")
-    resp = read_source(vault, "doc", mode="ripgrep", query="needle")
+    resp = read_source(vault, "doc", mode="literal", query="needle")
     # hit line uses "N:", context lines use "N-"
     assert "2:beta needle gamma" in resp.text
     assert "1-alpha" in resp.text
 
 
-def test_ripgrep_is_literal_not_regex(vault):
+def test_literal_is_literal_not_regex(vault):
     # Security fix (PR #104 review): regex interpretation was removed --
     # Python's stdlib `re` has no execution timeout, and `query` is
     # REST-caller-controlled, so a catastrophic-backtracking pattern could
     # hang a worker. `\d+` must be matched as the literal four characters,
     # not "one or more digits".
     _write(vault, "doc", r"contains \d+ literally" + "\nv1.0\nv2.3")
-    resp = read_source(vault, "doc", mode="ripgrep", query=r"\d+")
+    resp = read_source(vault, "doc", mode="literal", query=r"\d+")
     assert resp.match_count == 1
     assert "contains \\d+ literally" in resp.text
 
 
-def test_ripgrep_handles_regex_special_characters_safely(vault):
+def test_literal_handles_regex_special_characters_safely(vault):
     _write(vault, "doc", "a (b c\nunrelated")
-    resp = read_source(vault, "doc", mode="ripgrep", query="(b c")
+    resp = read_source(vault, "doc", mode="literal", query="(b c")
     assert resp.match_count == 1
 
 
-def test_ripgrep_catastrophic_backtracking_pattern_is_inert(vault):
+def test_literal_catastrophic_backtracking_pattern_is_inert(vault):
     # Would hang for a long time under real regex interpretation; must
     # resolve instantly and simply not match, since it's treated as a
     # literal string.
     _write(vault, "doc", "a" * 40 + "!")
-    resp = read_source(vault, "doc", mode="ripgrep", query="(a+)+$")
+    resp = read_source(vault, "doc", mode="literal", query="(a+)+$")
     assert resp.match_count == 0
 
 
-def test_ripgrep_no_query_returns_nothing(vault):
+def test_literal_no_query_returns_nothing(vault):
     _write(vault, "doc", "content")
-    resp = read_source(vault, "doc", mode="ripgrep")
+    resp = read_source(vault, "doc", mode="literal")
     assert resp.text == "" and resp.match_count == 0
 
 
-def test_ripgrep_not_truncated_for_a_small_result(vault):
+def test_literal_not_truncated_for_a_small_result(vault):
     _write(vault, "doc", "alpha\nneedle here\ndelta")
-    resp = read_source(vault, "doc", mode="ripgrep", query="needle")
+    resp = read_source(vault, "doc", mode="literal", query="needle")
     assert resp.truncated is False
 
 
-def test_ripgrep_caps_a_single_arbitrarily_long_line(vault):
+def test_literal_caps_a_single_arbitrarily_long_line(vault):
     # Regression (PR #104 review): match_count alone bounded how many
     # blocks were considered, not their size -- a single huge line (a
     # minified blob, a data URI) could otherwise blow the response size on
     # its own.
-    from prisma.services.source_reader import _RIPGREP_MAX_LINE_CHARS
+    from prisma.services.source_reader import _LITERAL_MAX_LINE_CHARS
     _write(vault, "doc", "needle " + "x" * 10_000)
-    resp = read_source(vault, "doc", mode="ripgrep", query="needle")
-    assert len(resp.text) <= _RIPGREP_MAX_LINE_CHARS + 20  # + the "N:" prefix
+    resp = read_source(vault, "doc", mode="literal", query="needle")
+    assert len(resp.text) <= _LITERAL_MAX_LINE_CHARS + 20  # + the "N:" prefix
     assert resp.truncated is False  # the one match itself was still returned, just capped
 
 
-def test_ripgrep_marks_truncated_when_total_size_budget_is_exceeded(vault):
-    from prisma.services.source_reader import _RIPGREP_MAX_LINE_CHARS, _RIPGREP_MAX_TOTAL_CHARS
-    # Exactly 20 matches (at _RIPGREP_MAX_MATCHES, not over it) so the
+def test_literal_marks_truncated_when_total_size_budget_is_exceeded(vault):
+    from prisma.services.source_reader import _LITERAL_MAX_LINE_CHARS, _LITERAL_MAX_TOTAL_CHARS
+    # Exactly 20 matches (at _LITERAL_MAX_MATCHES, not over it) so the
     # match-count cap alone wouldn't trigger truncated -- each match's line
     # is near the per-line cap, spaced far enough apart that context
     # windows don't overlap, so 20 blocks' combined size reliably exceeds
     # the total-size budget on its own.
-    per_line = "needle " + "y" * _RIPGREP_MAX_LINE_CHARS
+    per_line = "needle " + "y" * _LITERAL_MAX_LINE_CHARS
     lines = [per_line if i % 5 == 0 else f"filler {i}" for i in range(100)]
     _write(vault, "doc", "\n".join(lines))
-    resp = read_source(vault, "doc", mode="ripgrep", query="needle")
+    resp = read_source(vault, "doc", mode="literal", query="needle")
     assert resp.match_count == 20
     assert resp.truncated is True
-    assert len(resp.text) <= _RIPGREP_MAX_TOTAL_CHARS + _RIPGREP_MAX_LINE_CHARS  # one block's worth of slack before the size check breaks the loop
+    assert len(resp.text) <= _LITERAL_MAX_TOTAL_CHARS + _LITERAL_MAX_LINE_CHARS  # one block's worth of slack before the size check breaks the loop
 
 
-def test_ripgrep_marks_truncated_when_more_matches_than_shown(vault):
+def test_literal_marks_truncated_when_more_matches_than_shown(vault):
     lines = [f"needle {i}" if i % 2 == 0 else f"filler {i}" for i in range(50)]
     _write(vault, "doc", "\n".join(lines))
-    resp = read_source(vault, "doc", mode="ripgrep", query="needle")
+    resp = read_source(vault, "doc", mode="literal", query="needle")
     assert resp.match_count == 25
     assert resp.truncated is True
 

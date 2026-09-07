@@ -242,9 +242,9 @@ def test_read_section_mode(client, vault):
     assert body["available_sections"] == ["Methods", "Results"]
 
 
-def test_read_ripgrep_mode(client, vault):
+def test_read_literal_mode(client, vault):
     (vault.default_dirs[NodeType.note] / "doc.md").write_text(_SECTIONED_DOC, encoding="utf-8")
-    r = client.get("/notes/doc/read", params={"mode": "ripgrep", "query": "closed-form"})
+    r = client.get("/notes/doc/read", params={"mode": "literal", "query": "closed-form"})
     assert r.status_code == 200
     body = r.json()
     assert body["match_count"] == 1

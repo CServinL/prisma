@@ -153,13 +153,13 @@ def build_notes_router(
     @router.get("/{slug}/read", response_model=ReadSourceResponse)
     def read_note_source(
         slug: str,
-        mode: str = Query("summary", pattern="^(summary|section|ripgrep)$"),
+        mode: str = Query("summary", pattern="^(summary|section|literal)$"),
         query: Optional[str] = Query(None),
     ):
         """Bounded, addressable read of one vault document's own raw text
         (no graph involvement) — the REST surface for chat's READ_SOURCE
         tool. `mode`: summary (leading excerpt), section (heading-matched
-        slice), ripgrep (matching lines + context). Every mode returns a
+        slice), literal (matching lines + context). Every mode returns a
         bounded slice, never the whole file."""
         from prisma.services.source_reader import read_source
         try:

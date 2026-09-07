@@ -186,7 +186,7 @@ class SurprisingConnection(BaseModel):
 
 class ReadSourceResponse(BaseModel):
     """A bounded slice of one vault document's own raw text — never the
-    whole file. `mode` is one of summary/section/ripgrep."""
+    whole file. `mode` is one of summary/section/literal."""
     slug: str
     mode: str
     query: str | None = None
@@ -194,10 +194,10 @@ class ReadSourceResponse(BaseModel):
     # section mode: every heading found, so a missed `query` still tells the
     # caller what it could have asked for.
     available_sections: list[str] = []
-    # ripgrep mode: total matching lines found (may exceed what's actually
+    # literal mode: total matching lines found (may exceed what's actually
     # returned -- see `truncated`).
     match_count: int | None = None
-    # ripgrep mode: True if either more matches existed than were included,
+    # literal mode: True if either more matches existed than were included,
     # or a per-line/total-size budget cut the output short. Found live (PR
     # #104 review): match_count alone caps how many *blocks* are considered,
     # not the total bytes returned -- a single arbitrarily long matching or

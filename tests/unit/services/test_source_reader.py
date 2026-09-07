@@ -98,16 +98,31 @@ def test_ripgrep_marks_the_hit_line_with_a_colon(vault):
     assert "1-alpha" in resp.text
 
 
-def test_ripgrep_regex_query(vault):
-    _write(vault, "doc", "v1.0\nv2.3\nplain text")
-    resp = read_source(vault, "doc", mode="ripgrep", query=r"v\d+\.\d+")
-    assert resp.match_count == 2
+def test_ripgrep_is_literal_not_regex(vault):
+    # Security fix (PR #104 review): regex interpretation was removed --
+    # Python's stdlib `re` has no execution timeout, and `query` is
+    # REST-caller-controlled, so a catastrophic-backtracking pattern could
+    # hang a worker. `\d+` must be matched as the literal four characters,
+    # not "one or more digits".
+    _write(vault, "doc", r"contains \d+ literally" + "\nv1.0\nv2.3")
+    resp = read_source(vault, "doc", mode="ripgrep", query=r"\d+")
+    assert resp.match_count == 1
+    assert "contains \\d+ literally" in resp.text
 
 
-def test_ripgrep_invalid_regex_falls_back_to_literal(vault):
+def test_ripgrep_handles_regex_special_characters_safely(vault):
     _write(vault, "doc", "a (b c\nunrelated")
     resp = read_source(vault, "doc", mode="ripgrep", query="(b c")
     assert resp.match_count == 1
+
+
+def test_ripgrep_catastrophic_backtracking_pattern_is_inert(vault):
+    # Would hang for a long time under real regex interpretation; must
+    # resolve instantly and simply not match, since it's treated as a
+    # literal string.
+    _write(vault, "doc", "a" * 40 + "!")
+    resp = read_source(vault, "doc", mode="ripgrep", query="(a+)+$")
+    assert resp.match_count == 0
 
 
 def test_ripgrep_no_query_returns_nothing(vault):

@@ -10,9 +10,14 @@ Modes:
                just addressable by exact slug instead of via a ChromaDB hit.
   - section  — naive heading-split of the markdown body; returns the section
                whose heading contains `query` (case-insensitive).
-  - ripgrep  — literal-or-regex line search within the raw text, matching
-               lines with a few lines of context each — a grep scoped to
-               one file.
+  - ripgrep  — literal, case-insensitive line search within the raw text,
+               matching lines with a few lines of context each — a grep
+               scoped to one file. Literal-only, not a regex engine: `query`
+               is REST-caller-controlled (see GET /notes/{slug}/read), and
+               Python's stdlib `re` has no execution timeout, so a
+               catastrophic-backtracking pattern (e.g. "(a+)+$") run against
+               every line could hang a server worker (found in PR #104
+               review). Not worth the risk for what this mode is for.
 """
 from __future__ import annotations
 
@@ -99,12 +104,9 @@ def _read_section(slug: str, raw: str, query: str) -> ReadSourceResponse:
 def _read_ripgrep(slug: str, raw: str, query: str) -> ReadSourceResponse:
     if not query:
         return ReadSourceResponse(slug=slug, mode="ripgrep", query=None, text="", match_count=0)
-    try:
-        pattern = re.compile(query, re.IGNORECASE)
-    except re.error:
-        pattern = re.compile(re.escape(query), re.IGNORECASE)
+    needle = query.lower()
     lines = raw.splitlines()
-    hit_indices = [i for i, line in enumerate(lines) if pattern.search(line)]
+    hit_indices = [i for i, line in enumerate(lines) if needle in line.lower()]
     blocks: list[str] = []
     for i in hit_indices[:_RIPGREP_MAX_MATCHES]:
         lo = max(0, i - _RIPGREP_CONTEXT_LINES)

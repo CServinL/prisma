@@ -344,6 +344,31 @@ class VaultService:
                 if fname.endswith(extensions):
                     yield Path(dirpath) / fname
 
+    def _resolve_compound_slug(self, slug: str, suffix: str) -> Path | None:
+        """Decode a `dir--name` compound slug (ADR-021) into a candidate
+        path with the given suffix, refusing to resolve outside the vault
+        root. Without this check, a slug like `"..--..--etc--passwd"`
+        decodes (via `.replace("--", "/")`) to a `..`-laden relative path
+        that escapes the vault root once resolved, and a slug beginning
+        with `--` decodes to a leading `/` -- `Path`'s own `/` operator
+        discards the left operand entirely when the right side is absolute,
+        so `self.root / "/etc/passwd"` silently becomes `Path("/etc/passwd")`.
+        Found live during PR #104 review (Copilot): READ_SOURCE/GET
+        /notes/{slug}/read pass a slug straight through to this decode with
+        no other validation in between, unlike the existing wiki-link
+        resolution path this decode was originally written for."""
+        if "--" not in slug:
+            return None
+        candidate = (self.root / slug.replace("--", "/")).with_suffix(suffix)
+        try:
+            resolved = candidate.resolve()
+            root_resolved = self.root.resolve()
+        except OSError:
+            return None
+        if not resolved.is_relative_to(root_resolved):
+            return None
+        return candidate if candidate.exists() else None
+
     def _find_md(self, slug: str) -> Path | None:
         """Find a .md file whose slug matches -- either the bare stem, or a
         dir--name compound slug encoding its folder (ADR-021; the same
@@ -359,11 +384,7 @@ class VaultService:
         for path in self.iter_files():
             if _file_slug(path.stem).lower() == slug_norm:
                 return path
-        if "--" in slug:
-            candidate = (self.root / slug.replace("--", "/")).with_suffix(".md")
-            if candidate.exists():
-                return candidate
-        return None
+        return self._resolve_compound_slug(slug, ".md")
 
     def _find_sess(self, slug: str) -> Path | None:
         """Find a chat .sess file whose slug matches. Only looks in the
@@ -388,10 +409,9 @@ class VaultService:
         if md is not None:
             return md
         # Path-relative slugs encode '/' as '--' (e.g. "papers--bricken2003--index")
-        if "--" in slug:
-            html_candidate = (self.root / slug.replace("--", "/")).with_suffix(".html")
-            if html_candidate.exists():
-                return html_candidate
+        html_candidate = self._resolve_compound_slug(slug, ".html")
+        if html_candidate is not None:
+            return html_candidate
         slug_norm = _file_slug(slug).lower()
         for path in self.iter_files(extensions=(".html",)):
             if _file_slug(path.stem).lower() == slug_norm:

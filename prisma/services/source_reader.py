@@ -35,10 +35,20 @@ def read_source(
     path = vault.find_file(slug)
     if path is None:
         raise FileNotFoundError(slug)
-    raw = path.read_text(encoding="utf-8", errors="replace")
 
     if mode == "summary":
-        return ReadSourceResponse(slug=slug, mode="summary", text=raw[:_EXCERPT_CHARS])
+        # Bounded read straight from disk -- summary is a leading excerpt by
+        # definition, so it shouldn't load the whole file into memory first
+        # (matters for a large vault document). A text-mode file object's
+        # .read(n) reads at most n *characters*, decoding as it goes, not n
+        # raw bytes -- exactly what _EXCERPT_CHARS means here.
+        with path.open("r", encoding="utf-8", errors="replace") as f:
+            text = f.read(_EXCERPT_CHARS)
+        return ReadSourceResponse(slug=slug, mode="summary", text=text)
+
+    # section/ripgrep genuinely need the whole document -- a heading or a
+    # match can be anywhere in it.
+    raw = path.read_text(encoding="utf-8", errors="replace")
     if mode == "section":
         return _read_section(slug, raw, (query or "").strip())
     if mode == "ripgrep":

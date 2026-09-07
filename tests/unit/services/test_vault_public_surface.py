@@ -71,6 +71,22 @@ class TestFindFile:
         assert found is not None
         assert found == sources_dir / "paper.md"
 
+    def test_compound_slug_cannot_escape_vault_root_via_dotdot(self, vault, tmp_path):
+        # Regression (PR #104, Copilot review): "..--..--secret" decodes via
+        # .replace("--", "/") to "../../secret" -- without containment
+        # checking, self.root / that + .with_suffix(...) resolves outside
+        # the vault root if a matching file happens to exist there.
+        outside = tmp_path / "secret.md"
+        outside.write_text("---\ntype: note\n---\nleaked", encoding="utf-8")
+        assert vault.find_file("..--..--secret") is None
+
+    def test_compound_slug_cannot_escape_vault_root_via_leading_separator(self, vault):
+        # "--etc--passwd" decodes to "/etc/passwd" -- Path's own / operator
+        # discards the left operand entirely when the right side is
+        # absolute, so self.root / "/etc/passwd" would otherwise silently
+        # become Path("/etc/passwd") rather than staying inside the vault.
+        assert vault.find_file("--etc--passwd") is None
+
     def test_bare_slug_still_resolves_when_a_dir_slug_also_exists(self, vault):
         # Existing bare-name [[wiki-links]] must keep resolving exactly as
         # before -- the dir--name decode is additive, not a replacement.

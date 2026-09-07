@@ -189,5 +189,12 @@ class ReadSourceResponse(BaseModel):
     # section mode: every heading found, so a missed `query` still tells the
     # caller what it could have asked for.
     available_sections: list[str] = []
-    # ripgrep mode: total matching lines (the returned text is capped).
+    # ripgrep mode: total matching lines found (may exceed what's actually
+    # returned -- see `truncated`).
     match_count: int | None = None
+    # ripgrep mode: True if either more matches existed than were included,
+    # or a per-line/total-size budget cut the output short. Found live (PR
+    # #104 review): match_count alone caps how many *blocks* are considered,
+    # not the total bytes returned -- a single arbitrarily long matching or
+    # context line could otherwise still blow the "bounded slice" contract.
+    truncated: bool = False

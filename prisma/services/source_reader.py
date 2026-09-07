@@ -30,6 +30,12 @@ _EXCERPT_CHARS = 2000
 _SECTION_MAX_CHARS = 4000
 _RIPGREP_CONTEXT_LINES = 2
 _RIPGREP_MAX_MATCHES = 20
+# Bounds on top of _RIPGREP_MAX_MATCHES -- that caps how many blocks are
+# considered, not their size. A single arbitrarily long line (a minified
+# blob, a data URI) could otherwise still make the joined `text` return
+# megabytes despite the match-count cap (found in PR #104 review).
+_RIPGREP_MAX_LINE_CHARS = 500
+_RIPGREP_MAX_TOTAL_CHARS = 8000
 
 _HEADING_RE = re.compile(r"^#{1,6}\s+(.*)$")
 
@@ -107,14 +113,21 @@ def _read_ripgrep(slug: str, raw: str, query: str) -> ReadSourceResponse:
     needle = query.lower()
     lines = raw.splitlines()
     hit_indices = [i for i, line in enumerate(lines) if needle in line.lower()]
+    truncated = len(hit_indices) > _RIPGREP_MAX_MATCHES
     blocks: list[str] = []
+    used = 0
     for i in hit_indices[:_RIPGREP_MAX_MATCHES]:
         lo = max(0, i - _RIPGREP_CONTEXT_LINES)
         hi = min(len(lines), i + _RIPGREP_CONTEXT_LINES + 1)
-        blocks.append("\n".join(
-            f"{j + 1}{':' if j == i else '-'}{lines[j]}" for j in range(lo, hi)
-        ))
+        block = "\n".join(
+            f"{j + 1}{':' if j == i else '-'}{lines[j][:_RIPGREP_MAX_LINE_CHARS]}" for j in range(lo, hi)
+        )
+        if used + len(block) > _RIPGREP_MAX_TOTAL_CHARS:
+            truncated = True
+            break
+        blocks.append(block)
+        used += len(block)
     return ReadSourceResponse(
         slug=slug, mode="ripgrep", query=query,
-        text="\n--\n".join(blocks), match_count=len(hit_indices),
+        text="\n--\n".join(blocks), match_count=len(hit_indices), truncated=truncated,
     )

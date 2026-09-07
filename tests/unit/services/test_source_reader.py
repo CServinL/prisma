@@ -131,6 +131,48 @@ def test_ripgrep_no_query_returns_nothing(vault):
     assert resp.text == "" and resp.match_count == 0
 
 
+def test_ripgrep_not_truncated_for_a_small_result(vault):
+    _write(vault, "doc", "alpha\nneedle here\ndelta")
+    resp = read_source(vault, "doc", mode="ripgrep", query="needle")
+    assert resp.truncated is False
+
+
+def test_ripgrep_caps_a_single_arbitrarily_long_line(vault):
+    # Regression (PR #104 review): match_count alone bounded how many
+    # blocks were considered, not their size -- a single huge line (a
+    # minified blob, a data URI) could otherwise blow the response size on
+    # its own.
+    from prisma.services.source_reader import _RIPGREP_MAX_LINE_CHARS
+    _write(vault, "doc", "needle " + "x" * 10_000)
+    resp = read_source(vault, "doc", mode="ripgrep", query="needle")
+    assert len(resp.text) <= _RIPGREP_MAX_LINE_CHARS + 20  # + the "N:" prefix
+    assert resp.truncated is False  # the one match itself was still returned, just capped
+
+
+def test_ripgrep_marks_truncated_when_total_size_budget_is_exceeded(vault):
+    from prisma.services.source_reader import _RIPGREP_MAX_LINE_CHARS, _RIPGREP_MAX_TOTAL_CHARS
+    # Exactly 20 matches (at _RIPGREP_MAX_MATCHES, not over it) so the
+    # match-count cap alone wouldn't trigger truncated -- each match's line
+    # is near the per-line cap, spaced far enough apart that context
+    # windows don't overlap, so 20 blocks' combined size reliably exceeds
+    # the total-size budget on its own.
+    per_line = "needle " + "y" * _RIPGREP_MAX_LINE_CHARS
+    lines = [per_line if i % 5 == 0 else f"filler {i}" for i in range(100)]
+    _write(vault, "doc", "\n".join(lines))
+    resp = read_source(vault, "doc", mode="ripgrep", query="needle")
+    assert resp.match_count == 20
+    assert resp.truncated is True
+    assert len(resp.text) <= _RIPGREP_MAX_TOTAL_CHARS + _RIPGREP_MAX_LINE_CHARS  # one block's worth of slack before the size check breaks the loop
+
+
+def test_ripgrep_marks_truncated_when_more_matches_than_shown(vault):
+    lines = [f"needle {i}" if i % 2 == 0 else f"filler {i}" for i in range(50)]
+    _write(vault, "doc", "\n".join(lines))
+    resp = read_source(vault, "doc", mode="ripgrep", query="needle")
+    assert resp.match_count == 25
+    assert resp.truncated is True
+
+
 # ── unknown mode ──────────────────────────────────────────────────────────────
 
 def test_unknown_mode_raises(vault):

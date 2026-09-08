@@ -177,15 +177,30 @@ def god_nodes(conn, limit: int = DEFAULT_TOP_ENTITIES) -> list[TopEntity]:
 
 def expand_node(conn, node_id: str) -> ExpandNodeResponse:
     """One-hop traversal — the queried entity's direct neighbours and the
-    RelatesTo edges to them, chat-tier neighbours excluded. Edge direction is
-    normalised outward from the queried node (source = `node_id`)."""
+    RelatesTo edges to them, chat-tier neighbours excluded.
+
+    Two directed queries (outgoing, incoming), not one undirected `-`
+    pattern: an undirected match loses which side actually stored the
+    relation, and unconditionally reporting `source=node_id` regardless
+    would falsely invert any edge really stored as `neighbour ->
+    node_id` (e.g. a real "neighbour cites node_id" edge would be reported
+    as the false inverse "node_id cites neighbour"). `RelatesTo` is a
+    directed rel table (`FROM Entity TO Entity`), so `->` here reads the
+    true stored direction."""
     if conn is None or not node_id:
         return ExpandNodeResponse(entities=[], edges=[])
     entities: dict[str, EntityInfo] = {}
     edges: list[EdgeInfo] = []
     try:
-        result = conn.execute(
-            "MATCH (e:Entity {id: $id})-[r:RelatesTo]-(o:Entity) "
+        outgoing = conn.execute(
+            "MATCH (e:Entity {id: $id})-[r:RelatesTo]->(o:Entity) "
+            "WHERE o.trust_tier <> 'chat' "
+            "RETURN o.id, o.label, o.file_type, o.trust_tier, o.source_location, "
+            "r.relation, r.confidence, r.confidence_score",
+            {"id": node_id},
+        )
+        incoming = conn.execute(
+            "MATCH (o:Entity)-[r:RelatesTo]->(e:Entity {id: $id}) "
             "WHERE o.trust_tier <> 'chat' "
             "RETURN o.id, o.label, o.file_type, o.trust_tier, o.source_location, "
             "r.relation, r.confidence, r.confidence_score",
@@ -194,16 +209,18 @@ def expand_node(conn, node_id: str) -> ExpandNodeResponse:
     except Exception as exc:
         _log.warning("expand_node failed for %s: %s", node_id, exc)
         return ExpandNodeResponse(entities=[], edges=[])
-    while result.has_next():
-        oid, olabel, file_type, trust_tier, source_location, relation, confidence, confidence_score = result.get_next()
-        entities.setdefault(oid, EntityInfo(
-            id=oid, label=olabel, file_type=file_type,
-            trust_tier=trust_tier, source_location=source_location,
-        ))
-        edges.append(EdgeInfo(
-            source=node_id, relation=relation, target=oid,
-            confidence=confidence, confidence_score=confidence_score,
-        ))
+    for result, node_is_source in ((outgoing, True), (incoming, False)):
+        while result.has_next():
+            oid, olabel, file_type, trust_tier, source_location, relation, confidence, confidence_score = result.get_next()
+            entities.setdefault(oid, EntityInfo(
+                id=oid, label=olabel, file_type=file_type,
+                trust_tier=trust_tier, source_location=source_location,
+            ))
+            edges.append(EdgeInfo(
+                source=node_id if node_is_source else oid,
+                target=oid if node_is_source else node_id,
+                relation=relation, confidence=confidence, confidence_score=confidence_score,
+            ))
     return ExpandNodeResponse(entities=list(entities.values()), edges=edges)
 
 
@@ -223,10 +240,10 @@ def surprising_connections(
     two hops that connect them came from *different* source documents (so
     the link isn't just "this one paper mentions both").
 
-    Bridges by normalised `label`, not by entity `id` (found live, PR #104
-    review): `_extraction_system_prompt`'s ID format is `{stem}_{entity}`
-    -- every document mints its own id namespace, so the same concept
-    extracted from two different documents ends up as two different ids
+    Bridges by normalised `label`, not by entity `id`: `_extraction_system_
+    prompt`'s ID format is `{stem}_{entity}` -- every document mints its
+    own id namespace, so the same concept extracted from two different
+    documents ends up as two different ids
     (e.g. `papera_transformer` / `paperb_transformer`) and can never
     literally be "the same node" for a 2-hop Cypher pattern to walk
     through. `label`, unlike `id`, is the human-readable concept name and
@@ -250,17 +267,20 @@ def surprising_connections(
         result = conn.execute(
             "MATCH (a:Entity)-[r:RelatesTo]-(b:Entity) "
             "WHERE a.trust_tier <> 'chat' AND b.trust_tier <> 'chat' "
-            "RETURN a.id, a.source_file, r.relation, r.confidence_score, r.source_file, b.id, b.label"
+            "RETURN a.id, a.label, a.source_file, r.relation, r.confidence_score, "
+            "r.source_file, b.id, b.label"
         )
     except Exception as exc:
         _log.warning("surprising_connections edge scan failed: %s", exc)
         return []
-    direct_pairs: set[frozenset] = set()
+    # Keyed by label, not id -- see docstring above.
+    direct_label_pairs: set[frozenset] = set()
     by_bridge_label: dict[str, list[tuple]] = {}
     while result.has_next():
         row = result.get_next()
-        a_id, a_source_file, relation, confidence_score, edge_source_file, b_id, b_label = row
-        direct_pairs.add(frozenset((a_id, b_id)))
+        a_id, a_label, a_source_file, relation, confidence_score, edge_source_file, b_id, b_label = row
+        if a_label and b_label:
+            direct_label_pairs.add(frozenset((a_label.strip().lower(), b_label.strip().lower())))
         if b_id in hub_ids or not b_label:
             continue
         by_bridge_label.setdefault(b_label.strip().lower(), []).append(row)
@@ -270,9 +290,9 @@ def surprising_connections(
         if len(rows) > _MAX_BRIDGE_GROUP_SIZE:
             continue
         for i in range(len(rows)):
-            a1_id, a1_src, rel1, conf1, edge_src1, b1_id, b1_label = rows[i]
+            a1_id, a1_label, a1_src, rel1, conf1, edge_src1, b1_id, b1_label = rows[i]
             for j in range(i + 1, len(rows)):
-                a2_id, a2_src, rel2, conf2, edge_src2, b2_id, _ = rows[j]
+                a2_id, a2_label, a2_src, rel2, conf2, edge_src2, b2_id, _ = rows[j]
                 if b1_id == b2_id:
                     continue  # same physical bridge node seen from two of
                                # its own edges, not two documents' separate
@@ -280,11 +300,12 @@ def surprising_connections(
                 if a1_id == a2_id or a1_src == a2_src or edge_src1 == edge_src2:
                     continue  # same outer entity, same document, or both
                                # hops asserted by the same document
-                pair_key = frozenset((a1_id, a2_id))
-                if pair_key in direct_pairs:
+                label_pair_key = frozenset((a1_label.strip().lower(), a2_label.strip().lower()))
+                if label_pair_key in direct_label_pairs:
                     continue
                 candidates.append((
-                    (conf1 + conf2) / 2, a1_id, a2_id, b1_label, rel1, rel2, pair_key,
+                    (conf1 + conf2) / 2, a1_id, a2_id, b1_label, rel1, rel2,
+                    frozenset((a1_id, a2_id)),
                 ))
 
     candidates.sort(key=lambda c: -c[0])

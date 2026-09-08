@@ -72,10 +72,10 @@ class TestFindFile:
         assert found == sources_dir / "paper.md"
 
     def test_compound_slug_cannot_escape_vault_root_via_dotdot(self, vault, tmp_path):
-        # Regression (PR #104, Copilot review): "..--..--secret" decodes via
-        # .replace("--", "/") to "../../secret" -- without containment
-        # checking, self.root / that + .with_suffix(...) resolves outside
-        # the vault root if a matching file happens to exist there.
+        # "..--..--secret" decodes via .replace("--", "/") to
+        # "../../secret" -- without containment checking, self.root / that
+        # + .with_suffix(...) resolves outside the vault root if a
+        # matching file happens to exist there.
         outside = tmp_path / "secret.md"
         outside.write_text("---\ntype: note\n---\nleaked", encoding="utf-8")
         assert vault.find_file("..--..--secret") is None

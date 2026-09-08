@@ -261,8 +261,6 @@ def test_read_missing_slug_is_404(client):
 
 
 def test_read_rejects_path_traversal_slug(client, vault, tmp_path):
-    # Regression (PR #104, Copilot review) -- a compound slug crafted to
-    # decode outside the vault root must 404, not leak a file's contents.
     outside = tmp_path / "secret.md"
     outside.write_text("---\ntype: note\n---\nleaked", encoding="utf-8")
     r = client.get("/notes/..--..--secret/read")

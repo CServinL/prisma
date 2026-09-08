@@ -16,8 +16,8 @@ Modes:
                is REST-caller-controlled (see GET /notes/{slug}/read), and
                Python's stdlib `re` has no execution timeout, so a
                catastrophic-backtracking pattern (e.g. "(a+)+$") run against
-               every line could hang a server worker (found in PR #104
-               review). Not worth the risk for what this mode is for.
+               every line could hang a server worker. Not worth the risk
+               for what this mode is for.
 """
 from __future__ import annotations
 
@@ -33,7 +33,7 @@ _LITERAL_MAX_MATCHES = 20
 # Bounds on top of _LITERAL_MAX_MATCHES -- that caps how many blocks are
 # considered, not their size. A single arbitrarily long line (a minified
 # blob, a data URI) could otherwise still make the joined `text` return
-# megabytes despite the match-count cap (found in PR #104 review).
+# megabytes despite the match-count cap.
 _LITERAL_MAX_LINE_CHARS = 500
 _LITERAL_MAX_TOTAL_CHARS = 8000
 

@@ -614,9 +614,6 @@ def test_toolbox_read_source_missing_slug(vault):
 
 
 def test_toolbox_read_source_rejects_path_traversal_slug(vault, tmp_path):
-    # Regression (PR #104, Copilot review) -- a compound slug crafted to
-    # decode outside the vault root must behave like "not found", not leak
-    # a file's contents from outside the vault.
     outside = vault.root.parent / "secret.md"
     outside.write_text("---\ntype: note\n---\nleaked", encoding="utf-8")
     toolbox = ChatToolbox(MagicMock(), MagicMock(), vault)

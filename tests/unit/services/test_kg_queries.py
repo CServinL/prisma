@@ -154,7 +154,11 @@ def test_expand_node_returns_one_hop_neighbours(kg, conn):
     resp = kg_queries.expand_node(conn, "center")
     assert {e.id for e in resp.entities} == {"n1", "n2"}
     assert {edge.relation for edge in resp.edges} == {"cites", "extends"}
-    assert all(edge.source == "center" for edge in resp.edges)
+    by_relation = {edge.relation: edge for edge in resp.edges}
+    # "center cites n1" is outgoing, but "n2 extends center" is incoming --
+    # reporting it as "center extends n2" would be a false inverse claim.
+    assert (by_relation["cites"].source, by_relation["cites"].target) == ("center", "n1")
+    assert (by_relation["extends"].source, by_relation["extends"].target) == ("n2", "center")
 
 
 def test_expand_node_excludes_chat_tier_neighbours(kg, conn):
@@ -206,6 +210,19 @@ def test_surprising_connections_excludes_directly_asserted_pairs(kg, conn):
     _add(kg, "notes/b.md", "note", [{"id": "c", "label": "C"}, {"id": "b_bridge", "label": "Bridge"}],
          [{"source": "b_bridge", "target": "c", "relation": "extends"},
           {"source": "a", "target": "c", "relation": "already_known"}])
+
+    assert kg_queries.surprising_connections(conn, hub_ids=set()) == []
+
+
+def test_surprising_connections_excludes_direct_edge_asserted_by_a_third_document(kg, conn):
+    # doc3 asserts "A relates to C" using its own doc3-scoped ids, never
+    # the doc1_a/doc2_c ids the bridge candidate actually has.
+    _add(kg, "notes/doc1.md", "note", [{"id": "doc1_a", "label": "A"}, {"id": "doc1_bridge", "label": "Bridge"}],
+         [{"source": "doc1_a", "target": "doc1_bridge", "relation": "cites"}])
+    _add(kg, "notes/doc2.md", "note", [{"id": "doc2_c", "label": "C"}, {"id": "doc2_bridge", "label": "Bridge"}],
+         [{"source": "doc2_bridge", "target": "doc2_c", "relation": "extends"}])
+    _add(kg, "notes/doc3.md", "note", [{"id": "doc3_a", "label": "A"}, {"id": "doc3_c", "label": "C"}],
+         [{"source": "doc3_a", "target": "doc3_c", "relation": "already_known"}])
 
     assert kg_queries.surprising_connections(conn, hub_ids=set()) == []
 

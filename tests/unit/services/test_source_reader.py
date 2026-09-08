@@ -99,11 +99,7 @@ def test_literal_marks_the_hit_line_with_a_colon(vault):
 
 
 def test_literal_is_literal_not_regex(vault):
-    # Security fix (PR #104 review): regex interpretation was removed --
-    # Python's stdlib `re` has no execution timeout, and `query` is
-    # REST-caller-controlled, so a catastrophic-backtracking pattern could
-    # hang a worker. `\d+` must be matched as the literal four characters,
-    # not "one or more digits".
+    # `\d+` must match as the literal four characters, not "one or more digits".
     _write(vault, "doc", r"contains \d+ literally" + "\nv1.0\nv2.3")
     resp = read_source(vault, "doc", mode="literal", query=r"\d+")
     assert resp.match_count == 1
@@ -138,10 +134,6 @@ def test_literal_not_truncated_for_a_small_result(vault):
 
 
 def test_literal_caps_a_single_arbitrarily_long_line(vault):
-    # Regression (PR #104 review): match_count alone bounded how many
-    # blocks were considered, not their size -- a single huge line (a
-    # minified blob, a data URI) could otherwise blow the response size on
-    # its own.
     from prisma.services.source_reader import _LITERAL_MAX_LINE_CHARS
     _write(vault, "doc", "needle " + "x" * 10_000)
     resp = read_source(vault, "doc", mode="literal", query="needle")

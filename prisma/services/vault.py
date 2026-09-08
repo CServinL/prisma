@@ -353,10 +353,10 @@ class VaultService:
         with `--` decodes to a leading `/` -- `Path`'s own `/` operator
         discards the left operand entirely when the right side is absolute,
         so `self.root / "/etc/passwd"` silently becomes `Path("/etc/passwd")`.
-        Found live during PR #104 review (Copilot): READ_SOURCE/GET
-        /notes/{slug}/read pass a slug straight through to this decode with
-        no other validation in between, unlike the existing wiki-link
-        resolution path this decode was originally written for."""
+        READ_SOURCE and `GET /notes/{slug}/read` pass a slug straight
+        through to this decode with no other validation in between, unlike
+        the wiki-link resolution path this decode was originally written
+        for."""
         if "--" not in slug:
             return None
         candidate = (self.root / slug.replace("--", "/")).with_suffix(suffix)

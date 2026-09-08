@@ -261,8 +261,12 @@ def test_read_missing_slug_is_404(client):
 
 
 def test_read_rejects_path_traversal_slug(client, vault, tmp_path):
-    outside = tmp_path / "secret.md"
+    # This module's vault fixture uses vault.root == tmp_path directly (see
+    # the `vault` fixture above), so a single-hop "..--secret" decodes to
+    # tmp_path.parent/"secret.md" -- one level above vault.root, where this
+    # test actually plants the file.
+    outside = tmp_path.parent / "secret.md"
     outside.write_text("---\ntype: note\n---\nleaked", encoding="utf-8")
-    r = client.get("/notes/..--..--secret/read")
+    r = client.get("/notes/..--secret/read")
     assert r.status_code == 404
     assert "leaked" not in r.text

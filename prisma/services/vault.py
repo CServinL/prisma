@@ -359,11 +359,14 @@ class VaultService:
         for."""
         if "--" not in slug:
             return None
-        candidate = (self.root / slug.replace("--", "/")).with_suffix(suffix)
         try:
+            candidate = (self.root / slug.replace("--", "/")).with_suffix(suffix)
             resolved = candidate.resolve()
             root_resolved = self.root.resolve()
-        except OSError:
+        except (OSError, ValueError):
+            # ValueError: a slug like "--" decodes to "/", and
+            # Path("/").with_suffix(...) rejects a path with no name
+            # component before containment can even be checked.
             return None
         if not resolved.is_relative_to(root_resolved):
             return None

@@ -480,19 +480,22 @@ class ChatToolbox:
 
     def _expand_node(self, query: str) -> ToolResult:
         """One-hop graph traversal from a specific entity id — the neighbours
-        and the relationships to them. Same graph-derived attribution as
-        GRAPH_CONTEXT (wrapped as `knowledge-graph`)."""
+        and the relationships to them, direction preserved per edge (an
+        empty `text` here, not a "no neighbours" message, is what makes
+        `_turn_had_no_grounding` correctly treat this as ungrounded)."""
         node_id = query.strip()
         resp = self._kg.expand_node(node_id)
         if not resp.entities:
-            return ToolResult(text=f"(no neighbours found for entity {node_id!r})", raw=[])
-        rels_by_target: dict[str, set[str]] = {}
+            return ToolResult(text="", raw=[])
+        labels = {e.id: e.label for e in resp.entities}
+        lines = []
         for edge in resp.edges:
-            rels_by_target.setdefault(edge.target, set()).add(edge.relation)
-        lines = [f"{node_id} connects to:"]
-        for e in resp.entities:
-            rels = ", ".join(sorted(rels_by_target.get(e.id, set())))
-            lines.append(f"- {e.label} ({e.id})" + (f" [{rels}]" if rels else ""))
+            other_id = edge.target if edge.source == node_id else edge.source
+            other = f"{labels.get(other_id, other_id)} ({other_id})"
+            lines.append(
+                f"{node_id} --[{edge.relation}]--> {other}" if edge.source == node_id
+                else f"{other} --[{edge.relation}]--> {node_id}"
+            )
         wrapped = wrap_untrusted("knowledge-graph", "\n".join(lines))
         return ToolResult(text=wrapped, raw=[resp.model_dump()])
 
@@ -502,7 +505,7 @@ class ChatToolbox:
         orienting primitive."""
         entities = self._kg.god_nodes(limit=15)
         if not entities:
-            return ToolResult(text="(the knowledge graph has no connected entities yet)", raw=[])
+            return ToolResult(text="", raw=[])
         slugs = list(dict.fromkeys(
             Path(e.source_file).stem for e in entities if e.source_file
         ))
@@ -516,15 +519,18 @@ class ChatToolbox:
         return ToolResult(text=wrapped, raw=[e.model_dump() for e in entities])
 
     def _surprising_connections(self, query: str) -> ToolResult:
-        """2-hop links between entities that no single document ever
-        asserted directly — cached, background-computed (see
+        """Links between entities that no single document ever asserted
+        directly — cached, background-computed (see
         KnowledgeGraphService.surprising_connections()). The query text is
-        ignored, same as GOD_NODES."""
+        ignored, same as GOD_NODES. `--` on both sides, not `-->`: the
+        underlying scan doesn't preserve which side of each hop actually
+        stored the relation, so a one-way arrow would risk asserting the
+        wrong direction."""
         links = self._kg.surprising_connections(limit=15)
         if not links:
-            return ToolResult(text="(no surprising connections found yet)", raw=[])
+            return ToolResult(text="", raw=[])
         lines = [
-            f"- {c.entity_a} --[{c.relation_a}]--> {c.bridge} --[{c.relation_b}]--> {c.entity_b}"
+            f"- {c.entity_a} --[{c.relation_a}]-- {c.bridge} --[{c.relation_b}]-- {c.entity_b}"
             for c in links
         ]
         wrapped = wrap_untrusted("knowledge-graph", "\n".join(lines))
@@ -539,7 +545,7 @@ class ChatToolbox:
         try:
             resp = read_source(self._vault, slug, mode="summary")
         except FileNotFoundError:
-            return ToolResult(text=f"(no vault document with slug {slug!r})", raw=[])
+            return ToolResult(text="", raw=[])
         wrapped = wrap_untrusted(slug, resp.text) if resp.text else ""
         return ToolResult(text=wrapped, raw=[resp.model_dump()])
 

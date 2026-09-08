@@ -514,7 +514,7 @@ def test_toolbox_expand_node_lists_neighbours_with_relations(vault):
         entities=[EntityInfo(id="n1", label="Neighbour One"), EntityInfo(id="n2", label="Neighbour Two")],
         edges=[
             EdgeInfo(source="center", relation="cites", target="n1"),
-            EdgeInfo(source="center", relation="extends", target="n2"),
+            EdgeInfo(source="n2", relation="extends", target="center"),
         ],
     )
     toolbox = ChatToolbox(MagicMock(), kg, vault)
@@ -522,7 +522,8 @@ def test_toolbox_expand_node_lists_neighbours_with_relations(vault):
     result = toolbox.call("EXPAND_NODE", "center")
 
     kg.expand_node.assert_called_once_with("center")
-    assert "Neighbour One (n1) [cites]" in result.text
+    assert "center --[cites]--> Neighbour One (n1)" in result.text
+    assert "Neighbour Two (n2) --[extends]--> center" in result.text
     assert 'path="knowledge-graph"' in result.text
     assert result.raw[0]["entities"][0]["id"] == "n1"
 
@@ -534,7 +535,7 @@ def test_toolbox_expand_node_empty_when_no_neighbours(vault):
 
     result = toolbox.call("EXPAND_NODE", "lonely")
 
-    assert "no neighbours" in result.text
+    assert result.text == ""
     assert result.raw == []
 
 
@@ -561,7 +562,7 @@ def test_toolbox_god_nodes_empty_graph(vault):
 
     result = toolbox.call("GOD_NODES", "-")
 
-    assert "no connected entities" in result.text
+    assert result.text == ""
 
 
 def test_toolbox_surprising_connections_lists_links(vault):
@@ -575,7 +576,7 @@ def test_toolbox_surprising_connections_lists_links(vault):
     result = toolbox.call("SURPRISING_CONNECTIONS", "-")
 
     kg.surprising_connections.assert_called_once_with(limit=15)
-    assert "a --[cites]--> b --[extends]--> c" in result.text
+    assert "a --[cites]-- b --[extends]-- c" in result.text
     assert 'path="knowledge-graph"' in result.text
     assert len(result.raw) == 1
 
@@ -587,7 +588,7 @@ def test_toolbox_surprising_connections_empty(vault):
 
     result = toolbox.call("SURPRISING_CONNECTIONS", "-")
 
-    assert "no surprising connections" in result.text
+    assert result.text == ""
     assert result.raw == []
 
 
@@ -609,7 +610,7 @@ def test_toolbox_read_source_missing_slug(vault):
 
     result = toolbox.call("READ_SOURCE", "does-not-exist")
 
-    assert "no vault document" in result.text
+    assert result.text == ""
     assert result.raw == []
 
 
@@ -620,8 +621,7 @@ def test_toolbox_read_source_rejects_path_traversal_slug(vault, tmp_path):
 
     result = toolbox.call("READ_SOURCE", "..--secret")
 
-    assert "no vault document" in result.text
-    assert "leaked" not in result.text
+    assert result.text == ""
 
 
 # ── zotero_search (reaches Zotero bookmarks the vault's import boundary

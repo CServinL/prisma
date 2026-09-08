@@ -119,9 +119,14 @@ def _read_literal(slug: str, raw: str, query: str) -> ReadSourceResponse:
     for i in hit_indices[:_LITERAL_MAX_MATCHES]:
         lo = max(0, i - _LITERAL_CONTEXT_LINES)
         hi = min(len(lines), i + _LITERAL_CONTEXT_LINES + 1)
-        block = "\n".join(
-            f"{j + 1}{':' if j == i else '-'}{lines[j][:_LITERAL_MAX_LINE_CHARS]}" for j in range(lo, hi)
-        )
+        block_lines = []
+        for j in range(lo, hi):
+            line = lines[j]
+            if len(line) > _LITERAL_MAX_LINE_CHARS:
+                truncated = True
+                line = line[:_LITERAL_MAX_LINE_CHARS]
+            block_lines.append(f"{j + 1}{':' if j == i else '-'}{line}")
+        block = "\n".join(block_lines)
         if used + len(block) > _LITERAL_MAX_TOTAL_CHARS:
             truncated = True
             break

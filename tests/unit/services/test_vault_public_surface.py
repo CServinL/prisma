@@ -72,13 +72,16 @@ class TestFindFile:
         assert found == sources_dir / "paper.md"
 
     def test_compound_slug_cannot_escape_vault_root_via_dotdot(self, vault, tmp_path):
-        # "..--..--secret" decodes via .replace("--", "/") to
-        # "../../secret" -- without containment checking, self.root / that
-        # + .with_suffix(...) resolves outside the vault root if a
-        # matching file happens to exist there.
+        # vault.root is tmp_path/"vault"; "..--secret" decodes via
+        # .replace("--", "/") to "../secret", landing exactly at
+        # tmp_path/"secret.md" -- one level above vault.root, where this
+        # test actually plants the file.
         outside = tmp_path / "secret.md"
         outside.write_text("---\ntype: note\n---\nleaked", encoding="utf-8")
-        assert vault.find_file("..--..--secret") is None
+        assert vault.find_file("..--secret") is None
+
+    def test_compound_slug_of_bare_separator_does_not_raise(self, vault):
+        assert vault.find_file("--") is None
 
     def test_compound_slug_cannot_escape_vault_root_via_leading_separator(self, vault):
         # "--etc--passwd" decodes to "/etc/passwd" -- Path's own / operator

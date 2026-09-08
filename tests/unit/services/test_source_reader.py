@@ -138,7 +138,7 @@ def test_literal_caps_a_single_arbitrarily_long_line(vault):
     _write(vault, "doc", "needle " + "x" * 10_000)
     resp = read_source(vault, "doc", mode="literal", query="needle")
     assert len(resp.text) <= _LITERAL_MAX_LINE_CHARS + 20  # + the "N:" prefix
-    assert resp.truncated is False  # the one match itself was still returned, just capped
+    assert resp.truncated is True
 
 
 def test_literal_marks_truncated_when_total_size_budget_is_exceeded(vault):

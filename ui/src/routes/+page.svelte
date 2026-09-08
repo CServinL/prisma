@@ -1048,12 +1048,19 @@
     read_source: "Read source",
   };
 
-  function formatGraphResult(kind: string, data: any): string {
+  function formatGraphResult(kind: string, data: any, arg: string): string {
     if (kind === "expand_node") {
-      const es = data.entities ?? [];
-      return es.length
-        ? es.map((e: any) => `• ${e.label} (${e.id})`).join("\n")
-        : "(no neighbours)";
+      const edges = data.edges ?? [];
+      if (!edges.length) return "(no neighbours)";
+      const labelById = Object.fromEntries((data.entities ?? []).map((e: any) => [e.id, e.label]));
+      return edges.map((edge: any) => {
+        const outgoing = edge.source === arg;
+        const otherId = outgoing ? edge.target : edge.source;
+        const other = `${labelById[otherId] ?? otherId} (${otherId})`;
+        return outgoing
+          ? `• ${arg} --[${edge.relation}]--> ${other}`
+          : `• ${other} --[${edge.relation}]--> ${arg}`;
+      }).join("\n");
     }
     if (kind === "god_nodes") {
       return (data ?? []).map((e: any) =>
@@ -1061,8 +1068,10 @@
         (e.sample_relations?.length ? ` (${e.sample_relations.join(", ")})` : "")).join("\n") || "(empty)";
     }
     if (kind === "surprising_connections") {
+      // "--" on both sides, not "-->" -- the underlying data doesn't
+      // preserve which side of each hop actually stored the relation.
       return (data ?? []).map((c: any) =>
-        `• ${c.entity_a} --[${c.relation_a}]--> ${c.bridge} --[${c.relation_b}]--> ${c.entity_b}`
+        `• ${c.entity_a} --[${c.relation_a}]-- ${c.bridge} --[${c.relation_b}]-- ${c.entity_b}`
       ).join("\n") || "(no surprising connections yet)";
     }
     if (kind === "authors") {
@@ -1103,7 +1112,7 @@
     try {
       const r = await apiFetch(url);
       if (r.ok) {
-        graphToolResult = { title, body: formatGraphResult(kind, await r.json()) };
+        graphToolResult = { title, body: formatGraphResult(kind, await r.json(), arg) };
       } else {
         graphToolResult = { title, body: `(request failed: ${r.status})` };
       }

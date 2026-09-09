@@ -367,13 +367,16 @@ class VaultService:
         if "--" not in slug:
             return None
         try:
-            candidate = (self.root / slug.replace("--", "/")).with_suffix(suffix)
+            # Append the extension rather than .with_suffix(): the decoded
+            # stem can legitimately contain dots (`paper.v1` from
+            # `sources--paper.v1`), and .with_suffix() would rewrite the
+            # last one, resolving `paper.v1.md` down to `paper.md`.
+            candidate = self.root / (slug.replace("--", "/") + suffix)
             resolved = candidate.resolve()
             root_resolved = self.root.resolve()
         except (OSError, ValueError):
-            # ValueError: a slug like "--" decodes to "/", and
-            # Path("/").with_suffix(...) rejects a path with no name
-            # component before containment can even be checked.
+            # e.g. an embedded NUL in the slug — Path rejects it before
+            # containment can even be checked.
             return None
         if not resolved.is_relative_to(root_resolved):
             return None

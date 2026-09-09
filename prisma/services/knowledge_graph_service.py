@@ -1495,39 +1495,53 @@ class KnowledgeGraphService:
     # is enough to keep /search and ollama_deep_search working without
     # regression while that refinement is deferred.
 
+    # Kùzu's connection is not thread-safe (see _extract_file) and FastAPI
+    # runs these synchronous handlers in a threadpool, concurrently with each
+    # other and with background-index upserts. Every live scan on self._conn
+    # holds self._lock, the same one the extraction upserts take.
+
     def entities_for_file(self, rel_path: str) -> EntitiesForFileResponse:
         """Raw entities/edges extracted from one specific file — for
         inspecting extraction quality directly (search/ranked_nodes only
         ever return file-level scores, never the underlying nodes)."""
-        return kg_queries.entities_for_file(self._conn, rel_path, self.indexed_model(rel_path))
+        model = self.indexed_model(rel_path)
+        with self._lock:
+            return kg_queries.entities_for_file(self._conn, rel_path, model)
 
     def search(self, question: str, top_k: int = 20) -> list[GraphSearchResult]:
-        return kg_queries.search(self._conn, question, top_k=top_k)
+        with self._lock:
+            return kg_queries.search(self._conn, question, top_k=top_k)
 
     def _compute_top_entities(self, limit: int = TOP_ENTITIES_CACHE_SIZE) -> list[TopEntity]:
         """Live Cypher call -- only ever invoked from the background index
         thread (via _refresh_top_entities()), never from a request handler.
         top_entities() below is the cache-only read callers actually use."""
-        return kg_queries.compute_top_entities(self._conn, limit)
+        with self._lock:
+            return kg_queries.compute_top_entities(self._conn, limit)
 
     # ── Phase A retrieval capabilities (delegated to kg_queries) ──────────────
     # Live Cypher on the request path, same as entities_for_file/search above —
     # these are explicit tool/endpoint calls, not the per-turn priming read.
 
     def expand_node(self, node_id: str):
-        return kg_queries.expand_node(self._conn, node_id)
+        with self._lock:
+            return kg_queries.expand_node(self._conn, node_id)
 
     def god_nodes(self, limit: int = TOP_ENTITIES_CACHE_SIZE) -> list[TopEntity]:
-        return kg_queries.god_nodes(self._conn, limit)
+        with self._lock:
+            return kg_queries.god_nodes(self._conn, limit)
 
     def authors(self, limit: int = 100) -> list[AuthorSummary]:
-        return kg_queries.authors(self._conn, limit)
+        with self._lock:
+            return kg_queries.authors(self._conn, limit)
 
     def vault_health(self):
-        return kg_queries.vault_health(self._conn)
+        with self._lock:
+            return kg_queries.vault_health(self._conn)
 
     def timeline(self, question: str) -> list[TimelineEntry]:
-        return kg_queries.timeline(self._conn, self._vault, question)
+        with self._lock:
+            return kg_queries.timeline(self._conn, self._vault, question)
 
     def _refresh_top_entities(self) -> None:
         computed = self._compute_top_entities()
@@ -1549,9 +1563,14 @@ class KnowledgeGraphService:
         always the current cycle's top-entity list, not a stale one."""
         with self._lock:
             hub_ids = {e.id for e in self._top_entities_cache if e.degree >= _HUB_MIN_DEGREE}
-        computed = kg_queries.surprising_connections(
-            self._conn, hub_ids, limit=kg_queries.SURPRISING_CONNECTIONS_MAX,
-        )
+            # Held across the scan itself, not just the cache reads: the
+            # connection is not thread-safe and a request-path retrieval
+            # scan can land on the same _conn mid-cycle (see the retrieval
+            # methods above). Safe to hold here -- this runs on the
+            # background index thread and the public reader is cache-only.
+            computed = kg_queries.surprising_connections(
+                self._conn, hub_ids, limit=kg_queries.SURPRISING_CONNECTIONS_MAX,
+            )
         with self._lock:
             self._surprising_connections_cache = computed
 

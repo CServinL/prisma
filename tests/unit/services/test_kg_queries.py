@@ -282,6 +282,22 @@ def test_surprising_connections_excludes_the_same_physical_node_seen_twice(kg, c
     assert kg_queries.surprising_connections(conn, hub_ids=set()) == []
 
 
+def test_surprising_connections_excludes_endpoints_that_are_the_same_concept(kg, conn):
+    # Two documents each assert "<concept> Transformer — Bridge" using their
+    # own doc-scoped ids. The endpoints have different ids and come from
+    # different documents, but both normalise to the label "Transformer" --
+    # "Transformer — Bridge — Transformer" is not a connection between two
+    # distinct things and must not be reported.
+    _add(kg, "notes/a.md", "note",
+         [{"id": "a_transformer", "label": "Transformer"}, {"id": "a_bridge", "label": "Bridge"}],
+         [{"source": "a_transformer", "target": "a_bridge", "relation": "cites"}])
+    _add(kg, "notes/b.md", "note",
+         [{"id": "b_transformer", "label": "transformer"}, {"id": "b_bridge", "label": "Bridge"}],
+         [{"source": "b_bridge", "target": "b_transformer", "relation": "extends"}])
+
+    assert kg_queries.surprising_connections(conn, hub_ids=set()) == []
+
+
 def test_surprising_connections_none_conn_is_empty():
     assert kg_queries.surprising_connections(None, hub_ids=set()) == []
 

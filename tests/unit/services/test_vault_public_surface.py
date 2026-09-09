@@ -87,6 +87,22 @@ class TestFindFile:
         assert vault.find_file(slug) == md
         assert vault._resolve_compound_slug(slug, ".md") == md
 
+    def test_slug_for_relpath_round_trips_for_a_dotted_filename(self, vault):
+        # `paper.v1.md` encodes to `sources--paper.v1`; the decode must not
+        # rewrite the trailing `.v1` as a suffix and collapse the file to
+        # `sources/paper.md`.
+        sources_dir = vault.root / "sources"
+        sources_dir.mkdir(parents=True, exist_ok=True)
+        md = sources_dir / "paper.v1.md"
+        md.write_text("---\ntype: source\n---\nBody.", encoding="utf-8")
+        rel = md.relative_to(vault.root)
+
+        slug = vault.slug_for_relpath(rel)
+
+        assert slug == "sources--paper.v1"
+        assert vault.find_file(slug) == md
+        assert vault._resolve_compound_slug(slug, ".md") == md
+
     def test_compound_slug_cannot_escape_vault_root_via_dotdot(self, vault, tmp_path):
         # vault.root is tmp_path/"vault"; "..--secret" decodes via
         # .replace("--", "/") to "../secret", landing exactly at

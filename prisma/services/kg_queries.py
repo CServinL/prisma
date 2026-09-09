@@ -303,9 +303,13 @@ def surprising_connections(
                     continue  # same physical bridge node seen from two of
                                # its own edges, not two documents' separate
                                # instances of a shared concept
-                if a1_id == a2_id or a1_src == a2_src or edge_src1 == edge_src2:
-                    continue  # same outer entity, same document, or both
-                               # hops asserted by the same document
+                if (a1_id == a2_id or a1_src == a2_src or edge_src1 == edge_src2
+                        or a1_label.strip().lower() == a2_label.strip().lower()):
+                    continue  # same outer entity (by id or normalised label),
+                               # same document, or both hops asserted by the
+                               # same document -- an `A -- Bridge -- A` where
+                               # both A's are the same concept from two
+                               # documents isn't a connection between two things
                 label_pair_key = frozenset((a1_label.strip().lower(), a2_label.strip().lower()))
                 if label_pair_key in direct_label_pairs:
                     continue

@@ -658,6 +658,36 @@ def test_search_returns_empty_for_no_matching_terms(kg, vault):
     assert kg.search("completely unrelated query xyz") == []
 
 
+def test_request_path_retrieval_scans_hold_the_connection_lock(kg):
+    # Kùzu's connection is not thread-safe and FastAPI runs these sync
+    # handlers concurrently (with each other and with background-index
+    # upserts). Every live scan on self._conn must hold self._lock -- the
+    # same lock the extraction upserts take. Recorded at execute() time.
+    real = kg._conn
+    lock = kg._lock
+    held: list[bool] = []
+
+    class _LockSpyConn:
+        def execute(self, *a, **k):
+            held.append(lock.locked())
+            return real.execute(*a, **k)
+
+        def __getattr__(self, name):
+            return getattr(real, name)
+
+    kg._conn = _LockSpyConn()
+
+    kg.search("anything")
+    kg.expand_node("missing-id")
+    kg.god_nodes()
+    kg.authors()
+    kg.vault_health()
+    kg.timeline("anything")
+    kg.entities_for_file("notes/x.md")
+
+    assert held and all(held)
+
+
 # ── top_entities (vault-overview priming block) ────────────────────────────────
 
 def test_compute_top_entities_ranks_by_undirected_degree(kg, vault):

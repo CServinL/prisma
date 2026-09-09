@@ -85,6 +85,13 @@ DEFAULT_INDEX_EXTENSIONS: tuple[str, ...] = (".md",)
 # primes the model's own associative attention better than a long one).
 TOP_ENTITIES_CACHE_SIZE = 15
 
+# A cached top-entities slot alone doesn't make an entity a hub for
+# surprising_connections' exclusion purposes -- in a vault with 15 or fewer
+# connected entities, every entity trivially makes the top 15 regardless of
+# how connected it actually is, which would hub-exclude every possible
+# bridge. This floor requires genuine connectivity, not just a top-15 rank.
+_HUB_MIN_DEGREE = 5
+
 _RESOURCE_HOLDER = "kg"  # must match the worker name supervisor.py restarts — this
 # service now runs in its own supervised "kg" process (see kg_app.py and
 # ADR-012's follow-up section), not inside "api" — release_all_held_by("kg")
@@ -1378,10 +1385,11 @@ class KnowledgeGraphService:
     def _process_pending(self, pending: set[Path]) -> None:
         _log.info("knowledge graph incremental update: %d files flagged by watcher", len(pending))
         existing = [path for path in pending if path.exists()]
+        deleted = False
         for path in pending:
-            if not path.exists():
-                self._delete_file(path)
-        changed = self._extract_files_concurrently(existing)
+            if not path.exists() and self._delete_file(path):
+                deleted = True
+        extracted = self._extract_files_concurrently(existing)
         # mark_stale() is called optimistically from many API call sites
         # (any vault write) before this watcher-driven pass ever runs, so
         # /status reflects a change immediately rather than waiting up to
@@ -1391,6 +1399,7 @@ class KnowledgeGraphService:
         # sync-engine conflict retries rewriting identical content left
         # "stale" permanently stuck with nothing left to do, since only the
         # `changed` branch used to clear it).
+        changed = extracted or deleted
         with self._lock:
             if changed:
                 self._last_indexed = datetime.now()
@@ -1398,7 +1407,7 @@ class KnowledgeGraphService:
         if changed:
             self._refresh_top_entities()
             self._refresh_surprising_connections()
-        if not changed and existing:
+        if not extracted and existing:
             _log.info("knowledge graph incremental update: no real content change — watcher false-positive")
         self._set_activity(None)
 
@@ -1539,8 +1548,10 @@ class KnowledgeGraphService:
         same call site (see _process_pending/_full_index), so this is
         always the current cycle's top-entity list, not a stale one."""
         with self._lock:
-            hub_ids = {e.id for e in self._top_entities_cache}
-        computed = kg_queries.surprising_connections(self._conn, hub_ids)
+            hub_ids = {e.id for e in self._top_entities_cache if e.degree >= _HUB_MIN_DEGREE}
+        computed = kg_queries.surprising_connections(
+            self._conn, hub_ids, limit=kg_queries.SURPRISING_CONNECTIONS_MAX,
+        )
         with self._lock:
             self._surprising_connections_cache = computed
 

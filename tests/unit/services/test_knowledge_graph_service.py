@@ -13,6 +13,7 @@ from prisma.services.knowledge_graph_service import (
     Extraction,
     KnowledgeGraphService,
     Node,
+    TOP_ENTITIES_CACHE_SIZE,
     _extraction_system_prompt,
     _KUZU_BUFFER_POOL_SIZE_BYTES,
     _sanitize_escape_sequences,
@@ -777,19 +778,40 @@ def test_refresh_surprising_connections_populates_cache_from_two_documents(kg, v
         kg._extract_file(a_file, "note")
         kg._extract_file(b_file, "note")
 
-    # Hub cache deliberately left empty rather than computed for real: with
-    # only 4 entities in this fixture, a real _refresh_top_entities() would
-    # put all of them (including both bridge instances) in the top-15
-    # cache, which would then hub-exclude the very link this test is
-    # checking for -- an artifact of the fixture's small size, not a real
-    # hub. The hub-exclusion logic itself (given a real, larger hub set) is
-    # covered directly in test_kg_queries.py's
-    # test_surprising_connections_excludes_hub_mediated_links.
-    kg._top_entities_cache = []
+    # Real _refresh_top_entities(), not a manually emptied cache: with only
+    # 4 entities of degree 1 each, every one of them makes the top-15 cache,
+    # but none clears the _HUB_MIN_DEGREE floor -- this is exactly the
+    # small-graph production path that used to hub-exclude every candidate
+    # regardless of actual connectivity. The hub-exclusion logic itself
+    # (given a real, well-connected hub) is covered directly in
+    # test_kg_queries.py's test_surprising_connections_excludes_hub_mediated_links.
+    kg._refresh_top_entities()
     kg._refresh_surprising_connections()
 
     links = kg.surprising_connections()
     assert links and links[0].bridge == "Bridge"
+
+
+def test_refresh_surprising_connections_cache_holds_more_than_the_top_entities_slice(kg):
+    # The cache must be populated up to the real maximum a /graph request can
+    # ask for (SURPRISING_CONNECTIONS_MAX), not silently capped at
+    # TOP_ENTITIES_CACHE_SIZE by inheriting kg_queries.surprising_connections'
+    # own default limit. kg_queries' limit slicing is already covered by
+    # test_kg_queries.py::test_surprising_connections_respects_limit -- this
+    # asserts the cache itself, not the slice, was the bottleneck.
+    for i in range(20):
+        with kg._lock:
+            kg._upsert(f"notes/a{i}.md", "note",
+                       [{"id": f"a{i}", "label": f"A{i}"}, {"id": f"a{i}_bridge", "label": f"Bridge{i}"}],
+                       [{"source": f"a{i}", "target": f"a{i}_bridge", "relation": "cites"}])
+            kg._upsert(f"notes/b{i}.md", "note",
+                       [{"id": f"c{i}", "label": f"C{i}"}, {"id": f"b{i}_bridge", "label": f"Bridge{i}"}],
+                       [{"source": f"b{i}_bridge", "target": f"c{i}", "relation": "extends"}])
+
+    kg._refresh_top_entities()
+    kg._refresh_surprising_connections()
+
+    assert len(kg.surprising_connections(limit=100)) > TOP_ENTITIES_CACHE_SIZE
 
 
 def test_drop_index_clears_surprising_connections_cache(kg):
@@ -893,6 +915,29 @@ def test_process_pending_clears_stale_even_with_no_real_change(kg, vault):
     kg._process_pending({f})
 
     assert kg.status().state == "idle"
+
+
+def test_process_pending_refreshes_caches_on_deletion_only_batch(kg, vault):
+    # A pending set with nothing left to extract (every path already gone
+    # from disk) must still refresh top_entities/surprising_connections --
+    # _extract_files_concurrently([]) can't itself detect that a deletion
+    # is what actually changed the graph this cycle.
+    f = vault.root / "notes" / "gone.md"
+    f.write_text("---\ntype: note\n---\ncontent", encoding="utf-8")
+    result = _extraction(
+        nodes=[{"id": "gone_a", "label": "A"}, {"id": "gone_b", "label": "B"}],
+        edges=[{"source": "gone_a", "target": "gone_b", "relation": "cites"}],
+    )
+    with _patch_create(kg, return_value=result), \
+         patch("prisma.services.resource_lock.acquire", return_value=(True, "local-ollama", "req-1")):
+        kg._extract_file(f, "note")
+    kg._refresh_top_entities()
+    assert kg.top_entities()  # sanity: the cache holds the soon-to-be-deleted entity
+
+    f.unlink()
+    kg._process_pending({f})
+
+    assert kg.top_entities() == []
 
 
 def test_full_index_sets_idle_and_last_indexed(kg, vault):

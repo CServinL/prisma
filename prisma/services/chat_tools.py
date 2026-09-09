@@ -507,7 +507,7 @@ class ChatToolbox:
         if not entities:
             return ToolResult(text="", raw=[])
         slugs = list(dict.fromkeys(
-            Path(e.source_file).stem for e in entities if e.source_file
+            self._vault.slug_for_relpath(e.source_file) for e in entities if e.source_file
         ))
         lines = [
             f"- {e.label} ({e.degree} connections)"

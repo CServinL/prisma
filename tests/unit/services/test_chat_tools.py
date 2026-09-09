@@ -540,18 +540,21 @@ def test_toolbox_expand_node_empty_when_no_neighbours(vault):
 
 
 def test_toolbox_god_nodes_lists_hubs_with_sources_header(vault):
+    # Same filename in two different directories -- a bare `Path(...).stem`
+    # would collapse both to "paper", citing whichever one a later lookup
+    # happened to resolve first; the compound slug keeps them distinct.
     kg = MagicMock()
     kg.god_nodes.return_value = [
-        TopEntity(id="h1", label="Hub One", degree=7, source_file="sources/a.md",
+        TopEntity(id="h1", label="Hub One", degree=7, source_file="sources/paper.md",
                   sample_relations=["cites", "builds_on"]),
-        TopEntity(id="h2", label="Hub Two", degree=3, source_file="notes/b.md"),
+        TopEntity(id="h2", label="Hub Two", degree=3, source_file="notes/paper.md"),
     ]
     toolbox = ChatToolbox(MagicMock(), kg, vault)
 
     result = toolbox.call("GOD_NODES", "-")
 
     assert "Hub One (7 connections) — e.g. cites, builds_on" in result.text
-    assert "Sources: a, b" in result.text
+    assert "Sources: sources--paper, notes--paper" in result.text
     assert len(result.raw) == 2
 
 

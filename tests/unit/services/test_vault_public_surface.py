@@ -71,6 +71,22 @@ class TestFindFile:
         assert found is not None
         assert found == sources_dir / "paper.md"
 
+    def test_slug_for_relpath_round_trips_through_find_file_for_a_nested_path(self, vault):
+        # slug_for_relpath() is the encode counterpart of the dir--name decode
+        # in _resolve_compound_slug()/_find_md(); the two must stay inverses,
+        # including for a path more than one directory deep.
+        nested_dir = vault.root / "sources" / "archive"
+        nested_dir.mkdir(parents=True, exist_ok=True)
+        md = nested_dir / "paper.md"
+        md.write_text("---\ntype: source\n---\nBody.", encoding="utf-8")
+        rel = md.relative_to(vault.root)
+
+        slug = vault.slug_for_relpath(rel)
+
+        assert slug == "sources--archive--paper"
+        assert vault.find_file(slug) == md
+        assert vault._resolve_compound_slug(slug, ".md") == md
+
     def test_compound_slug_cannot_escape_vault_root_via_dotdot(self, vault, tmp_path):
         # vault.root is tmp_path/"vault"; "..--secret" decodes via
         # .replace("--", "/") to "../secret", landing exactly at

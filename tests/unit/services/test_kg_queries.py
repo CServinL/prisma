@@ -381,6 +381,26 @@ def test_timeline_year_less_entities_sort_last(kg, conn, vault):
     assert entries[-1].year is None
 
 
+def test_timeline_resolves_year_by_directory_not_just_filename(kg, conn, vault):
+    # Same filename ("paper") in two different directories -- a bare
+    # `Path(source_file).stem` lookup would resolve both entities to
+    # whichever one `vault.get_any("paper")` happens to find, silently
+    # attaching the wrong year to one of them.
+    _write_source(vault, "paper", 1990)
+    (vault.root / "archive").mkdir(parents=True, exist_ok=True)
+    (vault.root / "archive" / "paper.md").write_text(
+        "---\ntype: source\ntitle: paper\nyear: 2020\n---\nbody", encoding="utf-8",
+    )
+    _add(kg, "sources/paper.md", "source", [{"id": "old_topic", "label": "Topic"}])
+    _add(kg, "archive/paper.md", "source", [{"id": "new_topic", "label": "Topic"}])
+
+    entries = kg_queries.timeline(conn, vault, "topic")
+
+    years = {e.id: e.year for e in entries}
+    assert years["old_topic"] == 1990
+    assert years["new_topic"] == 2020
+
+
 def test_timeline_empty_for_no_terms(conn, vault):
     assert kg_queries.timeline(conn, vault, "  ") == []
 

@@ -17,6 +17,7 @@ from typing import Callable
 
 from fastapi import APIRouter, Query
 
+from prisma.services.kg_queries import SURPRISING_CONNECTIONS_MAX
 from prisma.services.knowledge_graph_client import KnowledgeGraphClient
 from prisma.storage.models.kg_models import (
     AuthorSummary,
@@ -44,7 +45,7 @@ def build_graph_router(get_client: Callable[[], KnowledgeGraphClient]) -> APIRou
         return get_client().god_nodes(limit=limit)
 
     @router.get("/surprising_connections", response_model=list[SurprisingConnection])
-    def surprising_connections(limit: int = Query(15, ge=1, le=100)):
+    def surprising_connections(limit: int = Query(15, ge=1, le=SURPRISING_CONNECTIONS_MAX)):
         """2-hop links between entities that no single document ever
         asserted directly — cached, background-computed (see
         KnowledgeGraphService.surprising_connections())."""

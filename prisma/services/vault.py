@@ -344,6 +344,13 @@ class VaultService:
                 if fname.endswith(extensions):
                     yield Path(dirpath) / fname
 
+    def slug_for_relpath(self, rel_path: str | Path) -> str:
+        """Encode a path relative to the vault root as the `dir--name`
+        compound slug (ADR-021) that `_resolve_compound_slug`/`_find_md`
+        below decode -- kept beside its decode counterpart so the two
+        can't drift apart."""
+        return str(Path(rel_path).with_suffix("")).replace("/", "--").replace("\\", "--")
+
     def _resolve_compound_slug(self, slug: str, suffix: str) -> Path | None:
         """Decode a `dir--name` compound slug (ADR-021) into a candidate
         path with the given suffix, refusing to resolve outside the vault
@@ -1082,7 +1089,7 @@ class VaultService:
                     if name.endswith(".html"):
                         try:
                             rel = path.relative_to(self.root)
-                            html_slug = str(rel.with_suffix("")).replace("/", "--").replace("\\", "--")
+                            html_slug = self.slug_for_relpath(rel)
                         except ValueError:
                             html_slug = _file_slug(path.stem)
                         companion_md = path.with_suffix(".md")
@@ -1149,7 +1156,7 @@ class VaultService:
             if companion.exists():
                 companion.rename(dest / companion.name)
         rel = new_path.relative_to(self.root)
-        new_slug = str(rel.with_suffix("")).replace("/", "--").replace("\\", "--")
+        new_slug = self.slug_for_relpath(rel)
         return new_slug, old_rel, str(rel)
 
     def rename_node(self, slug: str, new_title: str) -> tuple[str, str | None, str | None]:

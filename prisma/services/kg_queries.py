@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import logging
 import re
-from pathlib import Path
 
 from prisma.storage.models.kg_models import (
     AuthorSummary,
@@ -230,6 +229,13 @@ def expand_node(conn, node_id: str) -> ExpandNodeResponse:
 # entity ids), and the pair count grows O(n^2) per group.
 _MAX_BRIDGE_GROUP_SIZE = 50
 
+# The public route's upper bound (graph_routes.py's `Query(..., le=...)`) and
+# the background cache's populate size (KnowledgeGraphService.
+# _refresh_surprising_connections()) both read this one constant -- a cache
+# populated to a lower limit than the route accepts can never serve a
+# request asking for more than the cache actually holds.
+SURPRISING_CONNECTIONS_MAX = 100
+
 
 def surprising_connections(
     conn, hub_ids: "set[str] | frozenset[str]", limit: int = 15,
@@ -405,7 +411,7 @@ def timeline(conn, vault, question: str) -> list[TimelineEntry]:
     def _year(source_file: str | None) -> int | None:
         if not source_file:
             return None
-        slug = Path(source_file).stem
+        slug = vault.slug_for_relpath(source_file)
         if slug not in year_by_slug:
             try:
                 node = vault.get_any(slug)

@@ -162,6 +162,21 @@ class TestGetAnyResolvesCompoundSlugs:
         assert node.slug == "idea"
 
 
+class TestFrontmatterForRelpath:
+    def test_reads_year_from_a_nested_relative_path(self, vault):
+        (vault.root / "sources").mkdir(parents=True, exist_ok=True)
+        (vault.root / "sources" / "paper.md").write_text(
+            "---\ntype: source\nyear: 2018\n---\nBody.", encoding="utf-8")
+        assert vault.frontmatter_for_relpath("sources/paper.md")["year"] == 2018
+
+    def test_missing_file_is_empty(self, vault):
+        assert vault.frontmatter_for_relpath("sources/nope.md") == {}
+
+    def test_cannot_escape_the_vault_root(self, vault, tmp_path):
+        (tmp_path / "outside.md").write_text("---\nyear: 1999\n---\nx", encoding="utf-8")
+        assert vault.frontmatter_for_relpath("../outside.md") == {}
+
+
 class TestNodeTypeFromFrontmatter:
     def test_recognized_type(self, vault):
         assert vault.node_type_from_frontmatter({"type": "source"}) == NodeType.source

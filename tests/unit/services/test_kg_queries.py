@@ -2,6 +2,8 @@
 embedded Kùzu graph (same fixture pattern as test_knowledge_graph_service.py:
 tmp_path-backed Kùzu, nothing mocked here since there's no LLM call).
 """
+from unittest.mock import patch
+
 import pytest
 
 from prisma.services import kg_queries
@@ -179,6 +181,21 @@ def test_expand_node_excludes_chat_tier_neighbours(kg, conn):
          [{"source": "center", "target": "chatty"}])
     resp = kg_queries.expand_node(conn, "center")
     assert resp.entities == []
+
+
+def test_expand_node_excludes_a_chat_tier_center(kg, conn):
+    # The center "shared" is chat-tier; its neighbour "chatty" is later
+    # re-upserted as a note, so filtering only the neighbour would leak the
+    # chat-asserted relationship (and its chat source_file) into a grounding
+    # header.
+    _add(kg, "chats/c.md", "chat",
+         [{"id": "shared", "label": "Shared"}, {"id": "chatty", "label": "Chatty"}],
+         [{"source": "shared", "target": "chatty", "relation": "in"}])
+    _add(kg, "notes/n.md", "note", [{"id": "chatty", "label": "Chatty"}])
+
+    resp = kg_queries.expand_node(conn, "shared")
+
+    assert resp.entities == [] and resp.edges == []
 
 
 def test_expand_node_empty_for_unknown_id(kg, conn):
@@ -508,6 +525,18 @@ def test_timeline_edge_scan_ignores_chat_tier_neighbours(kg, conn, vault):
     entries = kg_queries.timeline(conn, vault, "topic")
 
     assert {e.source_file for e in entries} == {"sources/paper.md"}
+
+
+def test_timeline_reads_frontmatter_directly_not_via_get_any(kg, conn, vault):
+    # get_any() walks the whole vault and builds a full node model per
+    # lookup -- timeline must resolve the year from the known relative path.
+    _write_source(vault, "paper", 2015)
+    _add(kg, "sources/paper.md", "source", [{"id": "p_topic", "label": "Topic"}])
+
+    with patch.object(vault, "get_any", side_effect=AssertionError("get_any must not be called")):
+        entries = kg_queries.timeline(conn, vault, "topic")
+
+    assert entries[0].year == 2015
 
 
 def test_timeline_limit_caps_matched_entities_and_entries(kg, conn, vault):

@@ -62,6 +62,11 @@ def _file_slug(stem: str) -> str:
     return slug or "untitled"
 
 
+# frontmatter_for_relpath() reads only this many bytes -- a frontmatter
+# block larger than this is malformed, and its year lookup degrades to None.
+_FRONTMATTER_READ_BYTES = 8192
+
+
 def _parse_frontmatter(body: str) -> tuple[dict, str]:
     """Return (frontmatter_dict, body_without_frontmatter).
 
@@ -350,6 +355,22 @@ class VaultService:
         below decode -- kept beside its decode counterpart so the two
         can't drift apart."""
         return str(Path(rel_path).with_suffix("")).replace("/", "--").replace("\\", "--")
+
+    def frontmatter_for_relpath(self, rel_path: str | Path) -> dict:
+        """Frontmatter of a vault file addressed by its already-known
+        vault-relative path -- skips the slug decode and full-vault walk
+        `get_any()` does, and reads only the file's head. For hot paths that
+        already hold the relative path (e.g. kg_queries.timeline)."""
+        try:
+            candidate = (self.root / Path(rel_path)).resolve()
+            if not candidate.is_relative_to(self.root.resolve()):
+                return {}
+            with candidate.open("r", encoding="utf-8", errors="replace") as f:
+                head = f.read(_FRONTMATTER_READ_BYTES)
+        except OSError:
+            return {}
+        fm, _ = _parse_frontmatter(head)
+        return fm
 
     def _resolve_compound_slug(self, slug: str, suffix: str) -> Path | None:
         """Decode a `dir--name` compound slug (ADR-021) into a candidate

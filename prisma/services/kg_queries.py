@@ -190,7 +190,8 @@ def god_nodes(conn, limit: int = DEFAULT_TOP_ENTITIES) -> list[TopEntity]:
 
 def expand_node(conn, node_id: str) -> ExpandNodeResponse:
     """One-hop traversal — the queried entity's direct neighbours and the
-    RelatesTo edges to them, chat-tier neighbours excluded.
+    RelatesTo edges to them, chat tier excluded on both the queried node and
+    the neighbour (the result grounds a chat answer's citations).
 
     Two directed queries (outgoing, incoming) rather than one undirected
     `-` pattern, which would lose the stored edge direction and could
@@ -202,14 +203,14 @@ def expand_node(conn, node_id: str) -> ExpandNodeResponse:
     try:
         outgoing = conn.execute(
             "MATCH (e:Entity {id: $id})-[r:RelatesTo]->(o:Entity) "
-            "WHERE o.trust_tier <> 'chat' "
+            "WHERE e.trust_tier <> 'chat' AND o.trust_tier <> 'chat' "
             "RETURN o.id, o.label, o.file_type, o.trust_tier, o.source_location, o.source_file, "
             "r.relation, r.confidence, r.confidence_score, r.source_file",
             {"id": node_id},
         )
         incoming = conn.execute(
             "MATCH (o:Entity)-[r:RelatesTo]->(e:Entity {id: $id}) "
-            "WHERE o.trust_tier <> 'chat' "
+            "WHERE e.trust_tier <> 'chat' AND o.trust_tier <> 'chat' "
             "RETURN o.id, o.label, o.file_type, o.trust_tier, o.source_location, o.source_file, "
             "r.relation, r.confidence, r.confidence_score, r.source_file",
             {"id": node_id},
@@ -436,19 +437,19 @@ def timeline(conn, vault, question: str, limit: int = DEFAULT_TIMELINE) -> list[
     except Exception as exc:
         _log.warning("timeline edge scan failed: %s", exc)
 
-    year_by_slug: dict[str, int | None] = {}
+    year_by_file: dict[str, int | None] = {}
 
     def _year(source_file: str) -> int | None:
-        slug = vault.slug_for_relpath(source_file)
-        if slug not in year_by_slug:
+        # Resolve the known relative path directly and read only its
+        # frontmatter -- get_any() would walk the whole vault and build a
+        # full node model just for `year`, thousands of times under the lock.
+        if source_file not in year_by_file:
+            raw = vault.frontmatter_for_relpath(source_file).get("year")
             try:
-                node = vault.get_any(slug)
-                year_by_slug[slug] = getattr(node, "year", None)
-            except Exception as exc:  # one unresolvable node must not sink the whole report
-                if not isinstance(exc, FileNotFoundError):
-                    _log.debug("timeline: could not resolve %s: %s", slug, exc)
-                year_by_slug[slug] = None
-        return year_by_slug[slug]
+                year_by_file[source_file] = int(raw) if raw is not None else None
+            except (TypeError, ValueError):
+                year_by_file[source_file] = None
+        return year_by_file[source_file]
 
     entries: list[TimelineEntry] = []
     for _, eid, label, own_source in hits:

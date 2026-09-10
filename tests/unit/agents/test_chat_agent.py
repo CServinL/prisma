@@ -2,7 +2,13 @@
 from pathlib import Path
 from unittest.mock import MagicMock
 
-from prisma.agents.chat_agent import MAX_TOOL_ITERATIONS, ChatAgent, _extract_claims, _turn_had_no_grounding
+from prisma.agents.chat_agent import (
+    MAX_TOOL_ITERATIONS,
+    ChatAgent,
+    _extract_claims,
+    _GROUNDING_TOOLS,
+    _turn_had_no_grounding,
+)
 from prisma.schema_gov import RichContent
 from prisma.services.chat_tools import ToolResult
 from prisma.storage.models.vault_models import ChatRole, CitedClaimNode, InferenceNode, Note, ToolCallNode, TurnNode
@@ -799,6 +805,27 @@ def test_turn_had_no_grounding_false_when_zotero_search_returned_content():
     ]
 
     assert _turn_had_no_grounding(tool_calls) is False
+
+
+def test_expand_node_and_surprising_connections_are_not_grounding_tools():
+    # Their results name graph entities/relations but carry no document slug
+    # the model can cite -- god_nodes (which does emit a Sources: header)
+    # stays grounding, these two don't.
+    assert "expand_node" not in _GROUNDING_TOOLS
+    assert "surprising_connections" not in _GROUNDING_TOOLS
+    assert "god_nodes" in _GROUNDING_TOOLS
+
+
+def test_turn_had_no_grounding_true_when_only_expand_node_returned_content():
+    # Copilot review on PR #104: an empty SEARCH_VAULT followed by a
+    # non-empty EXPAND_NODE used to be treated as grounded, even though the
+    # model received nothing with a resolvable source slug.
+    tool_calls = [
+        ToolCallNode(tool="search_vault", args={"query": "x"}, result=None, status="ok"),
+        ToolCallNode(tool="expand_node", args={"query": "e1"}, result="e1 --[cites]--> e2 (e2)", status="ok"),
+    ]
+
+    assert _turn_had_no_grounding(tool_calls) is True
 
 
 def test_respond_overrides_self_report_when_grounding_tool_returns_nothing():

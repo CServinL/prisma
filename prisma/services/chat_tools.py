@@ -53,9 +53,12 @@ class ToolSpec(BaseModel):
     # getattr in `call()`, so a new tool is one TOOLS entry + one method,
     # not also an edit to a hardcoded if/elif chain.
     handler: str
-    # True for tools that can put real, citable document content in front of
-    # the model (search/graph/zotero/read_source/...). `chat_agent.py`'s
-    # `_GROUNDING_TOOLS` is derived from this, not hand-maintained.
+    # True only for tools whose result carries a resolvable source slug the
+    # model can legally cite (search/graph/god_nodes/zotero/read_source).
+    # EXPAND_NODE/SURPRISING_CONNECTIONS return graph structure with no
+    # per-result document slug, so a turn resting only on them has nothing
+    # citable and must fall through to the ai-inference wrapper —
+    # `chat_agent.py`'s `_GROUNDING_TOOLS` is derived from this flag.
     grounding: bool = False
     hidden_when_native_reasoning: bool = False
     # ZOTERO_SEARCH only makes sense when a Zotero library is actually
@@ -95,7 +98,9 @@ TOOLS: list[ToolSpec] = [
         name="expand_node",
         marker="EXPAND_NODE",
         handler="_expand_node",
-        grounding=True,
+        # Not grounding: the one-hop result names entities/relations, not the
+        # documents they came from — nothing here is citable as a source
+        # slug until edge/entity provenance is projected and rendered.
         description=(
             "Given one knowledge-graph entity id (as shown in a GRAPH_CONTEXT "
             "or GOD_NODES result), returns its direct one-hop neighbours and "
@@ -121,7 +126,9 @@ TOOLS: list[ToolSpec] = [
         name="surprising_connections",
         marker="SURPRISING_CONNECTIONS",
         handler="_surprising_connections",
-        grounding=True,
+        # Not grounding: same as EXPAND_NODE — the 2-hop links name entities,
+        # not citable documents (and by definition no single document
+        # asserts the link), so an answer resting only on this is inference.
         description=(
             "Lists 2-hop links between entities that no single document ever "
             "stated directly — connections that only emerge from the graph "
@@ -480,9 +487,10 @@ class ChatToolbox:
 
     def _expand_node(self, query: str) -> ToolResult:
         """One-hop graph traversal from a specific entity id — the neighbours
-        and the relationships to them, direction preserved per edge (an
-        empty `text` here, not a "no neighbours" message, is what makes
-        `_turn_had_no_grounding` correctly treat this as ungrounded)."""
+        and the relationships to them, direction preserved per edge. Not a
+        grounding tool (see the ToolSpec): the lines below carry no document
+        slug, so an answer built only on this is left to the ai-inference
+        wrapper rather than counted as cited."""
         node_id = query.strip()
         resp = self._kg.expand_node(node_id)
         if not resp.entities:

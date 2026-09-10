@@ -1513,9 +1513,10 @@ class KnowledgeGraphService:
             return kg_queries.search(self._conn, question, top_k=top_k)
 
     def _compute_top_entities(self, limit: int = TOP_ENTITIES_CACHE_SIZE) -> list[TopEntity]:
-        """Live Cypher call -- only ever invoked from the background index
-        thread (via _refresh_top_entities()), never from a request handler.
-        top_entities() below is the cache-only read callers actually use."""
+        """Live Cypher call, lock-held like the other kg_queries delegates --
+        the background refresh (_refresh_top_entities) inlines the same scan
+        so it can publish under one hold; this stays as the standalone
+        locked accessor. top_entities() below is the cache-only read."""
         with self._lock:
             return kg_queries.compute_top_entities(self._conn, limit)
 
@@ -1544,9 +1545,14 @@ class KnowledgeGraphService:
             return kg_queries.timeline(self._conn, self._vault, question)
 
     def _refresh_top_entities(self) -> None:
-        computed = self._compute_top_entities()
+        # Scan and publish under one lock hold (same as
+        # _refresh_surprising_connections below): a gap here would let
+        # drop_index() clear the graph and this cache in between, after
+        # which this would republish pre-drop entities.
         with self._lock:
-            self._top_entities_cache = computed
+            self._top_entities_cache = kg_queries.compute_top_entities(
+                self._conn, TOP_ENTITIES_CACHE_SIZE
+            )
 
     def top_entities(self, limit: int = TOP_ENTITIES_CACHE_SIZE) -> list[TopEntity]:
         """Cache-only read, no Kùzu call -- see _refresh_top_entities()."""
@@ -1563,16 +1569,16 @@ class KnowledgeGraphService:
         always the current cycle's top-entity list, not a stale one."""
         with self._lock:
             hub_ids = {e.id for e in self._top_entities_cache if e.degree >= _HUB_MIN_DEGREE}
-            # Held across the scan itself, not just the cache reads: the
-            # connection is not thread-safe and a request-path retrieval
-            # scan can land on the same _conn mid-cycle (see the retrieval
-            # methods above). Safe to hold here -- this runs on the
+            # Scan and publish under one lock hold, not two: the connection
+            # is not thread-safe (a request-path retrieval scan can land on
+            # the same _conn), and a gap between computing and assigning
+            # would let drop_index() clear the graph and both caches in
+            # between, after which this would republish pre-drop
+            # connections. Safe to hold across the scan -- this runs on the
             # background index thread and the public reader is cache-only.
-            computed = kg_queries.surprising_connections(
+            self._surprising_connections_cache = kg_queries.surprising_connections(
                 self._conn, hub_ids, limit=kg_queries.SURPRISING_CONNECTIONS_MAX,
             )
-        with self._lock:
-            self._surprising_connections_cache = computed
 
     def surprising_connections(self, limit: int = TOP_ENTITIES_CACHE_SIZE) -> list[SurprisingConnection]:
         """Cache-only read, no Kùzu call -- see _refresh_surprising_connections()."""

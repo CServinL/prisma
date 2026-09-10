@@ -171,10 +171,12 @@ def _extract_claims(reply: str) -> tuple[str, list[ClaimNode]]:
 # Grounding tools -- the only ones that can put real, citable content in
 # front of the model. Derived from ToolSpec.grounding, not hand-maintained:
 # RECALL (this session's own prior turns, not documents) and THINK (looks
-# nothing up) are not grounding; SEARCH_VAULT/GRAPH_CONTEXT/EXPAND_NODE/
-# GOD_NODES/SURPRISING_CONNECTIONS/READ_SOURCE/ZOTERO_SEARCH are. A resolvable zotero:<item_key>
-# source is exactly as citable as a vault slug, so a turn that only called
-# SEARCH_VAULT (empty) + ZOTERO_SEARCH (real hits) still counts as grounded.
+# nothing up) are not grounding; neither are EXPAND_NODE/SURPRISING_CONNECTIONS,
+# whose results name graph entities but carry no document slug the model can
+# cite. SEARCH_VAULT/GRAPH_CONTEXT/GOD_NODES/READ_SOURCE/ZOTERO_SEARCH are. A
+# resolvable zotero:<item_key> source is exactly as citable as a vault slug,
+# so a turn that only called SEARCH_VAULT (empty) + ZOTERO_SEARCH (real hits)
+# still counts as grounded.
 _GROUNDING_TOOLS = {t.name for t in TOOLS if t.grounding}
 
 

@@ -822,6 +822,56 @@ def test_refresh_surprising_connections_populates_cache_from_two_documents(kg, v
     assert links and links[0].bridge == "Bridge"
 
 
+class _CountingLock:
+    """Wraps a real lock, counting `with` entries -- so a test can assert a
+    refresh scans and publishes under one hold, with no gap a concurrent
+    drop_index() could slip a graph-clear into."""
+
+    def __init__(self, real):
+        self._real = real
+        self.entries = 0
+
+    def __enter__(self):
+        self.entries += 1
+        return self._real.__enter__()
+
+    def __exit__(self, *exc):
+        return self._real.__exit__(*exc)
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+def test_refresh_top_entities_scans_and_publishes_under_one_lock_hold(kg):
+    with kg._lock:
+        kg._upsert("notes/a.md", "note",
+                   [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}],
+                   [{"source": "a", "target": "b", "relation": "cites"}])
+    kg._lock = _CountingLock(kg._lock)
+
+    kg._refresh_top_entities()
+
+    assert kg._lock.entries == 1
+    assert kg.top_entities()
+
+
+def test_refresh_surprising_connections_scans_and_publishes_under_one_lock_hold(kg):
+    with kg._lock:
+        kg._upsert("notes/a.md", "note",
+                   [{"id": "a", "label": "A"}, {"id": "a_bridge", "label": "Bridge"}],
+                   [{"source": "a", "target": "a_bridge", "relation": "cites"}])
+        kg._upsert("notes/c.md", "note",
+                   [{"id": "c", "label": "C"}, {"id": "c_bridge", "label": "Bridge"}],
+                   [{"source": "c_bridge", "target": "c", "relation": "extends"}])
+    kg._refresh_top_entities()
+    kg._lock = _CountingLock(kg._lock)
+
+    kg._refresh_surprising_connections()
+
+    assert kg._lock.entries == 1
+    assert kg.surprising_connections()
+
+
 def test_refresh_surprising_connections_cache_holds_more_than_the_top_entities_slice(kg):
     # The cache must be populated up to the real maximum a /graph request can
     # ask for (SURPRISING_CONNECTIONS_MAX), not silently capped at

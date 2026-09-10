@@ -817,10 +817,8 @@ def test_kg_graph_tools_are_grounding():
 
 
 def test_turn_had_no_grounding_tracks_expand_node_by_whether_it_returned_sources():
-    # Copilot review on PR #104: EXPAND_NODE only counts as grounding when
-    # its result actually carries a citable Sources: header. An empty result
-    # (no resolvable source) still triggers the ai-inference override; a
-    # sourced one does not.
+    # EXPAND_NODE only grounds a turn when its result carries a Sources:
+    # header. An empty result still triggers the ai-inference override.
     empty = [
         ToolCallNode(tool="search_vault", args={"query": "x"}, result=None, status="ok"),
         ToolCallNode(tool="expand_node", args={"query": "e1"}, result=None, status="ok"),

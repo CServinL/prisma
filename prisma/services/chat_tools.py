@@ -53,12 +53,9 @@ class ToolSpec(BaseModel):
     # getattr in `call()`, so a new tool is one TOOLS entry + one method,
     # not also an edit to a hardcoded if/elif chain.
     handler: str
-    # True for tools whose result puts citable document content in front of
-    # the model — every one emits a `Sources:` header (or wraps under a real
-    # slug) and returns empty text when it has nothing citable, so a turn
-    # resting only on grounding tools that came back empty falls through to
-    # the ai-inference wrapper. `chat_agent.py`'s `_GROUNDING_TOOLS` is
-    # derived from this flag, not hand-maintained.
+    # True for tools that return citable content (a `Sources:` header or a
+    # real slug wrapper), empty text when they have nothing. `chat_agent.py`'s
+    # `_GROUNDING_TOOLS` is derived from this flag.
     grounding: bool = False
     hidden_when_native_reasoning: bool = False
     # ZOTERO_SEARCH only makes sense when a Zotero library is actually
@@ -482,12 +479,9 @@ class ChatToolbox:
         return ToolResult(text=wrapped, raw=[r.model_dump() for r in results])
 
     def _expand_node(self, query: str) -> ToolResult:
-        """One-hop graph traversal from a specific entity id — the neighbours,
-        the relationships to them (direction preserved per edge), and a
-        `Sources:` header naming the documents those edges and neighbours
-        came from so the model can cite them. Empty text (→ ungrounded) if
-        nothing citable comes back — an entity with no resolvable source is
-        a data anomaly, not something to answer from."""
+        """One-hop graph traversal from an entity id — neighbours, the edges
+        to them (direction preserved), and a `Sources:` header of the
+        documents behind them. Empty text when nothing is citable."""
         node_id = query.strip()
         resp = self._kg.expand_node(node_id)
         if not resp.entities:
@@ -536,16 +530,11 @@ class ChatToolbox:
         return ToolResult(text=wrapped, raw=raw)
 
     def _surprising_connections(self, query: str) -> ToolResult:
-        """Links between entities that no single document ever asserted
-        directly — cached, background-computed (see
-        KnowledgeGraphService.surprising_connections()). The query text is
-        ignored, same as GOD_NODES. `--` on both sides, not `-->`: the
-        underlying scan doesn't preserve which side of each hop actually
-        stored the relation, so a one-way arrow would risk asserting the
-        wrong direction. The `Sources:` header names the two documents each
-        link's endpoints came from — the citable pair for a `relational`
-        footnote (the bridge label spans documents, so it has no single
-        source of its own)."""
+        """Links between entities that no single document asserted directly
+        — cached (see KnowledgeGraphService.surprising_connections()). Query
+        text ignored, same as GOD_NODES. `--` not `-->`: the scan doesn't
+        keep which side stored each hop's relation. The `Sources:` header is
+        the two documents behind the link's hops."""
         links = self._kg.surprising_connections(limit=15)
         if not links:
             return ToolResult(text="", raw=[])

@@ -69,11 +69,7 @@ class EntityInfo(BaseModel):
     file_type: str | None = None
     trust_tier: str | None = None
     source_location: str | None = None
-    # The vault-relative path of the document this entity was extracted
-    # from -- provenance, so a caller (chat's grounding check, the UI) can
-    # resolve it to a citable slug. Optional: not every read path projects
-    # it, and a chat-tier-free graph always has one in practice.
-    source_file: str | None = None
+    source_file: str | None = None  # document this entity was extracted from
 
 
 class EdgeInfo(BaseModel):
@@ -82,9 +78,8 @@ class EdgeInfo(BaseModel):
     target: str
     confidence: str | None = None
     confidence_score: float | None = None
-    # Which document asserted this relationship -- the precise citation for
-    # a claim about the edge, distinct from either endpoint's own
-    # source_file. (In entities_for_file this is always the queried file.)
+    # Document that asserted this relationship -- not necessarily either
+    # endpoint's own source_file.
     source_file: str | None = None
 
 
@@ -174,33 +169,22 @@ class TimelineEntry(BaseModel):
 
 
 class SurprisingConnection(BaseModel):
-    """A link between two entities (`entity_a`/`entity_b`, real entity ids)
-    that no single document ever asserted directly -- see
-    kg_queries.surprising_connections() for the exact definition (cservinl:
-    "emerges from the KG itself, with no prior knowledge of it anywhere").
+    """A link between two entities that no single document asserted directly
+    -- see kg_queries.surprising_connections() for the exact definition.
 
-    `bridge` is a **label**, not an entity id: the two hops are asserted by
-    two different documents' own entity instances (each with its own
-    `{stem}_{entity}` id -- see `_extraction_system_prompt`), which share
-    the same normalised concept name but are never literally the same
-    graph node. There is no single id to report, since two distinct
-    instances participated -- the label is what they have in common."""
+    `bridge` is a **label**, not an entity id: each document mints its own
+    `{stem}_{entity}` id namespace, so the shared concept is two different
+    ids across the two documents -- the label is what they have in common."""
     entity_a: str
     entity_b: str
     bridge: str
     relation_a: str
     relation_b: str
     score: float
-    # The document that *asserted* each hop -- `source_file_a` is the
-    # RelatesTo edge behind `relation_a` (a<->bridge), `source_file_b` the
-    # one behind `relation_b` (bridge<->b). Deliberately the edge's
-    # provenance, not either endpoint Entity's `source_file`: entity rows
-    # merge by id and a later re-extraction overwrites `source_file`, so an
-    # endpoint can end up pointing at an unrelated last writer. The two are
-    # always different documents (a same-document link isn't "surprising"),
-    # and together they're the citable pair for a `relational` claim -- the
-    # bridge label spans documents by construction, so it has no single
-    # source of its own.
+    # The document behind each hop's RelatesTo edge -- the edge's own
+    # source_file, not the endpoint entity's (which a later re-extraction
+    # can overwrite). Always two different documents; the citable pair for a
+    # `relational` claim.
     source_file_a: str | None = None
     source_file_b: str | None = None
 
@@ -215,12 +199,7 @@ class ReadSourceResponse(BaseModel):
     # section mode: every heading found, so a missed `query` still tells the
     # caller what it could have asked for.
     available_sections: list[str] = []
-    # literal mode: total matching lines found (may exceed what's actually
-    # returned -- see `truncated`).
-    match_count: int | None = None
-    # literal mode: True if either more matches existed than were included,
-    # or a per-line/total-size budget cut the output short. Found live (PR
-    # #104 review): match_count alone caps how many *blocks* are considered,
-    # not the total bytes returned -- a single arbitrarily long matching or
-    # context line could otherwise still blow the "bounded slice" contract.
+    match_count: int | None = None  # literal mode: total matches (may exceed what's returned)
+    # literal mode: output was cut short -- by match count or by a size
+    # budget on a single long line.
     truncated: bool = False

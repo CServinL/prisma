@@ -184,15 +184,10 @@ def test_expand_node_empty_id_is_empty(conn):
 
 
 # ── surprising_connections ────────────────────────────────────────────────────
-# "Emerges from the KG itself, with no prior knowledge of it anywhere" (cservinl's
-# definition): a link where the two hops came from different documents, the
-# endpoints don't already share a document, and no document ever asserted a
-# direct edge between them. Bridges by normalised *label*, not entity id (PR
-# #104 review): real extraction mints a document-scoped id per
-# `_extraction_system_prompt`'s `{stem}_{entity}` format, so the same concept
-# in two documents is always two different ids -- these fixtures use distinct
-# ids with a shared label throughout, matching what production extraction
-# actually produces, not a single id manually reused across documents.
+# A link where the two hops came from different documents, the endpoints
+# don't share a document, and no document asserted a direct edge. Bridges by
+# normalised label, not id: extraction mints a document-scoped `{stem}_{entity}`
+# id, so these fixtures use distinct ids with a shared label, as production does.
 
 def test_surprising_connections_finds_cross_document_bridge(kg, conn):
     _add(kg, "notes/a.md", "note", [{"id": "a", "label": "A"}, {"id": "a_bridge", "label": "Bridge"}],

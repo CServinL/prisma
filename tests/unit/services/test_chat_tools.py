@@ -544,8 +544,7 @@ def test_toolbox_expand_node_empty_when_no_neighbours(vault):
 
 
 def test_toolbox_expand_node_empty_text_when_no_neighbour_has_a_source(vault):
-    # No resolvable source slug -> nothing citable -> empty text, so a turn
-    # resting only on this reads as ungrounded (Copilot review, PR #104).
+    # No resolvable source slug -> nothing citable -> empty text (ungrounded).
     kg = MagicMock()
     kg.expand_node.return_value = ExpandNodeResponse(
         entities=[EntityInfo(id="n1", label="Neighbour One")],

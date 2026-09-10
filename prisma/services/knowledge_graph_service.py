@@ -85,11 +85,9 @@ DEFAULT_INDEX_EXTENSIONS: tuple[str, ...] = (".md",)
 # primes the model's own associative attention better than a long one).
 TOP_ENTITIES_CACHE_SIZE = 15
 
-# A cached top-entities slot alone doesn't make an entity a hub for
-# surprising_connections' exclusion purposes -- in a vault with 15 or fewer
-# connected entities, every entity trivially makes the top 15 regardless of
-# how connected it actually is, which would hub-exclude every possible
-# bridge. This floor requires genuine connectivity, not just a top-15 rank.
+# surprising_connections excludes hubs by degree, not just top-15 rank:
+# in a small vault every entity makes the top 15, which would exclude
+# every possible bridge.
 _HUB_MIN_DEGREE = 5
 
 _RESOURCE_HOLDER = "kg"  # must match the worker name supervisor.py restarts — this
@@ -1371,9 +1369,8 @@ class KnowledgeGraphService:
             self._stop_event.wait(timeout=60)
 
     def _drain_once(self) -> None:
-        """One incremental-update cycle: apply queued vault renames, then
-        process whatever the watcher flagged. Split out of _loop() so a test
-        can drive a single cycle directly."""
+        """One incremental-update cycle. Split out of _loop() so a test can
+        drive a single cycle."""
         with self._lock:
             renames = self._pending_renames.copy()
             self._pending_renames.clear()
@@ -1384,27 +1381,16 @@ class KnowledgeGraphService:
             if self._rename_file(old_path, new_path):
                 renamed = True
             else:
-                # Not previously indexed (or the relabel itself failed) --
-                # fall back to treating it as a fresh file so it still gets
-                # extracted rather than silently dropped.
-                pending.add(new_path)
+                pending.add(new_path)  # never indexed / relabel failed -- extract fresh
         refreshed = self._process_pending(pending) if pending else False
         if renamed and not refreshed:
-            # A successful relabel rewrote source_file on Entity/RelatesTo
-            # rows but added nothing to `pending`, so _process_pending never
-            # ran (or ran but found no content change). The
-            # surprising_connections cache still holds the pre-rename paths
-            # -- dead slugs in /graph/surprising_connections and its
-            # grounding Sources: header until the next content change or
-            # restart.
+            # A relabel rewrote source_file on graph rows but queued nothing
+            # for _process_pending, so the caches still hold pre-rename paths.
             self._refresh_top_entities()
             self._refresh_surprising_connections()
 
     def _process_pending(self, pending: set[Path]) -> bool:
-        """Returns whether the derived caches (top_entities /
-        surprising_connections) were refreshed this pass -- so a caller that
-        also did work outside `pending` (a rename relabel) knows whether it
-        still needs to refresh them itself."""
+        """Returns whether the derived caches were refreshed this pass."""
         _log.info("knowledge graph incremental update: %d files flagged by watcher", len(pending))
         existing = [path for path in pending if path.exists()]
         deleted = False
@@ -1518,10 +1504,8 @@ class KnowledgeGraphService:
     # is enough to keep /search and ollama_deep_search working without
     # regression while that refinement is deferred.
 
-    # Kùzu's connection is not thread-safe (see _extract_file) and FastAPI
-    # runs these synchronous handlers in a threadpool, concurrently with each
-    # other and with background-index upserts. Every live scan on self._conn
-    # holds self._lock, the same one the extraction upserts take.
+    # The Kùzu connection is not thread-safe (see _extract_file); every live
+    # scan on self._conn holds self._lock, like the extraction upserts do.
 
     def entities_for_file(self, rel_path: str) -> EntitiesForFileResponse:
         """Raw entities/edges extracted from one specific file — for
@@ -1536,10 +1520,7 @@ class KnowledgeGraphService:
             return kg_queries.search(self._conn, question, top_k=top_k)
 
     def _compute_top_entities(self, limit: int = TOP_ENTITIES_CACHE_SIZE) -> list[TopEntity]:
-        """Live Cypher call, lock-held like the other kg_queries delegates --
-        the background refresh (_refresh_top_entities) inlines the same scan
-        so it can publish under one hold; this stays as the standalone
-        locked accessor. top_entities() below is the cache-only read."""
+        """Live Cypher call. top_entities() below is the cache-only read."""
         with self._lock:
             return kg_queries.compute_top_entities(self._conn, limit)
 
@@ -1568,10 +1549,8 @@ class KnowledgeGraphService:
             return kg_queries.timeline(self._conn, self._vault, question)
 
     def _refresh_top_entities(self) -> None:
-        # Scan and publish under one lock hold (same as
-        # _refresh_surprising_connections below): a gap here would let
-        # drop_index() clear the graph and this cache in between, after
-        # which this would republish pre-drop entities.
+        # Scan and publish under one lock hold: a gap lets drop_index()
+        # clear the graph in between, and this would republish stale rows.
         with self._lock:
             self._top_entities_cache = kg_queries.compute_top_entities(
                 self._conn, TOP_ENTITIES_CACHE_SIZE
@@ -1583,22 +1562,12 @@ class KnowledgeGraphService:
             return self._top_entities_cache[:limit]
 
     def _refresh_surprising_connections(self) -> None:
-        """Background-thread-only, like _refresh_top_entities() above --
-        2-hop enumeration is materially heavier than the flat scan
-        _compute_top_entities() runs. Reads the just-refreshed
-        _top_entities_cache for its hub-exclusion set rather than
-        recomputing degree separately -- both caches are refreshed from the
-        same call site (see _process_pending/_full_index), so this is
-        always the current cycle's top-entity list, not a stale one."""
+        """Background-thread-only -- the 2-hop enumeration is heavier than
+        the top-entities scan. Reads the just-refreshed _top_entities_cache
+        for hub exclusion (both caches refresh from the same call site)."""
         with self._lock:
             hub_ids = {e.id for e in self._top_entities_cache if e.degree >= _HUB_MIN_DEGREE}
-            # Scan and publish under one lock hold, not two: the connection
-            # is not thread-safe (a request-path retrieval scan can land on
-            # the same _conn), and a gap between computing and assigning
-            # would let drop_index() clear the graph and both caches in
-            # between, after which this would republish pre-drop
-            # connections. Safe to hold across the scan -- this runs on the
-            # background index thread and the public reader is cache-only.
+            # Scan and publish under one hold -- see _refresh_top_entities.
             self._surprising_connections_cache = kg_queries.surprising_connections(
                 self._conn, hub_ids, limit=kg_queries.SURPRISING_CONNECTIONS_MAX,
             )

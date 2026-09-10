@@ -9,6 +9,15 @@ were applied only at the flagged line, not to the class.
 vault-file reads, or chat grounding tools — and against the change's siblings,
 not just the line being touched.**
 
+## 0. Before treating a review finding as new
+
+Automated review runs against the PR's **pushed** head. If fixes are sitting
+in unpushed local commits, the reviewer re-flags the stale code and it looks
+like a fresh mistake. When a finding comes in: first `git log` the branch and
+grep the current working tree for the fix — if it's already there, the action
+is *push*, not re-fix. Keep the branch pushed after each verified batch so the
+next review is against real code.
+
 ## 1. `Entity.source_file` is last-writer, not provenance
 
 `KnowledgeGraphService._upsert()` does `MERGE (e:Entity {id}) SET e.source_file = $rel`

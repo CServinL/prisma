@@ -140,8 +140,8 @@ class KnowledgeGraphClient:
         data = self._get("/vault_health")
         return VaultHealthResponse.model_validate(data) if data else VaultHealthResponse(orphans=[], orphan_count=0)
 
-    def timeline(self, question: str) -> list[TimelineEntry]:
-        data = self._get("/timeline", params={"q": question}) or []
+    def timeline(self, question: str, limit: int = 50) -> list[TimelineEntry]:
+        data = self._get("/timeline", params={"q": question, "limit": limit}) or []
         return [TimelineEntry.model_validate(d) for d in data]
 
     def _ollama_ready(self) -> bool:

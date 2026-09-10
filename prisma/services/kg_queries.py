@@ -38,6 +38,15 @@ _log = logging.getLogger("prisma.knowledge_graph")
 
 DEFAULT_TOP_ENTITIES = 15
 
+# timeline() runs its per-document frontmatter reads while holding the
+# service's sole Kùzu lock, so an unbounded broad query would stall
+# indexing. DEFAULT is what a caller gets without asking; MAX bounds the
+# public route (graph_routes.py); _DOCS_PER_ENTITY caps the read fan-out
+# from a single hub entity.
+DEFAULT_TIMELINE = 50
+TIMELINE_MAX = 200
+_TIMELINE_DOCS_PER_ENTITY = 10
+
 
 def _terms(question: str) -> list[str]:
     """Same tokenisation `search()` has always used — lowercase alnum/underscore
@@ -375,7 +384,7 @@ def vault_health(conn) -> VaultHealthResponse:
     return VaultHealthResponse(orphans=orphans, orphan_count=len(orphans))
 
 
-def timeline(conn, vault, question: str) -> list[TimelineEntry]:
+def timeline(conn, vault, question: str, limit: int = DEFAULT_TIMELINE) -> list[TimelineEntry]:
     """Entities matching `question` by the same term-match `search()` uses,
     one entry per (matching entity, document it appears in) so a concept
     discussed across several papers shows up at each of their years.
@@ -385,8 +394,11 @@ def timeline(conn, vault, question: str) -> list[TimelineEntry]:
     its own `source_file` plus every `RelatesTo.source_file` touching it.
     A concept that appears only as a bare mention (no relationship) in a
     collapsed document is still lost; full per-document identity is the
-    deferred `{stem}_{entity}` id change (see TODO.md, ADR-021). Sorted
-    chronologically, year-less entries last."""
+    deferred `{stem}_{entity}` id change (see TODO.md, ADR-021).
+
+    `limit` caps both the matched entities considered (top-scored, like
+    `search`) and the entries returned. Sorted chronologically, year-less
+    entries last."""
     terms = _terms(question)
     if not terms or conn is None:
         return []
@@ -397,23 +409,30 @@ def timeline(conn, vault, question: str) -> list[TimelineEntry]:
     except Exception as exc:
         _log.warning("timeline query failed: %s", exc)
         return []
-    hits: list[tuple[str, str, str | None]] = []
+    scored: list[tuple[int, str, str, str | None]] = []
     while result.has_next():
         eid, label, source_file = result.get_next()
         haystack = f"{eid} {label}".lower()
-        if any(t in haystack for t in terms):
-            hits.append((eid, label, source_file))
+        score = sum(1 for t in terms if t in haystack)
+        if score:
+            scored.append((score, eid, label, source_file))
+    scored.sort(key=lambda s: -s[0])
+    hits = scored[:limit]
+    hit_ids = {eid for _, eid, _, _ in hits}
 
     docs_by_entity: dict[str, list[str]] = {}
     try:
         edge_result = conn.execute(
-            "MATCH (e:Entity)-[r:RelatesTo]-(:Entity) WHERE e.trust_tier <> 'chat' "
+            "MATCH (e:Entity)-[r:RelatesTo]-(o:Entity) "
+            "WHERE e.trust_tier <> 'chat' AND o.trust_tier <> 'chat' "
             "RETURN e.id, r.source_file"
         )
         while edge_result.has_next():
             eid, edge_src = edge_result.get_next()
-            if edge_src:
-                docs_by_entity.setdefault(eid, []).append(edge_src)
+            if edge_src and eid in hit_ids:
+                docs = docs_by_entity.setdefault(eid, [])
+                if edge_src not in docs and len(docs) < _TIMELINE_DOCS_PER_ENTITY:
+                    docs.append(edge_src)
     except Exception as exc:
         _log.warning("timeline edge scan failed: %s", exc)
 
@@ -432,7 +451,7 @@ def timeline(conn, vault, question: str) -> list[TimelineEntry]:
         return year_by_slug[slug]
 
     entries: list[TimelineEntry] = []
-    for eid, label, own_source in hits:
+    for _, eid, label, own_source in hits:
         docs = list(dict.fromkeys(([own_source] if own_source else []) + docs_by_entity.get(eid, [])))
         if not docs:
             entries.append(TimelineEntry(id=eid, label=label, source_file=None, year=None))
@@ -440,4 +459,4 @@ def timeline(conn, vault, question: str) -> list[TimelineEntry]:
         for d in docs:
             entries.append(TimelineEntry(id=eid, label=label, source_file=d, year=_year(d)))
     entries.sort(key=lambda e: (e.year is None, e.year or 0))
-    return entries
+    return entries[:limit]

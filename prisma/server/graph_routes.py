@@ -17,7 +17,11 @@ from typing import Callable
 
 from fastapi import APIRouter, Query
 
-from prisma.services.kg_queries import SURPRISING_CONNECTIONS_MAX
+from prisma.services.kg_queries import (
+    DEFAULT_TIMELINE,
+    SURPRISING_CONNECTIONS_MAX,
+    TIMELINE_MAX,
+)
 from prisma.services.knowledge_graph_client import KnowledgeGraphClient
 from prisma.storage.models.kg_models import (
     AuthorSummary,
@@ -63,9 +67,10 @@ def build_graph_router(get_client: Callable[[], KnowledgeGraphClient]) -> APIRou
         return get_client().vault_health()
 
     @router.get("/timeline", response_model=list[TimelineEntry])
-    def timeline(q: str = Query(..., min_length=1)):
+    def timeline(q: str = Query(..., min_length=1),
+                 limit: int = Query(DEFAULT_TIMELINE, ge=1, le=TIMELINE_MAX)):
         """Entities matching `q`, joined to their Source publication year,
-        sorted chronologically."""
-        return get_client().timeline(q)
+        sorted chronologically. `limit` caps matched entities and entries."""
+        return get_client().timeline(q, limit=limit)
 
     return router

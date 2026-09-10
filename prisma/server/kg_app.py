@@ -229,6 +229,6 @@ def vault_health():
 
 
 @app.get("/timeline", response_model=list[TimelineEntry])
-def timeline(q: str = Query(...)):
+def timeline(q: str = Query(...), limit: int = Query(50)):
     """Entities matching `q`, joined to their Source.year, sorted chronologically."""
-    return _kg.timeline(q)
+    return _kg.timeline(q, limit=limit)

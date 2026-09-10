@@ -491,3 +491,28 @@ def test_timeline_empty_for_no_terms(conn, vault):
 def test_timeline_excludes_chat_tier(kg, conn, vault):
     _add(kg, "chats/c.md", "chat", [{"id": "c_topic", "label": "Topic"}])
     assert kg_queries.timeline(conn, vault, "topic") == []
+
+
+def test_timeline_edge_scan_ignores_chat_tier_neighbours(kg, conn, vault):
+    # A note entity linked to a chat-tier entity by an edge asserted in a
+    # chat session -- that chat file's source_file must not become a
+    # timeline document for the note concept.
+    _write_source(vault, "paper", 2019)
+    _add(kg, "sources/paper.md", "source", [{"id": "n_topic", "label": "Topic"}])
+    _add(kg, "chats/c.md", "chat",
+         [{"id": "n_topic", "label": "Topic"}, {"id": "c_thing", "label": "Thing"}],
+         [{"source": "n_topic", "target": "c_thing", "relation": "mentions"}])
+    # re-assert the note tier so n_topic isn't itself chat-tier
+    _add(kg, "sources/paper.md", "source", [{"id": "n_topic", "label": "Topic"}])
+
+    entries = kg_queries.timeline(conn, vault, "topic")
+
+    assert {e.source_file for e in entries} == {"sources/paper.md"}
+
+
+def test_timeline_limit_caps_matched_entities_and_entries(kg, conn, vault):
+    for i in range(10):
+        _write_source(vault, f"p{i}", 2000 + i)
+        _add(kg, f"sources/p{i}.md", "source", [{"id": f"p{i}_topic", "label": f"Topic {i}"}])
+
+    assert len(kg_queries.timeline(conn, vault, "topic", limit=3)) == 3

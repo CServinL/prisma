@@ -97,8 +97,13 @@ def test_timeline_forwards_query(client, client_stub):
     r = client.get("/graph/timeline", params={"q": "transformers"})
     assert r.status_code == 200
     assert r.json()[0]["year"] == 2017
-    client_stub.timeline.assert_called_once_with("transformers")
+    client_stub.timeline.assert_called_once_with("transformers", limit=50)
 
 
 def test_timeline_requires_nonempty_q(client):
     assert client.get("/graph/timeline", params={"q": ""}).status_code == 422
+
+
+def test_timeline_rejects_out_of_range_limit(client):
+    assert client.get("/graph/timeline", params={"q": "x", "limit": 0}).status_code == 422
+    assert client.get("/graph/timeline", params={"q": "x", "limit": 999}).status_code == 422

@@ -1544,9 +1544,9 @@ class KnowledgeGraphService:
         with self._lock:
             return kg_queries.vault_health(self._conn)
 
-    def timeline(self, question: str) -> list[TimelineEntry]:
+    def timeline(self, question: str, limit: int = kg_queries.DEFAULT_TIMELINE) -> list[TimelineEntry]:
         with self._lock:
-            return kg_queries.timeline(self._conn, self._vault, question)
+            return kg_queries.timeline(self._conn, self._vault, question, limit)
 
     def _refresh_top_entities(self) -> None:
         # Scan and publish under one lock hold: a gap lets drop_index()

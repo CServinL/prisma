@@ -338,9 +338,9 @@ def test_timeline_forwards_query_and_returns_entries():
     payload = [{"id": "e1", "label": "Transformers", "source_file": "sources/a.md", "year": 2017}]
     with patch("prisma.services.knowledge_graph_client.requests.get",
                return_value=_mock_response(payload)) as mock_get:
-        result = client.timeline("transformers")
+        result = client.timeline("transformers", limit=25)
     assert result[0].year == 2017
-    assert mock_get.call_args.kwargs["params"] == {"q": "transformers"}
+    assert mock_get.call_args.kwargs["params"] == {"q": "transformers", "limit": 25}
 
 
 def test_timeline_empty_when_unreachable():

@@ -21,7 +21,13 @@ from prisma.services.knowledge_graph_service import (
     _strip_feature_catalog_paragraphs,
     _strip_reference_list_paragraphs,
 )
-from prisma.storage.models.kg_models import SurprisingConnection, TopEntity
+from prisma.storage.models.kg_models import (
+    AuthorSummary,
+    OrphanEntity,
+    SurprisingConnection,
+    TopEntity,
+    VaultHealthResponse,
+)
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -758,13 +764,13 @@ def test_request_path_retrieval_scans_hold_the_connection_lock(kg):
 
     kg._conn = _LockSpyConn()
 
+    # the scans still on the request path (god_nodes/authors/vault_health are
+    # now cache-only reads -- see _refresh_derived_caches)
     kg.search("anything")
     kg.expand_node("missing-id")
-    kg.god_nodes()
-    kg.authors()
-    kg.vault_health()
     kg.timeline("anything")
     kg.entities_for_file("notes/x.md")
+    kg._refresh_derived_caches()  # the background refresh must hold it too
 
     assert held and all(held)
 
@@ -987,6 +993,66 @@ def test_drop_index_clears_surprising_connections_cache(kg):
         kg.drop_index()
 
     assert kg.surprising_connections() == []
+
+
+# ── god_nodes / authors / vault_health (background-cached, like above) ─────────
+
+def _seed_graph(kg):
+    with kg._lock:
+        kg._upsert("sources/a.md", "source",
+                   [{"id": "hub", "label": "Hub", "author": "Ada Lovelace"},
+                    {"id": "leaf", "label": "Leaf"},
+                    {"id": "lonely", "label": "Lonely"}],
+                   [{"source": "hub", "target": "leaf", "relation": "cites"}])
+
+
+def test_god_nodes_authors_vault_health_are_cache_only_reads(kg):
+    kg._god_nodes_cache = [TopEntity(id="h", label="H", degree=3)]
+    kg._authors_cache = [AuthorSummary(author="Ada", file_count=1)]
+    kg._vault_health_cache = VaultHealthResponse(
+        orphans=[OrphanEntity(id="o", label="O")], orphan_count=1)
+
+    with patch.object(kg._conn, "execute") as mock_execute:
+        assert kg.god_nodes()[0].id == "h"
+        assert kg.authors()[0].author == "Ada"
+        assert kg.vault_health().orphan_count == 1
+    mock_execute.assert_not_called()
+
+
+def test_refresh_derived_caches_populates_the_new_caches(kg):
+    _seed_graph(kg)
+
+    kg._refresh_derived_caches()
+
+    assert any(e.id == "hub" for e in kg.god_nodes())
+    assert any(a.author == "Ada Lovelace" for a in kg.authors())
+    assert any(o.id == "lonely" for o in kg.vault_health().orphans)
+
+
+def test_vault_health_slices_orphans_but_keeps_the_true_count(kg):
+    kg._vault_health_cache = VaultHealthResponse(
+        orphans=[OrphanEntity(id=f"o{i}", label=f"O{i}") for i in range(10)],
+        orphan_count=10,
+    )
+    resp = kg.vault_health(limit=3)
+    assert len(resp.orphans) == 3
+    assert resp.orphan_count == 10
+
+
+def test_drop_index_clears_the_new_derived_caches(kg):
+    # populate the caches from a real graph, then drop -- the cache-only
+    # readers would otherwise keep serving the pre-drop rows.
+    _seed_graph(kg)
+    kg._refresh_derived_caches()
+    assert kg.god_nodes() and kg.authors() and kg.vault_health().orphans
+
+    with patch("prisma.services.resource_lock.acquire", return_value=(True, "local-ollama", "req-1")), \
+         patch.object(kg, "_full_index"):
+        kg.drop_index()
+
+    assert kg.god_nodes() == []
+    assert kg.authors() == []
+    assert kg.vault_health().orphan_count == 0
 
 
 # ── Status / lifecycle ────────────────────────────────────────────────────────

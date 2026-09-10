@@ -56,6 +56,7 @@ from prisma.storage.models.kg_models import (
     SurprisingConnection,
     TimelineEntry,
     TopEntity,
+    VaultHealthResponse,
 )
 from prisma.storage.models.search_models import DeepSearchCandidate, GraphSearchResult
 from prisma.storage.models.vault_models import NodeType
@@ -480,6 +481,13 @@ class KnowledgeGraphService:
         # heavier than a flat scan, so it must never run on a request thread.
         self._surprising_connections_cache: list[SurprisingConnection] = []
 
+        # Same discipline for the other /graph/* aggregates -- each is a full
+        # graph scan, so it runs on the index thread and the request path
+        # only slices the cache. See _refresh_derived_caches().
+        self._god_nodes_cache: list[TopEntity] = []
+        self._authors_cache: list[AuthorSummary] = []
+        self._vault_health_cache: VaultHealthResponse | None = None
+
         # Knowledge Graph progress page state (replaces an earlier, since
         # reverted, generic "ollama stats" page — this is scoped to what's
         # actually useful: full-sync progress, current file's chunk
@@ -632,6 +640,9 @@ class KnowledgeGraphService:
                     self._indexed_model_cache.clear()
                     self._top_entities_cache = []
                     self._surprising_connections_cache = []
+                    self._god_nodes_cache = []
+                    self._authors_cache = []
+                    self._vault_health_cache = None
                 except Exception as exc:
                     _log.warning("drop_index failed: %s", exc)
             self._state = "stale"
@@ -1392,8 +1403,7 @@ class KnowledgeGraphService:
         if renamed and not refreshed:
             # A relabel rewrote source_file on graph rows but queued nothing
             # for _process_pending, so the caches still hold pre-rename paths.
-            self._refresh_top_entities()
-            self._refresh_surprising_connections()
+            self._refresh_derived_caches()
 
     def _process_pending(self, pending: set[Path]) -> bool:
         """Returns whether the derived caches were refreshed this pass."""
@@ -1419,8 +1429,7 @@ class KnowledgeGraphService:
                 self._last_indexed = datetime.now()
             self._state = "idle"
         if changed:
-            self._refresh_top_entities()
-            self._refresh_surprising_connections()
+            self._refresh_derived_caches()
         if not extracted and existing:
             _log.info("knowledge graph incremental update: no real content change — watcher false-positive")
         self._set_activity(None)
@@ -1489,8 +1498,7 @@ class KnowledgeGraphService:
                 self._current_file = None
                 self._current_file_chunks_total = 0
                 self._current_file_chunks_done = 0
-            self._refresh_top_entities()
-            self._refresh_surprising_connections()
+            self._refresh_derived_caches()
             self._set_activity(None)
             _log.info("knowledge graph full index done: %d files indexed, %d changed", len(all_files), changed)
         except Exception as exc:
@@ -1534,16 +1542,23 @@ class KnowledgeGraphService:
             return kg_queries.expand_node(self._conn, node_id, limit)
 
     def god_nodes(self, limit: int = TOP_ENTITIES_CACHE_SIZE) -> list[TopEntity]:
+        """Cache-only read -- see _refresh_god_nodes()."""
         with self._lock:
-            return kg_queries.god_nodes(self._conn, limit)
+            return self._god_nodes_cache[:limit]
 
-    def authors(self, limit: int = 100) -> list[AuthorSummary]:
+    def authors(self, limit: int = kg_queries.DEFAULT_AUTHORS) -> list[AuthorSummary]:
+        """Cache-only read -- see _refresh_authors()."""
         with self._lock:
-            return kg_queries.authors(self._conn, limit)
+            return self._authors_cache[:limit]
 
-    def vault_health(self):
+    def vault_health(self, limit: int = kg_queries.VAULT_HEALTH_MAX) -> VaultHealthResponse:
+        """Cache-only read -- see _refresh_vault_health(). `orphan_count` is
+        the true total; `orphans` is sliced to `limit`."""
         with self._lock:
-            return kg_queries.vault_health(self._conn)
+            cached = self._vault_health_cache
+        if cached is None:
+            return VaultHealthResponse(orphans=[], orphan_count=0)
+        return VaultHealthResponse(orphans=cached.orphans[:limit], orphan_count=cached.orphan_count)
 
     def timeline(self, question: str, limit: int = kg_queries.DEFAULT_TIMELINE) -> list[TimelineEntry]:
         # Only the graph scan holds the lock; the per-document frontmatter
@@ -1581,6 +1596,28 @@ class KnowledgeGraphService:
         """Cache-only read, no Kùzu call -- see _refresh_surprising_connections()."""
         with self._lock:
             return self._surprising_connections_cache[:limit]
+
+    def _refresh_god_nodes(self) -> None:
+        with self._lock:
+            self._god_nodes_cache = kg_queries.god_nodes(self._conn, kg_queries.GOD_NODES_MAX)
+
+    def _refresh_authors(self) -> None:
+        with self._lock:
+            self._authors_cache = kg_queries.authors(self._conn, kg_queries.AUTHORS_MAX)
+
+    def _refresh_vault_health(self) -> None:
+        with self._lock:
+            self._vault_health_cache = kg_queries.vault_health(self._conn)
+
+    def _refresh_derived_caches(self) -> None:
+        """Recompute every /graph/* aggregate that would otherwise be a full
+        scan on the request path. Background-index-thread only. top_entities
+        first -- _refresh_surprising_connections reads its cache."""
+        self._refresh_top_entities()
+        self._refresh_surprising_connections()
+        self._refresh_god_nodes()
+        self._refresh_authors()
+        self._refresh_vault_health()
 
     # ── Compatibility wrappers ───────────────────────────────────────────────
     # Same names/shapes as GraphifyIndexer's — app.py's call sites (/search,

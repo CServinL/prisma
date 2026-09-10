@@ -18,6 +18,7 @@ from pathlib import Path
 from fastapi import FastAPI, Query
 
 from prisma.server import log_setup as _log_setup
+from prisma.services import kg_queries
 from prisma.services.knowledge_graph_service import KnowledgeGraphService
 from prisma.services.vault import VaultService
 from prisma.storage.models.kg_models import (
@@ -182,7 +183,7 @@ def query(q: str = Query(...), budget: int = Query(1500)):
 
 
 @app.get("/top_entities", response_model=list[TopEntity])
-def top_entities(limit: int = Query(15)):
+def top_entities(limit: int = Query(kg_queries.DEFAULT_TOP_ENTITIES)):
     """Cached ranking only -- no live Cypher call on this request path, see
     KnowledgeGraphService.top_entities()."""
     return _kg.top_entities(limit=limit)
@@ -197,38 +198,38 @@ def ollama_ready():
 # pass-through pattern as /search and /entities_for_file above. ────────────────
 
 @app.get("/expand_node", response_model=ExpandNodeResponse)
-def expand_node(id: str = Query(...), limit: int = Query(100)):
+def expand_node(id: str = Query(...), limit: int = Query(kg_queries.DEFAULT_EXPAND)):
     """One-hop neighbourhood of a single entity id."""
     return _kg.expand_node(id, limit=limit)
 
 
 @app.get("/god_nodes", response_model=list[TopEntity])
-def god_nodes(limit: int = Query(15)):
+def god_nodes(limit: int = Query(kg_queries.DEFAULT_TOP_ENTITIES)):
     """Most-connected hub entities, with each one's source_file and up to 3
     sample relation strings (richer than /top_entities' cache read)."""
     return _kg.god_nodes(limit=limit)
 
 
 @app.get("/surprising_connections", response_model=list[SurprisingConnection])
-def surprising_connections(limit: int = Query(15)):
+def surprising_connections(limit: int = Query(kg_queries.DEFAULT_TOP_ENTITIES)):
     """Cached ranking only -- no live Cypher on this request path, see
     KnowledgeGraphService.surprising_connections()."""
     return _kg.surprising_connections(limit=limit)
 
 
 @app.get("/authors", response_model=list[AuthorSummary])
-def authors(limit: int = Query(100)):
+def authors(limit: int = Query(kg_queries.DEFAULT_AUTHORS)):
     """Distinct Entity.author values grouped across the vault."""
     return _kg.authors(limit=limit)
 
 
 @app.get("/vault_health", response_model=VaultHealthResponse)
-def vault_health():
+def vault_health(limit: int = Query(kg_queries.VAULT_HEALTH_MAX)):
     """Entities with zero RelatesTo edges (first-cut vault health)."""
-    return _kg.vault_health()
+    return _kg.vault_health(limit=limit)
 
 
 @app.get("/timeline", response_model=list[TimelineEntry])
-def timeline(q: str = Query(...), limit: int = Query(50)):
+def timeline(q: str = Query(...), limit: int = Query(kg_queries.DEFAULT_TIMELINE)):
     """Entities matching `q`, joined to their Source.year, sorted chronologically."""
     return _kg.timeline(q, limit=limit)

@@ -320,10 +320,11 @@ def test_vault_health_returns_response():
     payload = {"orphans": [{"id": "o1", "label": "O1", "source_file": "notes/a.md"}], "orphan_count": 1}
     with patch("prisma.services.knowledge_graph_client.requests.get",
                return_value=_mock_response(payload)) as mock_get:
-        result = client.vault_health()
+        result = client.vault_health(limit=7)
     assert result.orphan_count == 1
     assert result.orphans[0].id == "o1"
     assert mock_get.call_args[0][0].endswith("/vault_health")
+    assert mock_get.call_args.kwargs["params"] == {"limit": 7}
 
 
 def test_vault_health_empty_shape_when_unreachable():

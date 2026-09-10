@@ -92,9 +92,10 @@ def test_vault_health(client, client_stub):
     client_stub.vault_health.return_value = VaultHealthResponse(
         orphans=[OrphanEntity(id="o1", label="O1")], orphan_count=1,
     )
-    r = client.get("/graph/vault_health")
+    r = client.get("/graph/vault_health", params={"limit": 5})
     assert r.status_code == 200
     assert r.json()["orphan_count"] == 1
+    client_stub.vault_health.assert_called_once_with(limit=5)
 
 
 def test_timeline_forwards_query(client, client_stub):

@@ -57,11 +57,12 @@ indexer upserts on it too.
   rename-relabel (not just `extracted`).
 - Every request-path query takes a validated `limit`; free-text query params
   (`?id=`, `?q=`, `?query=`) take a `max_length`.
-- Heavy 2-hop enumeration (`surprising_connections`) is background-computed and served
-  from cache, never run on a request thread.
-
-Known / deferred: `god_nodes` / `authors` / `vault_health` still do full unbounded
-Cypher scans on the live request path under the lock (aggregate-in-Python).
+- Any full-graph aggregate is background-computed and served from cache, never run on
+  a request thread: `top_entities`, `surprising_connections`, `god_nodes`, `authors`,
+  `vault_health` are all cache-only reads (`KnowledgeGraphService._refresh_derived_caches()`,
+  called from every `_process_pending` / `_full_index` / rename cycle). Adding another
+  such endpoint means adding a `_X_cache` + `_refresh_X()` + a line in
+  `_refresh_derived_caches()` + a `drop_index()` reset, not a live scan.
 
 ## 5. Grounding-tool contract
 

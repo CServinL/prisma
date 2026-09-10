@@ -18,11 +18,16 @@ from typing import Callable
 from fastapi import APIRouter, Query
 
 from prisma.services.kg_queries import (
+    AUTHORS_MAX,
+    DEFAULT_AUTHORS,
     DEFAULT_EXPAND,
     DEFAULT_TIMELINE,
+    DEFAULT_TOP_ENTITIES,
     EXPAND_MAX,
+    GOD_NODES_MAX,
     SURPRISING_CONNECTIONS_MAX,
     TIMELINE_MAX,
+    VAULT_HEALTH_MAX,
 )
 from prisma.services.knowledge_graph_client import KnowledgeGraphClient
 from prisma.storage.models.kg_models import (
@@ -47,28 +52,30 @@ def build_graph_router(get_client: Callable[[], KnowledgeGraphClient]) -> APIRou
         return get_client().expand_node(id, limit=limit)
 
     @router.get("/god_nodes", response_model=list[TopEntity])
-    def god_nodes(limit: int = Query(15, ge=1, le=100)):
+    def god_nodes(limit: int = Query(DEFAULT_TOP_ENTITIES, ge=1, le=GOD_NODES_MAX)):
         """Most-connected hub entities across the whole vault, each with its
-        source_file and a few sample relation strings."""
+        source files and a few sample relation strings. Cache-only read."""
         return get_client().god_nodes(limit=limit)
 
     @router.get("/surprising_connections", response_model=list[SurprisingConnection])
-    def surprising_connections(limit: int = Query(15, ge=1, le=SURPRISING_CONNECTIONS_MAX)):
+    def surprising_connections(limit: int = Query(DEFAULT_TOP_ENTITIES, ge=1, le=SURPRISING_CONNECTIONS_MAX)):
         """2-hop links between entities that no single document ever
         asserted directly — cached, background-computed (see
         KnowledgeGraphService.surprising_connections())."""
         return get_client().surprising_connections(limit=limit)
 
     @router.get("/authors", response_model=list[AuthorSummary])
-    def authors(limit: int = Query(100, ge=1, le=500)):
+    def authors(limit: int = Query(DEFAULT_AUTHORS, ge=1, le=AUTHORS_MAX)):
         """Distinct entity authors grouped across the vault, by how many
-        source files name each."""
+        source files name each. Cache-only read."""
         return get_client().authors(limit=limit)
 
     @router.get("/vault_health", response_model=VaultHealthResponse)
-    def vault_health():
-        """First-cut vault health: entities with no relationship edges."""
-        return get_client().vault_health()
+    def vault_health(limit: int = Query(VAULT_HEALTH_MAX, ge=1, le=VAULT_HEALTH_MAX)):
+        """First-cut vault health: entities with no relationship edges.
+        Cache-only read; `orphan_count` is the true total, `orphans` is
+        sliced to `limit`."""
+        return get_client().vault_health(limit=limit)
 
     @router.get("/timeline", response_model=list[TimelineEntry])
     def timeline(q: str = Query(..., min_length=1, max_length=512),

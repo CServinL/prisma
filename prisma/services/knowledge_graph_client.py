@@ -132,12 +132,12 @@ class KnowledgeGraphClient:
             return []
         return [SurprisingConnection.model_validate(d) for d in data]
 
-    def authors(self, limit: int = 100) -> list[AuthorSummary]:
+    def authors(self, limit: int = 100) -> list[AuthorSummary]:  # DEFAULT_AUTHORS
         data = self._get("/authors", params={"limit": limit}) or []
         return [AuthorSummary.model_validate(d) for d in data]
 
-    def vault_health(self) -> VaultHealthResponse:
-        data = self._get("/vault_health")
+    def vault_health(self, limit: int = 500) -> VaultHealthResponse:
+        data = self._get("/vault_health", params={"limit": limit})
         return VaultHealthResponse.model_validate(data) if data else VaultHealthResponse(orphans=[], orphan_count=0)
 
     def timeline(self, question: str, limit: int = 50) -> list[TimelineEntry]:

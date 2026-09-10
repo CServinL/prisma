@@ -36,7 +36,8 @@ from prisma.storage.models.search_models import GraphSearchResult
 
 _log = logging.getLogger("prisma.knowledge_graph")
 
-DEFAULT_TOP_ENTITIES = 15
+DEFAULT_TOP_ENTITIES = 15  # also the god_nodes / surprising_connections request default
+DEFAULT_AUTHORS = 100
 
 # timeline() runs its per-document frontmatter reads while holding the
 # service's sole Kùzu lock, so an unbounded broad query would stall
@@ -86,6 +87,11 @@ def search(conn, question: str, top_k: int = 20) -> list[GraphSearchResult]:
 
 
 def entities_for_file(conn, rel_path: str, extracted_by: str | None = None) -> EntitiesForFileResponse:
+    """Raw entities/edges extracted from one exact file. Deliberately NOT
+    trust-tier filtered: it's addressed by `source_file` (no join, no id
+    collision), only ever reached from the /admin/kg inspector -- never a
+    citation/grounding path -- and inspecting a chat file's own extraction
+    is a legitimate diagnostic use that a chat-tier filter would break."""
     if conn is None:
         return EntitiesForFileResponse(entities=[], edges=[])
     entities: list[EntityInfo] = []
@@ -251,9 +257,14 @@ def expand_node(conn, node_id: str, limit: int = DEFAULT_EXPAND) -> ExpandNodeRe
 # not a surprising link -- and the pair count is O(n^2) per group.
 _MAX_BRIDGE_GROUP_SIZE = 50
 
-# Shared by graph_routes.py's `Query(..., le=...)` and the background cache's
-# populate size, so the cache always holds at least what a request can ask for.
+# Each pairs a public route's `Query(..., le=...)` with the background cache's
+# populate size, so the cache always holds at least what a request can ask
+# for. god_nodes/authors/vault_health are cache-only reads on the request
+# path (KnowledgeGraphService) -- their full scans run on the index thread.
 SURPRISING_CONNECTIONS_MAX = 100
+GOD_NODES_MAX = 100
+AUTHORS_MAX = 500
+VAULT_HEALTH_MAX = 500
 
 
 def surprising_connections(
@@ -341,7 +352,7 @@ def surprising_connections(
     return out
 
 
-def authors(conn, limit: int = 100) -> list[AuthorSummary]:
+def authors(conn, limit: int = DEFAULT_AUTHORS) -> list[AuthorSummary]:
     """Distinct `Entity.author` grouped across the vault. Aggregated in
     Python (see `god_nodes`' rationale)."""
     if conn is None:

@@ -70,6 +70,8 @@ def test_entities_for_file_returns_nodes_and_edges(kg, conn):
     assert len(data.edges) == 1
     assert data.edges[0].relation == "cites"
     assert data.extracted_by == "qwen2.5:7b"
+    assert all(e.source_file == "notes/x.md" for e in data.entities)
+    assert data.edges[0].source_file == "notes/x.md"
 
 
 def test_entities_for_file_empty_for_untracked_file(kg, conn):
@@ -159,6 +161,9 @@ def test_expand_node_returns_one_hop_neighbours(kg, conn):
     # reporting it as "center extends n2" would be a false inverse claim.
     assert (by_relation["cites"].source, by_relation["cites"].target) == ("center", "n1")
     assert (by_relation["extends"].source, by_relation["extends"].target) == ("n2", "center")
+    # provenance for the grounding Sources: header
+    assert {e.source_file for e in resp.entities} == {"notes/a.md"}
+    assert {edge.source_file for edge in resp.edges} == {"notes/a.md"}
 
 
 def test_expand_node_excludes_chat_tier_neighbours(kg, conn):
@@ -202,6 +207,8 @@ def test_surprising_connections_finds_cross_document_bridge(kg, conn):
     assert link.bridge == "Bridge"  # the shared label (as-cased in the data), not either instance's id
     assert {link.entity_a, link.entity_b} == {"a", "c"}
     assert {link.relation_a, link.relation_b} == {"cites", "extends"}
+    # each endpoint's own document -- the citable pair for the relational claim
+    assert {link.source_file_a, link.source_file_b} == {"notes/a.md", "notes/b.md"}
 
 
 def test_surprising_connections_excludes_directly_asserted_pairs(kg, conn):

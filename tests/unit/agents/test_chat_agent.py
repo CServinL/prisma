@@ -807,25 +807,32 @@ def test_turn_had_no_grounding_false_when_zotero_search_returned_content():
     assert _turn_had_no_grounding(tool_calls) is False
 
 
-def test_expand_node_and_surprising_connections_are_not_grounding_tools():
-    # Their results name graph entities/relations but carry no document slug
-    # the model can cite -- god_nodes (which does emit a Sources: header)
-    # stays grounding, these two don't.
-    assert "expand_node" not in _GROUNDING_TOOLS
-    assert "surprising_connections" not in _GROUNDING_TOOLS
-    assert "god_nodes" in _GROUNDING_TOOLS
+def test_kg_graph_tools_are_grounding():
+    # EXPAND_NODE/GOD_NODES/SURPRISING_CONNECTIONS each emit a Sources:
+    # header of the documents behind the result and return empty text when
+    # they have nothing citable -- so they count as grounding tools, and an
+    # empty result from one correctly reads as "no grounding".
+    for name in ("expand_node", "god_nodes", "surprising_connections"):
+        assert name in _GROUNDING_TOOLS
 
 
-def test_turn_had_no_grounding_true_when_only_expand_node_returned_content():
-    # Copilot review on PR #104: an empty SEARCH_VAULT followed by a
-    # non-empty EXPAND_NODE used to be treated as grounded, even though the
-    # model received nothing with a resolvable source slug.
-    tool_calls = [
+def test_turn_had_no_grounding_tracks_expand_node_by_whether_it_returned_sources():
+    # Copilot review on PR #104: EXPAND_NODE only counts as grounding when
+    # its result actually carries a citable Sources: header. An empty result
+    # (no resolvable source) still triggers the ai-inference override; a
+    # sourced one does not.
+    empty = [
         ToolCallNode(tool="search_vault", args={"query": "x"}, result=None, status="ok"),
-        ToolCallNode(tool="expand_node", args={"query": "e1"}, result="e1 --[cites]--> e2 (e2)", status="ok"),
+        ToolCallNode(tool="expand_node", args={"query": "e1"}, result=None, status="ok"),
+    ]
+    sourced = [
+        ToolCallNode(tool="search_vault", args={"query": "x"}, result=None, status="ok"),
+        ToolCallNode(tool="expand_node", args={"query": "e1"},
+                     result="Sources: notes--a\n\ne1 --[cites]--> e2 (e2)", status="ok"),
     ]
 
-    assert _turn_had_no_grounding(tool_calls) is True
+    assert _turn_had_no_grounding(empty) is True
+    assert _turn_had_no_grounding(sourced) is False
 
 
 def test_respond_overrides_self_report_when_grounding_tool_returns_nothing():

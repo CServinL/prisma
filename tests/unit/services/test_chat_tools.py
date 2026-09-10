@@ -508,13 +508,16 @@ def test_tool_call_re_matches_new_markers(marker, query):
     assert TOOL_CALL_RE.findall(f"{marker}: {query}") == [(marker, query)]
 
 
-def test_toolbox_expand_node_lists_neighbours_with_relations(vault):
+def test_toolbox_expand_node_lists_neighbours_with_a_sources_header(vault):
     kg = MagicMock()
     kg.expand_node.return_value = ExpandNodeResponse(
-        entities=[EntityInfo(id="n1", label="Neighbour One"), EntityInfo(id="n2", label="Neighbour Two")],
+        entities=[
+            EntityInfo(id="n1", label="Neighbour One", source_file="sources/a.md"),
+            EntityInfo(id="n2", label="Neighbour Two", source_file="notes/b.md"),
+        ],
         edges=[
-            EdgeInfo(source="center", relation="cites", target="n1"),
-            EdgeInfo(source="n2", relation="extends", target="center"),
+            EdgeInfo(source="center", relation="cites", target="n1", source_file="sources/a.md"),
+            EdgeInfo(source="n2", relation="extends", target="center", source_file="notes/b.md"),
         ],
     )
     toolbox = ChatToolbox(MagicMock(), kg, vault)
@@ -524,6 +527,7 @@ def test_toolbox_expand_node_lists_neighbours_with_relations(vault):
     kg.expand_node.assert_called_once_with("center")
     assert "center --[cites]--> Neighbour One (n1)" in result.text
     assert "Neighbour Two (n2) --[extends]--> center" in result.text
+    assert "Sources: sources--a, notes--b" in result.text
     assert 'path="knowledge-graph"' in result.text
     assert result.raw[0]["entities"][0]["id"] == "n1"
 
@@ -537,6 +541,22 @@ def test_toolbox_expand_node_empty_when_no_neighbours(vault):
 
     assert result.text == ""
     assert result.raw == []
+
+
+def test_toolbox_expand_node_empty_text_when_no_neighbour_has_a_source(vault):
+    # No resolvable source slug -> nothing citable -> empty text, so a turn
+    # resting only on this reads as ungrounded (Copilot review, PR #104).
+    kg = MagicMock()
+    kg.expand_node.return_value = ExpandNodeResponse(
+        entities=[EntityInfo(id="n1", label="Neighbour One")],
+        edges=[EdgeInfo(source="center", relation="cites", target="n1")],
+    )
+    toolbox = ChatToolbox(MagicMock(), kg, vault)
+
+    result = toolbox.call("EXPAND_NODE", "center")
+
+    assert result.text == ""
+    assert result.raw and result.raw[0]["entities"][0]["id"] == "n1"
 
 
 def test_toolbox_god_nodes_lists_hubs_with_sources_header(vault):
@@ -568,7 +588,36 @@ def test_toolbox_god_nodes_empty_graph(vault):
     assert result.text == ""
 
 
-def test_toolbox_surprising_connections_lists_links(vault):
+def test_toolbox_god_nodes_empty_text_when_no_hub_has_a_source(vault):
+    kg = MagicMock()
+    kg.god_nodes.return_value = [TopEntity(id="h1", label="Hub One", degree=7)]
+    toolbox = ChatToolbox(MagicMock(), kg, vault)
+
+    result = toolbox.call("GOD_NODES", "-")
+
+    assert result.text == ""
+    assert len(result.raw) == 1
+
+
+def test_toolbox_surprising_connections_lists_links_with_a_sources_header(vault):
+    kg = MagicMock()
+    kg.surprising_connections.return_value = [
+        SurprisingConnection(entity_a="a", entity_b="c", bridge="b",
+                              relation_a="cites", relation_b="extends", score=0.8,
+                              source_file_a="sources/x.md", source_file_b="notes/y.md"),
+    ]
+    toolbox = ChatToolbox(MagicMock(), kg, vault)
+
+    result = toolbox.call("SURPRISING_CONNECTIONS", "-")
+
+    kg.surprising_connections.assert_called_once_with(limit=15)
+    assert "a --[cites]-- b --[extends]-- c" in result.text
+    assert "Sources: sources--x, notes--y" in result.text
+    assert 'path="knowledge-graph"' in result.text
+    assert len(result.raw) == 1
+
+
+def test_toolbox_surprising_connections_empty_text_when_endpoints_have_no_source(vault):
     kg = MagicMock()
     kg.surprising_connections.return_value = [
         SurprisingConnection(entity_a="a", entity_b="c", bridge="b",
@@ -578,9 +627,7 @@ def test_toolbox_surprising_connections_lists_links(vault):
 
     result = toolbox.call("SURPRISING_CONNECTIONS", "-")
 
-    kg.surprising_connections.assert_called_once_with(limit=15)
-    assert "a --[cites]-- b --[extends]-- c" in result.text
-    assert 'path="knowledge-graph"' in result.text
+    assert result.text == ""
     assert len(result.raw) == 1
 
 

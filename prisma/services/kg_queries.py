@@ -86,6 +86,7 @@ def entities_for_file(conn, rel_path: str, extracted_by: str | None = None) -> E
             entities.append(EntityInfo(
                 id=eid, label=label, file_type=file_type,
                 trust_tier=trust_tier, source_location=source_location,
+                source_file=rel_path,
             ))
     except Exception as exc:
         _log.warning("entities_for_file failed for %s: %s", rel_path, exc)
@@ -102,6 +103,7 @@ def entities_for_file(conn, rel_path: str, extracted_by: str | None = None) -> E
             edges.append(EdgeInfo(
                 source=src, relation=relation, target=dst,
                 confidence=confidence, confidence_score=confidence_score,
+                source_file=rel_path,
             ))
     except Exception as exc:
         _log.warning("entities_for_file edges failed for %s: %s", rel_path, exc)
@@ -194,15 +196,15 @@ def expand_node(conn, node_id: str) -> ExpandNodeResponse:
         outgoing = conn.execute(
             "MATCH (e:Entity {id: $id})-[r:RelatesTo]->(o:Entity) "
             "WHERE o.trust_tier <> 'chat' "
-            "RETURN o.id, o.label, o.file_type, o.trust_tier, o.source_location, "
-            "r.relation, r.confidence, r.confidence_score",
+            "RETURN o.id, o.label, o.file_type, o.trust_tier, o.source_location, o.source_file, "
+            "r.relation, r.confidence, r.confidence_score, r.source_file",
             {"id": node_id},
         )
         incoming = conn.execute(
             "MATCH (o:Entity)-[r:RelatesTo]->(e:Entity {id: $id}) "
             "WHERE o.trust_tier <> 'chat' "
-            "RETURN o.id, o.label, o.file_type, o.trust_tier, o.source_location, "
-            "r.relation, r.confidence, r.confidence_score",
+            "RETURN o.id, o.label, o.file_type, o.trust_tier, o.source_location, o.source_file, "
+            "r.relation, r.confidence, r.confidence_score, r.source_file",
             {"id": node_id},
         )
     except Exception as exc:
@@ -210,15 +212,18 @@ def expand_node(conn, node_id: str) -> ExpandNodeResponse:
         return ExpandNodeResponse(entities=[], edges=[])
     for result, node_is_source in ((outgoing, True), (incoming, False)):
         while result.has_next():
-            oid, olabel, file_type, trust_tier, source_location, relation, confidence, confidence_score = result.get_next()
+            (oid, olabel, file_type, trust_tier, source_location, o_source_file,
+             relation, confidence, confidence_score, edge_source_file) = result.get_next()
             entities.setdefault(oid, EntityInfo(
                 id=oid, label=olabel, file_type=file_type,
                 trust_tier=trust_tier, source_location=source_location,
+                source_file=o_source_file,
             ))
             edges.append(EdgeInfo(
                 source=node_id if node_is_source else oid,
                 target=oid if node_is_source else node_id,
                 relation=relation, confidence=confidence, confidence_score=confidence_score,
+                source_file=edge_source_file,
             ))
     return ExpandNodeResponse(entities=list(entities.values()), edges=edges)
 
@@ -315,19 +320,20 @@ def surprising_connections(
                     continue
                 candidates.append((
                     (conf1 + conf2) / 2, a1_id, a2_id, b1_label, rel1, rel2,
-                    frozenset((a1_id, a2_id)),
+                    a1_src, a2_src, frozenset((a1_id, a2_id)),
                 ))
 
     candidates.sort(key=lambda c: -c[0])
     seen_pairs: set[frozenset] = set()
     out: list[SurprisingConnection] = []
-    for score, a_id, c_id, bridge_label, rel_a, rel_b, pair_key in candidates:
+    for score, a_id, c_id, bridge_label, rel_a, rel_b, a_src, c_src, pair_key in candidates:
         if pair_key in seen_pairs:
             continue  # the same (a, c) pair reached via more than one shared bridge label
         seen_pairs.add(pair_key)
         out.append(SurprisingConnection(
             entity_a=a_id, entity_b=c_id, bridge=bridge_label,
             relation_a=rel_a, relation_b=rel_b, score=score,
+            source_file_a=a_src, source_file_b=c_src,
         ))
         if len(out) >= limit:
             break

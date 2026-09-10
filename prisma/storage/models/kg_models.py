@@ -69,6 +69,11 @@ class EntityInfo(BaseModel):
     file_type: str | None = None
     trust_tier: str | None = None
     source_location: str | None = None
+    # The vault-relative path of the document this entity was extracted
+    # from -- provenance, so a caller (chat's grounding check, the UI) can
+    # resolve it to a citable slug. Optional: not every read path projects
+    # it, and a chat-tier-free graph always has one in practice.
+    source_file: str | None = None
 
 
 class EdgeInfo(BaseModel):
@@ -77,6 +82,10 @@ class EdgeInfo(BaseModel):
     target: str
     confidence: str | None = None
     confidence_score: float | None = None
+    # Which document asserted this relationship -- the precise citation for
+    # a claim about the edge, distinct from either endpoint's own
+    # source_file. (In entities_for_file this is always the queried file.)
+    source_file: str | None = None
 
 
 class EntitiesForFileResponse(BaseModel):
@@ -182,6 +191,12 @@ class SurprisingConnection(BaseModel):
     relation_a: str
     relation_b: str
     score: float
+    # The documents `entity_a` / `entity_b` were each extracted from --
+    # the citable provenance for a `relational` claim about this link
+    # (the bridge label spans documents by construction, so it has no
+    # single source to report).
+    source_file_a: str | None = None
+    source_file_b: str | None = None
 
 
 class ReadSourceResponse(BaseModel):

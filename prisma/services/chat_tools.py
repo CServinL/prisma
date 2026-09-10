@@ -53,12 +53,12 @@ class ToolSpec(BaseModel):
     # getattr in `call()`, so a new tool is one TOOLS entry + one method,
     # not also an edit to a hardcoded if/elif chain.
     handler: str
-    # True only for tools whose result carries a resolvable source slug the
-    # model can legally cite (search/graph/god_nodes/zotero/read_source).
-    # EXPAND_NODE/SURPRISING_CONNECTIONS return graph structure with no
-    # per-result document slug, so a turn resting only on them has nothing
-    # citable and must fall through to the ai-inference wrapper —
-    # `chat_agent.py`'s `_GROUNDING_TOOLS` is derived from this flag.
+    # True for tools whose result puts citable document content in front of
+    # the model — every one emits a `Sources:` header (or wraps under a real
+    # slug) and returns empty text when it has nothing citable, so a turn
+    # resting only on grounding tools that came back empty falls through to
+    # the ai-inference wrapper. `chat_agent.py`'s `_GROUNDING_TOOLS` is
+    # derived from this flag, not hand-maintained.
     grounding: bool = False
     hidden_when_native_reasoning: bool = False
     # ZOTERO_SEARCH only makes sense when a Zotero library is actually
@@ -98,9 +98,7 @@ TOOLS: list[ToolSpec] = [
         name="expand_node",
         marker="EXPAND_NODE",
         handler="_expand_node",
-        # Not grounding: the one-hop result names entities/relations, not the
-        # documents they came from — nothing here is citable as a source
-        # slug until edge/entity provenance is projected and rendered.
+        grounding=True,
         description=(
             "Given one knowledge-graph entity id (as shown in a GRAPH_CONTEXT "
             "or GOD_NODES result), returns its direct one-hop neighbours and "
@@ -126,9 +124,7 @@ TOOLS: list[ToolSpec] = [
         name="surprising_connections",
         marker="SURPRISING_CONNECTIONS",
         handler="_surprising_connections",
-        # Not grounding: same as EXPAND_NODE — the 2-hop links name entities,
-        # not citable documents (and by definition no single document
-        # asserts the link), so an answer resting only on this is inference.
+        grounding=True,
         description=(
             "Lists 2-hop links between entities that no single document ever "
             "stated directly — connections that only emerge from the graph "
@@ -486,11 +482,12 @@ class ChatToolbox:
         return ToolResult(text=wrapped, raw=[r.model_dump() for r in results])
 
     def _expand_node(self, query: str) -> ToolResult:
-        """One-hop graph traversal from a specific entity id — the neighbours
-        and the relationships to them, direction preserved per edge. Not a
-        grounding tool (see the ToolSpec): the lines below carry no document
-        slug, so an answer built only on this is left to the ai-inference
-        wrapper rather than counted as cited."""
+        """One-hop graph traversal from a specific entity id — the neighbours,
+        the relationships to them (direction preserved per edge), and a
+        `Sources:` header naming the documents those edges and neighbours
+        came from so the model can cite them. Empty text (→ ungrounded) if
+        nothing citable comes back — an entity with no resolvable source is
+        a data anomaly, not something to answer from."""
         node_id = query.strip()
         resp = self._kg.expand_node(node_id)
         if not resp.entities:
@@ -504,8 +501,16 @@ class ChatToolbox:
                 f"{node_id} --[{edge.relation}]--> {other}" if edge.source == node_id
                 else f"{other} --[{edge.relation}]--> {node_id}"
             )
-        wrapped = wrap_untrusted("knowledge-graph", "\n".join(lines))
-        return ToolResult(text=wrapped, raw=[resp.model_dump()])
+        raw = [resp.model_dump()]
+        srcs = [e.source_file for e in resp.entities if e.source_file]
+        srcs += [edge.source_file for edge in resp.edges if edge.source_file]
+        slugs = list(dict.fromkeys(self._vault.slug_for_relpath(s) for s in srcs))
+        if not slugs:
+            return ToolResult(text="", raw=raw)
+        wrapped = wrap_untrusted(
+            "knowledge-graph", f"Sources: {', '.join(slugs)}\n\n" + "\n".join(lines)
+        )
+        return ToolResult(text=wrapped, raw=raw)
 
     def _god_nodes(self, query: str) -> ToolResult:
         """Highly-connected hub entities across the whole vault. The query
@@ -522,9 +527,13 @@ class ChatToolbox:
             + (f" — e.g. {', '.join(e.sample_relations)}" if e.sample_relations else "")
             for e in entities
         ]
-        header = f"Sources: {', '.join(slugs)}\n\n" if slugs else ""
-        wrapped = wrap_untrusted("knowledge-graph", header + "\n".join(lines))
-        return ToolResult(text=wrapped, raw=[e.model_dump() for e in entities])
+        raw = [e.model_dump() for e in entities]
+        if not slugs:
+            return ToolResult(text="", raw=raw)
+        wrapped = wrap_untrusted(
+            "knowledge-graph", f"Sources: {', '.join(slugs)}\n\n" + "\n".join(lines)
+        )
+        return ToolResult(text=wrapped, raw=raw)
 
     def _surprising_connections(self, query: str) -> ToolResult:
         """Links between entities that no single document ever asserted
@@ -533,7 +542,10 @@ class ChatToolbox:
         ignored, same as GOD_NODES. `--` on both sides, not `-->`: the
         underlying scan doesn't preserve which side of each hop actually
         stored the relation, so a one-way arrow would risk asserting the
-        wrong direction."""
+        wrong direction. The `Sources:` header names the two documents each
+        link's endpoints came from — the citable pair for a `relational`
+        footnote (the bridge label spans documents, so it has no single
+        source of its own)."""
         links = self._kg.surprising_connections(limit=15)
         if not links:
             return ToolResult(text="", raw=[])
@@ -541,8 +553,15 @@ class ChatToolbox:
             f"- {c.entity_a} --[{c.relation_a}]-- {c.bridge} --[{c.relation_b}]-- {c.entity_b}"
             for c in links
         ]
-        wrapped = wrap_untrusted("knowledge-graph", "\n".join(lines))
-        return ToolResult(text=wrapped, raw=[c.model_dump() for c in links])
+        raw = [c.model_dump() for c in links]
+        srcs = [s for c in links for s in (c.source_file_a, c.source_file_b) if s]
+        slugs = list(dict.fromkeys(self._vault.slug_for_relpath(s) for s in srcs))
+        if not slugs:
+            return ToolResult(text="", raw=raw)
+        wrapped = wrap_untrusted(
+            "knowledge-graph", f"Sources: {', '.join(slugs)}\n\n" + "\n".join(lines)
+        )
+        return ToolResult(text=wrapped, raw=raw)
 
     def _read_source(self, query: str) -> ToolResult:
         """Bounded leading excerpt of one vault document, addressed by slug.

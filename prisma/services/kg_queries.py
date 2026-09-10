@@ -320,20 +320,27 @@ def surprising_connections(
                     continue
                 candidates.append((
                     (conf1 + conf2) / 2, a1_id, a2_id, b1_label, rel1, rel2,
-                    a1_src, a2_src, frozenset((a1_id, a2_id)),
+                    edge_src1, edge_src2, frozenset((a1_id, a2_id)),
                 ))
 
     candidates.sort(key=lambda c: -c[0])
     seen_pairs: set[frozenset] = set()
     out: list[SurprisingConnection] = []
-    for score, a_id, c_id, bridge_label, rel_a, rel_b, a_src, c_src, pair_key in candidates:
+    for score, a_id, c_id, bridge_label, rel_a, rel_b, edge_a_src, edge_c_src, pair_key in candidates:
         if pair_key in seen_pairs:
             continue  # the same (a, c) pair reached via more than one shared bridge label
         seen_pairs.add(pair_key)
         out.append(SurprisingConnection(
             entity_a=a_id, entity_b=c_id, bridge=bridge_label,
             relation_a=rel_a, relation_b=rel_b, score=score,
-            source_file_a=a_src, source_file_b=c_src,
+            # The document that *asserted* each hop -- the RelatesTo edge's
+            # own source_file, not the endpoint Entity's. Entity rows are
+            # merged by id and a later upsert overwrites source_file (see
+            # KnowledgeGraphService._upsert), so the entity can point at
+            # some unrelated last-writer; the edge provenance is exact, and
+            # the two are guaranteed distinct here (edge_src1 == edge_src2
+            # was already excluded above).
+            source_file_a=edge_a_src, source_file_b=edge_c_src,
         ))
         if len(out) >= limit:
             break

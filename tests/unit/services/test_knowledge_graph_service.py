@@ -592,6 +592,44 @@ def test_rename_file_returns_false_when_old_path_was_never_indexed(kg, vault):
     assert kg._rename_file(old, new) is False
 
 
+def test_drain_once_refreshes_surprising_connections_cache_after_a_rename(kg, vault):
+    # A successful relabel rewrites source_file on the graph rows but queues
+    # nothing for _process_pending -- the surprising_connections cache (and
+    # its grounding Sources: header) would otherwise keep serving the
+    # pre-rename path as a dead slug.
+    a = vault.root / "notes" / "a.md"
+    a.write_text("---\ntype: note\n---\ncontent", encoding="utf-8")
+    b = vault.root / "notes" / "b.md"
+    b.write_text("---\ntype: note\n---\ncontent", encoding="utf-8")
+    a_result = _extraction(
+        nodes=[{"id": "a", "label": "A"}, {"id": "a_bridge", "label": "Bridge"}],
+        edges=[{"source": "a", "target": "a_bridge", "relation": "cites"}],
+    )
+    b_result = _extraction(
+        nodes=[{"id": "c", "label": "C"}, {"id": "b_bridge", "label": "Bridge"}],
+        edges=[{"source": "b_bridge", "target": "c", "relation": "extends"}],
+    )
+    with _patch_create(kg, side_effect=[a_result, b_result]), \
+         patch("prisma.services.resource_lock.acquire", return_value=(True, "local-ollama", "req-1")):
+        kg._extract_file(a, "note")
+        kg._extract_file(b, "note")
+    kg._refresh_top_entities()
+    kg._refresh_surprising_connections()
+    assert "notes/a.md" in {kg.surprising_connections()[0].source_file_a,
+                            kg.surprising_connections()[0].source_file_b}
+
+    moved = vault.root / "notes" / "a-renamed.md"
+    a.rename(moved)
+    with kg._lock:
+        kg._pending_renames.append((a, moved))
+    kg._drain_once()
+
+    srcs = {kg.surprising_connections()[0].source_file_a,
+            kg.surprising_connections()[0].source_file_b}
+    assert "notes/a.md" not in srcs
+    assert "notes/a-renamed.md" in srcs
+
+
 # ── Trust tier ────────────────────────────────────────────────────────────────
 
 @pytest.mark.parametrize("node_type,expected_tier", [

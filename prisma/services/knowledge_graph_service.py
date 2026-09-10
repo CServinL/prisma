@@ -1367,22 +1367,44 @@ class KnowledgeGraphService:
         self._stop_event.wait(timeout=20)
         self._full_index()
         while not self._stop_event.is_set():
-            with self._lock:
-                renames = self._pending_renames.copy()
-                self._pending_renames.clear()
-                pending = self._pending.copy()
-                self._pending.clear()
-            for old_path, new_path in renames:
-                if not self._rename_file(old_path, new_path):
-                    # Not previously indexed (or the relabel itself failed)
-                    # -- fall back to treating it as a fresh file so it
-                    # still gets extracted rather than silently dropped.
-                    pending.add(new_path)
-            if pending:
-                self._process_pending(pending)
+            self._drain_once()
             self._stop_event.wait(timeout=60)
 
-    def _process_pending(self, pending: set[Path]) -> None:
+    def _drain_once(self) -> None:
+        """One incremental-update cycle: apply queued vault renames, then
+        process whatever the watcher flagged. Split out of _loop() so a test
+        can drive a single cycle directly."""
+        with self._lock:
+            renames = self._pending_renames.copy()
+            self._pending_renames.clear()
+            pending = self._pending.copy()
+            self._pending.clear()
+        renamed = False
+        for old_path, new_path in renames:
+            if self._rename_file(old_path, new_path):
+                renamed = True
+            else:
+                # Not previously indexed (or the relabel itself failed) --
+                # fall back to treating it as a fresh file so it still gets
+                # extracted rather than silently dropped.
+                pending.add(new_path)
+        refreshed = self._process_pending(pending) if pending else False
+        if renamed and not refreshed:
+            # A successful relabel rewrote source_file on Entity/RelatesTo
+            # rows but added nothing to `pending`, so _process_pending never
+            # ran (or ran but found no content change). The
+            # surprising_connections cache still holds the pre-rename paths
+            # -- dead slugs in /graph/surprising_connections and its
+            # grounding Sources: header until the next content change or
+            # restart.
+            self._refresh_top_entities()
+            self._refresh_surprising_connections()
+
+    def _process_pending(self, pending: set[Path]) -> bool:
+        """Returns whether the derived caches (top_entities /
+        surprising_connections) were refreshed this pass -- so a caller that
+        also did work outside `pending` (a rename relabel) knows whether it
+        still needs to refresh them itself."""
         _log.info("knowledge graph incremental update: %d files flagged by watcher", len(pending))
         existing = [path for path in pending if path.exists()]
         deleted = False
@@ -1410,6 +1432,7 @@ class KnowledgeGraphService:
         if not extracted and existing:
             _log.info("knowledge graph incremental update: no real content change — watcher false-positive")
         self._set_activity(None)
+        return changed
 
     def _full_index(self) -> None:
         with self._lock:

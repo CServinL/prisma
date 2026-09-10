@@ -207,8 +207,28 @@ def test_surprising_connections_finds_cross_document_bridge(kg, conn):
     assert link.bridge == "Bridge"  # the shared label (as-cased in the data), not either instance's id
     assert {link.entity_a, link.entity_b} == {"a", "c"}
     assert {link.relation_a, link.relation_b} == {"cites", "extends"}
-    # each endpoint's own document -- the citable pair for the relational claim
+    # the document that asserted each hop -- the citable pair for the claim
     assert {link.source_file_a, link.source_file_b} == {"notes/a.md", "notes/b.md"}
+
+
+def test_surprising_connections_cites_the_edge_document_not_the_entity_last_writer(kg, conn):
+    # Entity rows merge by id and a later upsert overwrites source_file
+    # (KnowledgeGraphService._upsert). Here entity "a" is first extracted
+    # from notes/a.md (which asserts a--Bridge), then re-upserted from an
+    # unrelated notes/latewriter.md -- so a.source_file now points at
+    # latewriter, but the a--Bridge *edge* is still notes/a.md. The
+    # citation must follow the edge, not the entity.
+    _add(kg, "notes/a.md", "note", [{"id": "a", "label": "A"}, {"id": "a_bridge", "label": "Bridge"}],
+         [{"source": "a", "target": "a_bridge", "relation": "cites"}])
+    _add(kg, "notes/b.md", "note", [{"id": "c", "label": "C"}, {"id": "b_bridge", "label": "Bridge"}],
+         [{"source": "b_bridge", "target": "c", "relation": "extends"}])
+    _add(kg, "notes/latewriter.md", "note", [{"id": "a", "label": "A"}])
+
+    link = kg_queries.surprising_connections(conn, hub_ids=set())[0]
+
+    by_entity = {link.entity_a: link.source_file_a, link.entity_b: link.source_file_b}
+    assert by_entity["a"] == "notes/a.md"
+    assert "notes/latewriter.md" not in by_entity.values()
 
 
 def test_surprising_connections_excludes_directly_asserted_pairs(kg, conn):

@@ -191,10 +191,16 @@ class SurprisingConnection(BaseModel):
     relation_a: str
     relation_b: str
     score: float
-    # The documents `entity_a` / `entity_b` were each extracted from --
-    # the citable provenance for a `relational` claim about this link
-    # (the bridge label spans documents by construction, so it has no
-    # single source to report).
+    # The document that *asserted* each hop -- `source_file_a` is the
+    # RelatesTo edge behind `relation_a` (a<->bridge), `source_file_b` the
+    # one behind `relation_b` (bridge<->b). Deliberately the edge's
+    # provenance, not either endpoint Entity's `source_file`: entity rows
+    # merge by id and a later re-extraction overwrites `source_file`, so an
+    # endpoint can end up pointing at an unrelated last writer. The two are
+    # always different documents (a same-document link isn't "surprising"),
+    # and together they're the citable pair for a `relational` claim -- the
+    # bridge label spans documents by construction, so it has no single
+    # source of its own.
     source_file_a: str | None = None
     source_file_b: str | None = None
 

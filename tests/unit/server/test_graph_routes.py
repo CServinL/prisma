@@ -47,6 +47,13 @@ def test_expand_node_requires_id(client):
     assert client.get("/graph/expand_node").status_code == 422
 
 
+def test_free_text_params_are_length_bounded(client):
+    # an over-long id/q would otherwise become a giant Cypher param or a
+    # thousand-token substring scan, under the sole Kùzu lock
+    assert client.get("/graph/expand_node", params={"id": "x" * 600}).status_code == 422
+    assert client.get("/graph/timeline", params={"q": "x" * 600}).status_code == 422
+
+
 def test_god_nodes_passes_limit(client, client_stub):
     client_stub.god_nodes.return_value = [TopEntity(id="h", label="H", degree=4)]
     r = client.get("/graph/god_nodes", params={"limit": 5})

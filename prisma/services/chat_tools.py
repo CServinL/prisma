@@ -417,7 +417,10 @@ class ChatToolbox:
         for h in hits:
             path = self._vault.root / h.source_file
             try:
-                excerpt = path.read_text(encoding="utf-8", errors="replace")[:_EXCERPT_CHARS]
+                # bounded read -- an excerpt shouldn't pull a large vault
+                # document fully into memory first (matches source_reader).
+                with path.open("r", encoding="utf-8", errors="replace") as f:
+                    excerpt = f.read(_EXCERPT_CHARS)
             except OSError:
                 excerpt = ""
             items.append({"source_file": h.source_file, "score": h.score, "text": excerpt})

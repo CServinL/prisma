@@ -117,6 +117,20 @@ def test_toolbox_search_vault_returns_wrapped_text_and_raw(vault):
     assert "Attention mechanisms" in result.text
 
 
+def test_toolbox_search_vault_excerpt_is_bounded(vault):
+    from prisma.services.chat_tools import _EXCERPT_CHARS
+    note = vault.root / "notes" / "big.md"
+    note.parent.mkdir(parents=True, exist_ok=True)
+    note.write_text("x" * (_EXCERPT_CHARS * 4), encoding="utf-8")
+    chroma = MagicMock()
+    chroma.embedding_model_mismatch = False
+    chroma.query.return_value = [GraphSearchResult(source_file="notes/big.md", score=0.5)]
+
+    result = ChatToolbox(chroma, MagicMock(), vault).call("SEARCH_VAULT", "x")
+
+    assert len(result.raw[0]["text"]) == _EXCERPT_CHARS
+
+
 def test_toolbox_search_vault_skips_unreadable_files(vault):
     chroma = MagicMock()
     chroma.embedding_model_mismatch = False

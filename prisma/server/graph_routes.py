@@ -39,7 +39,7 @@ def build_graph_router(get_client: Callable[[], KnowledgeGraphClient]) -> APIRou
     router = APIRouter(prefix="/graph", tags=["graph"])
 
     @router.get("/expand_node", response_model=ExpandNodeResponse)
-    def expand_node(id: str = Query(..., min_length=1),
+    def expand_node(id: str = Query(..., min_length=1, max_length=512),
                     limit: int = Query(DEFAULT_EXPAND, ge=1, le=EXPAND_MAX)):
         """One-hop neighbourhood of a knowledge-graph entity id — its direct
         neighbours and the relationships connecting them. `limit` caps each
@@ -71,7 +71,7 @@ def build_graph_router(get_client: Callable[[], KnowledgeGraphClient]) -> APIRou
         return get_client().vault_health()
 
     @router.get("/timeline", response_model=list[TimelineEntry])
-    def timeline(q: str = Query(..., min_length=1),
+    def timeline(q: str = Query(..., min_length=1, max_length=512),
                  limit: int = Query(DEFAULT_TIMELINE, ge=1, le=TIMELINE_MAX)):
         """Entities matching `q`, joined to their Source publication year,
         sorted chronologically. `limit` caps matched entities and entries."""

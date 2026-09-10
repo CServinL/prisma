@@ -154,7 +154,7 @@ def build_notes_router(
     def read_note_source(
         slug: str,
         mode: str = Query("summary", pattern="^(summary|section|literal)$"),
-        query: Optional[str] = Query(None),
+        query: Optional[str] = Query(None, max_length=512),
     ):
         """Bounded, addressable read of one vault document's own raw text
         (no graph involvement) — the REST surface for chat's READ_SOURCE

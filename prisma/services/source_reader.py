@@ -27,6 +27,10 @@ from prisma.services.vault import VaultService
 from prisma.storage.models.kg_models import ReadSourceResponse
 
 _EXCERPT_CHARS = 2000
+# section/literal read the whole document -- cap it so a large imported
+# PDF->MD can't load tens of MB into a worker. A match/heading past this is
+# treated as absent (the modes are best-effort, not exhaustive).
+_MAX_SCAN_CHARS = 2_000_000
 _SECTION_MAX_CHARS = 4000
 _LITERAL_CONTEXT_LINES = 2
 _LITERAL_MAX_MATCHES = 20
@@ -58,8 +62,9 @@ def read_source(
         return ReadSourceResponse(slug=slug, mode="summary", text=text)
 
     # section/literal genuinely need the whole document -- a heading or a
-    # match can be anywhere in it.
-    raw = path.read_text(encoding="utf-8", errors="replace")
+    # match can be anywhere in it -- but bounded (see _MAX_SCAN_CHARS).
+    with path.open("r", encoding="utf-8", errors="replace") as f:
+        raw = f.read(_MAX_SCAN_CHARS)
     if mode == "section":
         return _read_section(slug, raw, (query or "").strip())
     if mode == "literal":

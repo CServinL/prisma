@@ -252,10 +252,10 @@ def test_expand_node_forwards_id_and_returns_response():
     payload = {"entities": [{"id": "n1", "label": "N1"}], "edges": [{"source": "c", "relation": "cites", "target": "n1"}]}
     with patch("prisma.services.knowledge_graph_client.requests.get",
                return_value=_mock_response(payload)) as mock_get:
-        result = client.expand_node("center")
+        result = client.expand_node("center", limit=25)
     assert result.entities[0].id == "n1"
     assert result.edges[0].relation == "cites"
-    assert mock_get.call_args.kwargs["params"] == {"id": "center"}
+    assert mock_get.call_args.kwargs["params"] == {"id": "center", "limit": 25}
 
 
 def test_expand_node_empty_shape_when_unreachable():

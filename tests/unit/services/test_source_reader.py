@@ -2,7 +2,7 @@
 reads of one vault file's raw text (no Kùzu involvement)."""
 import pytest
 
-from prisma.services.source_reader import _EXCERPT_CHARS, read_source
+from prisma.services.source_reader import _EXCERPT_CHARS, _MAX_SCAN_CHARS, read_source
 from prisma.services.vault import VaultService
 
 
@@ -165,7 +165,17 @@ def test_literal_marks_truncated_when_more_matches_than_shown(vault):
     assert resp.truncated is True
 
 
-# ── unknown mode ──────────────────────────────────────────────────────────────
+# ── oversized input ───────────────────────────────────────────────────────────
+
+def test_section_and_literal_bound_the_file_read(vault):
+    # A heading / match past _MAX_SCAN_CHARS is treated as absent rather
+    # than pulling the whole (e.g. imported PDF) document into memory.
+    body = "---\ntype: note\n---\n" + ("filler\n" * ((_MAX_SCAN_CHARS // 7) + 1000))
+    body += "\n## Late Heading\nlate needle here\n"
+    _write(vault, "big", body)
+
+    assert read_source(vault, "big", mode="section", query="Late Heading").text == ""
+    assert read_source(vault, "big", mode="literal", query="late needle").match_count == 0
 
 def test_unknown_mode_raises(vault):
     _write(vault, "doc", "content")

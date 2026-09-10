@@ -111,9 +111,9 @@ def test_toolbox_search_vault_returns_wrapped_text_and_raw(vault):
 
     assert result.raw == [{"source_file": "notes/attention.md", "score": 0.9,
                             "text": "Attention mechanisms let models weigh input tokens."}]
-    # Wrapped under the slug (ADR-017: what a footnote's `sources` expects),
-    # not the raw vault-relative path.
-    assert 'path="attention"' in result.text
+    # Wrapped under the compound dir--name slug (ADR-017: what a footnote's
+    # `sources` expects), not the bare stem or the raw path.
+    assert 'path="notes--attention"' in result.text
     assert "Attention mechanisms" in result.text
 
 

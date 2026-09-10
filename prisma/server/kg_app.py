@@ -197,9 +197,9 @@ def ollama_ready():
 # pass-through pattern as /search and /entities_for_file above. ────────────────
 
 @app.get("/expand_node", response_model=ExpandNodeResponse)
-def expand_node(id: str = Query(...)):
+def expand_node(id: str = Query(...), limit: int = Query(100)):
     """One-hop neighbourhood of a single entity id."""
-    return _kg.expand_node(id)
+    return _kg.expand_node(id, limit=limit)
 
 
 @app.get("/god_nodes", response_model=list[TopEntity])

@@ -630,6 +630,49 @@ def test_drain_once_refreshes_surprising_connections_cache_after_a_rename(kg, va
     assert "notes/a-renamed.md" in srcs
 
 
+def test_timeline_releases_the_lock_before_reading_frontmatter(kg, vault):
+    # The graph scan holds self._lock; the per-document frontmatter reads
+    # must not, or a broad timeline query stalls the indexer + every KG
+    # request for the whole scan+read.
+    (vault.root / "sources").mkdir(parents=True, exist_ok=True)
+    (vault.root / "sources" / "p.md").write_text(
+        "---\ntype: source\nyear: 2011\n---\nbody", encoding="utf-8")
+    with kg._lock:
+        kg._upsert("sources/p.md", "source", [{"id": "p_topic", "label": "Topic"}], [])
+
+    locked_during_read: list[bool] = []
+    real = vault.frontmatter_for_relpath
+
+    def spy(rel):
+        locked_during_read.append(kg._lock.locked())
+        return real(rel)
+
+    with patch.object(vault, "frontmatter_for_relpath", side_effect=spy):
+        entries = kg.timeline("topic")
+
+    assert entries and entries[0].year == 2011
+    assert locked_during_read and not any(locked_during_read)
+
+
+def test_loop_survives_a_failing_drain_cycle(kg):
+    # A Kùzu stream error (or any exception) in one incremental cycle must
+    # not kill the daemon thread and stop all further indexing.
+    cycles = []
+
+    def flaky():
+        cycles.append(len(cycles))
+        if len(cycles) == 1:
+            raise RuntimeError("kùzu stream died mid-cycle")
+        kg._stop_event.set()
+
+    kg._drain_once = flaky
+    with patch.object(kg, "_full_index"), patch.object(kg._stop_event, "wait"):
+        kg._stop_event.clear()
+        kg._loop()
+
+    assert cycles == [0, 1]  # ran again after the failure instead of dying
+
+
 # ── Trust tier ────────────────────────────────────────────────────────────────
 
 @pytest.mark.parametrize("node_type,expected_tier", [
@@ -740,7 +783,8 @@ def test_compute_top_entities_ranks_by_undirected_degree(kg, vault):
          patch("prisma.services.resource_lock.acquire", return_value=(True, "local-ollama", "req-1")):
         kg._extract_file(f, "note")
 
-    top = kg._compute_top_entities()
+    kg._refresh_top_entities()
+    top = kg.top_entities()
     assert top[0].id == "hub"
     assert top[0].degree == 2
 
@@ -764,7 +808,8 @@ def test_compute_top_entities_excludes_chat_trust_tier_on_either_endpoint(kg, va
         kg._extract_file(note_file, "note")
         kg._extract_file(chat_file, "chat")
 
-    top = kg._compute_top_entities()
+    kg._refresh_top_entities()
+    top = kg.top_entities()
     real = next(e for e in top if e.id == "real_entity")
     assert real.degree == 1  # only the other_real edge counts, not the chat_entity one
     assert all(e.id != "chat_entity" for e in top)
@@ -1479,7 +1524,8 @@ def test_query_returns_empty_when_no_matches(kg):
 
 def test_query_sources_are_slugs_not_raw_paths(kg, vault):
     # ADR-017: `sources` must be vault slugs (what a Footnote's `sources`
-    # list expects), not the raw source_file path `text` embeds.
+    # list expects) -- and the compound dir--name form, not the bare stem,
+    # so a duplicate filename in another folder stays distinct.
     f = vault.root / "notes" / "test.md"
     f.write_text("---\ntype: note\n---\nContent about quantum computing.", encoding="utf-8")
     result = _extraction(nodes=[{"id": "quantum_computing", "label": "Quantum Computing"}])
@@ -1490,7 +1536,7 @@ def test_query_sources_are_slugs_not_raw_paths(kg, vault):
 
     results = kg.query("quantum")
 
-    assert results[0].sources == ["test"]
+    assert results[0].sources == ["notes--test"]
 
 
 def test_query_sources_dedup_multiple_entities_from_same_file(kg, vault):
@@ -1507,4 +1553,4 @@ def test_query_sources_dedup_multiple_entities_from_same_file(kg, vault):
 
     results = kg.query("quantum")
 
-    assert results[0].sources == ["test"]
+    assert results[0].sources == ["notes--test"]

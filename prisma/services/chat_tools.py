@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import logging
 import re
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -424,10 +423,12 @@ class ChatToolbox:
             items.append({"source_file": h.source_file, "score": h.score, "text": excerpt})
         # Wrapped under the vault slug (not the raw source_file path) --
         # this is exactly the identifier a footnote's `sources` list
-        # expects (ADR-017), so the model can copy it verbatim rather than
-        # having to derive a slug from a path itself.
+        # expects (ADR-017), so the model can copy it verbatim. Compound
+        # `dir--name` slug, not the bare stem: two same-named files in
+        # different folders must not collapse to one citation.
         wrapped = "\n\n".join(
-            wrap_untrusted(Path(i["source_file"]).stem, i["text"]) for i in items if i["text"]
+            wrap_untrusted(self._vault.slug_for_relpath(i["source_file"]), i["text"])
+            for i in items if i["text"]
         )
         return ToolResult(text=wrapped, raw=items)
 

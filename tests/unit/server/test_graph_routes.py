@@ -40,7 +40,7 @@ def test_expand_node_forwards_id(client, client_stub):
     r = client.get("/graph/expand_node", params={"id": "center"})
     assert r.status_code == 200
     assert r.json()["entities"][0]["id"] == "n1"
-    client_stub.expand_node.assert_called_once_with("center")
+    client_stub.expand_node.assert_called_once_with("center", limit=100)
 
 
 def test_expand_node_requires_id(client):

@@ -1365,7 +1365,13 @@ class KnowledgeGraphService:
         self._stop_event.wait(timeout=20)
         self._full_index()
         while not self._stop_event.is_set():
-            self._drain_once()
+            try:
+                self._drain_once()
+            except Exception:
+                # One bad incremental cycle must not kill the daemon thread
+                # (a Kùzu stream error, a transient I/O failure) -- log and
+                # retry next tick, same as _full_index() already does.
+                _log.exception("knowledge graph incremental cycle failed")
             self._stop_event.wait(timeout=60)
 
     def _drain_once(self) -> None:
@@ -1519,18 +1525,13 @@ class KnowledgeGraphService:
         with self._lock:
             return kg_queries.search(self._conn, question, top_k=top_k)
 
-    def _compute_top_entities(self, limit: int = TOP_ENTITIES_CACHE_SIZE) -> list[TopEntity]:
-        """Live Cypher call. top_entities() below is the cache-only read."""
-        with self._lock:
-            return kg_queries.compute_top_entities(self._conn, limit)
-
     # ── Phase A retrieval capabilities (delegated to kg_queries) ──────────────
     # Live Cypher on the request path, same as entities_for_file/search above —
     # these are explicit tool/endpoint calls, not the per-turn priming read.
 
-    def expand_node(self, node_id: str):
+    def expand_node(self, node_id: str, limit: int = kg_queries.DEFAULT_EXPAND):
         with self._lock:
-            return kg_queries.expand_node(self._conn, node_id)
+            return kg_queries.expand_node(self._conn, node_id, limit)
 
     def god_nodes(self, limit: int = TOP_ENTITIES_CACHE_SIZE) -> list[TopEntity]:
         with self._lock:
@@ -1545,8 +1546,12 @@ class KnowledgeGraphService:
             return kg_queries.vault_health(self._conn)
 
     def timeline(self, question: str, limit: int = kg_queries.DEFAULT_TIMELINE) -> list[TimelineEntry]:
+        # Only the graph scan holds the lock; the per-document frontmatter
+        # reads (timeline_build) run with it released so a broad query
+        # doesn't stall the indexer and every other KG request.
         with self._lock:
-            return kg_queries.timeline(self._conn, self._vault, question, limit)
+            hits, docs_by_entity = kg_queries.timeline_scan(self._conn, question, limit)
+        return kg_queries.timeline_build(self._vault, hits, docs_by_entity, limit)
 
     def _refresh_top_entities(self) -> None:
         # Scan and publish under one lock hold: a gap lets drop_index()
@@ -1600,7 +1605,7 @@ class KnowledgeGraphService:
         sources: list[str] = []
         seen: set[str] = set()
         for r in results:
-            slug = Path(r.source_file).stem
+            slug = self._vault.slug_for_relpath(r.source_file)  # compound dir--name, not bare stem
             if slug not in seen:
                 seen.add(slug)
                 sources.append(slug)

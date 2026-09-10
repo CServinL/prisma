@@ -18,7 +18,9 @@ from typing import Callable
 from fastapi import APIRouter, Query
 
 from prisma.services.kg_queries import (
+    DEFAULT_EXPAND,
     DEFAULT_TIMELINE,
+    EXPAND_MAX,
     SURPRISING_CONNECTIONS_MAX,
     TIMELINE_MAX,
 )
@@ -37,10 +39,12 @@ def build_graph_router(get_client: Callable[[], KnowledgeGraphClient]) -> APIRou
     router = APIRouter(prefix="/graph", tags=["graph"])
 
     @router.get("/expand_node", response_model=ExpandNodeResponse)
-    def expand_node(id: str = Query(..., min_length=1)):
+    def expand_node(id: str = Query(..., min_length=1),
+                    limit: int = Query(DEFAULT_EXPAND, ge=1, le=EXPAND_MAX)):
         """One-hop neighbourhood of a knowledge-graph entity id — its direct
-        neighbours and the relationships connecting them."""
-        return get_client().expand_node(id)
+        neighbours and the relationships connecting them. `limit` caps each
+        direction (outgoing/incoming)."""
+        return get_client().expand_node(id, limit=limit)
 
     @router.get("/god_nodes", response_model=list[TopEntity])
     def god_nodes(limit: int = Query(15, ge=1, le=100)):

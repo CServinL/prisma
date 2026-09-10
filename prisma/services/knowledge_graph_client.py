@@ -115,8 +115,8 @@ class KnowledgeGraphClient:
 
     # ── Phase A retrieval capabilities (mirror kg_app.py's routes) ─────────
 
-    def expand_node(self, node_id: str) -> ExpandNodeResponse:
-        data = self._get("/expand_node", params={"id": node_id})
+    def expand_node(self, node_id: str, limit: int = 100) -> ExpandNodeResponse:
+        data = self._get("/expand_node", params={"id": node_id, "limit": limit})
         return ExpandNodeResponse.model_validate(data) if data else ExpandNodeResponse(entities=[], edges=[])
 
     def god_nodes(self, limit: int = 15) -> list[TopEntity]:

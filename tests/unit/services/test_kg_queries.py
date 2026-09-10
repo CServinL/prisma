@@ -8,6 +8,7 @@ import pytest
 
 from prisma.services import kg_queries
 from prisma.services.knowledge_graph_service import KnowledgeGraphService
+from prisma.storage.models.kg_models import ExpandNodeResponse
 
 
 @pytest.fixture
@@ -33,6 +34,34 @@ def conn(kg):
 def _add(kg, rel, trust_tier, nodes, edges=None):
     with kg._lock:
         kg._upsert(rel, trust_tier, nodes, edges or [])
+
+
+class _MidStreamFailConn:
+    """A conn whose result raises during iteration -- Kùzu can fail while
+    streaming rows, not only on execute()."""
+
+    class _Result:
+        def has_next(self):
+            return True
+
+        def get_next(self):
+            raise RuntimeError("kùzu stream died")
+
+    def execute(self, *a, **k):
+        return _MidStreamFailConn._Result()
+
+
+@pytest.mark.parametrize("call,empty", [
+    (lambda c: kg_queries.search(c, "x"), []),
+    (lambda c: kg_queries.compute_top_entities(c), []),
+    (lambda c: kg_queries.god_nodes(c), []),
+    (lambda c: kg_queries.authors(c), []),
+    (lambda c: kg_queries.surprising_connections(c, hub_ids=set()), []),
+    (lambda c: kg_queries.timeline_scan(c, "x"), ([], {})),
+    (lambda c: kg_queries.expand_node(c, "x"), ExpandNodeResponse(entities=[], edges=[])),
+])
+def test_scans_return_safe_default_on_a_mid_stream_error(call, empty):
+    assert call(_MidStreamFailConn()) == empty
 
 
 # ── search ────────────────────────────────────────────────────────────────────
@@ -196,6 +225,28 @@ def test_expand_node_excludes_a_chat_tier_center(kg, conn):
     resp = kg_queries.expand_node(conn, "shared")
 
     assert resp.entities == [] and resp.edges == []
+
+
+def test_expand_node_respects_limit_per_direction(kg, conn):
+    edges = [{"source": "hub", "target": f"n{i}", "relation": "cites"} for i in range(8)]
+    nodes = [{"id": "hub", "label": "Hub"}] + [{"id": f"n{i}", "label": f"N{i}"} for i in range(8)]
+    _add(kg, "notes/a.md", "note", nodes, edges)
+
+    resp = kg_queries.expand_node(conn, "hub", limit=3)
+
+    assert len(resp.edges) == 3
+
+
+def test_expand_node_drops_a_self_loop(kg, conn):
+    _add(kg, "notes/a.md", "note",
+         [{"id": "x", "label": "X"}, {"id": "y", "label": "Y"}],
+         [{"source": "x", "target": "x", "relation": "refines"},
+          {"source": "x", "target": "y", "relation": "cites"}])
+
+    resp = kg_queries.expand_node(conn, "x")
+
+    assert {e.id for e in resp.entities} == {"y"}
+    assert all(edge.source != edge.target for edge in resp.edges)
 
 
 def test_expand_node_empty_for_unknown_id(kg, conn):
@@ -426,6 +477,21 @@ def test_vault_health_excludes_chat_tier_orphans(kg, conn):
     _add(kg, "chats/c.md", "chat", [{"id": "chat_orphan", "label": "CO"}])
     resp = kg_queries.vault_health(conn)
     assert all(o.id != "chat_orphan" for o in resp.orphans)
+
+
+def test_vault_health_reports_an_orphan_that_shares_an_id_with_a_chat_edge(kg, conn):
+    # "topic" is a note entity with no note relationships. A chat session
+    # then extracts the same id with an edge -- if the connectivity scan
+    # doesn't filter chat tier, "topic" counts as connected and the orphan
+    # is silently under-reported.
+    _add(kg, "chats/c.md", "chat",
+         [{"id": "topic", "label": "Topic"}, {"id": "chatty", "label": "Chatty"}],
+         [{"source": "topic", "target": "chatty", "relation": "in"}])
+    _add(kg, "notes/n.md", "note", [{"id": "topic", "label": "Topic"}])  # re-tier to note, no edge
+
+    resp = kg_queries.vault_health(conn)
+
+    assert any(o.id == "topic" for o in resp.orphans)
 
 
 def test_vault_health_empty_graph(conn):

@@ -47,6 +47,11 @@ DEFAULT_TIMELINE = 50
 TIMELINE_MAX = 200
 _TIMELINE_DOCS_PER_ENTITY = 10
 
+# expand_node caps each direction's neighbour list -- a hub entity has
+# thousands of edges, and the whole scan+serialise runs under the lock.
+DEFAULT_EXPAND = 100
+EXPAND_MAX = 500
+
 
 def _terms(question: str) -> list[str]:
     """Same tokenisation `search()` has always used — lowercase alnum/underscore
@@ -60,22 +65,22 @@ def search(conn, question: str, top_k: int = 20) -> list[GraphSearchResult]:
     terms = _terms(question)
     if not terms or conn is None:
         return []
+    file_scores: dict[str, float] = {}
     try:
         result = conn.execute(
             "MATCH (e:Entity) WHERE e.trust_tier <> 'chat' RETURN e.id, e.label, e.source_file"
         )
+        while result.has_next():  # the stream can raise mid-scan too, not just execute()
+            eid, label, source_file = result.get_next()
+            if not source_file:
+                continue
+            haystack = f"{eid} {label}".lower()
+            score = sum(1.0 for t in terms if t in haystack)
+            if score > 0:
+                file_scores[source_file] = file_scores.get(source_file, 0.0) + score
     except Exception as exc:
         _log.warning("search failed: %s", exc)
         return []
-    file_scores: dict[str, float] = {}
-    while result.has_next():
-        eid, label, source_file = result.get_next()
-        if not source_file:
-            continue
-        haystack = f"{eid} {label}".lower()
-        score = sum(1.0 for t in terms if t in haystack)
-        if score > 0:
-            file_scores[source_file] = file_scores.get(source_file, 0.0) + score
     ranked = sorted(file_scores.items(), key=lambda x: -x[1])[:top_k]
     return [GraphSearchResult(source_file=sf, score=score) for sf, score in ranked]
 
@@ -126,6 +131,7 @@ def compute_top_entities(conn, limit: int = DEFAULT_TOP_ENTITIES) -> list[TopEnt
     thread — see KnowledgeGraphService.top_entities())."""
     if conn is None:
         return []
+    out: list[TopEntity] = []
     try:
         result = conn.execute(
             "MATCH (e:Entity)-[r:RelatesTo]-(o:Entity) "
@@ -134,13 +140,12 @@ def compute_top_entities(conn, limit: int = DEFAULT_TOP_ENTITIES) -> list[TopEnt
             "ORDER BY degree DESC LIMIT $limit",
             {"limit": limit},
         )
+        while result.has_next():
+            eid, label, degree = result.get_next()
+            out.append(TopEntity(id=eid, label=label, degree=degree))
     except Exception as exc:
         _log.warning("top_entities computation failed: %s", exc)
         return []
-    out: list[TopEntity] = []
-    while result.has_next():
-        eid, label, degree = result.get_next()
-        out.append(TopEntity(id=eid, label=label, degree=degree))
     return out
 
 
@@ -154,29 +159,29 @@ def god_nodes(conn, limit: int = DEFAULT_TOP_ENTITIES) -> list[TopEntity]:
     trusting Kùzu list-aggregation portability."""
     if conn is None:
         return []
+    degree: dict[str, int] = {}
+    label: dict[str, str] = {}
+    relations: dict[str, list[str]] = {}
+    sources: dict[str, list[str]] = {}
     try:
         result = conn.execute(
             "MATCH (e:Entity)-[r:RelatesTo]-(o:Entity) "
             "WHERE e.trust_tier <> 'chat' AND o.trust_tier <> 'chat' "
             "RETURN e.id, e.label, r.relation, r.source_file"
         )
+        while result.has_next():
+            eid, elabel, relation, edge_src = result.get_next()
+            degree[eid] = degree.get(eid, 0) + 1
+            label[eid] = elabel
+            seen = relations.setdefault(eid, [])
+            if relation and relation not in seen:
+                seen.append(relation)
+            srcs = sources.setdefault(eid, [])
+            if edge_src and edge_src not in srcs:
+                srcs.append(edge_src)
     except Exception as exc:
         _log.warning("god_nodes computation failed: %s", exc)
         return []
-    degree: dict[str, int] = {}
-    label: dict[str, str] = {}
-    relations: dict[str, list[str]] = {}
-    sources: dict[str, list[str]] = {}
-    while result.has_next():
-        eid, elabel, relation, edge_src = result.get_next()
-        degree[eid] = degree.get(eid, 0) + 1
-        label[eid] = elabel
-        seen = relations.setdefault(eid, [])
-        if relation and relation not in seen:
-            seen.append(relation)
-        srcs = sources.setdefault(eid, [])
-        if edge_src and edge_src not in srcs:
-            srcs.append(edge_src)
     ranked = sorted(degree, key=lambda e: -degree[e])[:limit]
     return [
         TopEntity(
@@ -188,51 +193,57 @@ def god_nodes(conn, limit: int = DEFAULT_TOP_ENTITIES) -> list[TopEntity]:
     ]
 
 
-def expand_node(conn, node_id: str) -> ExpandNodeResponse:
+_EXPAND_COLS = (
+    "o.id, o.label, o.file_type, o.trust_tier, o.source_location, o.source_file, "
+    "r.relation, r.confidence, r.confidence_score, r.source_file"
+)
+# `o.id <> $id` drops a self-loop edge, which would otherwise match both
+# directed queries and list the node as its own neighbour.
+_EXPAND_WHERE = "WHERE e.trust_tier <> 'chat' AND o.trust_tier <> 'chat' AND o.id <> $id"
+
+
+def expand_node(conn, node_id: str, limit: int = DEFAULT_EXPAND) -> ExpandNodeResponse:
     """One-hop traversal — the queried entity's direct neighbours and the
     RelatesTo edges to them, chat tier excluded on both the queried node and
     the neighbour (the result grounds a chat answer's citations).
 
     Two directed queries (outgoing, incoming) rather than one undirected
     `-` pattern, which would lose the stored edge direction and could
-    report a neighbour->node_id edge as its inverse."""
+    report a neighbour->node_id edge as its inverse. `limit` caps each
+    direction."""
     if conn is None or not node_id:
         return ExpandNodeResponse(entities=[], edges=[])
     entities: dict[str, EntityInfo] = {}
     edges: list[EdgeInfo] = []
     try:
         outgoing = conn.execute(
-            "MATCH (e:Entity {id: $id})-[r:RelatesTo]->(o:Entity) "
-            "WHERE e.trust_tier <> 'chat' AND o.trust_tier <> 'chat' "
-            "RETURN o.id, o.label, o.file_type, o.trust_tier, o.source_location, o.source_file, "
-            "r.relation, r.confidence, r.confidence_score, r.source_file",
-            {"id": node_id},
+            f"MATCH (e:Entity {{id: $id}})-[r:RelatesTo]->(o:Entity) {_EXPAND_WHERE} "
+            f"RETURN {_EXPAND_COLS} LIMIT $limit",
+            {"id": node_id, "limit": limit},
         )
         incoming = conn.execute(
-            "MATCH (o:Entity)-[r:RelatesTo]->(e:Entity {id: $id}) "
-            "WHERE e.trust_tier <> 'chat' AND o.trust_tier <> 'chat' "
-            "RETURN o.id, o.label, o.file_type, o.trust_tier, o.source_location, o.source_file, "
-            "r.relation, r.confidence, r.confidence_score, r.source_file",
-            {"id": node_id},
+            f"MATCH (o:Entity)-[r:RelatesTo]->(e:Entity {{id: $id}}) {_EXPAND_WHERE} "
+            f"RETURN {_EXPAND_COLS} LIMIT $limit",
+            {"id": node_id, "limit": limit},
         )
+        for result, node_is_source in ((outgoing, True), (incoming, False)):
+            while result.has_next():
+                (oid, olabel, file_type, trust_tier, source_location, o_source_file,
+                 relation, confidence, confidence_score, edge_source_file) = result.get_next()
+                entities.setdefault(oid, EntityInfo(
+                    id=oid, label=olabel, file_type=file_type,
+                    trust_tier=trust_tier, source_location=source_location,
+                    source_file=o_source_file,
+                ))
+                edges.append(EdgeInfo(
+                    source=node_id if node_is_source else oid,
+                    target=oid if node_is_source else node_id,
+                    relation=relation, confidence=confidence, confidence_score=confidence_score,
+                    source_file=edge_source_file,
+                ))
     except Exception as exc:
         _log.warning("expand_node failed for %s: %s", node_id, exc)
         return ExpandNodeResponse(entities=[], edges=[])
-    for result, node_is_source in ((outgoing, True), (incoming, False)):
-        while result.has_next():
-            (oid, olabel, file_type, trust_tier, source_location, o_source_file,
-             relation, confidence, confidence_score, edge_source_file) = result.get_next()
-            entities.setdefault(oid, EntityInfo(
-                id=oid, label=olabel, file_type=file_type,
-                trust_tier=trust_tier, source_location=source_location,
-                source_file=o_source_file,
-            ))
-            edges.append(EdgeInfo(
-                source=node_id if node_is_source else oid,
-                target=oid if node_is_source else node_id,
-                relation=relation, confidence=confidence, confidence_score=confidence_score,
-                source_file=edge_source_file,
-            ))
     return ExpandNodeResponse(entities=list(entities.values()), edges=edges)
 
 
@@ -263,16 +274,6 @@ def surprising_connections(
     form. Background-thread only (heavier than this module's other scans)."""
     if conn is None:
         return []
-    try:
-        result = conn.execute(
-            "MATCH (a:Entity)-[r:RelatesTo]-(b:Entity) "
-            "WHERE a.trust_tier <> 'chat' AND b.trust_tier <> 'chat' "
-            "RETURN a.id, a.label, a.source_file, r.relation, r.confidence_score, "
-            "r.source_file, b.id, b.label"
-        )
-    except Exception as exc:
-        _log.warning("surprising_connections edge scan failed: %s", exc)
-        return []
     # Which documents each concept label appears in (as an edge participant).
     # Endpoint pairs sharing a document are excluded below -- that one paper
     # already puts both concepts together, so the link isn't emergent. This
@@ -280,16 +281,26 @@ def surprising_connections(
     # edge's document).
     docs_by_label: dict[str, set[str]] = {}
     by_bridge_label: dict[str, list[tuple]] = {}
-    while result.has_next():
-        row = result.get_next()
-        a_id, a_label, a_source_file, relation, confidence_score, edge_source_file, b_id, b_label = row
-        if edge_source_file:
-            for lbl in (a_label, b_label):
-                if lbl:
-                    docs_by_label.setdefault(lbl.strip().lower(), set()).add(edge_source_file)
-        if b_id in hub_ids or not b_label:
-            continue
-        by_bridge_label.setdefault(b_label.strip().lower(), []).append(row)
+    try:
+        result = conn.execute(
+            "MATCH (a:Entity)-[r:RelatesTo]-(b:Entity) "
+            "WHERE a.trust_tier <> 'chat' AND b.trust_tier <> 'chat' "
+            "RETURN a.id, a.label, a.source_file, r.relation, r.confidence_score, "
+            "r.source_file, b.id, b.label"
+        )
+        while result.has_next():
+            row = result.get_next()
+            a_id, a_label, a_source_file, relation, confidence_score, edge_source_file, b_id, b_label = row
+            if edge_source_file:
+                for lbl in (a_label, b_label):
+                    if lbl:
+                        docs_by_label.setdefault(lbl.strip().lower(), set()).add(edge_source_file)
+            if b_id in hub_ids or not b_label:
+                continue
+            by_bridge_label.setdefault(b_label.strip().lower(), []).append(row)
+    except Exception as exc:
+        _log.warning("surprising_connections edge scan failed: %s", exc)
+        return []
 
     candidates: list[tuple] = []
     for rows in by_bridge_label.values():
@@ -335,24 +346,24 @@ def authors(conn, limit: int = 100) -> list[AuthorSummary]:
     Python (see `god_nodes`' rationale)."""
     if conn is None:
         return []
+    files: dict[str, set[str]] = {}
+    ids: dict[str, list[str]] = {}
     try:
         result = conn.execute(
             "MATCH (e:Entity) "
             "WHERE e.author IS NOT NULL AND e.author <> '' AND e.trust_tier <> 'chat' "
             "RETURN e.author, e.source_file, e.id"
         )
+        while result.has_next():
+            author, source_file, eid = result.get_next()
+            if source_file:
+                files.setdefault(author, set()).add(source_file)
+            entry = ids.setdefault(author, [])
+            if eid not in entry:
+                entry.append(eid)
     except Exception as exc:
         _log.warning("authors query failed: %s", exc)
         return []
-    files: dict[str, set[str]] = {}
-    ids: dict[str, list[str]] = {}
-    while result.has_next():
-        author, source_file, eid = result.get_next()
-        if source_file:
-            files.setdefault(author, set()).add(source_file)
-        entry = ids.setdefault(author, [])
-        if eid not in entry:
-            entry.append(eid)
     ranked = sorted(files, key=lambda a: -len(files[a]))[:limit]
     return [
         AuthorSummary(author=a, file_count=len(files[a]), sample_entities=ids.get(a, [])[:5])
@@ -368,7 +379,10 @@ def vault_health(conn) -> VaultHealthResponse:
         return VaultHealthResponse(orphans=[], orphan_count=0)
     try:
         connected: set[str] = set()
-        result = conn.execute("MATCH (a:Entity)-[:RelatesTo]-(b:Entity) RETURN a.id")
+        result = conn.execute(
+            "MATCH (a:Entity)-[:RelatesTo]-(b:Entity) "
+            "WHERE a.trust_tier <> 'chat' AND b.trust_tier <> 'chat' RETURN a.id"
+        )
         while result.has_next():
             connected.add(result.get_next()[0])
         orphans: list[OrphanEntity] = []
@@ -385,41 +399,35 @@ def vault_health(conn) -> VaultHealthResponse:
     return VaultHealthResponse(orphans=orphans, orphan_count=len(orphans))
 
 
-def timeline(conn, vault, question: str, limit: int = DEFAULT_TIMELINE) -> list[TimelineEntry]:
-    """Entities matching `question` by the same term-match `search()` uses,
-    one entry per (matching entity, document it appears in) so a concept
-    discussed across several papers shows up at each of their years.
+# timeline is split into a graph half (timeline_scan, holds the Kùzu lock)
+# and a vault half (timeline_build, frontmatter reads, lock released).
+# `timeline()` runs both for direct callers/tests.
 
-    `Entity.source_file` alone is only last-writer -- same-stem files
-    collapse into one Entity row -- so an entity's documents are taken as
-    its own `source_file` plus every `RelatesTo.source_file` touching it.
-    A concept that appears only as a bare mention (no relationship) in a
-    collapsed document is still lost; full per-document identity is the
-    deferred `{stem}_{entity}` id change (see TODO.md, ADR-021).
 
-    `limit` caps both the matched entities considered (top-scored, like
-    `search`) and the entries returned. Sorted chronologically, year-less
-    entries last."""
+def timeline_scan(conn, question: str, limit: int = DEFAULT_TIMELINE):
+    """The graph half of timeline(): the top-`limit` matching entities
+    (scored by term overlap, like `search`) and, per hit, the documents
+    that assert its edges. Pure Cypher -- run under the connection lock."""
     terms = _terms(question)
     if not terms or conn is None:
-        return []
+        return [], {}
+    scored: list[tuple[int, str, str, str | None]] = []
     try:
         result = conn.execute(
             "MATCH (e:Entity) WHERE e.trust_tier <> 'chat' RETURN e.id, e.label, e.source_file"
         )
+        while result.has_next():
+            eid, label, source_file = result.get_next()
+            haystack = f"{eid} {label}".lower()
+            score = sum(1 for t in terms if t in haystack)
+            if score:
+                scored.append((score, eid, label, source_file))
     except Exception as exc:
-        _log.warning("timeline query failed: %s", exc)
-        return []
-    scored: list[tuple[int, str, str, str | None]] = []
-    while result.has_next():
-        eid, label, source_file = result.get_next()
-        haystack = f"{eid} {label}".lower()
-        score = sum(1 for t in terms if t in haystack)
-        if score:
-            scored.append((score, eid, label, source_file))
+        _log.warning("timeline entity scan failed: %s", exc)
+        return [], {}
     scored.sort(key=lambda s: -s[0])
-    hits = scored[:limit]
-    hit_ids = {eid for _, eid, _, _ in hits}
+    hits = [(eid, label, src) for _, eid, label, src in scored[:limit]]
+    hit_ids = {eid for eid, _, _ in hits}
 
     docs_by_entity: dict[str, list[str]] = {}
     try:
@@ -437,12 +445,26 @@ def timeline(conn, vault, question: str, limit: int = DEFAULT_TIMELINE) -> list[
     except Exception as exc:
         _log.warning("timeline edge scan failed: %s", exc)
 
+    return hits, docs_by_entity
+
+
+def timeline_build(vault, hits, docs_by_entity, limit: int = DEFAULT_TIMELINE) -> list[TimelineEntry]:
+    """The vault half of timeline(): resolve each document's year from its
+    frontmatter and emit one entry per (entity, document). Pure vault I/O --
+    the connection lock must be *released* before this runs.
+
+    `Entity.source_file` alone is only last-writer -- same-stem files
+    collapse into one Entity row -- so an entity's documents are its own
+    `source_file` plus every `RelatesTo.source_file` touching it. A concept
+    that appears only as a bare mention (no relationship) in a collapsed
+    document is still lost; full per-document identity is the deferred
+    `{stem}_{entity}` id change (see TODO.md, ADR-021)."""
     year_by_file: dict[str, int | None] = {}
 
     def _year(source_file: str) -> int | None:
         # Resolve the known relative path directly and read only its
         # frontmatter -- get_any() would walk the whole vault and build a
-        # full node model just for `year`, thousands of times under the lock.
+        # full node model just for `year`.
         if source_file not in year_by_file:
             raw = vault.frontmatter_for_relpath(source_file).get("year")
             try:
@@ -452,7 +474,7 @@ def timeline(conn, vault, question: str, limit: int = DEFAULT_TIMELINE) -> list[
         return year_by_file[source_file]
 
     entries: list[TimelineEntry] = []
-    for _, eid, label, own_source in hits:
+    for eid, label, own_source in hits:
         docs = list(dict.fromkeys(([own_source] if own_source else []) + docs_by_entity.get(eid, [])))
         if not docs:
             entries.append(TimelineEntry(id=eid, label=label, source_file=None, year=None))
@@ -461,3 +483,11 @@ def timeline(conn, vault, question: str, limit: int = DEFAULT_TIMELINE) -> list[
             entries.append(TimelineEntry(id=eid, label=label, source_file=d, year=_year(d)))
     entries.sort(key=lambda e: (e.year is None, e.year or 0))
     return entries[:limit]
+
+
+def timeline(conn, vault, question: str, limit: int = DEFAULT_TIMELINE) -> list[TimelineEntry]:
+    """Entities matching `question`, one entry per (entity, document it
+    appears in), sorted chronologically (year-less last). See timeline_scan/
+    timeline_build -- the service splits these across the lock boundary."""
+    hits, docs_by_entity = timeline_scan(conn, question, limit)
+    return timeline_build(vault, hits, docs_by_entity, limit)

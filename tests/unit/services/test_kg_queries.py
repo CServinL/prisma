@@ -256,6 +256,26 @@ def test_surprising_connections_excludes_direct_edge_asserted_by_a_third_documen
     assert kg_queries.surprising_connections(conn, hub_ids=set()) == []
 
 
+def test_surprising_connections_excludes_endpoints_that_co_occur_in_a_third_document(kg, conn):
+    # doc3 mentions both concept A and concept C (each linked to a shared
+    # node), but never links them directly. That's still "one paper mentions
+    # both", so the A--Bridge--C candidate isn't emergent.
+    _add(kg, "notes/doc1.md", "note", [{"id": "doc1_a", "label": "A"}, {"id": "doc1_bridge", "label": "Bridge"}],
+         [{"source": "doc1_a", "target": "doc1_bridge", "relation": "cites"}])
+    _add(kg, "notes/doc2.md", "note", [{"id": "doc2_c", "label": "C"}, {"id": "doc2_bridge", "label": "Bridge"}],
+         [{"source": "doc2_bridge", "target": "doc2_c", "relation": "extends"}])
+    _add(kg, "notes/doc3.md", "note",
+         [{"id": "doc3_a", "label": "A"}, {"id": "doc3_c", "label": "C"}, {"id": "doc3_s", "label": "Shared"}],
+         [{"source": "doc3_a", "target": "doc3_s", "relation": "in"},
+          {"source": "doc3_c", "target": "doc3_s", "relation": "in"}])
+
+    links = kg_queries.surprising_connections(conn, hub_ids=set())
+
+    # the only pair a "Bridge"-labelled node can connect is (A, C), and they
+    # co-occur in doc3 -- so nothing should bridge on "Bridge"
+    assert not any(link.bridge == "Bridge" for link in links)
+
+
 def test_surprising_connections_excludes_same_document_hops(kg, conn):
     _add(
         kg, "notes/a.md", "note",
@@ -426,42 +446,42 @@ def test_timeline_year_less_entities_sort_last(kg, conn, vault):
     assert entries[-1].year is None
 
 
-def test_timeline_resolves_year_by_directory_not_just_filename(kg, conn, vault):
-    # Same filename ("paper") in two different directories -- a bare
-    # `Path(source_file).stem` lookup would resolve both entities to
-    # whichever one `vault.get_any("paper")` happens to find, silently
-    # attaching the wrong year to one of them.
-    _write_source(vault, "paper", 1990)
+def test_timeline_emits_an_entry_per_document_a_concept_appears_in(kg, conn, vault):
+    # Realistic collapse: same filename in two directories, so extraction
+    # mints the same `{stem}_topic` id and _upsert MERGEs them into one row
+    # whose source_file is just the last writer. Each document's edge still
+    # carries its own source_file, so the concept must surface at both years.
+    _write_source(vault, "paper", 1990)  # -> sources/paper.md
     (vault.root / "archive").mkdir(parents=True, exist_ok=True)
     (vault.root / "archive" / "paper.md").write_text(
         "---\ntype: source\ntitle: paper\nyear: 2020\n---\nbody", encoding="utf-8",
     )
-    _add(kg, "sources/paper.md", "source", [{"id": "old_topic", "label": "Topic"}])
-    _add(kg, "archive/paper.md", "source", [{"id": "new_topic", "label": "Topic"}])
+    _add(kg, "sources/paper.md", "source",
+         [{"id": "paper_topic", "label": "Topic"}, {"id": "paper_x", "label": "X"}],
+         [{"source": "paper_topic", "target": "paper_x", "relation": "cites"}])
+    _add(kg, "archive/paper.md", "source",
+         [{"id": "paper_topic", "label": "Topic"}, {"id": "paper_y", "label": "Y"}],
+         [{"source": "paper_topic", "target": "paper_y", "relation": "cites"}])
 
     entries = kg_queries.timeline(conn, vault, "topic")
 
-    years = {e.id: e.year for e in entries}
-    assert years["old_topic"] == 1990
-    assert years["new_topic"] == 2020
+    dated = {(e.source_file, e.year) for e in entries if e.id == "paper_topic"}
+    assert dated == {("sources/paper.md", 1990), ("archive/paper.md", 2020)}
 
 
-def test_timeline_dates_an_entity_to_its_earliest_document(kg, conn, vault):
-    # The entity row's own source_file is a 2020 paper, but an edge touching
-    # it was asserted by a 1990 paper -- the concept was discussed in 1990.
+def test_timeline_walks_edges_for_a_year_the_entity_row_lost(kg, conn, vault):
+    # The collapsed entity row's own source_file is the 2020 paper, but an
+    # edge is still tagged with the 1990 one -- that year must not vanish.
     _write_source(vault, "recent", 2020)
     _write_source(vault, "seminal", 1990)
-    # seminal first, recent last -> Entity.source_file ends up "recent" (2020);
-    # only walking the edge back to "seminal" gives the real 1990.
     _add(kg, "sources/seminal.md", "source",
          [{"id": "t", "label": "Transformers"}, {"id": "other", "label": "Other"}],
          [{"source": "t", "target": "other", "relation": "cites"}])
     _add(kg, "sources/recent.md", "source", [{"id": "t", "label": "Transformers"}])
 
-    entry = kg_queries.timeline(conn, vault, "transformers")[0]
+    years = {e.year for e in kg_queries.timeline(conn, vault, "transformers")}
 
-    assert entry.year == 1990
-    assert entry.source_file == "sources/seminal.md"
+    assert 1990 in years
 
 
 def test_timeline_empty_for_no_terms(conn, vault):

@@ -115,6 +115,14 @@ class TestFindFile:
     def test_compound_slug_of_bare_separator_does_not_raise(self, vault):
         assert vault.find_file("--") is None
 
+    def test_compound_slug_resolving_to_a_directory_is_not_returned_as_a_file(self, vault):
+        # A directory literally named "notes.md" -- exists() is True for it,
+        # so read_source() would open() a directory and 500. is_file() must
+        # reject it, degrading to the intended 404.
+        (vault.root / "wiki" / "page.md").mkdir(parents=True, exist_ok=True)
+        assert vault._resolve_compound_slug("wiki--page", ".md") is None
+        assert vault.find_file("wiki--page") is None
+
     def test_compound_slug_cannot_escape_vault_root_via_leading_separator(self, vault):
         # "--etc--passwd" decodes to "/etc/passwd" -- Path's own / operator
         # discards the left operand entirely when the right side is

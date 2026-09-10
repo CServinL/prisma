@@ -238,9 +238,9 @@ SURPRISING_CONNECTIONS_MAX = 100
 def surprising_connections(
     conn, hub_ids: "set[str] | frozenset[str]", limit: int = 15,
 ) -> list[SurprisingConnection]:
-    """A link between two entities that no document asserts directly, where
-    the two hops connecting them come from *different* source documents (so
-    it isn't just "one paper mentions both").
+    """A link between two entities that no single document connects, and
+    whose endpoint concepts never even co-occur in one document -- so it
+    genuinely emerges from the graph, not from any one paper.
 
     Bridges by normalised `label`, not entity `id`: each document mints its
     own `{stem}_{entity}` id namespace, so the shared concept is two
@@ -250,8 +250,7 @@ def surprising_connections(
 
     One flat edge scan aggregated in Python (like god_nodes/authors/
     vault_health): the label-equality bridge join has no portable Cypher
-    form, and the same scan doubles as the direct-edge exclusion set.
-    Background-thread only (heavier than this module's other scans)."""
+    form. Background-thread only (heavier than this module's other scans)."""
     if conn is None:
         return []
     try:
@@ -264,14 +263,20 @@ def surprising_connections(
     except Exception as exc:
         _log.warning("surprising_connections edge scan failed: %s", exc)
         return []
-    # Keyed by label, not id -- see docstring above.
-    direct_label_pairs: set[frozenset] = set()
+    # Which documents each concept label appears in (as an edge participant).
+    # Endpoint pairs sharing a document are excluded below -- that one paper
+    # already puts both concepts together, so the link isn't emergent. This
+    # subsumes the direct-edge case (a direct a--c edge puts both in that
+    # edge's document).
+    docs_by_label: dict[str, set[str]] = {}
     by_bridge_label: dict[str, list[tuple]] = {}
     while result.has_next():
         row = result.get_next()
         a_id, a_label, a_source_file, relation, confidence_score, edge_source_file, b_id, b_label = row
-        if a_label and b_label:
-            direct_label_pairs.add(frozenset((a_label.strip().lower(), b_label.strip().lower())))
+        if edge_source_file:
+            for lbl in (a_label, b_label):
+                if lbl:
+                    docs_by_label.setdefault(lbl.strip().lower(), set()).add(edge_source_file)
         if b_id in hub_ids or not b_label:
             continue
         by_bridge_label.setdefault(b_label.strip().lower(), []).append(row)
@@ -282,17 +287,17 @@ def surprising_connections(
             continue
         for i in range(len(rows)):
             a1_id, a1_label, a1_src, rel1, conf1, edge_src1, b1_id, b1_label = rows[i]
+            la = a1_label.strip().lower()
             for j in range(i + 1, len(rows)):
                 a2_id, a2_label, a2_src, rel2, conf2, edge_src2, b2_id, _ = rows[j]
+                lc = a2_label.strip().lower()
                 if b1_id == b2_id:
                     continue  # one real node touched twice, not two doc instances
-                if (a1_id == a2_id or a1_src == a2_src or edge_src1 == edge_src2
-                        or a1_label.strip().lower() == a2_label.strip().lower()):
+                if a1_id == a2_id or a1_src == a2_src or edge_src1 == edge_src2 or la == lc:
                     continue  # endpoints are the same entity/concept, or both
                                # hops come from the same document
-                label_pair_key = frozenset((a1_label.strip().lower(), a2_label.strip().lower()))
-                if label_pair_key in direct_label_pairs:
-                    continue
+                if docs_by_label.get(la, set()) & docs_by_label.get(lc, set()):
+                    continue  # both concepts already appear in one document
                 candidates.append((
                     (conf1 + conf2) / 2, a1_id, a2_id, b1_label, rel1, rel2,
                     edge_src1, edge_src2, frozenset((a1_id, a2_id)),
@@ -372,9 +377,15 @@ def vault_health(conn) -> VaultHealthResponse:
 
 def timeline(conn, vault, question: str) -> list[TimelineEntry]:
     """Entities matching `question` by the same term-match `search()` uses,
-    each dated to the *earliest* year among every document that mentions it
-    -- its own `source_file` plus every `RelatesTo.source_file` touching it,
-    since `Entity.source_file` alone is only last-writer. Sorted
+    one entry per (matching entity, document it appears in) so a concept
+    discussed across several papers shows up at each of their years.
+
+    `Entity.source_file` alone is only last-writer -- same-stem files
+    collapse into one Entity row -- so an entity's documents are taken as
+    its own `source_file` plus every `RelatesTo.source_file` touching it.
+    A concept that appears only as a bare mention (no relationship) in a
+    collapsed document is still lost; full per-document identity is the
+    deferred `{stem}_{entity}` id change (see TODO.md, ADR-021). Sorted
     chronologically, year-less entries last."""
     terms = _terms(question)
     if not terms or conn is None:
@@ -420,17 +431,13 @@ def timeline(conn, vault, question: str) -> list[TimelineEntry]:
                 year_by_slug[slug] = None
         return year_by_slug[slug]
 
-    def _earliest(eid: str, own: str | None) -> tuple[str | None, int | None]:
-        docs = list(dict.fromkeys(([own] if own else []) + docs_by_entity.get(eid, [])))
-        dated = [(d, _year(d)) for d in docs]
-        with_year = [(d, y) for d, y in dated if y is not None]
-        if with_year:
-            return min(with_year, key=lambda dy: dy[1])
-        return (own, None)
-
-    entries = []
+    entries: list[TimelineEntry] = []
     for eid, label, own_source in hits:
-        source_file, year = _earliest(eid, own_source)
-        entries.append(TimelineEntry(id=eid, label=label, source_file=source_file, year=year))
+        docs = list(dict.fromkeys(([own_source] if own_source else []) + docs_by_entity.get(eid, [])))
+        if not docs:
+            entries.append(TimelineEntry(id=eid, label=label, source_file=None, year=None))
+            continue
+        for d in docs:
+            entries.append(TimelineEntry(id=eid, label=label, source_file=d, year=_year(d)))
     entries.sort(key=lambda e: (e.year is None, e.year or 0))
     return entries

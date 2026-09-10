@@ -376,7 +376,9 @@ class VaultService:
             return None
         if not resolved.is_relative_to(root_resolved):
             return None
-        return candidate if candidate.exists() else None
+        # is_file(), not exists(): a directory literally named `foo.md`
+        # would otherwise be handed back and open()ed by read_source().
+        return candidate if candidate.is_file() else None
 
     def _find_md(self, slug: str) -> Path | None:
         """Find a .md file whose slug matches -- either the bare stem, or a

@@ -1573,3 +1573,16 @@ Candidate approaches, not decided:
   interpretation, take the one that exists) — rejected-leaning: heuristic,
   ambiguous when multiple exist, and adds branches to a path-traversal-
   sensitive function.
+
+### Related, same root cause: KG entity ids aren't directory-unique (2026-09-10, PR #104 review)
+
+Extraction mints entity ids as `{stem}_{entity}` (`_extraction_system_prompt`),
+so `sources/paper.md` and `archive/paper.md` both produce `paper_topic`, and
+`_upsert()`'s `MERGE (e:Entity {id})` collapses them into one row whose
+`source_file` is just the last writer. `timeline()` works around this by taking
+an entity's documents as its own `source_file` ∪ every `RelatesTo.source_file`
+touching it, but a concept that appears in a collapsed document only as a bare
+mention (no relationship) is still invisible there. The real fix is putting the
+relative path in the id (`{relpath}_{entity}`) — an extraction-prompt change plus
+a full graph rebuild — so it belongs with the escape-scheme work above, not a
+review-fix.

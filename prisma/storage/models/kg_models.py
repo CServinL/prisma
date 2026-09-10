@@ -118,15 +118,16 @@ class TopEntity(BaseModel):
     RelatesTo degree (chat-tier excluded). See
     KnowledgeGraphService.top_entities().
 
-    `source_file`/`sample_relations` are populated only by the richer
-    `god_nodes()` path (kg_queries.god_nodes); the cache-only
-    `top_entities()` priming read leaves them at their defaults, so a
-    payload without them still validates on both ends of the wire."""
+    `sample_relations`/`source_files` are populated only by the richer
+    `god_nodes()` path; the cache-only `top_entities()` priming read leaves
+    them empty, so a payload without them still validates on both ends.
+    `source_files` is the provenance of the sampled edges (each
+    `RelatesTo.source_file`), not the entity's own last-writer `source_file`."""
     id: str
     label: str
     degree: int
-    source_file: str | None = None
     sample_relations: list[str] = []
+    source_files: list[str] = []
 
 
 class ExpandNodeResponse(BaseModel):

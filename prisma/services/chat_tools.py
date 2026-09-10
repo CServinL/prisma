@@ -496,8 +496,9 @@ class ChatToolbox:
                 else f"{other} --[{edge.relation}]--> {node_id}"
             )
         raw = [resp.model_dump()]
-        srcs = [e.source_file for e in resp.entities if e.source_file]
-        srcs += [edge.source_file for edge in resp.edges if edge.source_file]
+        # Cite the edges' own source_file, not the neighbour entity's
+        # (last-writer -- see SurprisingConnection).
+        srcs = [edge.source_file for edge in resp.edges if edge.source_file]
         slugs = list(dict.fromkeys(self._vault.slug_for_relpath(s) for s in srcs))
         if not slugs:
             return ToolResult(text="", raw=raw)
@@ -514,7 +515,7 @@ class ChatToolbox:
         if not entities:
             return ToolResult(text="", raw=[])
         slugs = list(dict.fromkeys(
-            self._vault.slug_for_relpath(e.source_file) for e in entities if e.source_file
+            self._vault.slug_for_relpath(s) for e in entities for s in e.source_files
         ))
         lines = [
             f"- {e.label} ({e.degree} connections)"

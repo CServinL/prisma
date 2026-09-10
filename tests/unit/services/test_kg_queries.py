@@ -110,19 +110,26 @@ def test_compute_top_entities_excludes_chat_tier_on_either_endpoint(kg, conn):
 
 # ── god_nodes ─────────────────────────────────────────────────────────────────
 
-def test_god_nodes_adds_source_file_and_sample_relations(kg, conn):
+def test_god_nodes_adds_source_files_and_sample_relations(kg, conn):
     _add(
         kg, "notes/a.md", "note",
-        [{"id": "hub", "label": "Hub"}, {"id": "l1", "label": "L1"}, {"id": "l2", "label": "L2"}],
-        [
-            {"source": "hub", "target": "l1", "relation": "cites"},
-            {"source": "hub", "target": "l2", "relation": "builds_on"},
-        ],
+        [{"id": "hub", "label": "Hub"}, {"id": "l1", "label": "L1"}],
+        [{"source": "hub", "target": "l1", "relation": "cites"}],
     )
+    _add(
+        kg, "notes/b.md", "note",
+        [{"id": "hub", "label": "Hub"}, {"id": "l2", "label": "L2"}],
+        [{"source": "hub", "target": "l2", "relation": "builds_on"}],
+    )
+    # re-upsert the hub id from an unrelated doc with no edge -- this
+    # overwrites Entity.source_file but asserts none of hub's relations
+    _add(kg, "notes/latewriter.md", "note", [{"id": "hub", "label": "Hub"}])
+
     top = kg_queries.god_nodes(conn)
     hub = next(e for e in top if e.id == "hub")
     assert hub.degree == 2
-    assert hub.source_file == "notes/a.md"
+    # the documents behind the edges, not the entity's last-writer source_file
+    assert set(hub.source_files) == {"notes/a.md", "notes/b.md"}
     assert set(hub.sample_relations) == {"cites", "builds_on"}
 
 
@@ -437,6 +444,24 @@ def test_timeline_resolves_year_by_directory_not_just_filename(kg, conn, vault):
     years = {e.id: e.year for e in entries}
     assert years["old_topic"] == 1990
     assert years["new_topic"] == 2020
+
+
+def test_timeline_dates_an_entity_to_its_earliest_document(kg, conn, vault):
+    # The entity row's own source_file is a 2020 paper, but an edge touching
+    # it was asserted by a 1990 paper -- the concept was discussed in 1990.
+    _write_source(vault, "recent", 2020)
+    _write_source(vault, "seminal", 1990)
+    # seminal first, recent last -> Entity.source_file ends up "recent" (2020);
+    # only walking the edge back to "seminal" gives the real 1990.
+    _add(kg, "sources/seminal.md", "source",
+         [{"id": "t", "label": "Transformers"}, {"id": "other", "label": "Other"}],
+         [{"source": "t", "target": "other", "relation": "cites"}])
+    _add(kg, "sources/recent.md", "source", [{"id": "t", "label": "Transformers"}])
+
+    entry = kg_queries.timeline(conn, vault, "transformers")[0]
+
+    assert entry.year == 1990
+    assert entry.source_file == "sources/seminal.md"
 
 
 def test_timeline_empty_for_no_terms(conn, vault):

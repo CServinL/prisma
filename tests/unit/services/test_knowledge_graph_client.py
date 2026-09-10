@@ -213,7 +213,7 @@ def test_top_entities_passes_limit_and_returns_results():
                return_value=_mock_response([{"id": "x", "label": "X", "degree": 3}])) as mock_get:
         result = client.top_entities(limit=10)
     assert [r.model_dump() for r in result] == [
-        {"id": "x", "label": "X", "degree": 3, "source_file": None, "sample_relations": []}
+        {"id": "x", "label": "X", "degree": 3, "sample_relations": [], "source_files": []}
     ]
     assert mock_get.call_args.kwargs["params"] == {"limit": 10}
 
@@ -267,11 +267,11 @@ def test_expand_node_empty_shape_when_unreachable():
 
 def test_god_nodes_passes_limit_and_returns_rich_entities():
     client = KnowledgeGraphClient()
-    payload = [{"id": "h", "label": "H", "degree": 5, "source_file": "sources/a.md", "sample_relations": ["cites"]}]
+    payload = [{"id": "h", "label": "H", "degree": 5, "source_files": ["sources/a.md"], "sample_relations": ["cites"]}]
     with patch("prisma.services.knowledge_graph_client.requests.get",
                return_value=_mock_response(payload)) as mock_get:
         result = client.god_nodes(limit=20)
-    assert result[0].source_file == "sources/a.md"
+    assert result[0].source_files == ["sources/a.md"]
     assert result[0].sample_relations == ["cites"]
     assert mock_get.call_args.kwargs["params"] == {"limit": 20}
 

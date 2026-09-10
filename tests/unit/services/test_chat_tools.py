@@ -512,8 +512,9 @@ def test_toolbox_expand_node_lists_neighbours_with_a_sources_header(vault):
     kg = MagicMock()
     kg.expand_node.return_value = ExpandNodeResponse(
         entities=[
-            EntityInfo(id="n1", label="Neighbour One", source_file="sources/a.md"),
-            EntityInfo(id="n2", label="Neighbour Two", source_file="notes/b.md"),
+            # neighbour entity source_file is last-writer -- must NOT be cited
+            EntityInfo(id="n1", label="Neighbour One", source_file="wrong/lastwriter.md"),
+            EntityInfo(id="n2", label="Neighbour Two", source_file="wrong/lastwriter.md"),
         ],
         edges=[
             EdgeInfo(source="center", relation="cites", target="n1", source_file="sources/a.md"),
@@ -528,6 +529,7 @@ def test_toolbox_expand_node_lists_neighbours_with_a_sources_header(vault):
     assert "center --[cites]--> Neighbour One (n1)" in result.text
     assert "Neighbour Two (n2) --[extends]--> center" in result.text
     assert "Sources: sources--a, notes--b" in result.text
+    assert "lastwriter" not in result.text
     assert 'path="knowledge-graph"' in result.text
     assert result.raw[0]["entities"][0]["id"] == "n1"
 
@@ -559,14 +561,14 @@ def test_toolbox_expand_node_empty_text_when_no_neighbour_has_a_source(vault):
 
 
 def test_toolbox_god_nodes_lists_hubs_with_sources_header(vault):
-    # Same filename in two different directories -- a bare `Path(...).stem`
-    # would collapse both to "paper", citing whichever one a later lookup
-    # happened to resolve first; the compound slug keeps them distinct.
+    # Same filename in two directories -- the compound slug keeps them
+    # distinct where a bare stem would collapse both to "paper".
     kg = MagicMock()
     kg.god_nodes.return_value = [
-        TopEntity(id="h1", label="Hub One", degree=7, source_file="sources/paper.md",
-                  sample_relations=["cites", "builds_on"]),
-        TopEntity(id="h2", label="Hub Two", degree=3, source_file="notes/paper.md"),
+        TopEntity(id="h1", label="Hub One", degree=7,
+                  sample_relations=["cites", "builds_on"],
+                  source_files=["sources/paper.md", "notes/paper.md"]),
+        TopEntity(id="h2", label="Hub Two", degree=3, source_files=["notes/paper.md"]),
     ]
     toolbox = ChatToolbox(MagicMock(), kg, vault)
 

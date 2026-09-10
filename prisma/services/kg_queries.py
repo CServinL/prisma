@@ -138,39 +138,42 @@ def compute_top_entities(conn, limit: int = DEFAULT_TOP_ENTITIES) -> list[TopEnt
 # ── Phase A additive capabilities ─────────────────────────────────────────────
 
 def god_nodes(conn, limit: int = DEFAULT_TOP_ENTITIES) -> list[TopEntity]:
-    """`compute_top_entities` plus, per top entity, its `source_file` and up
-    to 3 sample `relation` strings (TODO.md's sketch:
-    `[{entity, connection_count, sample_relations}]`). Aggregated in Python
-    off a flat row scan rather than trusting Kùzu list-aggregation
-    portability, so behaviour is deterministic across Kùzu versions."""
+    """`compute_top_entities` plus, per top entity, up to 3 sample `relation`
+    strings and the distinct documents that asserted its edges. `source_files`
+    is the edges' provenance, not `Entity.source_file` (last-writer -- see
+    `SurprisingConnection`). Aggregated in Python off a flat scan rather than
+    trusting Kùzu list-aggregation portability."""
     if conn is None:
         return []
     try:
         result = conn.execute(
             "MATCH (e:Entity)-[r:RelatesTo]-(o:Entity) "
             "WHERE e.trust_tier <> 'chat' AND o.trust_tier <> 'chat' "
-            "RETURN e.id, e.label, e.source_file, r.relation"
+            "RETURN e.id, e.label, r.relation, r.source_file"
         )
     except Exception as exc:
         _log.warning("god_nodes computation failed: %s", exc)
         return []
     degree: dict[str, int] = {}
     label: dict[str, str] = {}
-    source_file: dict[str, str | None] = {}
     relations: dict[str, list[str]] = {}
+    sources: dict[str, list[str]] = {}
     while result.has_next():
-        eid, elabel, esrc, relation = result.get_next()
+        eid, elabel, relation, edge_src = result.get_next()
         degree[eid] = degree.get(eid, 0) + 1
         label[eid] = elabel
-        source_file[eid] = esrc
         seen = relations.setdefault(eid, [])
         if relation and relation not in seen:
             seen.append(relation)
+        srcs = sources.setdefault(eid, [])
+        if edge_src and edge_src not in srcs:
+            srcs.append(edge_src)
     ranked = sorted(degree, key=lambda e: -degree[e])[:limit]
     return [
         TopEntity(
             id=eid, label=label[eid], degree=degree[eid],
-            source_file=source_file.get(eid), sample_relations=relations.get(eid, [])[:3],
+            sample_relations=relations.get(eid, [])[:3],
+            source_files=sources.get(eid, [])[:5],
         )
         for eid in ranked
     ]
@@ -369,8 +372,10 @@ def vault_health(conn) -> VaultHealthResponse:
 
 def timeline(conn, vault, question: str) -> list[TimelineEntry]:
     """Entities matching `question` by the same term-match `search()` uses,
-    each joined `source_file` -> Source.year via `VaultService`, sorted
-    chronologically (year-less entries last)."""
+    each dated to the *earliest* year among every document that mentions it
+    -- its own `source_file` plus every `RelatesTo.source_file` touching it,
+    since `Entity.source_file` alone is only last-writer. Sorted
+    chronologically, year-less entries last."""
     terms = _terms(question)
     if not terms or conn is None:
         return []
@@ -388,11 +393,22 @@ def timeline(conn, vault, question: str) -> list[TimelineEntry]:
         if any(t in haystack for t in terms):
             hits.append((eid, label, source_file))
 
+    docs_by_entity: dict[str, list[str]] = {}
+    try:
+        edge_result = conn.execute(
+            "MATCH (e:Entity)-[r:RelatesTo]-(:Entity) WHERE e.trust_tier <> 'chat' "
+            "RETURN e.id, r.source_file"
+        )
+        while edge_result.has_next():
+            eid, edge_src = edge_result.get_next()
+            if edge_src:
+                docs_by_entity.setdefault(eid, []).append(edge_src)
+    except Exception as exc:
+        _log.warning("timeline edge scan failed: %s", exc)
+
     year_by_slug: dict[str, int | None] = {}
 
-    def _year(source_file: str | None) -> int | None:
-        if not source_file:
-            return None
+    def _year(source_file: str) -> int | None:
         slug = vault.slug_for_relpath(source_file)
         if slug not in year_by_slug:
             try:
@@ -404,9 +420,17 @@ def timeline(conn, vault, question: str) -> list[TimelineEntry]:
                 year_by_slug[slug] = None
         return year_by_slug[slug]
 
-    entries = [
-        TimelineEntry(id=eid, label=label, source_file=source_file, year=_year(source_file))
-        for eid, label, source_file in hits
-    ]
+    def _earliest(eid: str, own: str | None) -> tuple[str | None, int | None]:
+        docs = list(dict.fromkeys(([own] if own else []) + docs_by_entity.get(eid, [])))
+        dated = [(d, _year(d)) for d in docs]
+        with_year = [(d, y) for d, y in dated if y is not None]
+        if with_year:
+            return min(with_year, key=lambda dy: dy[1])
+        return (own, None)
+
+    entries = []
+    for eid, label, own_source in hits:
+        source_file, year = _earliest(eid, own_source)
+        entries.append(TimelineEntry(id=eid, label=label, source_file=source_file, year=year))
     entries.sort(key=lambda e: (e.year is None, e.year or 0))
     return entries

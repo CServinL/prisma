@@ -7,6 +7,7 @@ Read before writing code:
 - `docs/wiki/architecture.md` — package layout, service threads, client matrix
 - `docs/software-engineering-quality-aspects.md` — rubric for modularization/refactoring reviews (also loaded globally, see `~/.claude/CLAUDE.md`)
 - `docs/kg-retrieval-review-checklist.md` — before touching KG retrieval (`kg_queries.py`), `/graph/*` routes, vault-file reads, or chat grounding tools
+- `docs/chat-claims-review-checklist.md` — before touching `_RawFootnote`/`_resolve_rebuts` (`chat_agent.py`), `system_prompt_footnote_section()` (`chat_tools.py`), or claim rendering in `+page.svelte`
 
 ## Key conventions
 

@@ -64,12 +64,12 @@ around whenever a turn's position shifts.
 |---|---|---|---|
 | `TurnNode` | `id`, `role`, `content: RichContent`, `timestamp`, `model`, plus the branch lists below, plus `media`, `attachments`, `attached_slugs` | the pre-ADR-019 `ChatMessage` — `tool_calls`/`footnotes`/`alternates` moved from flat fields to typed branches | Shipped |
 | `ToolCallNode` | `id`, `tool`, `args`, `result`, `status` | the pre-ADR-019 `ToolCallRecord` — now with a persisted `result`, which the old flat summary discarded | Shipped |
-| `ThinkingNode` | `id`, `thought`, `thought_number`, `revises`, `branches_from` | new — see "Thinking blocks" below. Schema only, see [Status](#status) | Shipped (schema only) |
+| `ThinkingNode` | `id`, `thought`, `thought_number`, `revises`, `branches_from` | new — see "Thinking blocks" below. `revises`/`branches_from` schema only, see [Status](#status) | Shipped |
 | `CitedClaimNode` | `id`, `index`, `claim_text`, `sources`, `relation` (`citation`\|`attribution`\|`relational`), `faithfulness_checked`, `qualifier`, `warrant`, `rebuts` | the three sourced relations of the pre-ADR-019 [Footnote](claim.md) — see below | Shipped |
 | `InferenceNode` | `id`, `index`, `claim_text`, `qualifier`, `warrant`, `rebuts` | the pre-ADR-019 `ai-inference` relation — see below | Shipped |
 | `WarrantNode` | `id`, `text`, `backing` | new — see [Argumentation structure](#argumentation-structure-toulmin) | Shipped |
-| `InlineMediaNode` | `id`, `kind` (`svg`\|`latex`\|`drawio`), `value`, `caption` | new — see [Media nodes](#media-nodes) and [Attachments](#attachments-human-turn-input) (both directions) | v3, on branch (unmerged) |
-| `AssetMediaNode` | `id`, `kind` (`jpg`\|`pdf`), `asset_path`, `caption` | new — split from `InlineMediaNode`, not a shared shape (see [Media nodes](#media-nodes)) | v3, on branch (unmerged) |
+| `InlineMediaNode` | `id`, `kind` (`svg`\|`latex`\|`drawio`), `value`, `caption` | new — see [Media nodes](#media-nodes) and [Attachments](#attachments-human-turn-input) (both directions) | Shipped (`ATTACHES`/human-input direction only — see [Media nodes](#media-nodes) for the still-missing `PRODUCES` generator) |
+| `AssetMediaNode` | `id`, `kind` (`jpg`\|`pdf`), `asset_path`, `caption` | new — split from `InlineMediaNode`, not a shared shape (see [Media nodes](#media-nodes)) | Shipped (same caveat as `InlineMediaNode`) |
 
 `MediaNode` (used elsewhere in this doc) is `Annotated[InlineMediaNode | AssetMediaNode,
 Field(discriminator="kind")]` — a type alias for the discriminated union, not its own class, same
@@ -100,10 +100,10 @@ decision layered on top of one uniform shape. See [Claim](claim.md) for the full
 | `CITES` | `CitedClaimNode → Note \| Source \| Chat` | This claim's sourcing (into the knowledge graph's vault nodes, see above) — **not** from `TurnNode` directly, since an `InferenceNode` structurally has nothing to cite | the pre-ADR-019 `Footnote.sources` | Shipped |
 | `PINNED_IN` | `TurnNode → Note` (the Excerpt) | This turn is source material for the Excerpt | `pinned_turns`/`excerpt_slug` (unchanged in shape) | Shipped |
 | `RECALLS` | `TurnNode → any node` | This turn's `RECALL` pulled in this node beyond the default rolling history — persisted as `TurnNode.recalls: list[RecallRef]` (`{node_id, node_kind, chat_slug}`), a pointer only, never a duplicate of the recalled content | new, see [`RECALL`'s resolved behavior](#recalls-resolved-behavior) below | Shipped |
-| `WARRANTS` | `CitedClaimNode \| InferenceNode → WarrantNode` | This claim's warrant — why its grounds support it | — new, see [Argumentation structure](#argumentation-structure-toulmin) | v3, on branch (unmerged) |
-| `REBUTS` | `CitedClaimNode \| InferenceNode → CitedClaimNode \| InferenceNode` | This claim states an exception to, or contradicts, that one | — new, see [Argumentation structure](#argumentation-structure-toulmin) | v3, on branch (unmerged) |
-| `PRODUCES` | `TurnNode → MediaNode` | This turn generated this media artifact | — new, see [Media nodes](#media-nodes) | v3, on branch (unmerged) |
-| `ATTACHES` | `TurnNode → MediaNode` | This turn's input included this media artifact | — new, see [Attachments](#attachments-human-turn-input) | v3, on branch (unmerged) |
+| `WARRANTS` | `CitedClaimNode \| InferenceNode → WarrantNode` | This claim's warrant — why its grounds support it | — new, see [Argumentation structure](#argumentation-structure-toulmin) | Shipped |
+| `REBUTS` | `CitedClaimNode \| InferenceNode → CitedClaimNode \| InferenceNode` | This claim states an exception to, or contradicts, that one | — new, see [Argumentation structure](#argumentation-structure-toulmin) | Shipped |
+| `PRODUCES` | `TurnNode → MediaNode` | This turn generated this media artifact | — new, see [Media nodes](#media-nodes) | Shipped (schema only — no generator produces `media` yet) |
+| `ATTACHES` | `TurnNode → MediaNode` | This turn's input included this media artifact | — new, see [Attachments](#attachments-human-turn-input) | Shipped |
 | `REFERENCES` | `TurnNode → Note \| Source \| Chat` | This turn's input pointed at this existing vault node | — new, see [Attachments](#attachments-human-turn-input) | Field shipped (`attached_slugs`); **not** a real graph edge, deliberately — see Attachments |
 
 The key design call: `ToolCallNode`, `ThinkingNode`, `CitedClaimNode`, `InferenceNode`,
@@ -218,7 +218,8 @@ for now.
 
 ## Media nodes
 
-**Implemented on branch `chat-schema-v3-toulmin-media-attachments` (not yet merged).** Distinct
+**Shipped (schema + the human-input/`ATTACHES` direction) — no generator exists for the
+assistant-output/`PRODUCES` direction (`TurnNode.media`), for any of the four kinds.** Distinct
 from `RichContent.format` (`prisma/schema_gov/content.py`), which already has dormant `svg`/
 `latex` support — but that tags the format of an *entire turn's content*. `MediaNode` is for a
 normal markdown turn that also *produces* an attached artifact (a diagram, a figure, a formula) —
@@ -279,7 +280,7 @@ same way.
 
 ## Attachments (human turn input)
 
-**Implemented on branch `chat-schema-v3-toulmin-media-attachments` (not yet merged).**
+**Shipped**, including the upload/promote endpoints below.
 `MediaNode`/`PRODUCES` above is content the *assistant* generates. This is the input-side mirror:
 a human turn can bring in an image, a diagram, a LaTeX snippet, or a reference to an existing
 vault node, extending plain text with attached data rather than making the model re-derive or
@@ -507,8 +508,8 @@ inside `RECALL` itself.
 ## Status
 
 Shipped 2026-08-05 (ADR-019 v2, `CHAT_SCHEMA_VERSION = 2`, with a v1→v2 migration for chats saved
-before this cutover): the full node/edge taxonomy above (excluding the v3 rows, marked "v3, on
-branch (unmerged)" — see further down), `SessionOrchestrator` (default assembly + `graph_for()`),
+before this cutover): the v2 node/edge taxonomy above (the v3 rows — Toulmin, media, attachments —
+shipped later, see the dated entries below), `SessionOrchestrator` (default assembly + `graph_for()`),
 and `RECALL` (`chat_tools.py`'s `TOOLS`
 registry) — all backed by tests, including a real (not mocked) short `max_wait` exercise of
 `resource_lock.lease()`'s degrade path. The frontend (`+page.svelte`) renders `claims`/`thoughts`/

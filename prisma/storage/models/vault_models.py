@@ -168,7 +168,8 @@ class WarrantNode(BaseModel):
     argument. `backing` is the Toulmin Backing: support for the warrant
     itself, structurally identical to `sources` (a list of vault-node
     references), so it's a field here rather than its own node type.
-    Schema support only -- nothing populates this yet. See
+    Populated from the model's FOOTNOTES_JSON self-report (chat_agent.py's
+    _RawFootnote/_claim_from_raw) as of 2026-09-10. See
     docs/concepts/chat-session-graph.md's Argumentation structure section."""
     id: str = Field(default_factory=_new_id)
     text: str
@@ -198,8 +199,9 @@ class CitedClaimNode(BaseModel):
     # Whether an automated/manual check confirmed the claim accurately
     # represents `sources`. None = not (yet) checked.
     faithfulness_checked: bool | None = None
-    # Toulmin model extension (schema support only, nothing populates these
-    # yet -- see docs/concepts/chat-session-graph.md):
+    # Toulmin model extension -- populated from the model's FOOTNOTES_JSON
+    # self-report (chat_agent.py's _RawFootnote/_claim_from_raw) as of
+    # 2026-09-10; see docs/concepts/chat-session-graph.md:
     qualifier: Qualifier | None = None
     warrant: WarrantNode | None = None  # containment, like alternates -- at most one
     rebuts: str | None = None  # another ClaimNode's id this one contradicts/excepts
@@ -334,7 +336,11 @@ class TurnNode(BaseModel):
     # answers to the same prompt stay comparable, not just the current one.
     alternates: list["TurnNode"] = Field(default_factory=list)
     recalls: list[RecallRef] = Field(default_factory=list)
-    # v3 additions (schema support only, see docs/concepts/chat-session-graph.md):
+    # v3 additions, see docs/concepts/chat-session-graph.md. attachments/
+    # attached_slugs are populated (app.py wires ChatRequest.attachments/
+    # attached_slugs straight through); media (the assistant-output,
+    # PRODUCES side) is still schema support only -- no generator exists
+    # for any MediaNode kind.
     media: list[MediaNode] = Field(default_factory=list)         # assistant output, PRODUCES
     attachments: list[MediaNode] = Field(default_factory=list)   # human input, ATTACHES
     attached_slugs: list[str] = Field(default_factory=list)      # human input, REFERENCES

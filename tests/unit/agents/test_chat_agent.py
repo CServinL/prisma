@@ -856,6 +856,23 @@ def test_extract_claims_drops_claim_that_rebuts_its_own_index():
     assert claims[0].index == 2
 
 
+def test_extract_claims_drops_a_claim_that_rebuts_an_already_dropped_claim():
+    # Claim 1's own rebuts index (99) doesn't exist, so claim 1 is dropped.
+    # Claim 2 rebuts claim 1 -- resolved successfully at parse time (claim 1
+    # was still a valid same-turn index then), but claim 1 no longer
+    # exists, so claim 2 must be dropped too, not left pointing at nothing
+    # (github.com/CServinL/prisma/pull/105, Copilot review).
+    reply = (
+        'Two claims here.\n'
+        'FOOTNOTES_JSON: [{"index": 1, "relation": "citation", "sources": ["a"], "rebuts": 99}, '
+        '{"index": 2, "relation": "citation", "sources": ["b"], "rebuts": 1}]'
+    )
+
+    _, claims = _extract_claims(reply)
+
+    assert claims == []
+
+
 def test_extract_claims_inference_node_also_carries_a_qualifier():
     reply = (
         'This is my own reasoning[^1].\n'
@@ -1219,6 +1236,30 @@ def test_respond_keeps_claim_when_warrant_backing_resolves():
 
     assert len(reply.claims) == 1
     assert reply.claims[0].warrant.backing == ["kg-decision"]
+
+
+def test_respond_drops_a_claim_rebutting_another_dropped_for_bad_sources():
+    # Claim 1's own rebuts index is valid at parse time (resolved to claim
+    # 2's id by _resolve_rebuts, before either claim's sources are
+    # checked). Claim 2's sources don't resolve, so it's dropped by
+    # respond()'s later filter -- claim 1 must cascade-drop too, not
+    # survive pointing at a claim id no longer in the turn
+    # (github.com/CServinL/prisma/pull/105, Copilot review).
+    llm = MagicMock()
+    llm.model = "test-model"
+    llm.context_window = 1_000_000
+    llm.complete.side_effect = [
+        'Generally true[^1], except here[^2].\n'
+        'FOOTNOTES_JSON: [{"index": 1, "relation": "citation", "sources": ["a"], "rebuts": 2}, '
+        '{"index": 2, "relation": "citation", "sources": ["made-up-slug"]}]',
+    ]
+    toolbox = MagicMock()
+    toolbox.slug_resolves.side_effect = lambda s: s != "made-up-slug"
+    agent = _agent(llm=llm, toolbox=toolbox)
+
+    reply = agent.respond(history=[], user_text="does X always hold?")
+
+    assert reply.claims == []
 
 
 def test_respond_inference_claims_never_check_source_resolution():

@@ -236,13 +236,21 @@ def _resolve_rebuts(built: list[tuple[ClaimNode, int | None]]) -> list[ClaimNode
     index, or at the claim's own index, is a self-report inconsistency --
     the whole claim is dropped (same "an unsatisfied part of the block
     rejects the entry" rule sources/relation already enforce), not just the
-    `rebuts` field cleared."""
+    `rebuts` field cleared.
+
+    `by_index` is built once from *every* parsed entry, including ones this
+    loop is about to drop -- so a claim can still resolve its `rebuts` to a
+    target that turns out to be invalid itself (target's own `rebuts` index
+    doesn't exist) and gets dropped in the same pass. `_prune_dangling_
+    rebuts` cleans that up (and the same cascade recurs once more in
+    ChatAgent.respond(), after sources/warrant.backing resolution drops
+    claims this function has no visibility into)."""
     by_index = {c.index: c for c, _ in built}
-    claims: list[ClaimNode] = []
+    resolved: list[ClaimNode] = []
     dropped = 0
     for claim, rebuts_idx in built:
         if rebuts_idx is None:
-            claims.append(claim)
+            resolved.append(claim)
             continue
         target = by_index.get(rebuts_idx)
         if target is None or rebuts_idx == claim.index:
@@ -252,10 +260,35 @@ def _resolve_rebuts(built: list[tuple[ClaimNode, int | None]]) -> list[ClaimNode
         # immutable-update convention _verify_claim already uses below.
         # by_index keeps referencing the pre-copy object, but `.id` is
         # identical either way, so later lookups are unaffected.
-        claims.append(claim.model_copy(update={"rebuts": target.id}))
+        resolved.append(claim.model_copy(update={"rebuts": target.id}))
     if dropped:
         _log.warning("chat claims: dropped %d claim(s) with an invalid rebuts index", dropped)
-    return claims
+    survivors, cascaded = _prune_dangling_rebuts(resolved)
+    if cascaded:
+        _log.warning("chat claims: dropped %d claim(s) rebutting an already-dropped claim", cascaded)
+    return survivors
+
+
+def _prune_dangling_rebuts(claims: list[ClaimNode]) -> tuple[list[ClaimNode], int]:
+    """A claim whose `rebuts` id doesn't match any currently-surviving
+    claim is dropped -- and dropping it can dangle another claim's `rebuts`
+    in turn (a same-turn rebuttal chain), so repeat until a full pass
+    removes nothing. Two independent callers each drop claims for unrelated
+    reasons that can leave a *different* claim's already-resolved `rebuts`
+    id pointing at nothing: _resolve_rebuts (an invalid same-turn index)
+    and ChatAgent.respond() (an unresolvable sources/warrant.backing slug).
+    Without this, session_graph.py's `g.add_edge(claim.id, claim.rebuts,
+    kind="REBUTS")` would silently create a phantom, data-less node for the
+    dropped target -- NetworkX auto-creates any edge endpoint that isn't
+    already a node."""
+    total_dropped = 0
+    while True:
+        ids = {c.id for c in claims}
+        survivors = [c for c in claims if c.rebuts is None or c.rebuts in ids]
+        total_dropped += len(claims) - len(survivors)
+        if len(survivors) == len(claims):
+            return survivors, total_dropped
+        claims = survivors
 
 
 # Tools that put citable content in front of the model. Derived from
@@ -554,6 +587,17 @@ class ChatAgent:
                     _log.warning(
                         "chat claims: dropped %d claim(s) with an unresolvable warrant.backing slug",
                         dropped_warrant,
+                    )
+                # A claim dropped just above for its own bad sources/backing
+                # can still be another surviving claim's rebuts target --
+                # _resolve_rebuts already resolved same-turn rebuts before
+                # this filter ran, with no visibility into it. Same cascade
+                # as _resolve_rebuts', for the same reason.
+                resolved_claims, dropped_cascaded = _prune_dangling_rebuts(resolved_claims)
+                if dropped_cascaded:
+                    _log.warning(
+                        "chat claims: dropped %d claim(s) rebutting an already-dropped claim",
+                        dropped_cascaded,
                     )
                 claims = [self._verify_claim(c) for c in resolved_claims]
                 return TurnNode(

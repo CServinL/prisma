@@ -190,6 +190,17 @@ to the claim's own index, drops the whole claim. `warrant.backing` is validated 
 slug also drops the claim. Cross-turn `rebuts` is out of scope: the model's self-report has no way
 to reference a claim from an earlier turn.
 
+Dropping a claim can dangle *another* claim's already-resolved `rebuts` — claim B can resolve its
+`rebuts` to claim A's real `id` while A is still a valid same-turn index, only for A to then get
+dropped itself (its own invalid `rebuts`, or later, an unresolvable `sources`/`warrant.backing`
+slug B has no bearing on). Left alone, B would survive with a `rebuts` id pointing at a claim no
+longer in the turn — `session_graph.py`'s `REBUTS` edge would silently create a phantom, data-less
+node for it (NetworkX auto-creates any edge endpoint that isn't already a node). `_prune_dangling_
+rebuts` fixed-point-prunes this: any claim whose `rebuts` id doesn't match a currently-surviving
+claim is dropped, repeated until a full pass removes nothing (handling a rebuttal chain, not just
+one hop). Called from both `_resolve_rebuts` and the end of `ChatAgent.respond()`'s filter, since
+each drops claims for reasons the other has no visibility into.
+
 **Open question, not yet resolved:** can `WarrantNode.backing` / `CitedClaimNode.sources` include
 a `MediaNode.id` (e.g. "this claim is backed by this diagram"), not just vault slugs? `sources` is
 currently documented as vault-wide (Note/Source/Chat), while a `MediaNode` is session-local —
@@ -634,6 +645,11 @@ with nothing populating them):
 - `_resolve_rebuts` translates the model's same-turn `[^N]` index (the only handle its self-report
   has) into the target claim's real `id`; an index with no matching claim, or equal to the claim's
   own, drops the whole claim. Cross-turn `rebuts` stays out of scope.
+- `_prune_dangling_rebuts` fixed-point-drops a claim whose `rebuts` target was itself dropped
+  (its own bad `rebuts`, or later an unresolvable `sources`/`warrant.backing` slug) — added after
+  a PR #105 Copilot review caught the gap: without it, a surviving claim could keep a `rebuts` id
+  pointing at nothing, and `session_graph.py`'s `REBUTS` edge would silently create a phantom node
+  for it.
 - `ChatAgent._warrant_resolves` validates `warrant.backing` exactly like `_sources_resolve`
   validates `sources` — an unresolvable slug drops the claim.
 - `system_prompt_footnote_section()` declares the three keys and their vocab as an optional

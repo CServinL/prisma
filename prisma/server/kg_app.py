@@ -19,7 +19,7 @@ from fastapi import FastAPI, Query
 
 from prisma.server import log_setup as _log_setup
 from prisma.services import kg_queries
-from prisma.services.knowledge_graph_service import KnowledgeGraphService
+from prisma.services.knowledge_graph_service import TOP_ENTITIES_CACHE_SIZE, KnowledgeGraphService
 from prisma.services.vault import VaultService
 from prisma.storage.models.kg_models import (
     AuthorSummary,
@@ -187,7 +187,7 @@ def query(q: str = Query(..., max_length=512), budget: int = Query(1500, ge=1, l
 
 
 @app.get("/top_entities", response_model=list[TopEntity])
-def top_entities(limit: int = Query(kg_queries.DEFAULT_TOP_ENTITIES, ge=1, le=kg_queries.DEFAULT_TOP_ENTITIES)):
+def top_entities(limit: int = Query(TOP_ENTITIES_CACHE_SIZE, ge=1, le=TOP_ENTITIES_CACHE_SIZE)):
     """Cached ranking only -- no live Cypher call on this request path, see
     KnowledgeGraphService.top_entities()."""
     return _kg.top_entities(limit=limit)

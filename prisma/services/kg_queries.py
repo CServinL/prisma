@@ -39,11 +39,12 @@ _log = logging.getLogger("prisma.knowledge_graph")
 DEFAULT_TOP_ENTITIES = 15  # also the god_nodes / surprising_connections request default
 DEFAULT_AUTHORS = 100
 
-# timeline() runs its per-document frontmatter reads while holding the
-# service's sole Kùzu lock, so an unbounded broad query would stall
-# indexing. DEFAULT is what a caller gets without asking; MAX bounds the
-# public route (graph_routes.py); _DOCS_PER_ENTITY caps the read fan-out
-# from a single hub entity.
+# timeline_scan() runs its two entity/edge scans under the service's sole
+# Kùzu lock (KnowledgeGraphService.timeline() releases it before
+# timeline_build()'s frontmatter reads), so bounding the hit count also
+# bounds the follow-on per-document I/O. DEFAULT is what a caller gets
+# without asking; MAX bounds the public route (graph_routes.py);
+# _DOCS_PER_ENTITY caps the read fan-out from a single hub entity.
 DEFAULT_TIMELINE = 50
 TIMELINE_MAX = 200
 _TIMELINE_DOCS_PER_ENTITY = 10

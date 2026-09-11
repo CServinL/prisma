@@ -114,7 +114,7 @@
     faithfulness_checked: boolean | null;
     qualifier: Qualifier | null;
     warrant: WarrantOut | null;
-    rebuts: string | null;  // another claim's `id` in this same turn, not its index
+    rebuts: string | null;  // another claim's `id` anywhere in this chat (schema-unrestricted; cross-turn is a valid target -- see rebutsTargetById), not its index
   }
 
   interface InferenceClaimOut {
@@ -124,7 +124,7 @@
     claim_text: string;
     qualifier: Qualifier | null;
     warrant: WarrantOut | null;
-    rebuts: string | null;  // another claim's `id` in this same turn, not its index
+    rebuts: string | null;  // another claim's `id` anywhere in this chat (schema-unrestricted; cross-turn is a valid target -- see rebutsTargetById), not its index
   }
 
   type ClaimOut = CitedClaimOut | InferenceClaimOut;
@@ -363,6 +363,19 @@
   function isWholeTurnInference(content: string, claims: ClaimOut[]): boolean {
     if (claims.length !== 1 || claims[0].kind !== "inference") return false;
     return content.replace(TRAILING_FOOTNOTE_MARKER_RE, "").trim() === claims[0].claim_text.trim();
+  }
+
+  // A rebuts target's own claim-list anchor doesn't exist when its turn is
+  // wholeTurnInference (the References block is suppressed for those --
+  // isWholeTurnInference above) -- fall back to the turn container itself
+  // rather than a dead click, same "jump to the closest existing anchor"
+  // rationale, checked at click time instead of duplicating the
+  // isWholeTurnInference computation into rebutsTargetById.
+  function scrollToClaimOrTurn(turn: number, index: number) {
+    const el =
+      document.getElementById(`chat-turn-${turn}-claim-${index}`) ??
+      document.getElementById(`chat-turn-${turn}`);
+    el?.scrollIntoView({ behavior: "smooth", block: "nearest" });
   }
 
   // Collapsed-by-default toggle line summarizing a turn's process
@@ -2533,7 +2546,7 @@
                                 <button
                                   class="claim-rebuts"
                                   title="Rebuts claim #{rebutsTarget.index} — click to jump to it"
-                                  onclick={() => document.getElementById(`chat-turn-${rebutsTarget.turn}-claim-${rebutsTarget.index}`)?.scrollIntoView({ behavior: "smooth", block: "nearest" })}
+                                  onclick={() => scrollToClaimOrTurn(rebutsTarget.turn, rebutsTarget.index)}
                                 >⤺ rebuts</button>
                               {/if}
                             {/if}

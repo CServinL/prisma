@@ -162,14 +162,18 @@ class Qualifier(str, Enum):
 
 
 class WarrantNode(BaseModel):
-    """Toulmin model's Warrant -- the reasoning bridge explaining *why* a
-    claim's grounds (`sources`) support that specific claim, often left
+    """Toulmin model's Warrant -- the reasoning bridge explaining *why* the
+    evidence behind a claim supports that specific claim, often left
     implicit in informal writing but required explicit in formal academic
-    argument. `backing` is the Toulmin Backing: support for the warrant
+    argument. For a `CitedClaimNode`, that's why its grounds (`sources`)
+    support it; `InferenceNode` (no `sources`) can carry a warrant too --
+    there the evidence is the model's own reasoning process, not a
+    document. `backing` is the Toulmin Backing: support for the warrant
     itself, structurally identical to `sources` (a list of vault-node
-    references), so it's a field here rather than its own node type.
-    Populated from the model's FOOTNOTES_JSON self-report (chat_agent.py's
-    _RawFootnote/_claim_from_raw) as of 2026-09-10. See
+    references, empty when there's nothing to cite), so it's a field here
+    rather than its own node type. Populated from the model's
+    FOOTNOTES_JSON self-report (chat_agent.py's _RawFootnote/
+    _claim_from_raw) as of 2026-09-10. See
     docs/concepts/chat-session-graph.md's Argumentation structure section."""
     id: str = Field(default_factory=_new_id)
     text: str

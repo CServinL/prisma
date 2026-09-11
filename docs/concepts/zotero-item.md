@@ -70,7 +70,7 @@ produce a `.md` body, and saves a `Source` with `zotero_key = item.key`.
 
 ## Relevant axioms
 
-> Bookmark-first. See [Axiom 12](../ontologia.md).
-> Relevance is per-stream. See [Axiom 13](../ontologia.md).
-> Library search is a first-class source. See [Axiom 14](../ontologia.md).
-> Every Source has a `zotero_key`. See [Axiom 11](../ontologia.md).
+> Bookmark-first. See [Axiom 12](../ontology.md).
+> Relevance is per-stream. See [Axiom 13](../ontology.md).
+> Library search is a first-class source. See [Axiom 14](../ontology.md).
+> Every Source has a `zotero_key`. See [Axiom 11](../ontology.md).

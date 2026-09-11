@@ -1200,7 +1200,7 @@ This does **not** require "a good programmer to come in and rewrite it" — it n
 
 ## Deferred feature: vault unlock over LAN instead of an at-rest key (2026-07-22)
 
-Follows up on the "Encryption at rest ... deferred" line in `docs/ontologia.md`.
+Follows up on the "Encryption at rest ... deferred" line in `docs/ontology.md`.
 Context: the vault is planned to live on a Longhorn-backed volume (Test Prisma Server/k3s), with
 an app-level encrypted overlay (gocryptfs, chosen for portability — the encrypted
 directory doesn't care what storage backend sits under it, same reasoning as the
@@ -1394,11 +1394,11 @@ has tray/background OS-integration via Tauri, which this can build on.
 Design settled: distinguishing which claims in an assistant turn are traceable to a specific
 vault document vs. the model's own inference — mirroring academic citation practice ("what is
 self-made is not confused with what belongs to others"). Ontology done
-(`docs/ontologia.md` Axiom 16, `docs/concepts/footnote.md`); data model done
+(`docs/ontology.md` Axiom 16, `docs/concepts/footnote.md`); data model done
 (`FootnoteRelation`, `Footnote`, `ChatMessage.footnotes` in `storage/models/vault_models.py`,
 replacing the unused `sources_cited` field).
 
-**Point 5 turned out to be a stale-doc false alarm, not a real blocker**: `docs/ontologia.md`
+**Point 5 turned out to be a stale-doc false alarm, not a real blocker**: `docs/ontology.md`
 said Chat API routes weren't implemented yet, but `POST /chat` (and the rest of `/chats/*`) was
 already live and working by the time this was picked back up — the doc just hadn't been updated
 since ADR-017 was written. Fixed alongside this.

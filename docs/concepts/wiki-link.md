@@ -34,5 +34,5 @@ and rendered as a visible broken-link warning.
 
 ## Relevant axioms
 
-> Broken citations surface. See [Axiom 6](../ontologia.md).
-> `slug` is stable. See [Axiom 9](../ontologia.md).
+> Broken citations surface. See [Axiom 6](../ontology.md).
+> `slug` is stable. See [Axiom 9](../ontology.md).

@@ -185,7 +185,7 @@ class CitedClaimNode(BaseModel):
     """A claim traceable to specific vault document(s) -- `citation`/
     `paraphrase`/`attribution`/`relational` share this shape (all have real
     `sources`, a meaningful `faithfulness_checked`), unlike `InferenceNode`
-    below, which structurally has neither. See docs/ontologia.md Axiom 16.
+    below, which structurally has neither. See docs/ontology.md Axiom 16.
     `citation` (verbatim quote) and `paraphrase` (close restatement) were
     split from a single merged `citation` value in schema v4 -- see
     _migrate_chat_v3_to_v4."""

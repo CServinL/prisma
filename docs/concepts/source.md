@@ -56,6 +56,6 @@ The companion is the original rich format, served to the UI via `GET /notes/{slu
 
 ## Relevant axioms
 
-> Sources are immutable. See [Axiom 1](../ontologia.md).
-> Every Source has a `.md`; the companion is optional. See [Axiom 10](../ontologia.md).
-> Every Source has a `zotero_key`. See [Axiom 11](../ontologia.md).
+> Sources are immutable. See [Axiom 1](../ontology.md).
+> Every Source has a `.md`; the companion is optional. See [Axiom 10](../ontology.md).
+> Every Source has a `zotero_key`. See [Axiom 11](../ontology.md).

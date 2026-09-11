@@ -583,6 +583,12 @@
   let excerptPollInterval: ReturnType<typeof setInterval> | undefined;
   let chatInput = $state("");
   let chatSending = $state(false);
+  // Manual knowledge-graph tool controls (see runGraphTool) -- a person can
+  // trigger the /graph/* capabilities directly, not just view tool calls
+  // the model decided to make. No LLM round-trip: a direct fetch.
+  let graphToolArg = $state("");
+  let graphToolLoading = $state(false);
+  let graphToolResult = $state<{ title: string; body: string } | null>(null);
   // Turn indices whose tool-call/thought/recall "spin-offs" (the process
   // artifacts behind a reply, not the reply's own content) are expanded --
   // collapsed by default, since most turns don't need examining, but always
@@ -910,6 +916,8 @@
     showResourcesPage = false;
     showKgProgressPage = false;
     showSettings = false;
+    graphToolResult = null;  // a pending runGraphTool result belongs to the chat we're leaving
+    graphToolArg = "";
     loadingNode = true;
     try {
       const r = await apiFetch(`${apiBase}/chats/${encodeURIComponent(slug)}`);
@@ -1030,6 +1038,91 @@
       }
     } finally {
       chatSending = false;
+    }
+  }
+
+  // Manual trigger for the Phase-A knowledge-graph capabilities. Each maps
+  // to a /graph/* endpoint (or /notes/{slug}/read for read_source) and is
+  // called directly -- deterministic, instant, no LLM deciding to call it.
+  const GRAPH_TOOL_LABEL: Record<string, string> = {
+    expand_node: "Expand", god_nodes: "God nodes", surprising_connections: "Surprising",
+    authors: "Authors", vault_health: "Vault health", timeline: "Timeline",
+    read_source: "Read source",
+  };
+
+  function formatGraphResult(kind: string, data: any, arg: string): string {
+    if (kind === "expand_node") {
+      const edges = data.edges ?? [];
+      if (!edges.length) return "(no neighbours)";
+      const labelById = Object.fromEntries((data.entities ?? []).map((e: any) => [e.id, e.label]));
+      return edges.map((edge: any) => {
+        const outgoing = edge.source === arg;
+        const otherId = outgoing ? edge.target : edge.source;
+        const other = `${labelById[otherId] ?? otherId} (${otherId})`;
+        return outgoing
+          ? `• ${arg} --[${edge.relation}]--> ${other}`
+          : `• ${other} --[${edge.relation}]--> ${arg}`;
+      }).join("\n");
+    }
+    if (kind === "god_nodes") {
+      return (data ?? []).map((e: any) =>
+        `• ${e.label} — ${e.degree} connections` +
+        (e.sample_relations?.length ? ` (${e.sample_relations.join(", ")})` : "")).join("\n") || "(empty)";
+    }
+    if (kind === "surprising_connections") {
+      // "--" on both sides, not "-->" -- the underlying data doesn't
+      // preserve which side of each hop actually stored the relation.
+      return (data ?? []).map((c: any) =>
+        `• ${c.entity_a} --[${c.relation_a}]-- ${c.bridge} --[${c.relation_b}]-- ${c.entity_b}`
+      ).join("\n") || "(no surprising connections yet)";
+    }
+    if (kind === "authors") {
+      return (data ?? []).map((a: any) => `• ${a.author} — ${a.file_count} file(s)`).join("\n") || "(no authors)";
+    }
+    if (kind === "vault_health") {
+      const os = data.orphans ?? [];
+      return `${data.orphan_count} orphan entit${data.orphan_count === 1 ? "y" : "ies"}` +
+        (os.length ? ":\n" + os.map((o: any) => `• ${o.label} (${o.source_file ?? "?"})`).join("\n") : "");
+    }
+    if (kind === "timeline") {
+      return (data ?? []).map((t: any) => `${t.year ?? "????"} — ${t.label}`).join("\n") || "(no matches)";
+    }
+    if (kind === "read_source") {
+      return data.text || "(no text for that mode/query)";
+    }
+    return JSON.stringify(data, null, 2);
+  }
+
+  async function runGraphTool(kind: string) {
+    if (!activeChat || graphToolLoading) return;
+    const forSlug = activeChat.slug;  // the result belongs to this chat only
+    const arg = graphToolArg.trim();
+    const needsArg = kind === "expand_node" || kind === "timeline" || kind === "read_source";
+    if (needsArg && !arg) return;
+    let url = "";
+    if (kind === "expand_node") url = `${apiBase}/graph/expand_node?id=${encodeURIComponent(arg)}`;
+    else if (kind === "god_nodes") url = `${apiBase}/graph/god_nodes`;
+    else if (kind === "surprising_connections") url = `${apiBase}/graph/surprising_connections`;
+    else if (kind === "authors") url = `${apiBase}/graph/authors`;
+    else if (kind === "vault_health") url = `${apiBase}/graph/vault_health`;
+    else if (kind === "timeline") url = `${apiBase}/graph/timeline?q=${encodeURIComponent(arg)}`;
+    else if (kind === "read_source") url = `${apiBase}/notes/${encodeURIComponent(arg)}/read`;
+    else return;
+
+    const title = GRAPH_TOOL_LABEL[kind] + (needsArg ? `: ${arg}` : "");
+    graphToolLoading = true;
+    graphToolResult = null;
+    try {
+      const r = await apiFetch(url);
+      const data = r.ok ? await r.json() : null;
+      if (activeChat?.slug !== forSlug) return;  // switched chats mid-fetch -- result isn't ours
+      graphToolResult = r.ok
+        ? { title, body: formatGraphResult(kind, data, arg) }
+        : { title, body: `(request failed: ${r.status})` };
+    } catch (e) {
+      if (activeChat?.slug === forSlug) graphToolResult = { title, body: `(error: ${e})` };
+    } finally {
+      graphToolLoading = false;  // single-flight mutex -- always release
     }
   }
 
@@ -2475,6 +2568,34 @@
                 {/each}
               </div>
             {/if}
+            {#if graphToolResult}
+              <div class="chat-node-group chat-node-group-toolcalls chat-graph-tool-result">
+                <div class="chat-node-group-heading">
+                  {graphToolResult.title}
+                  <button type="button" class="chat-graph-tool-dismiss" title="Dismiss" onclick={() => (graphToolResult = null)}>×</button>
+                </div>
+                <div class="node-box node-box-toolcall">
+                  <div class="node-box-toolcall-result">{graphToolResult.body}</div>
+                </div>
+              </div>
+            {/if}
+            <div class="chat-graph-tools">
+              <input
+                class="chat-graph-tools-arg"
+                type="text"
+                placeholder="entity id / slug / query…"
+                title="Argument for Expand (entity id), Timeline (query), Read source (slug)"
+                bind:value={graphToolArg}
+              />
+              <button type="button" onclick={() => runGraphTool("expand_node")} disabled={graphToolLoading || !graphToolArg.trim()}>Expand</button>
+              <button type="button" onclick={() => runGraphTool("god_nodes")} disabled={graphToolLoading}>God nodes</button>
+              <button type="button" onclick={() => runGraphTool("surprising_connections")} disabled={graphToolLoading}>Surprising</button>
+              <button type="button" onclick={() => runGraphTool("authors")} disabled={graphToolLoading}>Authors</button>
+              <button type="button" onclick={() => runGraphTool("vault_health")} disabled={graphToolLoading}>Vault health</button>
+              <button type="button" onclick={() => runGraphTool("timeline")} disabled={graphToolLoading || !graphToolArg.trim()}>Timeline</button>
+              <button type="button" onclick={() => runGraphTool("read_source")} disabled={graphToolLoading || !graphToolArg.trim()}>Read source</button>
+              {#if graphToolLoading}<span class="spinner chat-attach-spinner"></span>{/if}
+            </div>
             <form class="chat-input-row" onsubmit={(e) => { e.preventDefault(); sendChatMessage(); }}>
               <div class="chat-attach-toolbar">
                 <label class="chat-attach-btn" title="Attach a jpg, pdf, svg, tex, or drawio file">
@@ -4724,6 +4845,46 @@
     font-size: 11px;
   }
   .chat-attach-spinner { width: 12px; height: 12px; }
+  .chat-graph-tools {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px;
+    padding: 0 18px 6px;
+  }
+  .chat-graph-tools button {
+    padding: 4px 8px;
+    border-radius: 6px;
+    background: none;
+    border: 1px solid #1a2d4a;
+    color: #8ba3c0;
+    cursor: pointer;
+    font-size: 11px;
+  }
+  .chat-graph-tools button:hover:not(:disabled) { border-color: #4a9eff; color: #c8ddf0; }
+  .chat-graph-tools button:disabled { opacity: 0.45; cursor: default; }
+  .chat-graph-tools-arg {
+    flex: 1 1 160px;
+    min-width: 120px;
+    background: #0d1420;
+    border: 1px solid #1a2d4a;
+    border-radius: 6px;
+    color: #c8ddf0;
+    padding: 4px 8px;
+    font-size: 11px;
+  }
+  .chat-graph-tool-result { margin: 0 18px 6px; }
+  .chat-graph-tool-result .node-box-toolcall-result { white-space: pre-wrap; }
+  .chat-graph-tool-dismiss {
+    float: right;
+    background: none;
+    border: none;
+    color: #8ba3c0;
+    cursor: pointer;
+    font-size: 13px;
+    line-height: 1;
+  }
+  .chat-graph-tool-dismiss:hover { color: #c8ddf0; }
   .chat-input-row {
     display: flex;
     gap: 8px;

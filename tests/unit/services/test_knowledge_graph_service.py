@@ -13,6 +13,7 @@ from prisma.services.knowledge_graph_service import (
     Extraction,
     KnowledgeGraphService,
     Node,
+    TOP_ENTITIES_CACHE_SIZE,
     _extraction_system_prompt,
     _KUZU_BUFFER_POOL_SIZE_BYTES,
     _sanitize_escape_sequences,
@@ -20,7 +21,13 @@ from prisma.services.knowledge_graph_service import (
     _strip_feature_catalog_paragraphs,
     _strip_reference_list_paragraphs,
 )
-from prisma.storage.models.kg_models import TopEntity
+from prisma.storage.models.kg_models import (
+    AuthorSummary,
+    OrphanEntity,
+    SurprisingConnection,
+    TopEntity,
+    VaultHealthResponse,
+)
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -591,6 +598,104 @@ def test_rename_file_returns_false_when_old_path_was_never_indexed(kg, vault):
     assert kg._rename_file(old, new) is False
 
 
+def test_drain_once_refreshes_surprising_connections_cache_after_a_rename(kg, vault):
+    # A successful relabel rewrites source_file on the graph rows but queues
+    # nothing for _process_pending -- the surprising_connections cache (and
+    # its grounding Sources: header) would otherwise keep serving the
+    # pre-rename path as a dead slug.
+    a = vault.root / "notes" / "a.md"
+    a.write_text("---\ntype: note\n---\ncontent", encoding="utf-8")
+    b = vault.root / "notes" / "b.md"
+    b.write_text("---\ntype: note\n---\ncontent", encoding="utf-8")
+    a_result = _extraction(
+        nodes=[{"id": "a", "label": "A"}, {"id": "a_bridge", "label": "Bridge"}],
+        edges=[{"source": "a", "target": "a_bridge", "relation": "cites"}],
+    )
+    b_result = _extraction(
+        nodes=[{"id": "c", "label": "C"}, {"id": "b_bridge", "label": "Bridge"}],
+        edges=[{"source": "b_bridge", "target": "c", "relation": "extends"}],
+    )
+    with _patch_create(kg, side_effect=[a_result, b_result]), \
+         patch("prisma.services.resource_lock.acquire", return_value=(True, "local-ollama", "req-1")):
+        kg._extract_file(a, "note")
+        kg._extract_file(b, "note")
+    kg._refresh_top_entities()
+    kg._refresh_surprising_connections()
+    assert "notes/a.md" in {kg.surprising_connections()[0].source_file_a,
+                            kg.surprising_connections()[0].source_file_b}
+
+    moved = vault.root / "notes" / "a-renamed.md"
+    a.rename(moved)
+    with kg._lock:
+        kg._pending_renames.append((a, moved))
+    kg._drain_once()
+
+    srcs = {kg.surprising_connections()[0].source_file_a,
+            kg.surprising_connections()[0].source_file_b}
+    assert "notes/a.md" not in srcs
+    assert "notes/a-renamed.md" in srcs
+
+
+def test_timeline_releases_the_lock_before_reading_frontmatter(kg, vault):
+    # The graph scan holds self._lock; the per-document frontmatter reads
+    # must not, or a broad timeline query stalls the indexer + every KG
+    # request for the whole scan+read.
+    (vault.root / "sources").mkdir(parents=True, exist_ok=True)
+    (vault.root / "sources" / "p.md").write_text(
+        "---\ntype: source\nyear: 2011\n---\nbody", encoding="utf-8")
+    with kg._lock:
+        kg._upsert("sources/p.md", "source", [{"id": "p_topic", "label": "Topic"}], [])
+
+    locked_during_read: list[bool] = []
+    real = vault.frontmatter_for_relpath
+
+    def spy(rel):
+        locked_during_read.append(kg._lock.locked())
+        return real(rel)
+
+    with patch.object(vault, "frontmatter_for_relpath", side_effect=spy):
+        entries = kg.timeline("topic")
+
+    assert entries and entries[0].year == 2011
+    assert locked_during_read and not any(locked_during_read)
+
+
+def test_loop_survives_a_failing_drain_cycle(kg):
+    # A Kùzu stream error (or any exception) in one incremental cycle must
+    # not kill the daemon thread and stop all further indexing.
+    cycles = []
+
+    def flaky():
+        cycles.append(len(cycles))
+        if len(cycles) == 1:
+            raise RuntimeError("kùzu stream died mid-cycle")
+        kg._stop_event.set()
+
+    kg._drain_once = flaky
+    with patch.object(kg, "_full_index"), patch.object(kg._stop_event, "wait"):
+        kg._stop_event.clear()
+        kg._loop()
+
+    assert cycles == [0, 1]  # ran again after the failure instead of dying
+
+
+def test_drain_once_requeues_the_batch_when_processing_fails(kg, vault):
+    # _loop() catches -- a failed cycle must not silently drop the queued
+    # work, or the graph stays stale until an unrelated FS event.
+    f = vault.root / "notes" / "x.md"
+    f.write_text("---\ntype: note\n---\nc", encoding="utf-8")
+    with kg._lock:
+        kg._pending.add(f)
+
+    with patch.object(kg, "_process_pending", side_effect=RuntimeError("boom")):
+        with pytest.raises(RuntimeError):
+            kg._drain_once()
+
+    with kg._lock:
+        assert f in kg._pending
+    assert kg.status().state == "stale"
+
+
 # ── Trust tier ────────────────────────────────────────────────────────────────
 
 @pytest.mark.parametrize("node_type,expected_tier", [
@@ -657,6 +762,36 @@ def test_search_returns_empty_for_no_matching_terms(kg, vault):
     assert kg.search("completely unrelated query xyz") == []
 
 
+def test_request_path_retrieval_scans_hold_the_connection_lock(kg):
+    # Kùzu's connection is not thread-safe and FastAPI runs these sync
+    # handlers concurrently (with each other and with background-index
+    # upserts). Every live scan on self._conn must hold self._lock -- the
+    # same lock the extraction upserts take. Recorded at execute() time.
+    real = kg._conn
+    lock = kg._lock
+    held: list[bool] = []
+
+    class _LockSpyConn:
+        def execute(self, *a, **k):
+            held.append(lock.locked())
+            return real.execute(*a, **k)
+
+        def __getattr__(self, name):
+            return getattr(real, name)
+
+    kg._conn = _LockSpyConn()
+
+    # the scans still on the request path (god_nodes/authors/vault_health are
+    # now cache-only reads -- see _refresh_derived_caches)
+    kg.search("anything")
+    kg.expand_node("missing-id")
+    kg.timeline("anything")
+    kg.entities_for_file("notes/x.md")
+    kg._refresh_derived_caches()  # the background refresh must hold it too
+
+    assert held and all(held)
+
+
 # ── top_entities (vault-overview priming block) ────────────────────────────────
 
 def test_compute_top_entities_ranks_by_undirected_degree(kg, vault):
@@ -671,7 +806,8 @@ def test_compute_top_entities_ranks_by_undirected_degree(kg, vault):
          patch("prisma.services.resource_lock.acquire", return_value=(True, "local-ollama", "req-1")):
         kg._extract_file(f, "note")
 
-    top = kg._compute_top_entities()
+    kg._refresh_top_entities()
+    top = kg.top_entities()
     assert top[0].id == "hub"
     assert top[0].degree == 2
 
@@ -695,7 +831,8 @@ def test_compute_top_entities_excludes_chat_trust_tier_on_either_endpoint(kg, va
         kg._extract_file(note_file, "note")
         kg._extract_file(chat_file, "chat")
 
-    top = kg._compute_top_entities()
+    kg._refresh_top_entities()
+    top = kg.top_entities()
     real = next(e for e in top if e.id == "real_entity")
     assert real.degree == 1  # only the other_real edge counts, not the chat_entity one
     assert all(e.id != "chat_entity" for e in top)
@@ -732,6 +869,223 @@ def test_drop_index_clears_top_entities_cache(kg, vault):
         kg.drop_index()
 
     assert kg.top_entities() == []
+
+
+# ── surprising_connections (background-cached, like top_entities above) ────────
+
+def test_surprising_connections_returns_cached_slice_without_querying_kuzu(kg):
+    kg._surprising_connections_cache = [
+        SurprisingConnection(entity_a="a", entity_b="c", bridge="b", relation_a="cites", relation_b="extends", score=0.8),
+    ]
+    with patch.object(kg._conn, "execute") as mock_execute:
+        result = kg.surprising_connections()
+    assert result[0].bridge == "b"
+    mock_execute.assert_not_called()
+
+
+def test_refresh_surprising_connections_populates_cache_from_two_documents(kg, vault):
+    # Sequential, deterministic _extract_file calls (not _full_index()'s
+    # concurrent path -- side_effect order isn't guaranteed to match file
+    # order once extraction fans out across threads).
+    a_file = vault.root / "notes" / "a.md"
+    a_file.write_text("---\ntype: note\n---\ncontent", encoding="utf-8")
+    b_file = vault.root / "notes" / "b.md"
+    b_file.write_text("---\ntype: note\n---\ncontent", encoding="utf-8")
+    # Distinct ids ("a_bridge"/"b_bridge") with a shared label, matching
+    # what real extraction actually produces (see kg_queries.
+    # surprising_connections' docstring) -- reusing one literal "bridge" id
+    # across both files would be the same physical node touched twice, not
+    # two documents' separate instances of a shared concept, and now gets
+    # correctly excluded rather than falsely counted as a bridge.
+    a_result = _extraction(
+        nodes=[{"id": "a", "label": "A"}, {"id": "a_bridge", "label": "Bridge"}],
+        edges=[{"source": "a", "target": "a_bridge", "relation": "cites"}],
+    )
+    b_result = _extraction(
+        nodes=[{"id": "c", "label": "C"}, {"id": "b_bridge", "label": "Bridge"}],
+        edges=[{"source": "b_bridge", "target": "c", "relation": "extends"}],
+    )
+
+    with _patch_create(kg, side_effect=[a_result, b_result]), \
+         patch("prisma.services.resource_lock.acquire", return_value=(True, "local-ollama", "req-1")):
+        kg._extract_file(a_file, "note")
+        kg._extract_file(b_file, "note")
+
+    # 4 entities of degree 1 -- none is a hub, so nothing is excluded.
+    kg._refresh_surprising_connections()
+
+    links = kg.surprising_connections()
+    assert links and links[0].bridge == "Bridge"
+
+
+def test_refresh_surprising_connections_excludes_a_hub_past_the_top_15(kg):
+    # d1_bridge is a genuine hub (degree 6) but ranks #16 -- below the
+    # 15-slot priming cache. It must still be hub-excluded as a bridge.
+    with kg._lock:
+        for h in range(15):  # 15 fillers, degree 10 each -- they fill the top-15
+            kg._upsert(f"notes/f{h}.md", "note",
+                       [{"id": f"f{h}", "label": f"F{h}"}] + [{"id": f"f{h}_{i}", "label": "L"} for i in range(10)],
+                       [{"source": f"f{h}", "target": f"f{h}_{i}", "relation": "r"} for i in range(10)])
+        # doc1: concept A -> "Bridge" instance d1_bridge, which is also a hub
+        kg._upsert("notes/d1.md", "note",
+                   [{"id": "d1_a", "label": "A"}, {"id": "d1_bridge", "label": "Bridge"}]
+                   + [{"id": f"d1_l{i}", "label": "L"} for i in range(5)],
+                   [{"source": "d1_a", "target": "d1_bridge", "relation": "cites"}]
+                   + [{"source": "d1_bridge", "target": f"d1_l{i}", "relation": "r"} for i in range(5)])
+        # doc2: concept C -> a second "Bridge" instance (not a hub)
+        kg._upsert("notes/d2.md", "note",
+                   [{"id": "d2_c", "label": "C"}, {"id": "d2_bridge", "label": "Bridge"}],
+                   [{"source": "d2_bridge", "target": "d2_c", "relation": "extends"}])
+
+    kg._refresh_top_entities()
+    assert all(e.id != "d1_bridge" for e in kg.top_entities())  # confirms it's past the top-15
+    kg._refresh_surprising_connections()
+
+    assert all(link.bridge != "Bridge" for link in kg.surprising_connections(limit=100))
+
+
+class _CountingLock:
+    """Wraps a real lock, counting `with` entries -- so a test can assert a
+    refresh scans and publishes under one hold, with no gap a concurrent
+    drop_index() could slip a graph-clear into."""
+
+    def __init__(self, real):
+        self._real = real
+        self.entries = 0
+
+    def __enter__(self):
+        self.entries += 1
+        return self._real.__enter__()
+
+    def __exit__(self, *exc):
+        return self._real.__exit__(*exc)
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+def test_refresh_top_entities_scans_and_publishes_under_one_lock_hold(kg):
+    with kg._lock:
+        kg._upsert("notes/a.md", "note",
+                   [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}],
+                   [{"source": "a", "target": "b", "relation": "cites"}])
+    kg._lock = _CountingLock(kg._lock)
+
+    kg._refresh_top_entities()
+
+    assert kg._lock.entries == 1
+    assert kg.top_entities()
+
+
+def test_refresh_surprising_connections_scans_and_publishes_under_one_lock_hold(kg):
+    with kg._lock:
+        kg._upsert("notes/a.md", "note",
+                   [{"id": "a", "label": "A"}, {"id": "a_bridge", "label": "Bridge"}],
+                   [{"source": "a", "target": "a_bridge", "relation": "cites"}])
+        kg._upsert("notes/c.md", "note",
+                   [{"id": "c", "label": "C"}, {"id": "c_bridge", "label": "Bridge"}],
+                   [{"source": "c_bridge", "target": "c", "relation": "extends"}])
+    kg._refresh_top_entities()
+    kg._lock = _CountingLock(kg._lock)
+
+    kg._refresh_surprising_connections()
+
+    assert kg._lock.entries == 1
+    assert kg.surprising_connections()
+
+
+def test_refresh_surprising_connections_cache_holds_more_than_the_top_entities_slice(kg):
+    # The cache must be populated up to the real maximum a /graph request can
+    # ask for (SURPRISING_CONNECTIONS_MAX), not silently capped at
+    # TOP_ENTITIES_CACHE_SIZE by inheriting kg_queries.surprising_connections'
+    # own default limit. kg_queries' limit slicing is already covered by
+    # test_kg_queries.py::test_surprising_connections_respects_limit -- this
+    # asserts the cache itself, not the slice, was the bottleneck.
+    for i in range(20):
+        with kg._lock:
+            kg._upsert(f"notes/a{i}.md", "note",
+                       [{"id": f"a{i}", "label": f"A{i}"}, {"id": f"a{i}_bridge", "label": f"Bridge{i}"}],
+                       [{"source": f"a{i}", "target": f"a{i}_bridge", "relation": "cites"}])
+            kg._upsert(f"notes/b{i}.md", "note",
+                       [{"id": f"c{i}", "label": f"C{i}"}, {"id": f"b{i}_bridge", "label": f"Bridge{i}"}],
+                       [{"source": f"b{i}_bridge", "target": f"c{i}", "relation": "extends"}])
+
+    kg._refresh_top_entities()
+    kg._refresh_surprising_connections()
+
+    assert len(kg.surprising_connections(limit=100)) > TOP_ENTITIES_CACHE_SIZE
+
+
+def test_drop_index_clears_surprising_connections_cache(kg):
+    kg._surprising_connections_cache = [
+        SurprisingConnection(entity_a="a", entity_b="c", bridge="b", relation_a="cites", relation_b="extends", score=0.8),
+    ]
+
+    with patch("prisma.services.resource_lock.acquire", return_value=(True, "local-ollama", "req-1")), \
+         patch.object(kg, "_full_index"):  # avoid the real background re-index racing this assertion
+        kg.drop_index()
+
+    assert kg.surprising_connections() == []
+
+
+# ── god_nodes / authors / vault_health (background-cached, like above) ─────────
+
+def _seed_graph(kg):
+    with kg._lock:
+        kg._upsert("sources/a.md", "source",
+                   [{"id": "hub", "label": "Hub", "author": "Ada Lovelace"},
+                    {"id": "leaf", "label": "Leaf"},
+                    {"id": "lonely", "label": "Lonely"}],
+                   [{"source": "hub", "target": "leaf", "relation": "cites"}])
+
+
+def test_god_nodes_authors_vault_health_are_cache_only_reads(kg):
+    kg._god_nodes_cache = [TopEntity(id="h", label="H", degree=3)]
+    kg._authors_cache = [AuthorSummary(author="Ada", file_count=1)]
+    kg._vault_health_cache = VaultHealthResponse(
+        orphans=[OrphanEntity(id="o", label="O")], orphan_count=1)
+
+    with patch.object(kg._conn, "execute") as mock_execute:
+        assert kg.god_nodes()[0].id == "h"
+        assert kg.authors()[0].author == "Ada"
+        assert kg.vault_health().orphan_count == 1
+    mock_execute.assert_not_called()
+
+
+def test_refresh_derived_caches_populates_the_new_caches(kg):
+    _seed_graph(kg)
+
+    kg._refresh_derived_caches()
+
+    assert any(e.id == "hub" for e in kg.god_nodes())
+    assert any(a.author == "Ada Lovelace" for a in kg.authors())
+    assert any(o.id == "lonely" for o in kg.vault_health().orphans)
+
+
+def test_vault_health_slices_orphans_but_keeps_the_true_count(kg):
+    kg._vault_health_cache = VaultHealthResponse(
+        orphans=[OrphanEntity(id=f"o{i}", label=f"O{i}") for i in range(10)],
+        orphan_count=10,
+    )
+    resp = kg.vault_health(limit=3)
+    assert len(resp.orphans) == 3
+    assert resp.orphan_count == 10
+
+
+def test_drop_index_clears_the_new_derived_caches(kg):
+    # populate the caches from a real graph, then drop -- the cache-only
+    # readers would otherwise keep serving the pre-drop rows.
+    _seed_graph(kg)
+    kg._refresh_derived_caches()
+    assert kg.god_nodes() and kg.authors() and kg.vault_health().orphans
+
+    with patch("prisma.services.resource_lock.acquire", return_value=(True, "local-ollama", "req-1")), \
+         patch.object(kg, "_full_index"):
+        kg.drop_index()
+
+    assert kg.god_nodes() == []
+    assert kg.authors() == []
+    assert kg.vault_health().orphan_count == 0
 
 
 # ── Status / lifecycle ────────────────────────────────────────────────────────
@@ -823,6 +1177,29 @@ def test_process_pending_clears_stale_even_with_no_real_change(kg, vault):
     kg._process_pending({f})
 
     assert kg.status().state == "idle"
+
+
+def test_process_pending_refreshes_caches_on_deletion_only_batch(kg, vault):
+    # A pending set with nothing left to extract (every path already gone
+    # from disk) must still refresh top_entities/surprising_connections --
+    # _extract_files_concurrently([]) can't itself detect that a deletion
+    # is what actually changed the graph this cycle.
+    f = vault.root / "notes" / "gone.md"
+    f.write_text("---\ntype: note\n---\ncontent", encoding="utf-8")
+    result = _extraction(
+        nodes=[{"id": "gone_a", "label": "A"}, {"id": "gone_b", "label": "B"}],
+        edges=[{"source": "gone_a", "target": "gone_b", "relation": "cites"}],
+    )
+    with _patch_create(kg, return_value=result), \
+         patch("prisma.services.resource_lock.acquire", return_value=(True, "local-ollama", "req-1")):
+        kg._extract_file(f, "note")
+    kg._refresh_top_entities()
+    assert kg.top_entities()  # sanity: the cache holds the soon-to-be-deleted entity
+
+    f.unlink()
+    kg._process_pending({f})
+
+    assert kg.top_entities() == []
 
 
 def test_full_index_sets_idle_and_last_indexed(kg, vault):
@@ -1246,7 +1623,8 @@ def test_query_returns_empty_when_no_matches(kg):
 
 def test_query_sources_are_slugs_not_raw_paths(kg, vault):
     # ADR-017: `sources` must be vault slugs (what a Footnote's `sources`
-    # list expects), not the raw source_file path `text` embeds.
+    # list expects) -- and the compound dir--name form, not the bare stem,
+    # so a duplicate filename in another folder stays distinct.
     f = vault.root / "notes" / "test.md"
     f.write_text("---\ntype: note\n---\nContent about quantum computing.", encoding="utf-8")
     result = _extraction(nodes=[{"id": "quantum_computing", "label": "Quantum Computing"}])
@@ -1257,7 +1635,7 @@ def test_query_sources_are_slugs_not_raw_paths(kg, vault):
 
     results = kg.query("quantum")
 
-    assert results[0].sources == ["test"]
+    assert results[0].sources == ["notes--test"]
 
 
 def test_query_sources_dedup_multiple_entities_from_same_file(kg, vault):
@@ -1274,4 +1652,4 @@ def test_query_sources_dedup_multiple_entities_from_same_file(kg, vault):
 
     results = kg.query("quantum")
 
-    assert results[0].sources == ["test"]
+    assert results[0].sources == ["notes--test"]

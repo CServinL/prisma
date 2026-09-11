@@ -1535,3 +1535,54 @@ Not scoped or designed yet. Likely candidates for a first pass, not decided:
   edges can point backward/sideways across turns, not just linearly forward.
 - Open question: does this replace the vertical view as a toggleable mode on the same chat, or
   live as a separate page/route? Not decided — needs its own design pass before implementation.
+
+## Deferred: ADR-021 compound-slug `--` separator is not collision-safe (2026-09-09, PR #104 review)
+
+Raised by Copilot review on the `kg-tools-phase-a` branch against
+`VaultService.slug_for_relpath()` (the encode helper factored out that round
+from `move_node()`'s and the tree-listing's inline copies). The finding is
+real but **pre-existing and not introduced by that PR** — `slug_for_relpath`
+is byte-identical to the encoding ADR-021 §Decision names as canonical
+(`str(rel.with_suffix("")).replace("/", "--")`).
+
+**The problem:** the `dir--name` compound slug joins path components with an
+unescaped `--`, so the encode is not an inverse of the decode
+(`_resolve_compound_slug` / `VaultRef.parse`'s `raw.split("--")`) whenever a
+path component itself contains `--`. `archive/foo--bar.md` encodes to
+`archive--foo--bar` and decodes back to `archive/foo/bar.md` — a different
+path. The file becomes unreachable via its compound slug (404), or, if
+`archive/foo/bar.md` also exists, resolves to the wrong file. ADR-021's own
+"Negative consequences" section already flags that path components aren't
+sanitized, but overstates the result as "still round-trippable" — the
+`--`-in-component case isn't.
+
+**Why deferred (cservinl, 2026-09-09):** a correct fix is an escape scheme
+applied consistently across every consumer of the ADR-021 interchange
+encoding — `VaultRef.parse`/`.compound_slug` (`vault_models.py`),
+`_resolve_compound_slug`/`_find_md`/`find_file` (the security-sensitive
+decode, `vault.py`), `renderer.py`'s wiki-link/transclusion resolution, the
+UI's "Copy slug" action — plus a migration path for any already-persisted
+`vault:` URIs / compound slugs (chat claim `sources`, bookmarks, saved
+links). That's an ADR-021 amendment with its own design pass, not a
+review-fix on a KG-tools PR. Tracked here to pick up later.
+
+Candidate approaches, not decided:
+- Percent-encode `-` (or just `--`) within each component before the `/`→`--`
+  join; decode symmetrically. Keeps existing `--`-free slugs unchanged.
+- Disk-existence disambiguation on the decode side (try each `--`-split
+  interpretation, take the one that exists) — rejected-leaning: heuristic,
+  ambiguous when multiple exist, and adds branches to a path-traversal-
+  sensitive function.
+
+### Related, same root cause: KG entity ids aren't directory-unique (2026-09-10, PR #104 review)
+
+Extraction mints entity ids as `{stem}_{entity}` (`_extraction_system_prompt`),
+so `sources/paper.md` and `archive/paper.md` both produce `paper_topic`, and
+`_upsert()`'s `MERGE (e:Entity {id})` collapses them into one row whose
+`source_file` is just the last writer. `timeline()` works around this by taking
+an entity's documents as its own `source_file` ∪ every `RelatesTo.source_file`
+touching it, but a concept that appears in a collapsed document only as a bare
+mention (no relationship) is still invisible there. The real fix is putting the
+relative path in the id (`{relpath}_{entity}`) — an extraction-prompt change plus
+a full graph rebuild — so it belongs with the escape-scheme work above, not a
+review-fix.

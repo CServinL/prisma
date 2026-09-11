@@ -2,7 +2,13 @@
 from pathlib import Path
 from unittest.mock import MagicMock
 
-from prisma.agents.chat_agent import MAX_TOOL_ITERATIONS, ChatAgent, _extract_claims, _turn_had_no_grounding
+from prisma.agents.chat_agent import (
+    MAX_TOOL_ITERATIONS,
+    ChatAgent,
+    _extract_claims,
+    _GROUNDING_TOOLS,
+    _turn_had_no_grounding,
+)
 from prisma.schema_gov import RichContent
 from prisma.services.chat_tools import ToolResult
 from prisma.storage.models.vault_models import ChatRole, CitedClaimNode, InferenceNode, Note, ToolCallNode, TurnNode
@@ -381,11 +387,11 @@ def test_respond_returns_overflow_message_without_calling_llm_when_assembly_exce
 def test_respond_checks_context_window_again_after_a_tool_result_grows_the_assembly():
     llm = MagicMock()
     llm.model = "test-model"
-    # Fits the initial system+history+user assembly (~1100 estimated tokens
-    # for this agent's system prompt), but not once a big tool result's
-    # text (~1000 more estimated tokens) gets appended to messages for the
-    # second completion call.
-    llm.context_window = 1500
+    # Fits the initial system+history+user assembly (~1550 estimated tokens
+    # for this agent's system prompt + tool section), but not once a big
+    # tool result's text (~1000 more estimated tokens) gets appended to
+    # messages for the second completion call.
+    llm.context_window = 2000
     llm.complete.return_value = "SEARCH_VAULT: something"
     toolbox = MagicMock()
     toolbox.call.return_value = ToolResult(text="y" * 4000, raw=[])
@@ -799,6 +805,32 @@ def test_turn_had_no_grounding_false_when_zotero_search_returned_content():
     ]
 
     assert _turn_had_no_grounding(tool_calls) is False
+
+
+def test_kg_graph_tools_are_grounding():
+    # EXPAND_NODE/GOD_NODES/SURPRISING_CONNECTIONS each emit a Sources:
+    # header of the documents behind the result and return empty text when
+    # they have nothing citable -- so they count as grounding tools, and an
+    # empty result from one correctly reads as "no grounding".
+    for name in ("expand_node", "god_nodes", "surprising_connections"):
+        assert name in _GROUNDING_TOOLS
+
+
+def test_turn_had_no_grounding_tracks_expand_node_by_whether_it_returned_sources():
+    # EXPAND_NODE only grounds a turn when its result carries a Sources:
+    # header. An empty result still triggers the ai-inference override.
+    empty = [
+        ToolCallNode(tool="search_vault", args={"query": "x"}, result=None, status="ok"),
+        ToolCallNode(tool="expand_node", args={"query": "e1"}, result=None, status="ok"),
+    ]
+    sourced = [
+        ToolCallNode(tool="search_vault", args={"query": "x"}, result=None, status="ok"),
+        ToolCallNode(tool="expand_node", args={"query": "e1"},
+                     result="Sources: notes--a\n\ne1 --[cites]--> e2 (e2)", status="ok"),
+    ]
+
+    assert _turn_had_no_grounding(empty) is True
+    assert _turn_had_no_grounding(sourced) is False
 
 
 def test_respond_overrides_self_report_when_grounding_tool_returns_nothing():

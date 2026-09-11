@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import logging
 import re
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -49,6 +48,14 @@ class ToolSpec(BaseModel):
     name: str
     marker: str
     description: str
+    # `ChatToolbox` method name this marker dispatches to — resolved via
+    # getattr in `call()`, so a new tool is one TOOLS entry + one method,
+    # not also an edit to a hardcoded if/elif chain.
+    handler: str
+    # True for tools that return citable content (a `Sources:` header or a
+    # real slug wrapper), empty text when they have nothing. `chat_agent.py`'s
+    # `_GROUNDING_TOOLS` is derived from this flag.
+    grounding: bool = False
     hidden_when_native_reasoning: bool = False
     # ZOTERO_SEARCH only makes sense when a Zotero library is actually
     # configured and reachable (online mode) -- see system_prompt_tool_
@@ -62,6 +69,8 @@ TOOLS: list[ToolSpec] = [
     ToolSpec(
         name="search_vault",
         marker="SEARCH_VAULT",
+        handler="_search_vault",
+        grounding=True,
         description=(
             "Semantic search over the vault's ChromaDB embedding index — finds "
             "notes/sources/chats by meaning, not just keyword match. Default "
@@ -71,6 +80,8 @@ TOOLS: list[ToolSpec] = [
     ToolSpec(
         name="graph_context",
         marker="GRAPH_CONTEXT",
+        handler="_graph_context",
+        grounding=True,
         description=(
             "Traverses the Knowledge Graph (KG) — entities and relationships "
             "extracted across the whole vault — to answer questions about how "
@@ -80,8 +91,62 @@ TOOLS: list[ToolSpec] = [
         ),
     ),
     ToolSpec(
+        name="expand_node",
+        marker="EXPAND_NODE",
+        handler="_expand_node",
+        grounding=True,
+        description=(
+            "Given one knowledge-graph entity id (as shown in a GRAPH_CONTEXT "
+            "or GOD_NODES result), returns its direct one-hop neighbours and "
+            "the relationships to them. Call to follow a specific thread after "
+            "a broader tool named an entity worth drilling into. "
+            "Format: EXPAND_NODE: <entity_id>"
+        ),
+    ),
+    ToolSpec(
+        name="god_nodes",
+        marker="GOD_NODES",
+        handler="_god_nodes",
+        grounding=True,
+        description=(
+            "Lists the most-connected hub entities across the whole vault — "
+            "the things everything else relates to. Call for broad/orienting "
+            "questions with no specific narrow target (\"what are the big "
+            "themes in my notes about X\"), or to orient before diving into "
+            "specifics. The query text is ignored; write GOD_NODES: -"
+        ),
+    ),
+    ToolSpec(
+        name="surprising_connections",
+        marker="SURPRISING_CONNECTIONS",
+        handler="_surprising_connections",
+        grounding=True,
+        description=(
+            "Lists 2-hop links between entities that no single document ever "
+            "stated directly — connections that only emerge from the graph "
+            "itself. Call when the user explicitly asks for unexpected/"
+            "creative connections, or when direct search results seem too "
+            "narrow/obvious for what's being asked. The query text is "
+            "ignored; write SURPRISING_CONNECTIONS: -"
+        ),
+    ),
+    ToolSpec(
+        name="read_source",
+        marker="READ_SOURCE",
+        handler="_read_source",
+        grounding=True,
+        description=(
+            "Reads a bounded leading excerpt of one specific vault document, "
+            "addressed by its exact slug. Last resort — only when a specific "
+            "document is clearly central and SEARCH_VAULT/GRAPH_CONTEXT "
+            "haven't given enough of its actual text. Never call by default. "
+            "Format: READ_SOURCE: <slug>"
+        ),
+    ),
+    ToolSpec(
         name="recall",
         marker="RECALL",
+        handler="_recall",
         description=(
             "Searches THIS conversation's own history — earlier turns, tool "
             "results, and claims — for something you saw before but that "
@@ -93,6 +158,7 @@ TOOLS: list[ToolSpec] = [
     ToolSpec(
         name="think",
         marker="THINK",
+        handler="_think",
         description=(
             "Externalizes one reasoning step before you answer — write down "
             "what you're weighing, checking, or ruling out. Call it as many "
@@ -106,6 +172,8 @@ TOOLS: list[ToolSpec] = [
     ToolSpec(
         name="zotero_search",
         marker="ZOTERO_SEARCH",
+        handler="_zotero_search",
+        grounding=True,
         description=(
             "Searches the user's whole Zotero library (title/author/text, via "
             "Zotero's own search) — including items never imported into the "
@@ -123,6 +191,8 @@ TOOL_CALL_RE = re.compile(
     r"^(" + "|".join(re.escape(t.marker) for t in TOOLS) + r"):\s*(.+)$",
     re.MULTILINE,
 )
+
+_SPEC_BY_MARKER: dict[str, ToolSpec] = {t.marker: t for t in TOOLS}
 
 # ADR-017 claim attribution. Same pattern-based convention as tool calls
 # (ADR-014's appendix found free-text markers more reliable than native
@@ -270,17 +340,15 @@ class ChatToolbox:
         session_graph: "nx.MultiDiGraph | None" = None, remaining_budget: int = 4000,
         chat_slug: str | None = None,
     ) -> ToolResult:
-        if marker == "SEARCH_VAULT":
-            return self._search_vault(query)
-        if marker == "GRAPH_CONTEXT":
-            return self._graph_context(query)
-        if marker == "RECALL":
+        spec = _SPEC_BY_MARKER.get(marker)
+        if spec is None:
+            raise ValueError(f"unknown tool marker: {marker!r}")
+        if spec.handler == "_recall":
+            # The only handler needing session context, not just the query
+            # text -- kept as a narrow special case rather than widening
+            # every handler's signature.
             return self._recall(query, session_graph, remaining_budget, chat_slug)
-        if marker == "THINK":
-            return self._think(query)
-        if marker == "ZOTERO_SEARCH":
-            return self._zotero_search(query)
-        raise ValueError(f"unknown tool marker: {marker!r}")
+        return getattr(self, spec.handler)(query)
 
     def _think(self, query: str) -> ToolResult:
         # No external lookup, unlike the other tools -- THINK is a
@@ -349,16 +417,21 @@ class ChatToolbox:
         for h in hits:
             path = self._vault.root / h.source_file
             try:
-                excerpt = path.read_text(encoding="utf-8", errors="replace")[:_EXCERPT_CHARS]
+                # bounded read -- an excerpt shouldn't pull a large vault
+                # document fully into memory first (matches source_reader).
+                with path.open("r", encoding="utf-8", errors="replace") as f:
+                    excerpt = f.read(_EXCERPT_CHARS)
             except OSError:
                 excerpt = ""
             items.append({"source_file": h.source_file, "score": h.score, "text": excerpt})
         # Wrapped under the vault slug (not the raw source_file path) --
         # this is exactly the identifier a footnote's `sources` list
-        # expects (ADR-017), so the model can copy it verbatim rather than
-        # having to derive a slug from a path itself.
+        # expects (ADR-017), so the model can copy it verbatim. Compound
+        # `dir--name` slug, not the bare stem: two same-named files in
+        # different folders must not collapse to one citation.
         wrapped = "\n\n".join(
-            wrap_untrusted(Path(i["source_file"]).stem, i["text"]) for i in items if i["text"]
+            wrap_untrusted(self._vault.slug_for_relpath(i["source_file"]), i["text"])
+            for i in items if i["text"]
         )
         return ToolResult(text=wrapped, raw=items)
 
@@ -408,6 +481,104 @@ class ChatToolbox:
         else:
             wrapped = ""
         return ToolResult(text=wrapped, raw=[r.model_dump() for r in results])
+
+    def _expand_node(self, query: str) -> ToolResult:
+        """One-hop graph traversal from an entity id — neighbours, the edges
+        to them (direction preserved), and a `Sources:` header of the
+        documents behind them. Empty text when nothing is citable."""
+        node_id = query.strip()
+        resp = self._kg.expand_node(node_id)
+        if not resp.entities:
+            return ToolResult(text="", raw=[])
+        raw = [resp.model_dump()]
+        # Only render edges that carry their own source_file -- an uncitable
+        # edge shown under another edge's `Sources:` header would let the
+        # model attribute it to the wrong document. Cite the edge's
+        # source_file, not the neighbour entity's (last-writer).
+        labels = {e.id: e.label for e in resp.entities}
+        lines = []
+        slugs: list[str] = []
+        for edge in resp.edges:
+            if not edge.source_file:
+                continue
+            slug = self._vault.slug_for_relpath(edge.source_file)
+            if slug not in slugs:
+                slugs.append(slug)
+            other_id = edge.target if edge.source == node_id else edge.source
+            other = f"{labels.get(other_id, other_id)} ({other_id})"
+            lines.append(
+                f"{node_id} --[{edge.relation}]--> {other}" if edge.source == node_id
+                else f"{other} --[{edge.relation}]--> {node_id}"
+            )
+        if not lines:
+            return ToolResult(text="", raw=raw)
+        wrapped = wrap_untrusted(
+            "knowledge-graph", f"Sources: {', '.join(slugs)}\n\n" + "\n".join(lines)
+        )
+        return ToolResult(text=wrapped, raw=raw)
+
+    def _god_nodes(self, query: str) -> ToolResult:
+        """Highly-connected hub entities across the whole vault. The query
+        text is ignored (there's nothing to filter by) — this is an
+        orienting primitive."""
+        entities = self._kg.god_nodes(limit=15)
+        raw = [e.model_dump() for e in entities]
+        # Only hubs whose edges have resolvable provenance -- a line with no
+        # citable source under a shared header misattributes it.
+        citable = [e for e in entities if e.source_files]
+        if not citable:
+            return ToolResult(text="", raw=raw)
+        slugs = list(dict.fromkeys(
+            self._vault.slug_for_relpath(s) for e in citable for s in e.source_files
+        ))
+        lines = [
+            f"- {e.label} ({e.degree} connections)"
+            + (f" — e.g. {', '.join(e.sample_relations)}" if e.sample_relations else "")
+            for e in citable
+        ]
+        wrapped = wrap_untrusted(
+            "knowledge-graph", f"Sources: {', '.join(slugs)}\n\n" + "\n".join(lines)
+        )
+        return ToolResult(text=wrapped, raw=raw)
+
+    def _surprising_connections(self, query: str) -> ToolResult:
+        """Links between entities that no single document asserted directly
+        — cached (see KnowledgeGraphService.surprising_connections()). Query
+        text ignored, same as GOD_NODES. `--` not `-->`: the scan doesn't
+        keep which side stored each hop's relation. The `Sources:` header is
+        the two documents behind the link's hops."""
+        links = self._kg.surprising_connections(limit=15)
+        raw = [c.model_dump() for c in links]
+        # A link is a claim between its two endpoint documents -- render only
+        # links where both are resolvable.
+        citable = [c for c in links if c.source_file_a and c.source_file_b]
+        if not citable:
+            return ToolResult(text="", raw=raw)
+        lines = [
+            f"- {c.entity_a} --[{c.relation_a}]-- {c.bridge} --[{c.relation_b}]-- {c.entity_b}"
+            for c in citable
+        ]
+        slugs = list(dict.fromkeys(
+            self._vault.slug_for_relpath(s) for c in citable
+            for s in (c.source_file_a, c.source_file_b)
+        ))
+        wrapped = wrap_untrusted(
+            "knowledge-graph", f"Sources: {', '.join(slugs)}\n\n" + "\n".join(lines)
+        )
+        return ToolResult(text=wrapped, raw=raw)
+
+    def _read_source(self, query: str) -> ToolResult:
+        """Bounded leading excerpt of one vault document, addressed by slug.
+        The chat tool only exposes summary mode — section/literal are for
+        the REST surface (GET /notes/{slug}/read)."""
+        from prisma.services.source_reader import read_source
+        slug = query.strip()
+        try:
+            resp = read_source(self._vault, slug, mode="summary")
+        except FileNotFoundError:
+            return ToolResult(text="", raw=[])
+        wrapped = wrap_untrusted(slug, resp.text) if resp.text else ""
+        return ToolResult(text=wrapped, raw=[resp.model_dump()])
 
     # ── RECALL (ADR-019, docs/concepts/chat-session-graph.md) ───────────────
 

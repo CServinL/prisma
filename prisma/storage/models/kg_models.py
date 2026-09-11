@@ -69,6 +69,7 @@ class EntityInfo(BaseModel):
     file_type: str | None = None
     trust_tier: str | None = None
     source_location: str | None = None
+    source_file: str | None = None  # document this entity was extracted from
 
 
 class EdgeInfo(BaseModel):
@@ -77,6 +78,9 @@ class EdgeInfo(BaseModel):
     target: str
     confidence: str | None = None
     confidence_score: float | None = None
+    # Document that asserted this relationship -- not necessarily either
+    # endpoint's own source_file.
+    source_file: str | None = None
 
 
 class EntitiesForFileResponse(BaseModel):
@@ -112,7 +116,92 @@ class OllamaReadyResponse(BaseModel):
 class TopEntity(BaseModel):
     """One entity in the vault-overview priming block -- top-N by undirected
     RelatesTo degree (chat-tier excluded). See
-    KnowledgeGraphService.top_entities()."""
+    KnowledgeGraphService.top_entities().
+
+    `sample_relations`/`source_files` are populated only by the richer
+    `god_nodes()` path; the cache-only `top_entities()` priming read leaves
+    them empty, so a payload without them still validates on both ends.
+    `source_files` is the provenance of the sampled edges (each
+    `RelatesTo.source_file`), not the entity's own last-writer `source_file`."""
     id: str
     label: str
     degree: int
+    sample_relations: list[str] = []
+    source_files: list[str] = []
+
+
+class ExpandNodeResponse(BaseModel):
+    """One-hop neighbourhood of a single Entity — the neighbours plus the
+    RelatesTo edges connecting them to the queried node. Mirrors
+    EntitiesForFileResponse's shape (chat-tier neighbours excluded)."""
+    entities: list[EntityInfo]
+    edges: list[EdgeInfo]
+
+
+class AuthorSummary(BaseModel):
+    """Distinct `Entity.author` value grouped across the vault — how many
+    source files name that author, plus a few example entity ids."""
+    author: str
+    file_count: int
+    sample_entities: list[str] = []
+
+
+class OrphanEntity(BaseModel):
+    id: str
+    label: str
+    source_file: str | None = None
+
+
+class VaultHealthResponse(BaseModel):
+    """First-cut vault health: entities with zero RelatesTo edges. Full
+    disconnected-cluster detection (connected components) is a noted stretch
+    follow-up, not part of this cut."""
+    orphans: list[OrphanEntity]
+    orphan_count: int
+
+
+class TimelineEntry(BaseModel):
+    """An entity whose `source_file` resolves to a Source with a `year` —
+    the year comes from vault frontmatter (VaultService), not the graph."""
+    id: str
+    label: str
+    source_file: str | None = None
+    year: int | None = None
+
+
+class SurprisingConnection(BaseModel):
+    """A link between two entities that no single document asserted directly
+    -- see kg_queries.surprising_connections() for the exact definition.
+
+    `bridge` is a **label**, not an entity id: each document mints its own
+    `{stem}_{entity}` id namespace, so the shared concept is two different
+    ids across the two documents -- the label is what they have in common."""
+    entity_a: str
+    entity_b: str
+    bridge: str
+    relation_a: str
+    relation_b: str
+    score: float
+    # The document behind each hop's RelatesTo edge -- the edge's own
+    # source_file, not the endpoint entity's (which a later re-extraction
+    # can overwrite). Always two different documents; the citable pair for a
+    # `relational` claim.
+    source_file_a: str | None = None
+    source_file_b: str | None = None
+
+
+class ReadSourceResponse(BaseModel):
+    """A bounded slice of one vault document's own raw text — never the
+    whole file. `mode` is one of summary/section/literal."""
+    slug: str
+    mode: str
+    query: str | None = None
+    text: str
+    # section mode: every heading found, so a missed `query` still tells the
+    # caller what it could have asked for.
+    available_sections: list[str] = []
+    match_count: int | None = None  # literal mode: total matches (may exceed what's returned)
+    # Output is not the full answer -- the document exceeded the scan cap,
+    # or (literal) more matches / a longer line than were returned, or
+    # (section) the section body was longer than the slice.
+    truncated: bool = False

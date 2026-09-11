@@ -42,19 +42,21 @@ from pydantic import BaseModel
 from watchdog.events import FileSystemEventHandler, FileSystemEvent
 from watchdog.observers import Observer
 
-from prisma.services import resource_lock
+from prisma.services import kg_queries, resource_lock
 from prisma.services.injection_defense import wrap_untrusted
 from prisma.services.vault import VaultService
 from prisma.storage.models.kg_models import (
+    AuthorSummary,
     DeadLetterEntry,
     DroppedChunkInfo,
-    EdgeInfo,
     EntitiesForFileResponse,
-    EntityInfo,
     GraphQueryResult,
     KGStatus,
     RankedNode,
+    SurprisingConnection,
+    TimelineEntry,
     TopEntity,
+    VaultHealthResponse,
 )
 from prisma.storage.models.search_models import DeepSearchCandidate, GraphSearchResult
 from prisma.storage.models.vault_models import NodeType
@@ -83,6 +85,11 @@ DEFAULT_INDEX_EXTENSIONS: tuple[str, ...] = (".md",)
 # provider choice. It's chosen for priming effectiveness (a short list
 # primes the model's own associative attention better than a long one).
 TOP_ENTITIES_CACHE_SIZE = 15
+
+# surprising_connections excludes hubs by degree, not just top-15 rank:
+# in a small vault every entity makes the top 15, which would exclude
+# every possible bridge.
+_HUB_MIN_DEGREE = 5
 
 _RESOURCE_HOLDER = "kg"  # must match the worker name supervisor.py restarts — this
 # service now runs in its own supervised "kg" process (see kg_app.py and
@@ -468,6 +475,19 @@ class KnowledgeGraphService:
         # _refresh_top_entities()/top_entities().
         self._top_entities_cache: list[TopEntity] = []
 
+        # Cache-only mirror of surprising_connections()'s ranking -- same
+        # background-thread-only refresh discipline as _top_entities_cache
+        # above, and for the same reason: 2-hop enumeration is materially
+        # heavier than a flat scan, so it must never run on a request thread.
+        self._surprising_connections_cache: list[SurprisingConnection] = []
+
+        # Same discipline for the other /graph/* aggregates -- each is a full
+        # graph scan, so it runs on the index thread and the request path
+        # only slices the cache. See _refresh_derived_caches().
+        self._god_nodes_cache: list[TopEntity] = []
+        self._authors_cache: list[AuthorSummary] = []
+        self._vault_health_cache: VaultHealthResponse | None = None
+
         # Knowledge Graph progress page state (replaces an earlier, since
         # reverted, generic "ollama stats" page — this is scoped to what's
         # actually useful: full-sync progress, current file's chunk
@@ -619,6 +639,10 @@ class KnowledgeGraphService:
                     self._indexed_cache.clear()
                     self._indexed_model_cache.clear()
                     self._top_entities_cache = []
+                    self._surprising_connections_cache = []
+                    self._god_nodes_cache = []
+                    self._authors_cache = []
+                    self._vault_health_cache = None
                 except Exception as exc:
                     _log.warning("drop_index failed: %s", exc)
             self._state = "stale"
@@ -1352,28 +1376,60 @@ class KnowledgeGraphService:
         self._stop_event.wait(timeout=20)
         self._full_index()
         while not self._stop_event.is_set():
-            with self._lock:
-                renames = self._pending_renames.copy()
-                self._pending_renames.clear()
-                pending = self._pending.copy()
-                self._pending.clear()
-            for old_path, new_path in renames:
-                if not self._rename_file(old_path, new_path):
-                    # Not previously indexed (or the relabel itself failed)
-                    # -- fall back to treating it as a fresh file so it
-                    # still gets extracted rather than silently dropped.
-                    pending.add(new_path)
-            if pending:
-                self._process_pending(pending)
+            try:
+                self._drain_once()
+            except Exception:
+                # One bad incremental cycle must not kill the daemon thread
+                # (a Kùzu stream error, a transient I/O failure) -- log and
+                # retry next tick, same as _full_index() already does.
+                _log.exception("knowledge graph incremental cycle failed")
             self._stop_event.wait(timeout=60)
 
-    def _process_pending(self, pending: set[Path]) -> None:
+    def _drain_once(self) -> None:
+        """One incremental-update cycle. Split out of _loop() so a test can
+        drive a single cycle."""
+        with self._lock:
+            renames = list(self._pending_renames)
+            self._pending_renames.clear()
+            pending = set(self._pending)
+            self._pending.clear()
+        try:
+            self._drain(renames, pending)
+        except Exception:
+            # _loop() catches and moves on -- a failed cycle must not lose
+            # the batch, or the graph/caches stay stale until an unrelated
+            # filesystem event. Re-queue everything (extraction is
+            # content-hash guarded, so re-processing is a cheap no-op) and
+            # let /status show it's still outstanding.
+            with self._lock:
+                self._pending |= pending
+                self._pending_renames[:0] = renames
+                if self._state != "indexing":
+                    self._state = "stale"
+            raise
+
+    def _drain(self, renames: list, pending: set) -> None:
+        renamed = False
+        for old_path, new_path in renames:
+            if self._rename_file(old_path, new_path):
+                renamed = True
+            else:
+                pending.add(new_path)  # never indexed / relabel failed -- extract fresh
+        refreshed = self._process_pending(pending) if pending else False
+        if renamed and not refreshed:
+            # A relabel rewrote source_file on graph rows but queued nothing
+            # for _process_pending, so the caches still hold pre-rename paths.
+            self._refresh_derived_caches()
+
+    def _process_pending(self, pending: set[Path]) -> bool:
+        """Returns whether the derived caches were refreshed this pass."""
         _log.info("knowledge graph incremental update: %d files flagged by watcher", len(pending))
         existing = [path for path in pending if path.exists()]
+        deleted = False
         for path in pending:
-            if not path.exists():
-                self._delete_file(path)
-        changed = self._extract_files_concurrently(existing)
+            if not path.exists() and self._delete_file(path):
+                deleted = True
+        extracted = self._extract_files_concurrently(existing)
         # mark_stale() is called optimistically from many API call sites
         # (any vault write) before this watcher-driven pass ever runs, so
         # /status reflects a change immediately rather than waiting up to
@@ -1383,15 +1439,17 @@ class KnowledgeGraphService:
         # sync-engine conflict retries rewriting identical content left
         # "stale" permanently stuck with nothing left to do, since only the
         # `changed` branch used to clear it).
+        changed = extracted or deleted
         with self._lock:
             if changed:
                 self._last_indexed = datetime.now()
             self._state = "idle"
         if changed:
-            self._refresh_top_entities()
-        if not changed and existing:
+            self._refresh_derived_caches()
+        if not extracted and existing:
             _log.info("knowledge graph incremental update: no real content change — watcher false-positive")
         self._set_activity(None)
+        return changed
 
     def _full_index(self) -> None:
         with self._lock:
@@ -1456,7 +1514,7 @@ class KnowledgeGraphService:
                 self._current_file = None
                 self._current_file_chunks_total = 0
                 self._current_file_chunks_done = 0
-            self._refresh_top_entities()
+            self._refresh_derived_caches()
             self._set_activity(None)
             _log.info("knowledge graph full index done: %d files indexed, %d changed", len(all_files), changed)
         except Exception as exc:
@@ -1476,100 +1534,107 @@ class KnowledgeGraphService:
     # is enough to keep /search and ollama_deep_search working without
     # regression while that refinement is deferred.
 
+    # The Kùzu connection is not thread-safe (see _extract_file); every live
+    # scan on self._conn holds self._lock, like the extraction upserts do.
+
     def entities_for_file(self, rel_path: str) -> EntitiesForFileResponse:
         """Raw entities/edges extracted from one specific file — for
         inspecting extraction quality directly (search/ranked_nodes only
         ever return file-level scores, never the underlying nodes)."""
-        if self._conn is None:
-            return EntitiesForFileResponse(entities=[], edges=[])
-        entities: list[EntityInfo] = []
-        try:
-            result = self._conn.execute(
-                "MATCH (e:Entity {source_file: $rel}) "
-                "RETURN e.id, e.label, e.file_type, e.trust_tier, e.source_location",
-                {"rel": rel_path},
-            )
-            while result.has_next():
-                eid, label, file_type, trust_tier, source_location = result.get_next()
-                entities.append(EntityInfo(
-                    id=eid, label=label, file_type=file_type,
-                    trust_tier=trust_tier, source_location=source_location,
-                ))
-        except Exception as exc:
-            _log.warning("entities_for_file failed for %s: %s", rel_path, exc)
-            return EntitiesForFileResponse(entities=[], edges=[])
-        edges: list[EdgeInfo] = []
-        try:
-            result = self._conn.execute(
-                "MATCH (a:Entity)-[r:RelatesTo {source_file: $rel}]->(b:Entity) "
-                "RETURN a.id, r.relation, b.id, r.confidence, r.confidence_score",
-                {"rel": rel_path},
-            )
-            while result.has_next():
-                src, relation, dst, confidence, confidence_score = result.get_next()
-                edges.append(EdgeInfo(
-                    source=src, relation=relation, target=dst,
-                    confidence=confidence, confidence_score=confidence_score,
-                ))
-        except Exception as exc:
-            _log.warning("entities_for_file edges failed for %s: %s", rel_path, exc)
-        return EntitiesForFileResponse(entities=entities, edges=edges, extracted_by=self.indexed_model(rel_path))
+        model = self.indexed_model(rel_path)
+        with self._lock:
+            return kg_queries.entities_for_file(self._conn, rel_path, model)
 
     def search(self, question: str, top_k: int = 20) -> list[GraphSearchResult]:
-        terms = [t.lower() for t in re.findall(r"[a-zA-Z0-9_]+", question) if len(t) > 2]
-        if not terms or self._conn is None:
-            return []
-        try:
-            result = self._conn.execute(
-                "MATCH (e:Entity) WHERE e.trust_tier <> 'chat' RETURN e.id, e.label, e.source_file"
-            )
-        except Exception as exc:
-            _log.warning("search failed: %s", exc)
-            return []
-        file_scores: dict[str, float] = {}
-        while result.has_next():
-            eid, label, source_file = result.get_next()
-            if not source_file:
-                continue
-            haystack = f"{eid} {label}".lower()
-            score = sum(1.0 for t in terms if t in haystack)
-            if score > 0:
-                file_scores[source_file] = file_scores.get(source_file, 0.0) + score
-        ranked = sorted(file_scores.items(), key=lambda x: -x[1])[:top_k]
-        return [GraphSearchResult(source_file=sf, score=score) for sf, score in ranked]
+        with self._lock:
+            return kg_queries.search(self._conn, question, top_k=top_k)
 
-    def _compute_top_entities(self, limit: int = TOP_ENTITIES_CACHE_SIZE) -> list[TopEntity]:
-        """Live Cypher call -- only ever invoked from the background index
-        thread (via _refresh_top_entities()), never from a request handler.
-        top_entities() below is the cache-only read callers actually use."""
-        if self._conn is None:
-            return []
-        try:
-            result = self._conn.execute(
-                "MATCH (e:Entity)-[r:RelatesTo]-(o:Entity) "
-                "WHERE e.trust_tier <> 'chat' AND o.trust_tier <> 'chat' "
-                "RETURN e.id, e.label, count(r) AS degree "
-                "ORDER BY degree DESC LIMIT $limit",
-                {"limit": limit},
-            )
-        except Exception as exc:
-            _log.warning("top_entities computation failed: %s", exc)
-            return []
-        out: list[TopEntity] = []
-        while result.has_next():
-            eid, label, degree = result.get_next()
-            out.append(TopEntity(id=eid, label=label, degree=degree))
-        return out
+    # ── Phase A retrieval capabilities (delegated to kg_queries) ──────────────
+    # Live Cypher on the request path, same as entities_for_file/search above —
+    # these are explicit tool/endpoint calls, not the per-turn priming read.
+
+    def expand_node(self, node_id: str, limit: int = kg_queries.DEFAULT_EXPAND):
+        with self._lock:
+            return kg_queries.expand_node(self._conn, node_id, limit)
+
+    def god_nodes(self, limit: int = TOP_ENTITIES_CACHE_SIZE) -> list[TopEntity]:
+        """Cache-only read -- see _refresh_god_nodes()."""
+        with self._lock:
+            return self._god_nodes_cache[:limit]
+
+    def authors(self, limit: int = kg_queries.DEFAULT_AUTHORS) -> list[AuthorSummary]:
+        """Cache-only read -- see _refresh_authors()."""
+        with self._lock:
+            return self._authors_cache[:limit]
+
+    def vault_health(self, limit: int = kg_queries.VAULT_HEALTH_MAX) -> VaultHealthResponse:
+        """Cache-only read -- see _refresh_vault_health(). `orphan_count` is
+        the true total; `orphans` is sliced to `limit`."""
+        with self._lock:
+            cached = self._vault_health_cache
+        if cached is None:
+            return VaultHealthResponse(orphans=[], orphan_count=0)
+        return VaultHealthResponse(orphans=cached.orphans[:limit], orphan_count=cached.orphan_count)
+
+    def timeline(self, question: str, limit: int = kg_queries.DEFAULT_TIMELINE) -> list[TimelineEntry]:
+        # Only the graph scan holds the lock; the per-document frontmatter
+        # reads (timeline_build) run with it released so a broad query
+        # doesn't stall the indexer and every other KG request.
+        with self._lock:
+            hits, docs_by_entity = kg_queries.timeline_scan(self._conn, question, limit)
+        return kg_queries.timeline_build(self._vault, hits, docs_by_entity, limit)
 
     def _refresh_top_entities(self) -> None:
-        computed = self._compute_top_entities()
+        # Scan and publish under one lock hold: a gap lets drop_index()
+        # clear the graph in between, and this would republish stale rows.
         with self._lock:
-            self._top_entities_cache = computed
+            self._top_entities_cache = kg_queries.compute_top_entities(
+                self._conn, TOP_ENTITIES_CACHE_SIZE
+            )
 
     def top_entities(self, limit: int = TOP_ENTITIES_CACHE_SIZE) -> list[TopEntity]:
         """Cache-only read, no Kùzu call -- see _refresh_top_entities()."""
         with self._lock:
             return self._top_entities_cache[:limit]
+
+    def _refresh_surprising_connections(self) -> None:
+        """Background-thread-only -- the 2-hop enumeration is heavier than
+        the top-entities scan."""
+        with self._lock:
+            # *Every* entity of degree >= _HUB_MIN_DEGREE, not just the
+            # 15-entry priming cache -- otherwise the 16th+ hub in a large
+            # vault stays eligible as a bridge and dominates the result.
+            hubs = kg_queries.hub_ids(self._conn, _HUB_MIN_DEGREE)
+            # Scan and publish under one hold -- see _refresh_top_entities.
+            self._surprising_connections_cache = kg_queries.surprising_connections(
+                self._conn, hubs, limit=kg_queries.SURPRISING_CONNECTIONS_MAX,
+            )
+
+    def surprising_connections(self, limit: int = TOP_ENTITIES_CACHE_SIZE) -> list[SurprisingConnection]:
+        """Cache-only read, no Kùzu call -- see _refresh_surprising_connections()."""
+        with self._lock:
+            return self._surprising_connections_cache[:limit]
+
+    def _refresh_god_nodes(self) -> None:
+        with self._lock:
+            self._god_nodes_cache = kg_queries.god_nodes(self._conn, kg_queries.GOD_NODES_MAX)
+
+    def _refresh_authors(self) -> None:
+        with self._lock:
+            self._authors_cache = kg_queries.authors(self._conn, kg_queries.AUTHORS_MAX)
+
+    def _refresh_vault_health(self) -> None:
+        with self._lock:
+            self._vault_health_cache = kg_queries.vault_health(self._conn)
+
+    def _refresh_derived_caches(self) -> None:
+        """Recompute every /graph/* aggregate that would otherwise be a full
+        scan on the request path. Background-index-thread only."""
+        self._refresh_top_entities()
+        self._refresh_surprising_connections()
+        self._refresh_god_nodes()
+        self._refresh_authors()
+        self._refresh_vault_health()
 
     # ── Compatibility wrappers ───────────────────────────────────────────────
     # Same names/shapes as GraphifyIndexer's — app.py's call sites (/search,
@@ -1594,7 +1659,7 @@ class KnowledgeGraphService:
         sources: list[str] = []
         seen: set[str] = set()
         for r in results:
-            slug = Path(r.source_file).stem
+            slug = self._vault.slug_for_relpath(r.source_file)  # compound dir--name, not bare stem
             if slug not in seen:
                 seen.add(slug)
                 sources.append(slug)

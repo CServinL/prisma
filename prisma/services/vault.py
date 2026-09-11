@@ -62,6 +62,11 @@ def _file_slug(stem: str) -> str:
     return slug or "untitled"
 
 
+# frontmatter_for_relpath() reads only this many bytes -- a frontmatter
+# block larger than this is malformed, and its year lookup degrades to None.
+_FRONTMATTER_READ_BYTES = 8192
+
+
 def _parse_frontmatter(body: str) -> tuple[dict, str]:
     """Return (frontmatter_dict, body_without_frontmatter).
 
@@ -344,6 +349,58 @@ class VaultService:
                 if fname.endswith(extensions):
                     yield Path(dirpath) / fname
 
+    def slug_for_relpath(self, rel_path: str | Path) -> str:
+        """Encode a path relative to the vault root as the `dir--name`
+        compound slug (ADR-021) that `_resolve_compound_slug`/`_find_md`
+        below decode -- kept beside its decode counterpart so the two
+        can't drift apart."""
+        return str(Path(rel_path).with_suffix("")).replace("/", "--").replace("\\", "--")
+
+    def frontmatter_for_relpath(self, rel_path: str | Path) -> dict:
+        """Frontmatter of a vault file addressed by its already-known
+        vault-relative path -- skips the slug decode and full-vault walk
+        `get_any()` does, and reads only the file's head. For hot paths that
+        already hold the relative path (e.g. kg_queries.timeline)."""
+        try:
+            candidate = (self.root / Path(rel_path)).resolve()
+            if not candidate.is_relative_to(self.root.resolve()):
+                return {}
+            with candidate.open("r", encoding="utf-8", errors="replace") as f:
+                head = f.read(_FRONTMATTER_READ_BYTES)
+        except OSError:
+            return {}
+        fm, _ = _parse_frontmatter(head)
+        return fm
+
+    def _resolve_compound_slug(self, slug: str, suffix: str) -> Path | None:
+        """Decode a `dir--name` compound slug (ADR-021) into a candidate
+        path with the given suffix, refusing to resolve outside the vault
+        root. Without this check, a slug like `"..--..--etc--passwd"`
+        decodes (via `.replace("--", "/")`) to a `..`-laden relative path
+        that escapes the vault root once resolved, and a slug beginning
+        with `--` decodes to a leading `/` -- `Path`'s own `/` operator
+        discards the left operand entirely when the right side is absolute,
+        so `self.root / "/etc/passwd"` silently becomes `Path("/etc/passwd")`.
+        READ_SOURCE and `GET /notes/{slug}/read` pass a slug straight
+        through to this decode with no other validation in between, unlike
+        the wiki-link resolution path this decode was originally written
+        for."""
+        if "--" not in slug:
+            return None
+        try:
+            # Append, not .with_suffix(): a decoded stem can contain dots
+            # (`paper.v1`), which .with_suffix() would rewrite.
+            candidate = self.root / (slug.replace("--", "/") + suffix)
+            resolved = candidate.resolve()
+            root_resolved = self.root.resolve()
+        except (OSError, ValueError):  # e.g. embedded NUL — Path rejects it
+            return None
+        if not resolved.is_relative_to(root_resolved):
+            return None
+        # is_file(), not exists(): a directory literally named `foo.md`
+        # would otherwise be handed back and open()ed by read_source().
+        return candidate if candidate.is_file() else None
+
     def _find_md(self, slug: str) -> Path | None:
         """Find a .md file whose slug matches -- either the bare stem, or a
         dir--name compound slug encoding its folder (ADR-021; the same
@@ -359,11 +416,7 @@ class VaultService:
         for path in self.iter_files():
             if _file_slug(path.stem).lower() == slug_norm:
                 return path
-        if "--" in slug:
-            candidate = (self.root / slug.replace("--", "/")).with_suffix(".md")
-            if candidate.exists():
-                return candidate
-        return None
+        return self._resolve_compound_slug(slug, ".md")
 
     def _find_sess(self, slug: str) -> Path | None:
         """Find a chat .sess file whose slug matches. Only looks in the
@@ -388,10 +441,9 @@ class VaultService:
         if md is not None:
             return md
         # Path-relative slugs encode '/' as '--' (e.g. "papers--bricken2003--index")
-        if "--" in slug:
-            html_candidate = (self.root / slug.replace("--", "/")).with_suffix(".html")
-            if html_candidate.exists():
-                return html_candidate
+        html_candidate = self._resolve_compound_slug(slug, ".html")
+        if html_candidate is not None:
+            return html_candidate
         slug_norm = _file_slug(slug).lower()
         for path in self.iter_files(extensions=(".html",)):
             if _file_slug(path.stem).lower() == slug_norm:
@@ -1059,7 +1111,7 @@ class VaultService:
                     if name.endswith(".html"):
                         try:
                             rel = path.relative_to(self.root)
-                            html_slug = str(rel.with_suffix("")).replace("/", "--").replace("\\", "--")
+                            html_slug = self.slug_for_relpath(rel)
                         except ValueError:
                             html_slug = _file_slug(path.stem)
                         companion_md = path.with_suffix(".md")
@@ -1126,7 +1178,7 @@ class VaultService:
             if companion.exists():
                 companion.rename(dest / companion.name)
         rel = new_path.relative_to(self.root)
-        new_slug = str(rel.with_suffix("")).replace("/", "--").replace("\\", "--")
+        new_slug = self.slug_for_relpath(rel)
         return new_slug, old_rel, str(rel)
 
     def rename_node(self, slug: str, new_title: str) -> tuple[str, str | None, str | None]:

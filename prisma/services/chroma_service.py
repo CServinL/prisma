@@ -346,7 +346,16 @@ class ChromaIndexer:
                 pending = self._pending.copy()
                 self._pending.clear()
             if pending:
-                self._process_incremental(pending)
+                try:
+                    self._process_incremental(pending)
+                except Exception:
+                    # A failed cycle must not kill the daemon or silently
+                    # drop the batch (the queue is already cleared) -- log,
+                    # re-queue, retry next tick. mtime guards make
+                    # re-embedding a no-op.
+                    _log.exception("chroma incremental cycle failed")
+                    with self._lock:
+                        self._pending |= pending
             self._stop_event.wait(timeout=60)
 
     def _process_incremental(self, pending: set[Path]) -> None:

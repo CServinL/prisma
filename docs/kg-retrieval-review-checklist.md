@@ -1,0 +1,150 @@
+# KG retrieval / `/graph/*` / vault-read review checklist
+
+Distilled from ~36 review findings on the Phase-A knowledge-graph capabilities
+(`kg_queries.py`, `prisma/server/graph_routes.py`, `source_reader.py`, the chat
+grounding tools). The same defect classes recurred repeatedly because fixes
+were applied only at the flagged line, not to the class.
+
+**Run this whole list against any change to KG retrieval, `/graph/*` routes,
+vault-file reads, or chat grounding tools — and against the change's siblings,
+not just the line being touched.**
+
+## 0. Before treating a review finding as new
+
+Automated review runs against the PR's **pushed** head. If fixes are sitting
+in unpushed local commits, the reviewer re-flags the stale code and it looks
+like a fresh mistake. When a finding comes in: first `git log` the branch and
+grep the current working tree for the fix — if it's already there, the action
+is *push*, not re-fix. Keep the branch pushed after each verified batch so the
+next review is against real code.
+
+## 1. `Entity.source_file` is last-writer, not provenance
+
+`KnowledgeGraphService._upsert()` does `MERGE (e:Entity {id}) SET e.source_file = $rel`
+— the row is mutable and last-writer-wins. Extraction ids are `{stem}_{entity}`, so
+same-stem files in different directories mint the same id and `_upsert` merges them,
+overwriting `source_file`.
+
+- For any **citation / provenance**, use the edge's `RelatesTo.source_file` (immutable,
+  one per assertion), not either endpoint entity's `source_file`.
+- `god_nodes` (`source_files`), `surprising_connections` (`source_file_a/b`),
+  `expand_node` (grounding header), `timeline` (per-document) all follow this.
+- `search` relevance, the `expand_node` UI neighbour hint, and `OrphanEntity.source_file`
+  legitimately use the entity's own `source_file` (best-effort, non-citation).
+
+## 2. chat-tier filter on **both** endpoints
+
+Every `MATCH (a:Entity)-[r:RelatesTo]-(b:Entity)` needs
+`WHERE a.trust_tier <> 'chat' AND b.trust_tier <> 'chat'`. Chats are non-citable
+(Axiom 5). "An edge's two endpoints share a trust tier" is *not* a safe assumption —
+an id collision plus a later re-extraction at a different tier breaks it, leaking a
+chat-asserted relationship (and its chat `source_file`) into a citable surface.
+
+Exception: `entities_for_file` is addressed by an exact `source_file` and is diagnostic
+(`/admin/kg/*`), so it deliberately returns whatever that file produced.
+
+## 3. Edge direction
+
+`RelatesTo` is a **directed** rel table. `MATCH (a)-[r]-(b)` (undirected) discards the
+stored orientation.
+
+- Undirected match → only `count()` / existence-check with it, or render the relation
+  **direction-neutrally** (`--`, not `-->`).
+- Want direction → use `->` and two directed queries (see `expand_node`).
+
+## 4. The Kùzu connection is shared, serialized, and not thread-safe
+
+There is one `self._conn`. FastAPI runs sync handlers concurrently, and the background
+indexer upserts on it too.
+
+- Every live scan holds `self._lock` (same lock the extraction upserts take).
+- Expensive non-Cypher I/O (vault file reads) runs **outside** the lock — split the
+  query into a locked scan and an unlocked build (`timeline_scan` / `timeline_build`).
+- A derived cache is **computed and published under one lock hold** — a gap lets
+  `drop_index()` clear the graph in between and the stale result gets republished.
+- The cache refresh must gate on **every** graph mutation: extraction, deletion, and
+  rename-relabel (not just `extracted`).
+- Every request-path query takes a validated `limit`; free-text query params
+  (`?id=`, `?q=`, `?query=`) take a `max_length`, plus `min_length=1` when the param
+  is required (an empty required param is a client error, not a request for
+  everything). Validate at **every** HTTP boundary — the `kg` worker (`kg_app.py`)
+  binds to a host and is directly reachable, so its routes carry the *same*
+  `ge`/`le`/`min_length`/`max_length` as the public `/graph/*` router, param for
+  param; "the client always passes a sane value" is not a defence, and neither is
+  "the query function returns empty on bad input anyway".
+- A degree threshold / hub-exclusion set is computed from the **whole graph**
+  (`kg_queries.hub_ids`), not from the top-N priming cache (`_top_entities_cache` holds
+  only `TOP_ENTITIES_CACHE_SIZE`, so the (N+1)th hub would slip through).
+- A `try/except` wrapped around a work-draining loop (`_loop` → `_drain_once`) must
+  **re-queue the batch** before propagating — the queue was already `.clear()`ed, so a
+  caught exception otherwise drops the work with nothing to retry.
+- Any full-graph aggregate is background-computed and served from cache, never run on
+  a request thread: `top_entities`, `surprising_connections`, `god_nodes`, `authors`,
+  `vault_health` are all cache-only reads (`KnowledgeGraphService._refresh_derived_caches()`,
+  called from every `_process_pending` / `_full_index` / rename cycle). Adding another
+  such endpoint means adding a `_X_cache` + `_refresh_X()` + a line in
+  `_refresh_derived_caches()` + a `drop_index()` reset, not a live scan.
+
+## 5. Grounding-tool contract
+
+A tool marked `grounding=True` (`ToolSpec`) must, for anything it returns:
+
+- carry a **resolvable citable slug** — the compound `dir--name` form via
+  `VaultService.slug_for_relpath()`, **never** `Path(x).stem` (which drops the
+  directory and collapses duplicate filenames) — rendered in a `Sources:` header, or
+  wrap the payload under a real slug (`read_source`, `zotero_search`);
+- return **empty text** when it has nothing citable, so
+  `ChatAgent._turn_had_no_grounding()` (which keys on `result.text or None`) correctly
+  forces the ai-inference wrapper;
+- render **only the items that carry their own provenance** — an edge/row with no
+  `source_file` shown under another row's `Sources:` header is a misattribution. Build
+  the rendered lines and the header from the same citable-only subset, not "render
+  everything, cite what we can".
+
+## 6. "Bounded slice" means all three
+
+- bounded **input** read — `f.read(N)`, not `path.read_text()[:N]` (don't pull a large
+  imported PDF→MD fully into memory). Read `N + 1` and compare, so you can tell the
+  file continued past the cap;
+- bounded **output** size — a cap on total joined chars, not just a match/row count;
+- the **`truncated` flag** set on *every* path that shortened the result (scan cap,
+  per-line clip, total-size budget, more matches than shown) — across *all* modes, not
+  just the one it was first added for.
+
+`read_source`'s literal mode is literal-only — no regex engine on caller-controlled
+input (`re` has no execution timeout; `(a+)+$` is a catastrophic-backtracking DoS).
+
+## 7. Slug decode safety
+
+`_resolve_compound_slug()` / `_find_md()` decode `dir--name` → a path. Any new caller
+(`READ_SOURCE`, `GET /notes/{slug}/read`, `frontmatter_for_relpath`) inherits its
+input contract — audit it, don't assume "existing code = safe":
+
+- containment check: `resolved.is_relative_to(self.root.resolve())`;
+- `candidate.is_file()`, not `.exists()` (a directory literally named `foo.md`);
+- append the known suffix, don't `Path.with_suffix()` (a dotted stem `paper.v1` would
+  lose `.v1`);
+- catch `ValueError` for degenerate inputs (`"--"` → `/`, leading-separator absolutes).
+
+Open limitation: the `--` separator is unescaped, so a path component containing `--`
+does not round-trip; `{stem}_{entity}` ids are not directory-unique. Full fix is an
+escape scheme + `{relpath}_{entity}` ids + a reindex — see `TODO.md`.
+
+## 8. Two literals that must agree → one shared constant
+
+e.g. `SURPRISING_CONNECTIONS_MAX` backs both the route's `Query(..., le=...)` and the
+background cache's populate size; `TIMELINE_MAX` / `EXPAND_MAX` likewise.
+
+A route bound (`le=`) must reference the constant it *semantically* depends on, not a
+different one that happens to hold the same number. `/top_entities`' `le=` is the
+cache's row count, so it binds to `knowledge_graph_service.TOP_ENTITIES_CACHE_SIZE`,
+not `kg_queries.DEFAULT_TOP_ENTITIES` (coincidentally also 15 — they'd drift silently).
+
+## 9. Tests build state through the real write path
+
+Construct the graph with `_upsert` / real extraction / the public service method —
+never hand-assemble the end state (`kg._top_entities_cache = []`, reusing one entity
+id across documents, manually assigning `old_topic` / `new_topic` that
+`{stem}_{entity}` extraction would never produce). A fixture that dodges the
+production invariant proves nothing. And always confirm the test fails on the pre-fix
+code (`git stash` the source, run the test, see red).

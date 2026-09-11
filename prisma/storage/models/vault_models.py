@@ -175,6 +175,12 @@ class WarrantNode(BaseModel):
     backing: list[str] = Field(default_factory=list)  # Note/Source/Chat slugs
 
 
+# The four relation values a document-traceable claim can carry. Named so
+# the FOOTNOTES_JSON parser (chat_agent._RawFootnote) can validate against
+# exactly this set plus "ai-inference", rather than re-listing it.
+CitedRelation = Literal["citation", "paraphrase", "attribution", "relational"]
+
+
 class CitedClaimNode(BaseModel):
     """A claim traceable to specific vault document(s) -- `citation`/
     `paraphrase`/`attribution`/`relational` share this shape (all have real
@@ -188,7 +194,7 @@ class CitedClaimNode(BaseModel):
     index: int  # sequential per turn, 1-based -- the inline [^N] marker this claim is
     claim_text: str
     sources: list[str] = Field(default_factory=list)  # Note/Source/Chat slugs
-    relation: Literal["citation", "paraphrase", "attribution", "relational"]
+    relation: CitedRelation
     # Whether an automated/manual check confirmed the claim accurately
     # represents `sources`. None = not (yet) checked.
     faithfulness_checked: bool | None = None

@@ -400,6 +400,33 @@ def test_process_incremental_succeeds_and_saves_manifest_when_granted(indexer, v
     assert md_file not in indexer._pending
 
 
+def test_loop_requeues_the_batch_when_a_cycle_raises(indexer, vault):
+    # The queue is cleared before processing -- a raised (not just
+    # lease-denied) cycle must not lose the batch and must not kill the loop.
+    md_file = vault.root / "notes" / "x.md"
+    md_file.parent.mkdir(parents=True, exist_ok=True)
+    md_file.write_text("c", encoding="utf-8")
+    with indexer._lock:
+        indexer._pending.add(md_file)
+
+    calls = []
+
+    def flaky(pending):
+        calls.append(1)
+        if len(calls) >= 2:
+            indexer._stop_event.set()
+        raise RuntimeError("boom")
+
+    with patch.object(indexer, "_full_index"), \
+         patch.object(indexer, "_process_incremental", side_effect=flaky), \
+         patch.object(indexer._stop_event, "wait"):
+        indexer._stop_event.clear()
+        indexer._loop()
+
+    assert len(calls) == 2  # retried after the first failure instead of dying
+    assert md_file in indexer._pending  # the batch was re-queued, not dropped
+
+
 def test_save_and_load_manifest(indexer, vault):
     col = _mock_chroma_collection()
     client = _mock_chroma_client(col)

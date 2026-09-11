@@ -71,6 +71,65 @@ class TestFindFile:
         assert found is not None
         assert found == sources_dir / "paper.md"
 
+    def test_slug_for_relpath_round_trips_through_find_file_for_a_nested_path(self, vault):
+        # slug_for_relpath() is the encode counterpart of the dir--name decode
+        # in _resolve_compound_slug()/_find_md(); the two must stay inverses,
+        # including for a path more than one directory deep.
+        nested_dir = vault.root / "sources" / "archive"
+        nested_dir.mkdir(parents=True, exist_ok=True)
+        md = nested_dir / "paper.md"
+        md.write_text("---\ntype: source\n---\nBody.", encoding="utf-8")
+        rel = md.relative_to(vault.root)
+
+        slug = vault.slug_for_relpath(rel)
+
+        assert slug == "sources--archive--paper"
+        assert vault.find_file(slug) == md
+        assert vault._resolve_compound_slug(slug, ".md") == md
+
+    def test_slug_for_relpath_round_trips_for_a_dotted_filename(self, vault):
+        # `paper.v1.md` encodes to `sources--paper.v1`; the decode must not
+        # rewrite the trailing `.v1` as a suffix and collapse the file to
+        # `sources/paper.md`.
+        sources_dir = vault.root / "sources"
+        sources_dir.mkdir(parents=True, exist_ok=True)
+        md = sources_dir / "paper.v1.md"
+        md.write_text("---\ntype: source\n---\nBody.", encoding="utf-8")
+        rel = md.relative_to(vault.root)
+
+        slug = vault.slug_for_relpath(rel)
+
+        assert slug == "sources--paper.v1"
+        assert vault.find_file(slug) == md
+        assert vault._resolve_compound_slug(slug, ".md") == md
+
+    def test_compound_slug_cannot_escape_vault_root_via_dotdot(self, vault, tmp_path):
+        # vault.root is tmp_path/"vault"; "..--secret" decodes via
+        # .replace("--", "/") to "../secret", landing exactly at
+        # tmp_path/"secret.md" -- one level above vault.root, where this
+        # test actually plants the file.
+        outside = tmp_path / "secret.md"
+        outside.write_text("---\ntype: note\n---\nleaked", encoding="utf-8")
+        assert vault.find_file("..--secret") is None
+
+    def test_compound_slug_of_bare_separator_does_not_raise(self, vault):
+        assert vault.find_file("--") is None
+
+    def test_compound_slug_resolving_to_a_directory_is_not_returned_as_a_file(self, vault):
+        # A directory literally named "notes.md" -- exists() is True for it,
+        # so read_source() would open() a directory and 500. is_file() must
+        # reject it, degrading to the intended 404.
+        (vault.root / "wiki" / "page.md").mkdir(parents=True, exist_ok=True)
+        assert vault._resolve_compound_slug("wiki--page", ".md") is None
+        assert vault.find_file("wiki--page") is None
+
+    def test_compound_slug_cannot_escape_vault_root_via_leading_separator(self, vault):
+        # "--etc--passwd" decodes to "/etc/passwd" -- Path's own / operator
+        # discards the left operand entirely when the right side is
+        # absolute, so self.root / "/etc/passwd" would otherwise silently
+        # become Path("/etc/passwd") rather than staying inside the vault.
+        assert vault.find_file("--etc--passwd") is None
+
     def test_bare_slug_still_resolves_when_a_dir_slug_also_exists(self, vault):
         # Existing bare-name [[wiki-links]] must keep resolving exactly as
         # before -- the dir--name decode is additive, not a replacement.
@@ -101,6 +160,21 @@ class TestGetAnyResolvesCompoundSlugs:
         (notes_dir / "idea.md").write_text("---\ntype: note\n---\nBody.", encoding="utf-8")
         node = vault.get_any("notes--idea")
         assert node.slug == "idea"
+
+
+class TestFrontmatterForRelpath:
+    def test_reads_year_from_a_nested_relative_path(self, vault):
+        (vault.root / "sources").mkdir(parents=True, exist_ok=True)
+        (vault.root / "sources" / "paper.md").write_text(
+            "---\ntype: source\nyear: 2018\n---\nBody.", encoding="utf-8")
+        assert vault.frontmatter_for_relpath("sources/paper.md")["year"] == 2018
+
+    def test_missing_file_is_empty(self, vault):
+        assert vault.frontmatter_for_relpath("sources/nope.md") == {}
+
+    def test_cannot_escape_the_vault_root(self, vault, tmp_path):
+        (tmp_path / "outside.md").write_text("---\nyear: 1999\n---\nx", encoding="utf-8")
+        assert vault.frontmatter_for_relpath("../outside.md") == {}
 
 
 class TestNodeTypeFromFrontmatter:

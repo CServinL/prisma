@@ -90,10 +90,12 @@
   // the end of the turn — see renderContentSegments() below.
   type ClaimRelation = "citation" | "paraphrase" | "attribution" | "relational";
 
-  // v3 (schema-only until the chat-schema-v3 branch): Toulmin argumentation
-  // extension. qualifier/warrant/rebuts exist on both claim kinds but
-  // nothing populates them yet -- same "renders if present" posture as
-  // `thoughts` below.
+  // Toulmin argumentation extension (chat_agent.py's FOOTNOTES_JSON parsing) --
+  // qualifier/warrant/rebuts exist on both claim kinds, populated only when
+  // the model self-reported them for that entry, same "renders if present"
+  // posture as `thoughts` below. `rebuts` is another claim's node `id`
+  // (chat_agent._resolve_rebuts resolves the model's same-turn [^N] index to
+  // it), not that claim's `index` -- see the jump-link below.
   type Qualifier = "certain" | "probable" | "possible" | "tentative";
 
   interface WarrantOut {
@@ -103,6 +105,7 @@
   }
 
   interface CitedClaimOut {
+    id: string;
     kind: "claim";
     index: number;
     claim_text: string;
@@ -111,16 +114,17 @@
     faithfulness_checked: boolean | null;
     qualifier: Qualifier | null;
     warrant: WarrantOut | null;
-    rebuts: string | null;
+    rebuts: string | null;  // another claim's `id` in this same turn, not its index
   }
 
   interface InferenceClaimOut {
+    id: string;
     kind: "inference";
     index: number;
     claim_text: string;
     qualifier: Qualifier | null;
     warrant: WarrantOut | null;
-    rebuts: string | null;
+    rebuts: string | null;  // another claim's `id` in this same turn, not its index
   }
 
   type ClaimOut = CitedClaimOut | InferenceClaimOut;
@@ -2507,11 +2511,14 @@
                               <span class="claim-qualifier" title="Epistemic strength (Toulmin qualifier)">{claim.qualifier}</span>
                             {/if}
                             {#if claim.rebuts}
-                              <button
-                                class="claim-rebuts"
-                                title="Rebuts claim #{claim.rebuts} — click to jump to it"
-                                onclick={() => document.getElementById(`chat-turn-${i}-claim-${claim.rebuts}`)?.scrollIntoView({ behavior: "smooth", block: "nearest" })}
-                              >⤺ rebuts</button>
+                              {@const rebutsTarget = msg.claims.find((c) => c.id === claim.rebuts)}
+                              {#if rebutsTarget}
+                                <button
+                                  class="claim-rebuts"
+                                  title="Rebuts claim #{rebutsTarget.index} — click to jump to it"
+                                  onclick={() => document.getElementById(`chat-turn-${i}-claim-${rebutsTarget.index}`)?.scrollIntoView({ behavior: "smooth", block: "nearest" })}
+                                >⤺ rebuts</button>
+                              {/if}
                             {/if}
                             {#if claim.warrant}
                               <div class="claim-warrant" title="Toulmin warrant — why the grounds support this claim">

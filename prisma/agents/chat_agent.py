@@ -15,15 +15,15 @@ import logging
 import re
 from typing import Callable, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from prisma.agents.session_orchestrator import SessionOrchestrator
 from prisma.schema_gov import ContentFormat, RichContent
 from prisma.services.chat_llm import ChatLLM
 from prisma.services.chat_tools import FOOTNOTES_LINE_RE, TOOL_CALL_RE, TOOLS, ChatToolbox
 from prisma.storage.models.vault_models import (
-    ChatRole, CitedClaimNode, CitedRelation, ClaimNode, InferenceNode, Note, RecallRef, ThinkingNode,
-    ToolCallNode, TurnNode,
+    ChatRole, CitedClaimNode, CitedRelation, ClaimNode, InferenceNode, Note, Qualifier, RecallRef,
+    ThinkingNode, ToolCallNode, TurnNode, WarrantNode,
 )
 
 _log = logging.getLogger("prisma.chat_agent")
@@ -84,6 +84,17 @@ def _extract_claim_texts(content: str) -> dict[int, str]:
     return claims
 
 
+class _RawWarrant(BaseModel):
+    """The optional `warrant` object inside a FOOTNOTES_JSON entry -- the
+    Toulmin reasoning bridge (see WarrantNode). `text` is required: a
+    warrant with nothing to say is not a warrant, so a missing/empty one
+    fails `_RawFootnote.model_validate` and the whole entry is skipped,
+    same as a bad `relation` -- not silently coerced to "no warrant"."""
+    model_config = ConfigDict(extra="ignore")
+    text: str = Field(min_length=1)
+    backing: list[str] = Field(default_factory=list)
+
+
 class _RawFootnote(BaseModel):
     """One FOOTNOTES_JSON self-report entry as the model emits it, validated
     on parse -- same typed-block discipline `Extraction` applies to KG
@@ -91,7 +102,15 @@ class _RawFootnote(BaseModel):
     `relation` (including the CitedClaimNode-absent value "ai-inference"),
     never `kind`, so `relation` is what `_claim_from_raw` keys off. Extra
     keys are ignored, not rejected: an LLM self-report drifts, and a
-    stray field must not sink an otherwise-valid entry."""
+    stray field must not sink an otherwise-valid entry.
+
+    `qualifier`/`warrant`/`rebuts` are the optional Toulmin extension
+    (system_prompt_footnote_section()) -- validated here on the same terms
+    as `relation`: a malformed value fails the whole entry, it does not
+    silently degrade to "field omitted." Referential validation (does
+    `rebuts` point at a real claim in this turn? does `backing` resolve to
+    a real vault node?) can't happen at this shape-only layer -- see
+    `_extract_claims`/`ChatAgent._warrant_resolves`."""
     model_config = ConfigDict(extra="ignore")
     index: int
     # The relation vocabulary is validated here by Pydantic, not by letting
@@ -102,23 +121,45 @@ class _RawFootnote(BaseModel):
     relation: CitedRelation | Literal["ai-inference"]
     sources: list[str] = Field(default_factory=list)
     claim_text: str | None = None
+    qualifier: Qualifier | None = None
+    warrant: _RawWarrant | None = None
+    # The index of another footnote in THIS turn that this one rebuts --
+    # same-turn only, see _extract_claims. Accepts a bare int or the
+    # "[^N]"/"N" string forms a model might emit despite the prompt's
+    # example using a plain int.
+    rebuts: int | None = None
+
+    @field_validator("rebuts", mode="before")
+    @classmethod
+    def _coerce_rebuts(cls, v: object) -> object:
+        if isinstance(v, str):
+            digits = v.strip().lstrip("[").rstrip("]").lstrip("^")
+            return int(digits) if digits.lstrip("-").isdigit() else v
+        return v
 
 
-def _claim_from_raw(item: object, claim_texts: dict[int, str]) -> ClaimNode | None:
-    """One FOOTNOTES_JSON self-reported entry -> a CitedClaimNode or
-    InferenceNode. `item` is a raw `json.loads` element (any shape) --
-    `_RawFootnote.model_validate` is the boundary that rejects a
-    non-conforming entry (missing/typo'd index/relation, wrong types) as None."""
+def _claim_from_raw(item: object, claim_texts: dict[int, str]) -> tuple[ClaimNode, int | None] | None:
+    """One FOOTNOTES_JSON self-reported entry -> a (CitedClaimNode or
+    InferenceNode, raw same-turn `rebuts` index) pair. `item` is a raw
+    `json.loads` element (any shape) -- `_RawFootnote.model_validate` is the
+    boundary that rejects a non-conforming entry (missing/typo'd index/
+    relation, an unknown qualifier, an empty warrant, wrong types) as None.
+    The `rebuts` index is returned unresolved -- `_extract_claims` is what
+    has every claim in the turn to resolve it against."""
     try:
         raw = _RawFootnote.model_validate(item)
     except ValidationError:
         return None
     claim_text = raw.claim_text or claim_texts.get(raw.index) or ""
+    warrant = WarrantNode(text=raw.warrant.text, backing=raw.warrant.backing) if raw.warrant else None
     if raw.relation == "ai-inference":
-        return InferenceNode(index=raw.index, claim_text=claim_text)
+        return InferenceNode(
+            index=raw.index, claim_text=claim_text, qualifier=raw.qualifier, warrant=warrant,
+        ), raw.rebuts
     return CitedClaimNode(
         index=raw.index, claim_text=claim_text, sources=raw.sources, relation=raw.relation,
-    )
+        qualifier=raw.qualifier, warrant=warrant,
+    ), raw.rebuts
 
 
 def _extract_claims(reply: str) -> tuple[str, list[ClaimNode]]:
@@ -158,14 +199,42 @@ def _extract_claims(reply: str) -> tuple[str, list[ClaimNode]]:
         _log.warning("chat claims: FOOTNOTES_JSON was not a JSON array, dropping")
         return content, []
     claim_texts = _extract_claim_texts(content)
-    claims: list[ClaimNode] = []
+    built: list[tuple[ClaimNode, int | None]] = []
     for item in raw_items:
-        claim = _claim_from_raw(item, claim_texts)
-        if claim is None:
+        parsed = _claim_from_raw(item, claim_texts)
+        if parsed is None:
             _log.warning("chat claims: skipping malformed entry %r", item)
             continue
+        built.append(parsed)
+    return content, _resolve_rebuts(built)
+
+
+def _resolve_rebuts(built: list[tuple[ClaimNode, int | None]]) -> list[ClaimNode]:
+    """Same-turn only: a claim's raw `rebuts` value is the *index* of
+    another footnote in this turn (the only handle the model's self-report
+    has -- it never sees stable node ids), resolved here to that claim's
+    real `id`, which is what `rebuts`/session_graph.py's REBUTS edge/the
+    committed schema actually mean. A `rebuts` pointing at a non-existent
+    index, or at the claim's own index, is a self-report inconsistency --
+    the whole claim is dropped (same "an unsatisfied part of the block
+    rejects the entry" rule sources/relation already enforce), not just the
+    `rebuts` field cleared."""
+    by_index = {c.index: c for c, _ in built}
+    claims: list[ClaimNode] = []
+    dropped = 0
+    for claim, rebuts_idx in built:
+        if rebuts_idx is None:
+            claims.append(claim)
+            continue
+        target = by_index.get(rebuts_idx)
+        if target is None or rebuts_idx == claim.index:
+            dropped += 1
+            continue
+        claim.rebuts = target.id
         claims.append(claim)
-    return content, claims
+    if dropped:
+        _log.warning("chat claims: dropped %d claim(s) with an invalid rebuts index", dropped)
+    return claims
 
 
 # Tools that put citable content in front of the model. Derived from
@@ -364,6 +433,16 @@ class ChatAgent:
             return True
         return all(self._toolbox.slug_resolves(s) for s in claim.sources)
 
+    def _warrant_resolves(self, claim: ClaimNode) -> bool:
+        """Same rule as _sources_resolve, for the Toulmin `warrant.backing`
+        extension -- backing is structurally identical to `sources` (a list
+        of vault-node references), so a backing slug the model invented is
+        just as much a hallucinated citation as a bad `sources` entry. A
+        claim with no warrant at all trivially resolves."""
+        if claim.warrant is None:
+            return True
+        return all(self._toolbox.slug_resolves(s) for s in claim.warrant.backing)
+
     def respond(
         self, history: list[TurnNode], user_text: str, excerpt_notes: list[Note] | None = None,
         chat_slug: str | None = None,
@@ -438,7 +517,7 @@ class ChatAgent:
                     content = f"{content} [^1]"
                 resolved_claims, dropped = [], 0
                 for c in claims:
-                    if self._sources_resolve(c):
+                    if self._sources_resolve(c) and self._warrant_resolves(c):
                         resolved_claims.append(c)
                     else:
                         dropped += 1

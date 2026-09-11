@@ -67,7 +67,7 @@ around whenever a turn's position shifts.
 | `ThinkingNode` | `id`, `thought`, `thought_number`, `revises`, `branches_from` | new — see "Thinking blocks" below. Schema only, see [Status](#status) | Shipped (schema only) |
 | `CitedClaimNode` | `id`, `index`, `claim_text`, `sources`, `relation` (`citation`\|`attribution`\|`relational`), `faithfulness_checked`, `qualifier`, `warrant`, `rebuts` | the three sourced relations of the pre-ADR-019 [Footnote](claim.md) — see below | Shipped |
 | `InferenceNode` | `id`, `index`, `claim_text`, `qualifier`, `warrant`, `rebuts` | the pre-ADR-019 `ai-inference` relation — see below | Shipped |
-| `WarrantNode` | `id`, `text`, `backing` | new — see [Argumentation structure](#argumentation-structure-toulmin) | v3, on branch (unmerged) |
+| `WarrantNode` | `id`, `text`, `backing` | new — see [Argumentation structure](#argumentation-structure-toulmin) | Shipped |
 | `InlineMediaNode` | `id`, `kind` (`svg`\|`latex`\|`drawio`), `value`, `caption` | new — see [Media nodes](#media-nodes) and [Attachments](#attachments-human-turn-input) (both directions) | v3, on branch (unmerged) |
 | `AssetMediaNode` | `id`, `kind` (`jpg`\|`pdf`), `asset_path`, `caption` | new — split from `InlineMediaNode`, not a shared shape (see [Media nodes](#media-nodes)) | v3, on branch (unmerged) |
 
@@ -131,8 +131,10 @@ deferred), not a separate mechanism.
 
 ## Argumentation structure (Toulmin)
 
-**Implemented on branch `chat-schema-v3-toulmin-media-attachments` (not yet merged to `main`) —
-`CHAT_SCHEMA_VERSION = 3`.** Formal academic
+**Schema shipped in `CHAT_SCHEMA_VERSION = 3`; populated from the model's own `FOOTNOTES_JSON`
+self-report as of 2026-09-10** (`prisma/agents/chat_agent.py`'s `_RawFootnote`/`_claim_from_raw`/
+`_resolve_rebuts` — same typed-block-plus-deterministic-validation path `sources`/`relation`
+already use, not prompt-behaviour coaching). Formal academic
 writing is this chat harness's primary use case, and `CitedClaimNode`/`InferenceNode` alone only
 cover two of the six elements of the [Toulmin model of
 argumentation](https://en.wikipedia.org/wiki/Stephen_Toulmin#The_Toulmin_model_of_argumentation)
@@ -174,6 +176,19 @@ place `REVISES`/`BRANCHES_FROM` are added for `ThinkingNode`.
 Migration v2→v3 (`_migrate_chat_v2_to_v3`) is a no-op identity function — every v3 field is new
 and optional with a default, so there's nothing to restructure, only a version-number step
 `VersionedModel` requires one callable per version for.
+
+**Population and validation** (mirrors [Claim](claim.md)'s `sources`/`relation` handling):
+`FOOTNOTES_JSON` entries may optionally carry `qualifier`, `warrant`
+(`{"text": ..., "backing": [...]}`), and `rebuts` (an integer — the *index* of another `[^N]`
+footnote in the **same answer**, the only handle the model's self-report has; it never sees
+stable node ids). `_RawFootnote` validates the shape of all three on parse — an unknown
+`qualifier` value or a `warrant` with no `text` fails that entry, same as an unknown `relation`.
+`_resolve_rebuts` then resolves a valid `rebuts` index to the target claim's real `id` (what the
+schema/`REBUTS` edge above actually store); an index with no matching claim in the turn, or equal
+to the claim's own index, drops the whole claim. `warrant.backing` is validated exactly like
+`sources` (`ChatAgent._warrant_resolves`, alongside `_sources_resolve`) — an unresolvable backing
+slug also drops the claim. Cross-turn `rebuts` is out of scope: the model's self-report has no way
+to reference a claim from an earlier turn.
 
 **Open question, not yet resolved:** can `WarrantNode.backing` / `CitedClaimNode.sources` include
 a `MediaNode.id` (e.g. "this claim is backed by this diagram"), not just vault slugs? `sources` is
@@ -609,3 +624,21 @@ Still genuinely open:
   purely recency-driven) was considered and deliberately not built this pass — bigger scope than
   extending `RECALL`, would need its own UI/config, and recency already gives a reasonable default
   without asking the user to curate anything up front.
+
+**Implemented 2026-09-10 — Toulmin `qualifier`/`warrant`/`rebuts` population** (Phase B of the
+knowledge-graph-tools grand plan, no schema/migration change — the v3 fields above had shipped
+with nothing populating them):
+
+- `_RawFootnote` (`prisma/agents/chat_agent.py`) validates the three optional keys on parse —
+  same terms as `relation`, a malformed value fails that entry rather than silently degrading.
+- `_resolve_rebuts` translates the model's same-turn `[^N]` index (the only handle its self-report
+  has) into the target claim's real `id`; an index with no matching claim, or equal to the claim's
+  own, drops the whole claim. Cross-turn `rebuts` stays out of scope.
+- `ChatAgent._warrant_resolves` validates `warrant.backing` exactly like `_sources_resolve`
+  validates `sources` — an unresolvable slug drops the claim.
+- `system_prompt_footnote_section()` declares the three keys and their vocab as an optional
+  addition to the existing `FOOTNOTES_JSON` block — no new prose behaviour to teach, just a typed
+  slot the model may fill in.
+- Frontend's rebuts jump-link (dead code since the schema-only pass — it assumed `claim.rebuts`
+  was an index) fixed to resolve the `id` it actually receives back to the target's index.
+- See [Argumentation structure](#argumentation-structure-toulmin) for the full validation rules.

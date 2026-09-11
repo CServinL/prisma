@@ -11,7 +11,9 @@ from prisma.agents.chat_agent import (
 )
 from prisma.schema_gov import RichContent
 from prisma.services.chat_tools import ToolResult
-from prisma.storage.models.vault_models import ChatRole, CitedClaimNode, InferenceNode, Note, ToolCallNode, TurnNode
+from prisma.storage.models.vault_models import (
+    ChatRole, CitedClaimNode, InferenceNode, Note, Qualifier, ToolCallNode, TurnNode,
+)
 
 
 def _msg(role: ChatRole, text: str) -> TurnNode:
@@ -736,6 +738,120 @@ def test_extract_claims_uses_the_last_match_if_model_discusses_format_first():
     assert isinstance(claims[0], InferenceNode)
 
 
+# ── _extract_claims() — Toulmin qualifier/warrant/rebuts extension ───────────
+
+def test_extract_claims_parses_a_qualifier():
+    reply = (
+        'This likely holds[^1].\n'
+        'FOOTNOTES_JSON: [{"index": 1, "relation": "attribution", "sources": ["a"], '
+        '"qualifier": "probable"}]'
+    )
+
+    _, claims = _extract_claims(reply)
+
+    assert claims[0].qualifier == Qualifier.probable
+
+
+def test_extract_claims_drops_entry_with_an_unknown_qualifier():
+    reply = (
+        'Two claims here.\n'
+        'FOOTNOTES_JSON: [{"index": 1, "relation": "citation", "sources": ["a"]}, '
+        '{"index": 2, "relation": "citation", "sources": ["b"], "qualifier": "definitely"}]'
+    )
+
+    _, claims = _extract_claims(reply)
+
+    assert len(claims) == 1
+    assert claims[0].index == 1
+
+
+def test_extract_claims_parses_a_warrant():
+    reply = (
+        'X causes Y[^1].\n'
+        'FOOTNOTES_JSON: [{"index": 1, "relation": "attribution", "sources": ["a"], '
+        '"warrant": {"text": "the methodology directly measures causation", "backing": ["b"]}}]'
+    )
+
+    _, claims = _extract_claims(reply)
+
+    assert claims[0].warrant.text == "the methodology directly measures causation"
+    assert claims[0].warrant.backing == ["b"]
+
+
+def test_extract_claims_drops_entry_with_an_empty_warrant_text():
+    reply = (
+        'Some claim[^1].\n'
+        'FOOTNOTES_JSON: [{"index": 1, "relation": "citation", "sources": ["a"], '
+        '"warrant": {"text": ""}}]'
+    )
+
+    _, claims = _extract_claims(reply)
+
+    assert claims == []
+
+
+def test_extract_claims_resolves_rebuts_index_to_the_target_claims_id():
+    reply = (
+        'X holds generally[^1], except under Z[^2].\n'
+        'FOOTNOTES_JSON: [{"index": 1, "relation": "citation", "sources": ["a"]}, '
+        '{"index": 2, "relation": "citation", "sources": ["b"], "rebuts": 1}]'
+    )
+
+    _, claims = _extract_claims(reply)
+
+    assert len(claims) == 2
+    assert claims[1].rebuts == claims[0].id
+
+
+def test_extract_claims_accepts_string_forms_of_rebuts():
+    reply = (
+        'X holds[^1], except under Z[^2].\n'
+        'FOOTNOTES_JSON: [{"index": 1, "relation": "citation", "sources": ["a"]}, '
+        '{"index": 2, "relation": "citation", "sources": ["b"], "rebuts": "[^1]"}]'
+    )
+
+    _, claims = _extract_claims(reply)
+
+    assert claims[1].rebuts == claims[0].id
+
+
+def test_extract_claims_drops_claim_whose_rebuts_index_has_no_match():
+    reply = (
+        'X holds[^1].\n'
+        'FOOTNOTES_JSON: [{"index": 1, "relation": "citation", "sources": ["a"], "rebuts": 9}]'
+    )
+
+    _, claims = _extract_claims(reply)
+
+    assert claims == []
+
+
+def test_extract_claims_drops_claim_that_rebuts_its_own_index():
+    reply = (
+        'Two claims here.\n'
+        'FOOTNOTES_JSON: [{"index": 1, "relation": "citation", "sources": ["a"], "rebuts": 1}, '
+        '{"index": 2, "relation": "citation", "sources": ["b"]}]'
+    )
+
+    _, claims = _extract_claims(reply)
+
+    assert len(claims) == 1
+    assert claims[0].index == 2
+
+
+def test_extract_claims_inference_node_also_carries_a_qualifier():
+    reply = (
+        'This is my own reasoning[^1].\n'
+        'FOOTNOTES_JSON: [{"index": 1, "relation": "ai-inference", "sources": [], '
+        '"qualifier": "tentative"}]'
+    )
+
+    _, claims = _extract_claims(reply)
+
+    assert isinstance(claims[0], InferenceNode)
+    assert claims[0].qualifier == Qualifier.tentative
+
+
 def test_respond_final_answer_populates_claims():
     llm = MagicMock()
     llm.model = "test-model"
@@ -1040,6 +1156,44 @@ def test_respond_keeps_claim_when_all_sources_resolve():
 
     assert len(reply.claims) == 1
     assert reply.claims[0].sources == ["kg-decision"]
+
+
+def test_respond_drops_claim_with_an_unresolvable_warrant_backing_slug():
+    llm = MagicMock()
+    llm.model = "test-model"
+    llm.context_window = 1_000_000
+    llm.complete.side_effect = [
+        'Kùzu is embedded, no server process[^1].\n'
+        'FOOTNOTES_JSON: [{"index": 1, "relation": "attribution", "sources": ["kg-decision"], '
+        '"warrant": {"text": "because X", "backing": ["made-up-slug"]}}]',
+    ]
+    toolbox = MagicMock()
+    toolbox.slug_resolves.side_effect = lambda s: s != "made-up-slug"
+    agent = _agent(llm=llm, toolbox=toolbox)
+
+    reply = agent.respond(history=[], user_text="why Kùzu?")
+
+    assert reply.claims == []
+
+
+def test_respond_keeps_claim_when_warrant_backing_resolves():
+    llm = MagicMock()
+    llm.model = "test-model"
+    llm.context_window = 1_000_000
+    llm.complete.side_effect = [
+        'Kùzu is embedded, no server process[^1].\n'
+        'FOOTNOTES_JSON: [{"index": 1, "relation": "attribution", "sources": ["kg-decision"], '
+        '"warrant": {"text": "because X", "backing": ["kg-decision"]}}]',
+    ]
+    toolbox = MagicMock()
+    toolbox.slug_resolves.return_value = True
+    toolbox.get_node_text.return_value = None  # skip the faithfulness LLM call
+    agent = _agent(llm=llm, toolbox=toolbox)
+
+    reply = agent.respond(history=[], user_text="why Kùzu?")
+
+    assert len(reply.claims) == 1
+    assert reply.claims[0].warrant.backing == ["kg-decision"]
 
 
 def test_respond_inference_claims_never_check_source_resolution():

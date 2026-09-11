@@ -3,7 +3,9 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from prisma.services.chat_tools import TOOL_CALL_RE, ChatToolbox, system_prompt_tool_section
+from prisma.services.chat_tools import (
+    TOOL_CALL_RE, ChatToolbox, system_prompt_footnote_section, system_prompt_tool_section,
+)
 from prisma.services.vault import VaultService
 from prisma.storage.models.kg_models import GraphQueryResult
 from prisma.storage.models.search_models import GraphSearchResult
@@ -43,6 +45,14 @@ def test_system_prompt_tool_section_shows_zotero_search_when_available():
     assert "SEARCH_VAULT:" in text
     assert "GRAPH_CONTEXT:" in text
     assert "RECALL:" in text
+
+
+def test_system_prompt_footnote_section_advertises_the_toulmin_keys():
+    text = system_prompt_footnote_section()
+    assert "qualifier" in text
+    assert "certain" in text and "probable" in text and "possible" in text and "tentative" in text
+    assert "warrant" in text and "backing" in text
+    assert "rebuts" in text
 
 
 def test_give_up_instruction_routes_through_zotero_search_when_available():

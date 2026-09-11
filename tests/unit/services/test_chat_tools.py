@@ -55,6 +55,17 @@ def test_system_prompt_footnote_section_advertises_the_toulmin_keys():
     assert "rebuts" in text
 
 
+def test_system_prompt_footnote_section_warrant_covers_ai_inference():
+    # WarrantNode is schema-supported on InferenceNode too, but ai-inference
+    # entries always have empty sources -- the description must not define
+    # warrant purely in terms of "why sources support this claim," or the
+    # model has no coherent instruction for the ai-inference case at all
+    # (PR #105 Copilot review).
+    text = system_prompt_footnote_section()
+    warrant_section = text[text.index('"warrant"'):text.index('"rebuts"')]
+    assert "ai-inference" in warrant_section
+
+
 def test_give_up_instruction_routes_through_zotero_search_when_available():
     text = system_prompt_tool_section(zotero_available=True)
     assert (

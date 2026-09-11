@@ -308,10 +308,14 @@ def system_prompt_footnote_section() -> str:
         '"tentative" (use "tentative" for a hypothesis you are not '
         "asserting as established) -- the claim's epistemic strength.",
         '- "warrant": {"text": "...", "backing": ["slug", ...]} -- the '
-        "reasoning bridge explaining *why* the sources support this "
+        "reasoning bridge explaining *why* the evidence supports this "
         "specific claim, when that's not obvious from the claim alone. "
-        "backing follows the same rule as sources: only real slugs you "
-        "actually saw, never invented.",
+        "For a sourced claim (citation/paraphrase/attribution/relational), "
+        "that's why the sources support it. For ai-inference (no sources), "
+        "it's your own reasoning process itself -- leave backing empty in "
+        "that case, since there's nothing to cite. backing otherwise "
+        "follows the same rule as sources: only real slugs you actually "
+        "saw, never invented.",
         '- "rebuts": N -- the index of another [^N] footnote IN THIS SAME '
         "ANSWER that this claim contradicts or states an exception/"
         "limitation to (e.g. a caveat on an earlier claim). Only ever "

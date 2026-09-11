@@ -181,10 +181,11 @@ and optional with a default, so there's nothing to restructure, only a version-n
 `FOOTNOTES_JSON` entries may optionally carry `qualifier`, `warrant`
 (`{"text": ..., "backing": [...]}`), and `rebuts` (an integer — the *index* of another `[^N]`
 footnote in the **same answer**, the only handle the model's self-report has; it never sees
-stable node ids; `rebuts`, and the entry's own `index`, are both `StrictInt`, not plain `int` —
-lax `int` would silently coerce `true`->`1` and `1.0`->`1`, and `index` is the primary key
-everything else in this pipeline keys off ([^N] matching, duplicate-index detection, `rebuts`
-resolution), so the same coercion there is the more consequential half of this fix).
+stable node ids; `rebuts`, and the entry's own `index`, are both `StrictInt` with `index` also
+`gt=0` — lax `int` would silently coerce `true`->`1` and `1.0`->`1`, and `0`/negative values are
+strictly-typed but still not a real 1-based `[^N]` marker; `index` is the primary key everything
+else in this pipeline keys off ([^N] matching, duplicate-index detection, `rebuts` resolution), so
+the coercion there is the more consequential half of this fix).
 `_RawFootnote` validates the shape of all three on parse — an unknown `qualifier` value or a
 `warrant` with no `text` fails that entry, same as an unknown `relation`. A duplicate `index`
 across two entries in one self-report is dropped entirely, both copies — `by_index` (and the UI's
@@ -665,6 +666,13 @@ with nothing populating them):
   `index` field too, which had the identical plain-`int` gap and is the more consequential of the
   two -- `index` is the primary key `[^N]` matching, duplicate-index detection, and `rebuts`
   resolution all key off. Also switched to `StrictInt`.
+- Same finding, one more layer: `StrictInt` alone still let `0`/negative values through
+  (strictly-typed, but not a real 1-based marker) — added `gt=0`.
+- Separately: `system_prompt_footnote_section()`'s `warrant` description defined it purely as
+  "why the sources support this claim," but `InferenceNode` (`ai-inference`, always empty
+  `sources`) is schema-supported for `warrant` too — the model had no coherent instruction for
+  that case. Reworded to cover both: sourced claims (why the sources support it) and
+  `ai-inference` (the reasoning process itself, `backing` left empty).
 - `ChatAgent._warrant_resolves` validates `warrant.backing` exactly like `_sources_resolve`
   validates `sources` — an unresolvable slug drops the claim.
 - `system_prompt_footnote_section()` declares the three keys and their vocab as an optional

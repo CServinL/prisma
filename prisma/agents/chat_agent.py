@@ -137,8 +137,10 @@ class _RawFootnote(BaseModel):
     # resolution) -- the same class of bug `rebuts` below was fixed for.
     # No string-form use case to preserve here (unlike rebuts, the model
     # is never taught a "[^N]" form for its own index), so no
-    # mode="before" validator is needed.
-    index: StrictInt
+    # mode="before" validator is needed. gt=0: the documented format is
+    # 1-based ([^1], [^2], ...) -- StrictInt alone still let 0/negative
+    # values through, which are strictly-typed but not a real marker.
+    index: StrictInt = Field(gt=0)
     # The relation vocabulary is validated here by Pydantic, not by letting
     # a bad value fall through to CitedClaimNode and fail there -- an
     # unknown relation ("not-a-real-relation") fails model_validate, so

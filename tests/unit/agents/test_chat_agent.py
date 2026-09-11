@@ -853,12 +853,13 @@ def test_extract_claims_rejects_non_integer_rebuts_values(bad_rebuts):
     assert claims[0].index == 1
 
 
-@pytest.mark.parametrize("bad_index", [True, 1.0])
-def test_extract_claims_rejects_a_non_integer_index(bad_index):
+@pytest.mark.parametrize("bad_index", [True, 1.0, 0, -5])
+def test_extract_claims_rejects_an_invalid_index(bad_index):
     # Same defect class as rebuts above, on the field everything else in
     # this pipeline keys off ([^N] matching, duplicate-index detection,
     # rebuts resolution) -- Copilot's cross-reference from the rebuts
-    # finding to this same-shaped `index` field (PR #105 review).
+    # finding to this same-shaped `index` field. 0/negative are strictly-
+    # typed but still not a real 1-based [^N] marker (PR #105 review).
     footnotes = json.dumps([{"index": bad_index, "relation": "citation", "sources": ["a"]}])
     reply = f"Weird claim[^1].\nFOOTNOTES_JSON: {footnotes}"
 

@@ -20,6 +20,18 @@ def test_timeline_rejects_oversized_limit_and_query():
     assert client.get("/timeline", params={"q": "x" * 600}).status_code == 422
 
 
+def test_required_free_text_params_reject_empty_string():
+    # Same floor the public /graph/* router enforces -- the worker binds to a
+    # host and is reachable directly, so an empty ?id=/?q=/?rel= is a client
+    # error here too, not just there.
+    assert client.get("/expand_node", params={"id": ""}).status_code == 422
+    assert client.get("/timeline", params={"q": ""}).status_code == 422
+    assert client.get("/search", params={"q": ""}).status_code == 422
+    assert client.get("/ranked_nodes", params={"q": ""}).status_code == 422
+    assert client.get("/query", params={"q": ""}).status_code == 422
+    assert client.get("/entities_for_file", params={"rel": ""}).status_code == 422
+
+
 def test_aggregate_routes_reject_oversized_limit():
     assert client.get("/god_nodes", params={"limit": kg_queries.GOD_NODES_MAX + 1}).status_code == 422
     assert client.get("/authors", params={"limit": kg_queries.AUTHORS_MAX + 1}).status_code == 422

@@ -163,12 +163,12 @@ def clear_dead_letters():
 # bounds are not the only line of defence.
 
 @app.get("/entities_for_file", response_model=EntitiesForFileResponse)
-def entities_for_file(rel: str = Query(..., max_length=1024)):
+def entities_for_file(rel: str = Query(..., min_length=1, max_length=1024)):
     return _kg.entities_for_file(rel)
 
 
 @app.get("/search", response_model=list[GraphSearchResult])
-def search(q: str = Query(..., max_length=512), top_k: int = Query(20, ge=1, le=200)):
+def search(q: str = Query(..., min_length=1, max_length=512), top_k: int = Query(20, ge=1, le=200)):
     """Raw graph query — keyword match over Entity nodes only, bypassing
     Ollama reasoning and ChromaDB entirely. Diagnostic tool: isolates the KG
     layer so a bad /search/deep result can be attributed to extraction vs.
@@ -177,12 +177,12 @@ def search(q: str = Query(..., max_length=512), top_k: int = Query(20, ge=1, le=
 
 
 @app.get("/ranked_nodes", response_model=list[RankedNode])
-def ranked_nodes(q: str = Query(..., max_length=512), top_k: int = Query(20, ge=1, le=200)):
+def ranked_nodes(q: str = Query(..., min_length=1, max_length=512), top_k: int = Query(20, ge=1, le=200)):
     return _kg.ranked_nodes(q, top_k=top_k)
 
 
 @app.get("/query", response_model=list[GraphQueryResult])
-def query(q: str = Query(..., max_length=512), budget: int = Query(1500, ge=1, le=20000)):
+def query(q: str = Query(..., min_length=1, max_length=512), budget: int = Query(1500, ge=1, le=20000)):
     return _kg.query(q, budget=budget)
 
 
@@ -202,7 +202,7 @@ def ollama_ready():
 # pass-through pattern as /search and /entities_for_file above. ────────────────
 
 @app.get("/expand_node", response_model=ExpandNodeResponse)
-def expand_node(id: str = Query(..., max_length=512),
+def expand_node(id: str = Query(..., min_length=1, max_length=512),
                 limit: int = Query(kg_queries.DEFAULT_EXPAND, ge=1, le=kg_queries.EXPAND_MAX)):
     """One-hop neighbourhood of a single entity id."""
     return _kg.expand_node(id, limit=limit)
@@ -235,7 +235,7 @@ def vault_health(limit: int = Query(kg_queries.VAULT_HEALTH_MAX, ge=1, le=kg_que
 
 
 @app.get("/timeline", response_model=list[TimelineEntry])
-def timeline(q: str = Query(..., max_length=512),
+def timeline(q: str = Query(..., min_length=1, max_length=512),
              limit: int = Query(kg_queries.DEFAULT_TIMELINE, ge=1, le=kg_queries.TIMELINE_MAX)):
     """Entities matching `q`, joined to their Source.year, sorted chronologically."""
     return _kg.timeline(q, limit=limit)

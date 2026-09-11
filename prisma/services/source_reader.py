@@ -62,13 +62,17 @@ def read_source(
         return ReadSourceResponse(slug=slug, mode="summary", text=text)
 
     # section/literal genuinely need the whole document -- a heading or a
-    # match can be anywhere in it -- but bounded (see _MAX_SCAN_CHARS).
+    # match can be anywhere in it -- but bounded (see _MAX_SCAN_CHARS). Read
+    # one extra char so we can tell the file continued past the cap and mark
+    # the result truncated (a miss past the boundary isn't "exhaustive").
     with path.open("r", encoding="utf-8", errors="replace") as f:
-        raw = f.read(_MAX_SCAN_CHARS)
+        raw = f.read(_MAX_SCAN_CHARS + 1)
+    scan_truncated = len(raw) > _MAX_SCAN_CHARS
+    raw = raw[:_MAX_SCAN_CHARS]
     if mode == "section":
-        return _read_section(slug, raw, (query or "").strip())
+        return _read_section(slug, raw, (query or "").strip(), scan_truncated)
     if mode == "literal":
-        return _read_literal(slug, raw, query or "")
+        return _read_literal(slug, raw, query or "", scan_truncated)
     raise ValueError(f"unknown read mode: {mode!r}")
 
 
@@ -81,7 +85,7 @@ def _strip_frontmatter(raw: str) -> str:
     return raw
 
 
-def _read_section(slug: str, raw: str, query: str) -> ReadSourceResponse:
+def _read_section(slug: str, raw: str, query: str, scan_truncated: bool = False) -> ReadSourceResponse:
     lines = _strip_frontmatter(raw).splitlines()
     sections: list[tuple[str, list[str]]] = []
     heading: str | None = None
@@ -102,23 +106,27 @@ def _read_section(slug: str, raw: str, query: str) -> ReadSourceResponse:
     if query:
         for h, body_lines in sections:
             if query.lower() in h.lower():
+                body = "\n".join(body_lines)
                 return ReadSourceResponse(
                     slug=slug, mode="section", query=query,
-                    text="\n".join(body_lines)[:_SECTION_MAX_CHARS],
+                    text=body[:_SECTION_MAX_CHARS],
                     available_sections=headings,
+                    truncated=scan_truncated or len(body) > _SECTION_MAX_CHARS,
                 )
     return ReadSourceResponse(
-        slug=slug, mode="section", query=query or None, text="", available_sections=headings,
+        slug=slug, mode="section", query=query or None, text="",
+        available_sections=headings, truncated=scan_truncated,
     )
 
 
-def _read_literal(slug: str, raw: str, query: str) -> ReadSourceResponse:
+def _read_literal(slug: str, raw: str, query: str, scan_truncated: bool = False) -> ReadSourceResponse:
     if not query:
-        return ReadSourceResponse(slug=slug, mode="literal", query=None, text="", match_count=0)
+        return ReadSourceResponse(slug=slug, mode="literal", query=None, text="",
+                                  match_count=0, truncated=scan_truncated)
     needle = query.lower()
     lines = raw.splitlines()
     hit_indices = [i for i, line in enumerate(lines) if needle in line.lower()]
-    truncated = len(hit_indices) > _LITERAL_MAX_MATCHES
+    truncated = scan_truncated or len(hit_indices) > _LITERAL_MAX_MATCHES
     blocks: list[str] = []
     used = 0
     for i in hit_indices[:_LITERAL_MAX_MATCHES]:

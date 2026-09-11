@@ -167,15 +167,25 @@ def test_literal_marks_truncated_when_more_matches_than_shown(vault):
 
 # ── oversized input ───────────────────────────────────────────────────────────
 
-def test_section_and_literal_bound_the_file_read(vault):
+def test_section_and_literal_bound_the_file_read_and_mark_truncated(vault):
     # A heading / match past _MAX_SCAN_CHARS is treated as absent rather
-    # than pulling the whole (e.g. imported PDF) document into memory.
+    # than pulling the whole (e.g. imported PDF) document into memory -- and
+    # the response says so, so a miss isn't mistaken for exhaustive.
     body = "---\ntype: note\n---\n" + ("filler\n" * ((_MAX_SCAN_CHARS // 7) + 1000))
     body += "\n## Late Heading\nlate needle here\n"
     _write(vault, "big", body)
 
-    assert read_source(vault, "big", mode="section", query="Late Heading").text == ""
-    assert read_source(vault, "big", mode="literal", query="late needle").match_count == 0
+    section = read_source(vault, "big", mode="section", query="Late Heading")
+    assert section.text == "" and section.truncated is True
+    literal = read_source(vault, "big", mode="literal", query="late needle")
+    assert literal.match_count == 0 and literal.truncated is True
+
+
+def test_section_and_literal_not_truncated_for_a_small_file(vault):
+    _write(vault, "small", "---\ntype: note\n---\n## H\nbody line\n")
+    assert read_source(vault, "small", mode="section", query="H").truncated is False
+    assert read_source(vault, "small", mode="literal", query="body").truncated is False
+
 
 def test_unknown_mode_raises(vault):
     _write(vault, "doc", "content")

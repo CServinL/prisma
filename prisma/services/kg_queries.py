@@ -155,6 +155,29 @@ def compute_top_entities(conn, limit: int = DEFAULT_TOP_ENTITIES) -> list[TopEnt
     return out
 
 
+def hub_ids(conn, min_degree: int) -> set[str]:
+    """*Every* entity with undirected RelatesTo degree >= `min_degree`
+    (chat-tier excluded on both ends) -- not just the priming cache's top
+    slice. surprising_connections excludes these as bridges."""
+    if conn is None:
+        return set()
+    out: set[str] = set()
+    try:
+        result = conn.execute(
+            "MATCH (e:Entity)-[r:RelatesTo]-(o:Entity) "
+            "WHERE e.trust_tier <> 'chat' AND o.trust_tier <> 'chat' "
+            "RETURN e.id, count(r) AS degree"
+        )
+        while result.has_next():
+            eid, degree = result.get_next()
+            if degree >= min_degree:
+                out.add(eid)
+    except Exception as exc:
+        _log.warning("hub_ids computation failed: %s", exc)
+        return set()
+    return out
+
+
 # ── Phase A additive capabilities ─────────────────────────────────────────────
 
 def god_nodes(conn, limit: int = DEFAULT_TOP_ENTITIES) -> list[TopEntity]:

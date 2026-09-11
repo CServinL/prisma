@@ -65,7 +65,16 @@ indexer upserts on it too.
 - The cache refresh must gate on **every** graph mutation: extraction, deletion, and
   rename-relabel (not just `extracted`).
 - Every request-path query takes a validated `limit`; free-text query params
-  (`?id=`, `?q=`, `?query=`) take a `max_length`.
+  (`?id=`, `?q=`, `?query=`) take a `max_length`. Validate at **every** HTTP boundary —
+  the `kg` worker (`kg_app.py`) binds to a host and is directly reachable, so its
+  routes carry the same `ge`/`le`/`max_length` as the public `/graph/*` router; "the
+  client always passes a sane value" is not a defence.
+- A degree threshold / hub-exclusion set is computed from the **whole graph**
+  (`kg_queries.hub_ids`), not from the top-N priming cache (`_top_entities_cache` holds
+  only `TOP_ENTITIES_CACHE_SIZE`, so the (N+1)th hub would slip through).
+- A `try/except` wrapped around a work-draining loop (`_loop` → `_drain_once`) must
+  **re-queue the batch** before propagating — the queue was already `.clear()`ed, so a
+  caught exception otherwise drops the work with nothing to retry.
 - Any full-graph aggregate is background-computed and served from cache, never run on
   a request thread: `top_entities`, `surprising_connections`, `god_nodes`, `authors`,
   `vault_health` are all cache-only reads (`KnowledgeGraphService._refresh_derived_caches()`,
@@ -83,15 +92,21 @@ A tool marked `grounding=True` (`ToolSpec`) must, for anything it returns:
   wrap the payload under a real slug (`read_source`, `zotero_search`);
 - return **empty text** when it has nothing citable, so
   `ChatAgent._turn_had_no_grounding()` (which keys on `result.text or None`) correctly
-  forces the ai-inference wrapper.
+  forces the ai-inference wrapper;
+- render **only the items that carry their own provenance** — an edge/row with no
+  `source_file` shown under another row's `Sources:` header is a misattribution. Build
+  the rendered lines and the header from the same citable-only subset, not "render
+  everything, cite what we can".
 
 ## 6. "Bounded slice" means all three
 
 - bounded **input** read — `f.read(N)`, not `path.read_text()[:N]` (don't pull a large
-  imported PDF→MD fully into memory);
+  imported PDF→MD fully into memory). Read `N + 1` and compare, so you can tell the
+  file continued past the cap;
 - bounded **output** size — a cap on total joined chars, not just a match/row count;
-- the **`truncated` flag** set on *every* path that shortened the result (per-line
-  clip, total-size budget, more matches than shown).
+- the **`truncated` flag** set on *every* path that shortened the result (scan cap,
+  per-line clip, total-size budget, more matches than shown) — across *all* modes, not
+  just the one it was first added for.
 
 `read_source`'s literal mode is literal-only — no regex engine on caller-controlled
 input (`re` has no execution timeout; `(a+)+$` is a catastrophic-backtracking DoS).

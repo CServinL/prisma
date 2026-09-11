@@ -158,13 +158,17 @@ def clear_dead_letters():
     return {"removed": removed}
 
 
+# Every route here validates its own inputs -- the worker binds to a host
+# (supervisor.py) and is directly reachable, so the /graph public router's
+# bounds are not the only line of defence.
+
 @app.get("/entities_for_file", response_model=EntitiesForFileResponse)
-def entities_for_file(rel: str = Query(...)):
+def entities_for_file(rel: str = Query(..., max_length=1024)):
     return _kg.entities_for_file(rel)
 
 
 @app.get("/search", response_model=list[GraphSearchResult])
-def search(q: str = Query(...), top_k: int = Query(20)):
+def search(q: str = Query(..., max_length=512), top_k: int = Query(20, ge=1, le=200)):
     """Raw graph query — keyword match over Entity nodes only, bypassing
     Ollama reasoning and ChromaDB entirely. Diagnostic tool: isolates the KG
     layer so a bad /search/deep result can be attributed to extraction vs.
@@ -173,17 +177,17 @@ def search(q: str = Query(...), top_k: int = Query(20)):
 
 
 @app.get("/ranked_nodes", response_model=list[RankedNode])
-def ranked_nodes(q: str = Query(...), top_k: int = Query(20)):
+def ranked_nodes(q: str = Query(..., max_length=512), top_k: int = Query(20, ge=1, le=200)):
     return _kg.ranked_nodes(q, top_k=top_k)
 
 
 @app.get("/query", response_model=list[GraphQueryResult])
-def query(q: str = Query(...), budget: int = Query(1500)):
+def query(q: str = Query(..., max_length=512), budget: int = Query(1500, ge=1, le=20000)):
     return _kg.query(q, budget=budget)
 
 
 @app.get("/top_entities", response_model=list[TopEntity])
-def top_entities(limit: int = Query(kg_queries.DEFAULT_TOP_ENTITIES)):
+def top_entities(limit: int = Query(kg_queries.DEFAULT_TOP_ENTITIES, ge=1, le=kg_queries.DEFAULT_TOP_ENTITIES)):
     """Cached ranking only -- no live Cypher call on this request path, see
     KnowledgeGraphService.top_entities()."""
     return _kg.top_entities(limit=limit)
@@ -198,38 +202,40 @@ def ollama_ready():
 # pass-through pattern as /search and /entities_for_file above. ────────────────
 
 @app.get("/expand_node", response_model=ExpandNodeResponse)
-def expand_node(id: str = Query(...), limit: int = Query(kg_queries.DEFAULT_EXPAND)):
+def expand_node(id: str = Query(..., max_length=512),
+                limit: int = Query(kg_queries.DEFAULT_EXPAND, ge=1, le=kg_queries.EXPAND_MAX)):
     """One-hop neighbourhood of a single entity id."""
     return _kg.expand_node(id, limit=limit)
 
 
 @app.get("/god_nodes", response_model=list[TopEntity])
-def god_nodes(limit: int = Query(kg_queries.DEFAULT_TOP_ENTITIES)):
+def god_nodes(limit: int = Query(kg_queries.DEFAULT_TOP_ENTITIES, ge=1, le=kg_queries.GOD_NODES_MAX)):
     """Most-connected hub entities, with each one's source_file and up to 3
     sample relation strings (richer than /top_entities' cache read)."""
     return _kg.god_nodes(limit=limit)
 
 
 @app.get("/surprising_connections", response_model=list[SurprisingConnection])
-def surprising_connections(limit: int = Query(kg_queries.DEFAULT_TOP_ENTITIES)):
+def surprising_connections(limit: int = Query(kg_queries.DEFAULT_TOP_ENTITIES, ge=1, le=kg_queries.SURPRISING_CONNECTIONS_MAX)):
     """Cached ranking only -- no live Cypher on this request path, see
     KnowledgeGraphService.surprising_connections()."""
     return _kg.surprising_connections(limit=limit)
 
 
 @app.get("/authors", response_model=list[AuthorSummary])
-def authors(limit: int = Query(kg_queries.DEFAULT_AUTHORS)):
+def authors(limit: int = Query(kg_queries.DEFAULT_AUTHORS, ge=1, le=kg_queries.AUTHORS_MAX)):
     """Distinct Entity.author values grouped across the vault."""
     return _kg.authors(limit=limit)
 
 
 @app.get("/vault_health", response_model=VaultHealthResponse)
-def vault_health(limit: int = Query(kg_queries.VAULT_HEALTH_MAX)):
+def vault_health(limit: int = Query(kg_queries.VAULT_HEALTH_MAX, ge=1, le=kg_queries.VAULT_HEALTH_MAX)):
     """Entities with zero RelatesTo edges (first-cut vault health)."""
     return _kg.vault_health(limit=limit)
 
 
 @app.get("/timeline", response_model=list[TimelineEntry])
-def timeline(q: str = Query(...), limit: int = Query(kg_queries.DEFAULT_TIMELINE)):
+def timeline(q: str = Query(..., max_length=512),
+             limit: int = Query(kg_queries.DEFAULT_TIMELINE, ge=1, le=kg_queries.TIMELINE_MAX)):
     """Entities matching `q`, joined to their Source.year, sorted chronologically."""
     return _kg.timeline(q, limit=limit)

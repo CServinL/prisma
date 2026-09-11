@@ -574,6 +574,25 @@ def test_toolbox_expand_node_empty_text_when_no_neighbour_has_a_source(vault):
     assert result.raw and result.raw[0]["entities"][0]["id"] == "n1"
 
 
+def test_toolbox_expand_node_omits_edges_without_their_own_provenance(vault):
+    # A rendered edge with no source_file, shown under another edge's
+    # `Sources:` header, would let the model misattribute it.
+    kg = MagicMock()
+    kg.expand_node.return_value = ExpandNodeResponse(
+        entities=[EntityInfo(id="n1", label="Cited N"), EntityInfo(id="n2", label="Uncited N")],
+        edges=[
+            EdgeInfo(source="center", relation="cites", target="n1", source_file="sources/a.md"),
+            EdgeInfo(source="center", relation="mentions", target="n2"),  # no source_file
+        ],
+    )
+    result = ChatToolbox(MagicMock(), kg, vault).call("EXPAND_NODE", "center")
+
+    assert "Cited N (n1)" in result.text
+    assert "Uncited N" not in result.text
+    assert "mentions" not in result.text
+    assert "Sources: sources--a" in result.text
+
+
 def test_toolbox_god_nodes_lists_hubs_with_sources_header(vault):
     # Same filename in two directories -- the compound slug keeps them
     # distinct where a bare stem would collapse both to "paper".
@@ -614,6 +633,18 @@ def test_toolbox_god_nodes_empty_text_when_no_hub_has_a_source(vault):
     assert len(result.raw) == 1
 
 
+def test_toolbox_god_nodes_omits_hubs_without_provenance(vault):
+    kg = MagicMock()
+    kg.god_nodes.return_value = [
+        TopEntity(id="h1", label="Cited Hub", degree=9, source_files=["sources/a.md"]),
+        TopEntity(id="h2", label="Uncited Hub", degree=4, source_files=[]),
+    ]
+    result = ChatToolbox(MagicMock(), kg, vault).call("GOD_NODES", "-")
+
+    assert "Cited Hub" in result.text
+    assert "Uncited Hub" not in result.text
+
+
 def test_toolbox_surprising_connections_lists_links_with_a_sources_header(vault):
     kg = MagicMock()
     kg.surprising_connections.return_value = [
@@ -644,6 +675,22 @@ def test_toolbox_surprising_connections_empty_text_when_endpoints_have_no_source
 
     assert result.text == ""
     assert len(result.raw) == 1
+
+
+def test_toolbox_surprising_connections_omits_links_missing_an_endpoint_source(vault):
+    kg = MagicMock()
+    kg.surprising_connections.return_value = [
+        SurprisingConnection(entity_a="a", entity_b="c", bridge="Bridge",
+                              relation_a="cites", relation_b="extends", score=0.9,
+                              source_file_a="sources/x.md", source_file_b="notes/y.md"),
+        SurprisingConnection(entity_a="p", entity_b="q", bridge="Half",
+                              relation_a="cites", relation_b="extends", score=0.8,
+                              source_file_a="sources/x.md", source_file_b=None),
+    ]
+    result = ChatToolbox(MagicMock(), kg, vault).call("SURPRISING_CONNECTIONS", "-")
+
+    assert "Bridge" in result.text
+    assert "Half" not in result.text
 
 
 def test_toolbox_surprising_connections_empty(vault):

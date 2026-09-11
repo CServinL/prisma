@@ -1389,10 +1389,26 @@ class KnowledgeGraphService:
         """One incremental-update cycle. Split out of _loop() so a test can
         drive a single cycle."""
         with self._lock:
-            renames = self._pending_renames.copy()
+            renames = list(self._pending_renames)
             self._pending_renames.clear()
-            pending = self._pending.copy()
+            pending = set(self._pending)
             self._pending.clear()
+        try:
+            self._drain(renames, pending)
+        except Exception:
+            # _loop() catches and moves on -- a failed cycle must not lose
+            # the batch, or the graph/caches stay stale until an unrelated
+            # filesystem event. Re-queue everything (extraction is
+            # content-hash guarded, so re-processing is a cheap no-op) and
+            # let /status show it's still outstanding.
+            with self._lock:
+                self._pending |= pending
+                self._pending_renames[:0] = renames
+                if self._state != "indexing":
+                    self._state = "stale"
+            raise
+
+    def _drain(self, renames: list, pending: set) -> None:
         renamed = False
         for old_path, new_path in renames:
             if self._rename_file(old_path, new_path):
@@ -1583,13 +1599,15 @@ class KnowledgeGraphService:
 
     def _refresh_surprising_connections(self) -> None:
         """Background-thread-only -- the 2-hop enumeration is heavier than
-        the top-entities scan. Reads the just-refreshed _top_entities_cache
-        for hub exclusion (both caches refresh from the same call site)."""
+        the top-entities scan."""
         with self._lock:
-            hub_ids = {e.id for e in self._top_entities_cache if e.degree >= _HUB_MIN_DEGREE}
+            # *Every* entity of degree >= _HUB_MIN_DEGREE, not just the
+            # 15-entry priming cache -- otherwise the 16th+ hub in a large
+            # vault stays eligible as a bridge and dominates the result.
+            hubs = kg_queries.hub_ids(self._conn, _HUB_MIN_DEGREE)
             # Scan and publish under one hold -- see _refresh_top_entities.
             self._surprising_connections_cache = kg_queries.surprising_connections(
-                self._conn, hub_ids, limit=kg_queries.SURPRISING_CONNECTIONS_MAX,
+                self._conn, hubs, limit=kg_queries.SURPRISING_CONNECTIONS_MAX,
             )
 
     def surprising_connections(self, limit: int = TOP_ENTITIES_CACHE_SIZE) -> list[SurprisingConnection]:
@@ -1611,8 +1629,7 @@ class KnowledgeGraphService:
 
     def _refresh_derived_caches(self) -> None:
         """Recompute every /graph/* aggregate that would otherwise be a full
-        scan on the request path. Background-index-thread only. top_entities
-        first -- _refresh_surprising_connections reads its cache."""
+        scan on the request path. Background-index-thread only."""
         self._refresh_top_entities()
         self._refresh_surprising_connections()
         self._refresh_god_nodes()

@@ -679,6 +679,23 @@ def test_loop_survives_a_failing_drain_cycle(kg):
     assert cycles == [0, 1]  # ran again after the failure instead of dying
 
 
+def test_drain_once_requeues_the_batch_when_processing_fails(kg, vault):
+    # _loop() catches -- a failed cycle must not silently drop the queued
+    # work, or the graph stays stale until an unrelated FS event.
+    f = vault.root / "notes" / "x.md"
+    f.write_text("---\ntype: note\n---\nc", encoding="utf-8")
+    with kg._lock:
+        kg._pending.add(f)
+
+    with patch.object(kg, "_process_pending", side_effect=RuntimeError("boom")):
+        with pytest.raises(RuntimeError):
+            kg._drain_once()
+
+    with kg._lock:
+        assert f in kg._pending
+    assert kg.status().state == "stale"
+
+
 # ── Trust tier ────────────────────────────────────────────────────────────────
 
 @pytest.mark.parametrize("node_type,expected_tier", [
@@ -869,10 +886,7 @@ def test_surprising_connections_returns_cached_slice_without_querying_kuzu(kg):
 def test_refresh_surprising_connections_populates_cache_from_two_documents(kg, vault):
     # Sequential, deterministic _extract_file calls (not _full_index()'s
     # concurrent path -- side_effect order isn't guaranteed to match file
-    # order once extraction fans out across threads, same reasoning
-    # test_compute_top_entities_excludes_chat_trust_tier_on_either_endpoint
-    # above already relies on). _refresh_top_entities() must run first: it
-    # populates the hub-exclusion set _refresh_surprising_connections() reads.
+    # order once extraction fans out across threads).
     a_file = vault.root / "notes" / "a.md"
     a_file.write_text("---\ntype: note\n---\ncontent", encoding="utf-8")
     b_file = vault.root / "notes" / "b.md"
@@ -897,18 +911,37 @@ def test_refresh_surprising_connections_populates_cache_from_two_documents(kg, v
         kg._extract_file(a_file, "note")
         kg._extract_file(b_file, "note")
 
-    # Real _refresh_top_entities(), not a manually emptied cache: with only
-    # 4 entities of degree 1 each, every one of them makes the top-15 cache,
-    # but none clears the _HUB_MIN_DEGREE floor -- this is exactly the
-    # small-graph production path that used to hub-exclude every candidate
-    # regardless of actual connectivity. The hub-exclusion logic itself
-    # (given a real, well-connected hub) is covered directly in
-    # test_kg_queries.py's test_surprising_connections_excludes_hub_mediated_links.
-    kg._refresh_top_entities()
+    # 4 entities of degree 1 -- none is a hub, so nothing is excluded.
     kg._refresh_surprising_connections()
 
     links = kg.surprising_connections()
     assert links and links[0].bridge == "Bridge"
+
+
+def test_refresh_surprising_connections_excludes_a_hub_past_the_top_15(kg):
+    # d1_bridge is a genuine hub (degree 6) but ranks #16 -- below the
+    # 15-slot priming cache. It must still be hub-excluded as a bridge.
+    with kg._lock:
+        for h in range(15):  # 15 fillers, degree 10 each -- they fill the top-15
+            kg._upsert(f"notes/f{h}.md", "note",
+                       [{"id": f"f{h}", "label": f"F{h}"}] + [{"id": f"f{h}_{i}", "label": "L"} for i in range(10)],
+                       [{"source": f"f{h}", "target": f"f{h}_{i}", "relation": "r"} for i in range(10)])
+        # doc1: concept A -> "Bridge" instance d1_bridge, which is also a hub
+        kg._upsert("notes/d1.md", "note",
+                   [{"id": "d1_a", "label": "A"}, {"id": "d1_bridge", "label": "Bridge"}]
+                   + [{"id": f"d1_l{i}", "label": "L"} for i in range(5)],
+                   [{"source": "d1_a", "target": "d1_bridge", "relation": "cites"}]
+                   + [{"source": "d1_bridge", "target": f"d1_l{i}", "relation": "r"} for i in range(5)])
+        # doc2: concept C -> a second "Bridge" instance (not a hub)
+        kg._upsert("notes/d2.md", "note",
+                   [{"id": "d2_c", "label": "C"}, {"id": "d2_bridge", "label": "Bridge"}],
+                   [{"source": "d2_bridge", "target": "d2_c", "relation": "extends"}])
+
+    kg._refresh_top_entities()
+    assert all(e.id != "d1_bridge" for e in kg.top_entities())  # confirms it's past the top-15
+    kg._refresh_surprising_connections()
+
+    assert all(link.bridge != "Bridge" for link in kg.surprising_connections(limit=100))
 
 
 class _CountingLock:

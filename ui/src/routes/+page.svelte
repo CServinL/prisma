@@ -916,6 +916,8 @@
     showResourcesPage = false;
     showKgProgressPage = false;
     showSettings = false;
+    graphToolResult = null;  // a pending runGraphTool result belongs to the chat we're leaving
+    graphToolArg = "";
     loadingNode = true;
     try {
       const r = await apiFetch(`${apiBase}/chats/${encodeURIComponent(slug)}`);
@@ -1093,6 +1095,7 @@
 
   async function runGraphTool(kind: string) {
     if (!activeChat || graphToolLoading) return;
+    const forSlug = activeChat.slug;  // the result belongs to this chat only
     const arg = graphToolArg.trim();
     const needsArg = kind === "expand_node" || kind === "timeline" || kind === "read_source";
     if (needsArg && !arg) return;
@@ -1111,15 +1114,15 @@
     graphToolResult = null;
     try {
       const r = await apiFetch(url);
-      if (r.ok) {
-        graphToolResult = { title, body: formatGraphResult(kind, await r.json(), arg) };
-      } else {
-        graphToolResult = { title, body: `(request failed: ${r.status})` };
-      }
+      const data = r.ok ? await r.json() : null;
+      if (activeChat?.slug !== forSlug) return;  // switched chats mid-fetch -- result isn't ours
+      graphToolResult = r.ok
+        ? { title, body: formatGraphResult(kind, data, arg) }
+        : { title, body: `(request failed: ${r.status})` };
     } catch (e) {
-      graphToolResult = { title, body: `(error: ${e})` };
+      if (activeChat?.slug === forSlug) graphToolResult = { title, body: `(error: ${e})` };
     } finally {
-      graphToolLoading = false;
+      graphToolLoading = false;  // single-flight mutex -- always release
     }
   }
 

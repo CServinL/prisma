@@ -139,6 +139,28 @@ def test_compute_top_entities_excludes_chat_tier_on_either_endpoint(kg, conn):
     assert all(e.id != "chatty" for e in top)
 
 
+# ── hub_ids ───────────────────────────────────────────────────────────────────
+
+def test_hub_ids_returns_every_entity_over_the_threshold_not_a_top_slice(kg, conn):
+    # 20 hubs each of degree 3 -- a 15-entry top slice would miss the last 5.
+    for h in range(20):
+        nodes = [{"id": f"h{h}", "label": f"H{h}"}] + [{"id": f"h{h}_l{i}", "label": "L"} for i in range(3)]
+        edges = [{"source": f"h{h}", "target": f"h{h}_l{i}"} for i in range(3)]
+        _add(kg, f"notes/{h}.md", "note", nodes, edges)
+
+    hubs = kg_queries.hub_ids(conn, min_degree=3)
+
+    assert {f"h{h}" for h in range(20)} <= hubs
+    assert "h0_l0" not in hubs  # degree-1 leaf
+
+
+def test_hub_ids_excludes_chat_tier_on_both_ends(kg, conn):
+    _add(kg, "chats/c.md", "chat",
+         [{"id": "cx", "label": "CX"}] + [{"id": f"cx_l{i}", "label": "L"} for i in range(6)],
+         [{"source": "cx", "target": f"cx_l{i}"} for i in range(6)])
+    assert kg_queries.hub_ids(conn, min_degree=3) == set()
+
+
 # ── god_nodes ─────────────────────────────────────────────────────────────────
 
 def test_god_nodes_adds_source_files_and_sample_relations(kg, conn):

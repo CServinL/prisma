@@ -201,6 +201,7 @@ class ReadSourceResponse(BaseModel):
     # caller what it could have asked for.
     available_sections: list[str] = []
     match_count: int | None = None  # literal mode: total matches (may exceed what's returned)
-    # literal mode: output was cut short -- by match count or by a size
-    # budget on a single long line.
+    # Output is not the full answer -- the document exceeded the scan cap,
+    # or (literal) more matches / a longer line than were returned, or
+    # (section) the section body was longer than the slice.
     truncated: bool = False

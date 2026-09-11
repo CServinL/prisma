@@ -490,21 +490,27 @@ class ChatToolbox:
         resp = self._kg.expand_node(node_id)
         if not resp.entities:
             return ToolResult(text="", raw=[])
+        raw = [resp.model_dump()]
+        # Only render edges that carry their own source_file -- an uncitable
+        # edge shown under another edge's `Sources:` header would let the
+        # model attribute it to the wrong document. Cite the edge's
+        # source_file, not the neighbour entity's (last-writer).
         labels = {e.id: e.label for e in resp.entities}
         lines = []
+        slugs: list[str] = []
         for edge in resp.edges:
+            if not edge.source_file:
+                continue
+            slug = self._vault.slug_for_relpath(edge.source_file)
+            if slug not in slugs:
+                slugs.append(slug)
             other_id = edge.target if edge.source == node_id else edge.source
             other = f"{labels.get(other_id, other_id)} ({other_id})"
             lines.append(
                 f"{node_id} --[{edge.relation}]--> {other}" if edge.source == node_id
                 else f"{other} --[{edge.relation}]--> {node_id}"
             )
-        raw = [resp.model_dump()]
-        # Cite the edges' own source_file, not the neighbour entity's
-        # (last-writer -- see SurprisingConnection).
-        srcs = [edge.source_file for edge in resp.edges if edge.source_file]
-        slugs = list(dict.fromkeys(self._vault.slug_for_relpath(s) for s in srcs))
-        if not slugs:
+        if not lines:
             return ToolResult(text="", raw=raw)
         wrapped = wrap_untrusted(
             "knowledge-graph", f"Sources: {', '.join(slugs)}\n\n" + "\n".join(lines)
@@ -516,19 +522,20 @@ class ChatToolbox:
         text is ignored (there's nothing to filter by) — this is an
         orienting primitive."""
         entities = self._kg.god_nodes(limit=15)
-        if not entities:
-            return ToolResult(text="", raw=[])
+        raw = [e.model_dump() for e in entities]
+        # Only hubs whose edges have resolvable provenance -- a line with no
+        # citable source under a shared header misattributes it.
+        citable = [e for e in entities if e.source_files]
+        if not citable:
+            return ToolResult(text="", raw=raw)
         slugs = list(dict.fromkeys(
-            self._vault.slug_for_relpath(s) for e in entities for s in e.source_files
+            self._vault.slug_for_relpath(s) for e in citable for s in e.source_files
         ))
         lines = [
             f"- {e.label} ({e.degree} connections)"
             + (f" — e.g. {', '.join(e.sample_relations)}" if e.sample_relations else "")
-            for e in entities
+            for e in citable
         ]
-        raw = [e.model_dump() for e in entities]
-        if not slugs:
-            return ToolResult(text="", raw=raw)
         wrapped = wrap_untrusted(
             "knowledge-graph", f"Sources: {', '.join(slugs)}\n\n" + "\n".join(lines)
         )
@@ -541,17 +548,20 @@ class ChatToolbox:
         keep which side stored each hop's relation. The `Sources:` header is
         the two documents behind the link's hops."""
         links = self._kg.surprising_connections(limit=15)
-        if not links:
-            return ToolResult(text="", raw=[])
+        raw = [c.model_dump() for c in links]
+        # A link is a claim between its two endpoint documents -- render only
+        # links where both are resolvable.
+        citable = [c for c in links if c.source_file_a and c.source_file_b]
+        if not citable:
+            return ToolResult(text="", raw=raw)
         lines = [
             f"- {c.entity_a} --[{c.relation_a}]-- {c.bridge} --[{c.relation_b}]-- {c.entity_b}"
-            for c in links
+            for c in citable
         ]
-        raw = [c.model_dump() for c in links]
-        srcs = [s for c in links for s in (c.source_file_a, c.source_file_b) if s]
-        slugs = list(dict.fromkeys(self._vault.slug_for_relpath(s) for s in srcs))
-        if not slugs:
-            return ToolResult(text="", raw=raw)
+        slugs = list(dict.fromkeys(
+            self._vault.slug_for_relpath(s) for c in citable
+            for s in (c.source_file_a, c.source_file_b)
+        ))
         wrapped = wrap_untrusted(
             "knowledge-graph", f"Sources: {', '.join(slugs)}\n\n" + "\n".join(lines)
         )

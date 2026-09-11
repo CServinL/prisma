@@ -181,8 +181,13 @@ and optional with a default, so there's nothing to restructure, only a version-n
 `FOOTNOTES_JSON` entries may optionally carry `qualifier`, `warrant`
 (`{"text": ..., "backing": [...]}`), and `rebuts` (an integer — the *index* of another `[^N]`
 footnote in the **same answer**, the only handle the model's self-report has; it never sees
-stable node ids). `_RawFootnote` validates the shape of all three on parse — an unknown
-`qualifier` value or a `warrant` with no `text` fails that entry, same as an unknown `relation`.
+stable node ids; `rebuts` is `StrictInt`, not plain `int` — lax `int` would silently coerce
+`true`->`1` and `1.0`->`1`, building a real `REBUTS` edge from what's actually a malformed value).
+`_RawFootnote` validates the shape of all three on parse — an unknown `qualifier` value or a
+`warrant` with no `text` fails that entry, same as an unknown `relation`. A duplicate `index`
+across two entries in one self-report is dropped entirely, both copies — `by_index` (and the UI's
+`id="chat-turn-N-claim-{index}"` DOM anchor) can't tell them apart, so every claim sharing that
+index is untrustworthy, not just whichever `rebuts` targets it.
 `_resolve_rebuts` then resolves a valid `rebuts` index to the target claim's real `id` (what the
 schema/`REBUTS` edge above actually store); an index with no matching claim in the turn, or equal
 to the claim's own index, drops the whole claim. `warrant.backing` is validated exactly like
@@ -650,6 +655,10 @@ with nothing populating them):
   a PR #105 Copilot review caught the gap: without it, a surviving claim could keep a `rebuts` id
   pointing at nothing, and `session_graph.py`'s `REBUTS` edge would silently create a phantom node
   for it.
+- Two more findings from the same PR #105 review round: `rebuts` is `StrictInt`, not plain `int`
+  (lax `int` silently coerced `true`->`1`/`1.0`->`1` into a real `REBUTS` edge from a malformed
+  value); and a duplicate `index` across two entries in one self-report now drops both/all of
+  them, rather than `by_index` picking one arbitrarily while the UI's DOM anchor picks another.
 - `ChatAgent._warrant_resolves` validates `warrant.backing` exactly like `_sources_resolve`
   validates `sources` — an unresolvable slug drops the claim.
 - `system_prompt_footnote_section()` declares the three keys and their vocab as an optional

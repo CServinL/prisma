@@ -832,6 +832,27 @@ def test_extract_claims_accepts_string_forms_of_rebuts():
     assert claims[1].rebuts == claims[0].id
 
 
+@pytest.mark.parametrize("bad_rebuts", [True, 1.0])
+def test_extract_claims_rejects_non_integer_rebuts_values(bad_rebuts):
+    # Plain `int` would silently coerce true->1 and 1.0->1 -- neither is
+    # the index the model actually meant, and both would build a REBUTS
+    # edge from a malformed self-report instead of dropping it. Claim 1
+    # exists and isn't claim 2's own index, so a coercion to 1 would
+    # resolve "successfully" if StrictInt weren't in effect -- this isn't
+    # caught by the separate no-such-index/self-reference checks
+    # (github.com/CServinL/prisma/pull/105, Copilot review).
+    footnotes = json.dumps([
+        {"index": 1, "relation": "citation", "sources": ["a"]},
+        {"index": 2, "relation": "citation", "sources": ["b"], "rebuts": bad_rebuts},
+    ])
+    reply = f"X holds[^1]. Except here[^2].\nFOOTNOTES_JSON: {footnotes}"
+
+    _, claims = _extract_claims(reply)
+
+    assert len(claims) == 1
+    assert claims[0].index == 1
+
+
 def test_extract_claims_drops_claim_whose_rebuts_index_has_no_match():
     reply = (
         'X holds[^1].\n'
@@ -866,6 +887,38 @@ def test_extract_claims_drops_a_claim_that_rebuts_an_already_dropped_claim():
         'Two claims here.\n'
         'FOOTNOTES_JSON: [{"index": 1, "relation": "citation", "sources": ["a"], "rebuts": 99}, '
         '{"index": 2, "relation": "citation", "sources": ["b"], "rebuts": 1}]'
+    )
+
+    _, claims = _extract_claims(reply)
+
+    assert claims == []
+
+
+def test_extract_claims_drops_both_claims_sharing_a_duplicate_index():
+    # Two entries both self-report index 1 -- by_index (and the UI's
+    # id="chat-turn-N-claim-1" DOM anchor) can't tell them apart, so both
+    # are dropped rather than one winning arbitrarily
+    # (github.com/CServinL/prisma/pull/105, Copilot review).
+    reply = (
+        'Two claims, same index.\n'
+        'FOOTNOTES_JSON: [{"index": 1, "relation": "citation", "sources": ["a"]}, '
+        '{"index": 1, "relation": "citation", "sources": ["b"]}]'
+    )
+
+    _, claims = _extract_claims(reply)
+
+    assert claims == []
+
+
+def test_extract_claims_drops_a_claim_rebutting_a_duplicate_index():
+    # Claims 1a/1b share index 1; claim 2 rebuts index 1 -- ambiguous, so
+    # it can't resolve to either survivor (there are none) and is dropped
+    # along with them.
+    reply = (
+        'Three claims here.\n'
+        'FOOTNOTES_JSON: [{"index": 1, "relation": "citation", "sources": ["a"]}, '
+        '{"index": 1, "relation": "citation", "sources": ["b"]}, '
+        '{"index": 2, "relation": "citation", "sources": ["c"], "rebuts": 1}]'
     )
 
     _, claims = _extract_claims(reply)

@@ -15,7 +15,7 @@ import logging
 import re
 from typing import Callable, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, ValidationError, field_validator
 
 from prisma.agents.session_orchestrator import SessionOrchestrator
 from prisma.schema_gov import ContentFormat, RichContent
@@ -144,8 +144,14 @@ class _RawFootnote(BaseModel):
     # The index of another footnote in THIS turn that this one rebuts --
     # same-turn only, see _extract_claims. Accepts a bare int or the
     # "[^N]"/"N" string forms a model might emit despite the prompt's
-    # example using a plain int.
-    rebuts: int | None = None
+    # example using a plain int. StrictInt, not int: plain `int` also
+    # coerces bool ("rebuts": true -> 1) and a whole-number float
+    # ("rebuts": 1.0 -> 1) -- neither is the integer the model actually
+    # meant, and silently accepting either would build a real REBUTS edge
+    # from what's actually a malformed self-report. _coerce_rebuts below
+    # still runs first (mode="before") and hands StrictInt a real int for
+    # the string forms it recognizes.
+    rebuts: StrictInt | None = None
 
     @field_validator("rebuts", mode="before")
     @classmethod
@@ -245,6 +251,23 @@ def _resolve_rebuts(built: list[tuple[ClaimNode, int | None]]) -> list[ClaimNode
     rebuts` cleans that up (and the same cascade recurs once more in
     ChatAgent.respond(), after sources/warrant.backing resolution drops
     claims this function has no visibility into)."""
+    # A duplicate `index` across two entries in one self-report makes
+    # by_index's {index: claim} mapping pick one arbitrarily (whichever
+    # came last), and the UI's id="chat-turn-N-claim-{index}" DOM anchor
+    # collides the same way -- every claim sharing that index is
+    # untrustworthy, not just whichever rebuts happens to target it, so
+    # all of them are dropped up front, before by_index is even built.
+    seen_indices: set[int] = set()
+    duplicate_indices: set[int] = set()
+    for claim, _ in built:
+        if claim.index in seen_indices:
+            duplicate_indices.add(claim.index)
+        seen_indices.add(claim.index)
+    if duplicate_indices:
+        n_dup = sum(1 for c, _ in built if c.index in duplicate_indices)
+        built = [(c, r) for c, r in built if c.index not in duplicate_indices]
+        _log.warning("chat claims: dropped %d claim(s) sharing a duplicate index", n_dup)
+
     by_index = {c.index: c for c, _ in built}
     resolved: list[ClaimNode] = []
     dropped = 0

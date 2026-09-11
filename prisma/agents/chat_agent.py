@@ -100,9 +100,11 @@ class _RawWarrant(BaseModel):
     entry is skipped, same as a bad `relation` -- not silently coerced to
     "no warrant"."""
     model_config = ConfigDict(extra="ignore")
-    text: str = Field(min_length=1)
+    text: str
     backing: list[str] = Field(default_factory=list, max_length=_MAX_WARRANT_BACKING)
 
+    # Subsumes a bare min_length=1 -- "" fails .strip() too, so that
+    # constraint would be redundant dead weight alongside this validator.
     @field_validator("text")
     @classmethod
     def _reject_blank(cls, v: str) -> str:

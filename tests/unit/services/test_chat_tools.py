@@ -66,6 +66,17 @@ def test_system_prompt_footnote_section_warrant_covers_ai_inference():
     assert "ai-inference" in warrant_section
 
 
+def test_system_prompt_footnote_section_states_the_backing_limit():
+    # _RawWarrant.backing has a hard max_length (MAX_WARRANT_BACKING) --
+    # exceeding it drops the entire otherwise-valid claim, so the model
+    # needs to know the ceiling exists rather than discover it by having a
+    # claim silently vanish (PR #105 Copilot review).
+    from prisma.services.chat_tools import MAX_WARRANT_BACKING
+    text = system_prompt_footnote_section()
+    warrant_section = text[text.index('"warrant"'):text.index('"rebuts"')]
+    assert str(MAX_WARRANT_BACKING) in warrant_section
+
+
 def test_give_up_instruction_routes_through_zotero_search_when_available():
     text = system_prompt_tool_section(zotero_available=True)
     assert (

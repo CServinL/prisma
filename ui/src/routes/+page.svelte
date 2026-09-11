@@ -584,6 +584,23 @@
     };
   });
   let activeChat = $state<ChatDetail | null>(null);
+  // Chat-wide id -> {turn, index}, not scoped to one turn's own msg.claims.
+  // CitedClaimNode.rebuts/InferenceNode.rebuts is an unrestricted claim id
+  // -- session_graph.py's REBUTS edge already supports a cross-turn target
+  // (tests/unit/agents/test_session_graph.py has one), even though the
+  // model's own self-report can only ever produce a same-turn one
+  // (chat_agent.py's _resolve_rebuts is deliberately same-turn-only, since
+  // that's the only handle the self-report has). The renderer has to
+  // support whatever the schema allows, not just what today's producer
+  // emits -- a same-turn-only id->index map would silently hide a valid,
+  // schema-supported cross-turn rebuts with no error, just a missing button.
+  let rebutsTargetById = $derived(
+    new Map(
+      (activeChat?.messages ?? []).flatMap((m, turnIdx) =>
+        (m.claims ?? []).map((c) => [c.id, { turn: turnIdx, index: c.index }] as const)
+      )
+    )
+  );
   let excerptPollInterval: ReturnType<typeof setInterval> | undefined;
   let chatInput = $state("");
   let chatSending = $state(false);
@@ -2500,9 +2517,6 @@
                     {/if}
                   {/if}
                   {#if msg.claims?.length && !wholeTurnInference}
-                    <!-- id -> index, computed once per turn -- a claim.rebuts lookup via
-                         msg.claims.find() inside the loop below would be O(n^2) per turn. -->
-                    {@const claimIndexById = new Map(msg.claims.map((c) => [c.id, c.index]))}
                     <div class="chat-claims">
                       <div class="chat-claims-heading">References</div>
                       <ol class="chat-claims-list">
@@ -2514,12 +2528,12 @@
                               <span class="claim-qualifier" title="Epistemic strength (Toulmin qualifier)">{claim.qualifier}</span>
                             {/if}
                             {#if claim.rebuts}
-                              {@const rebutsIndex = claimIndexById.get(claim.rebuts)}
-                              {#if rebutsIndex !== undefined}
+                              {@const rebutsTarget = rebutsTargetById.get(claim.rebuts)}
+                              {#if rebutsTarget !== undefined}
                                 <button
                                   class="claim-rebuts"
-                                  title="Rebuts claim #{rebutsIndex} — click to jump to it"
-                                  onclick={() => document.getElementById(`chat-turn-${i}-claim-${rebutsIndex}`)?.scrollIntoView({ behavior: "smooth", block: "nearest" })}
+                                  title="Rebuts claim #{rebutsTarget.index} — click to jump to it"
+                                  onclick={() => document.getElementById(`chat-turn-${rebutsTarget.turn}-claim-${rebutsTarget.index}`)?.scrollIntoView({ behavior: "smooth", block: "nearest" })}
                                 >⤺ rebuts</button>
                               {/if}
                             {/if}

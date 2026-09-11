@@ -202,6 +202,14 @@ _SPEC_BY_MARKER: dict[str, ToolSpec] = {t.marker: t for t in TOOLS}
 # the model discusses the format itself earlier in its answer.
 FOOTNOTES_LINE_RE = re.compile(r"^FOOTNOTES_JSON:\s*(.+)$", re.MULTILINE)
 
+# The producer (system_prompt_footnote_section, below) and the parser
+# (chat_agent.py's _RawWarrant.backing) must agree on this -- a self-report
+# with a real, otherwise-valid warrant.backing longer than this is dropped
+# entirely by the parser's hard max_length, so the model needs to know the
+# ceiling exists, not just discover it by having a whole claim silently
+# vanish once it names one too many real slugs.
+MAX_WARRANT_BACKING = 20
+
 
 def system_prompt_tool_section(has_native_reasoning: bool = True, zotero_available: bool = False) -> str:
     visible = [
@@ -315,7 +323,8 @@ def system_prompt_footnote_section() -> str:
         "it's your own reasoning process itself -- leave backing empty in "
         "that case, since there's nothing to cite. backing otherwise "
         "follows the same rule as sources: only real slugs you actually "
-        "saw, never invented.",
+        f"saw, never invented, and at most {MAX_WARRANT_BACKING} of them "
+        "-- past that the whole claim is dropped, not just the extra ones.",
         '- "rebuts": N -- the index of another [^N] footnote IN THIS SAME '
         "ANSWER that this claim contradicts or states an exception/"
         "limitation to (e.g. a caveat on an earlier claim). Only ever "

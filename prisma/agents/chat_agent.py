@@ -20,7 +20,9 @@ from pydantic import BaseModel, ConfigDict, Field, StrictInt, ValidationError, f
 from prisma.agents.session_orchestrator import SessionOrchestrator
 from prisma.schema_gov import ContentFormat, RichContent
 from prisma.services.chat_llm import ChatLLM
-from prisma.services.chat_tools import FOOTNOTES_LINE_RE, TOOL_CALL_RE, TOOLS, ChatToolbox
+from prisma.services.chat_tools import (
+    FOOTNOTES_LINE_RE, MAX_WARRANT_BACKING, TOOL_CALL_RE, TOOLS, ChatToolbox,
+)
 from prisma.storage.models.vault_models import (
     ChatRole, CitedClaimNode, CitedRelation, ClaimNode, InferenceNode, Note, Qualifier, RecallRef,
     ThinkingNode, ToolCallNode, TurnNode, WarrantNode,
@@ -84,14 +86,6 @@ def _extract_claim_texts(content: str) -> dict[int, str]:
     return claims
 
 
-# Each backing entry costs one ChatToolbox.slug_resolves() vault lookup
-# (ChatAgent._warrant_resolves) -- a cap keeps one malformed/adversarial
-# self-report from ballooning that per-claim cost. sources has no such cap
-# today, but that's pre-existing code outside this change, not a reason to
-# let new code repeat the gap unbounded.
-_MAX_WARRANT_BACKING = 20
-
-
 class _RawWarrant(BaseModel):
     """The optional `warrant` object inside a FOOTNOTES_JSON entry -- the
     Toulmin reasoning bridge (see WarrantNode). `text` is required: a
@@ -101,7 +95,18 @@ class _RawWarrant(BaseModel):
     "no warrant"."""
     model_config = ConfigDict(extra="ignore")
     text: str
-    backing: list[str] = Field(default_factory=list, max_length=_MAX_WARRANT_BACKING)
+    # Each backing entry costs one ChatToolbox.slug_resolves() vault lookup
+    # (ChatAgent._warrant_resolves) -- a cap keeps one malformed/adversarial
+    # self-report from ballooning that per-claim cost. sources has no such
+    # cap today, but that's pre-existing code outside this change, not a
+    # reason to let new code repeat the gap unbounded. MAX_WARRANT_BACKING
+    # lives in chat_tools.py (imported below), not here, because
+    # system_prompt_footnote_section() -- the producer this parser's
+    # contract must match -- also needs it, and chat_tools.py is already
+    # the shared home for parser/prompt constants both sides use
+    # (FOOTNOTES_LINE_RE, TOOL_CALL_RE); chat_tools.py doesn't import this
+    # module, so the reverse direction would be circular.
+    backing: list[str] = Field(default_factory=list, max_length=MAX_WARRANT_BACKING)
 
     # Subsumes a bare min_length=1 -- "" fails .strip() too, so that
     # constraint would be redundant dead weight alongside this validator.

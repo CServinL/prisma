@@ -84,6 +84,14 @@ def _extract_claim_texts(content: str) -> dict[int, str]:
     return claims
 
 
+# Each backing entry costs one ChatToolbox.slug_resolves() vault lookup
+# (ChatAgent._warrant_resolves) -- a cap keeps one malformed/adversarial
+# self-report from ballooning that per-claim cost. sources has no such cap
+# today, but that's pre-existing code outside this change, not a reason to
+# let new code repeat the gap unbounded.
+_MAX_WARRANT_BACKING = 20
+
+
 class _RawWarrant(BaseModel):
     """The optional `warrant` object inside a FOOTNOTES_JSON entry -- the
     Toulmin reasoning bridge (see WarrantNode). `text` is required: a
@@ -93,7 +101,7 @@ class _RawWarrant(BaseModel):
     "no warrant"."""
     model_config = ConfigDict(extra="ignore")
     text: str = Field(min_length=1)
-    backing: list[str] = Field(default_factory=list)
+    backing: list[str] = Field(default_factory=list, max_length=_MAX_WARRANT_BACKING)
 
     @field_validator("text")
     @classmethod
@@ -238,8 +246,11 @@ def _resolve_rebuts(built: list[tuple[ClaimNode, int | None]]) -> list[ClaimNode
         if target is None or rebuts_idx == claim.index:
             dropped += 1
             continue
-        claim.rebuts = target.id
-        claims.append(claim)
+        # model_copy(update=...), not attribute assignment -- same
+        # immutable-update convention _verify_claim already uses below.
+        # by_index keeps referencing the pre-copy object, but `.id` is
+        # identical either way, so later lookups are unaffected.
+        claims.append(claim.model_copy(update={"rebuts": target.id}))
     if dropped:
         _log.warning("chat claims: dropped %d claim(s) with an invalid rebuts index", dropped)
     return claims
@@ -523,14 +534,25 @@ class ChatAgent:
                     content = _FOOTNOTE_MARKER_RE.sub("", content).strip()
                     claims = [InferenceNode(index=1, claim_text=content)]
                     content = f"{content} [^1]"
-                resolved_claims, dropped = [], 0
+                # Two separate counters, not one -- a single combined
+                # message can't tell a hallucinated `sources` slug apart
+                # from a hallucinated `warrant.backing` one, and those point
+                # at different parts of the self-report to fix.
+                resolved_claims, dropped_sources, dropped_warrant = [], 0, 0
                 for c in claims:
-                    if self._sources_resolve(c) and self._warrant_resolves(c):
-                        resolved_claims.append(c)
+                    if not self._sources_resolve(c):
+                        dropped_sources += 1
+                    elif not self._warrant_resolves(c):
+                        dropped_warrant += 1
                     else:
-                        dropped += 1
-                if dropped:
-                    _log.warning("chat claims: dropped %d claim(s) citing an unresolvable slug", dropped)
+                        resolved_claims.append(c)
+                if dropped_sources:
+                    _log.warning("chat claims: dropped %d claim(s) citing an unresolvable slug", dropped_sources)
+                if dropped_warrant:
+                    _log.warning(
+                        "chat claims: dropped %d claim(s) with an unresolvable warrant.backing slug",
+                        dropped_warrant,
+                    )
                 claims = [self._verify_claim(c) for c in resolved_claims]
                 return TurnNode(
                     role=ChatRole.assistant, content=RichContent(format=ContentFormat.markdown, value=content),

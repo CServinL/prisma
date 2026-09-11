@@ -2500,6 +2500,9 @@
                     {/if}
                   {/if}
                   {#if msg.claims?.length && !wholeTurnInference}
+                    <!-- id -> index, computed once per turn -- a claim.rebuts lookup via
+                         msg.claims.find() inside the loop below would be O(n^2) per turn. -->
+                    {@const claimIndexById = new Map(msg.claims.map((c) => [c.id, c.index]))}
                     <div class="chat-claims">
                       <div class="chat-claims-heading">References</div>
                       <ol class="chat-claims-list">
@@ -2511,12 +2514,12 @@
                               <span class="claim-qualifier" title="Epistemic strength (Toulmin qualifier)">{claim.qualifier}</span>
                             {/if}
                             {#if claim.rebuts}
-                              {@const rebutsTarget = msg.claims.find((c) => c.id === claim.rebuts)}
-                              {#if rebutsTarget}
+                              {@const rebutsIndex = claimIndexById.get(claim.rebuts)}
+                              {#if rebutsIndex !== undefined}
                                 <button
                                   class="claim-rebuts"
-                                  title="Rebuts claim #{rebutsTarget.index} — click to jump to it"
-                                  onclick={() => document.getElementById(`chat-turn-${i}-claim-${rebutsTarget.index}`)?.scrollIntoView({ behavior: "smooth", block: "nearest" })}
+                                  title="Rebuts claim #{rebutsIndex} — click to jump to it"
+                                  onclick={() => document.getElementById(`chat-turn-${i}-claim-${rebutsIndex}`)?.scrollIntoView({ behavior: "smooth", block: "nearest" })}
                                 >⤺ rebuts</button>
                               {/if}
                             {/if}

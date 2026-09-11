@@ -1,6 +1,9 @@
 """Unit tests for the bounded, pattern-based chat tool loop."""
+import json
 from pathlib import Path
 from unittest.mock import MagicMock
+
+import pytest
 
 from prisma.agents.chat_agent import (
     MAX_TOOL_ITERATIONS,
@@ -778,24 +781,26 @@ def test_extract_claims_parses_a_warrant():
     assert claims[0].warrant.backing == ["b"]
 
 
-def test_extract_claims_drops_entry_with_an_empty_warrant_text():
-    reply = (
-        'Some claim[^1].\n'
-        'FOOTNOTES_JSON: [{"index": 1, "relation": "citation", "sources": ["a"], '
-        '"warrant": {"text": ""}}]'
-    )
+def test_extract_claims_drops_entry_with_an_oversized_warrant_backing():
+    # Each backing entry costs a vault lookup (ChatAgent._warrant_resolves)
+    # -- a self-report can't balloon that per-claim cost unbounded.
+    footnotes = json.dumps([{
+        "index": 1, "relation": "attribution", "sources": ["a"],
+        "warrant": {"text": "why", "backing": [f"slug-{n}" for n in range(21)]},
+    }])
+    reply = f"X causes Y[^1].\nFOOTNOTES_JSON: {footnotes}"
 
     _, claims = _extract_claims(reply)
 
     assert claims == []
 
 
-def test_extract_claims_drops_entry_with_a_whitespace_only_warrant_text():
-    reply = (
-        'Some claim[^1].\n'
-        'FOOTNOTES_JSON: [{"index": 1, "relation": "citation", "sources": ["a"], '
-        '"warrant": {"text": "   "}}]'
-    )
+@pytest.mark.parametrize("blank_text", ["", "   "])
+def test_extract_claims_drops_entry_with_a_blank_warrant_text(blank_text):
+    footnotes = json.dumps([
+        {"index": 1, "relation": "citation", "sources": ["a"], "warrant": {"text": blank_text}},
+    ])
+    reply = f"Some claim[^1].\nFOOTNOTES_JSON: {footnotes}"
 
     _, claims = _extract_claims(reply)
 
@@ -1133,7 +1138,7 @@ def test_respond_forces_relational_for_multi_source_claims_regardless_of_self_re
     assert reply.claims[0].relation == "relational"
 
 
-def test_respond_drops_claim_citing_an_unresolvable_slug():
+def test_respond_drops_claim_citing_an_unresolvable_slug(caplog):
     llm = MagicMock()
     llm.model = "test-model"
     llm.context_window = 1_000_000
@@ -1149,6 +1154,11 @@ def test_respond_drops_claim_citing_an_unresolvable_slug():
 
     assert reply.claims == []
     toolbox.slug_resolves.assert_called_once_with("made-up-slug")
+    # The two drop reasons (sources vs. warrant.backing) point at different
+    # parts of the self-report to fix -- a single combined message couldn't
+    # tell them apart.
+    assert "citing an unresolvable slug" in caplog.text
+    assert "warrant.backing" not in caplog.text
 
 
 def test_respond_keeps_claim_when_all_sources_resolve():
@@ -1170,7 +1180,7 @@ def test_respond_keeps_claim_when_all_sources_resolve():
     assert reply.claims[0].sources == ["kg-decision"]
 
 
-def test_respond_drops_claim_with_an_unresolvable_warrant_backing_slug():
+def test_respond_drops_claim_with_an_unresolvable_warrant_backing_slug(caplog):
     llm = MagicMock()
     llm.model = "test-model"
     llm.context_window = 1_000_000
@@ -1186,6 +1196,9 @@ def test_respond_drops_claim_with_an_unresolvable_warrant_backing_slug():
     reply = agent.respond(history=[], user_text="why Kùzu?")
 
     assert reply.claims == []
+    # Distinct from the plain sources-drop message -- see the test above.
+    assert "warrant.backing" in caplog.text
+    assert "citing an unresolvable slug" not in caplog.text
 
 
 def test_respond_keeps_claim_when_warrant_backing_resolves():

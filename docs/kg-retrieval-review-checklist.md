@@ -65,10 +65,13 @@ indexer upserts on it too.
 - The cache refresh must gate on **every** graph mutation: extraction, deletion, and
   rename-relabel (not just `extracted`).
 - Every request-path query takes a validated `limit`; free-text query params
-  (`?id=`, `?q=`, `?query=`) take a `max_length`. Validate at **every** HTTP boundary —
-  the `kg` worker (`kg_app.py`) binds to a host and is directly reachable, so its
-  routes carry the same `ge`/`le`/`max_length` as the public `/graph/*` router; "the
-  client always passes a sane value" is not a defence.
+  (`?id=`, `?q=`, `?query=`) take a `max_length`, plus `min_length=1` when the param
+  is required (an empty required param is a client error, not a request for
+  everything). Validate at **every** HTTP boundary — the `kg` worker (`kg_app.py`)
+  binds to a host and is directly reachable, so its routes carry the *same*
+  `ge`/`le`/`min_length`/`max_length` as the public `/graph/*` router, param for
+  param; "the client always passes a sane value" is not a defence, and neither is
+  "the query function returns empty on bad input anyway".
 - A degree threshold / hub-exclusion set is computed from the **whole graph**
   (`kg_queries.hub_ids`), not from the top-N priming cache (`_top_entities_cache` holds
   only `TOP_ENTITIES_CACHE_SIZE`, so the (N+1)th hub would slip through).

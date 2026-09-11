@@ -790,6 +790,18 @@ def test_extract_claims_drops_entry_with_an_empty_warrant_text():
     assert claims == []
 
 
+def test_extract_claims_drops_entry_with_a_whitespace_only_warrant_text():
+    reply = (
+        'Some claim[^1].\n'
+        'FOOTNOTES_JSON: [{"index": 1, "relation": "citation", "sources": ["a"], '
+        '"warrant": {"text": "   "}}]'
+    )
+
+    _, claims = _extract_claims(reply)
+
+    assert claims == []
+
+
 def test_extract_claims_resolves_rebuts_index_to_the_target_claims_id():
     reply = (
         'X holds generally[^1], except under Z[^2].\n'

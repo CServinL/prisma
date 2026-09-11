@@ -87,12 +87,20 @@ def _extract_claim_texts(content: str) -> dict[int, str]:
 class _RawWarrant(BaseModel):
     """The optional `warrant` object inside a FOOTNOTES_JSON entry -- the
     Toulmin reasoning bridge (see WarrantNode). `text` is required: a
-    warrant with nothing to say is not a warrant, so a missing/empty one
-    fails `_RawFootnote.model_validate` and the whole entry is skipped,
-    same as a bad `relation` -- not silently coerced to "no warrant"."""
+    warrant with nothing to say is not a warrant, so a missing, empty, or
+    whitespace-only one fails `_RawFootnote.model_validate` and the whole
+    entry is skipped, same as a bad `relation` -- not silently coerced to
+    "no warrant"."""
     model_config = ConfigDict(extra="ignore")
     text: str = Field(min_length=1)
     backing: list[str] = Field(default_factory=list)
+
+    @field_validator("text")
+    @classmethod
+    def _reject_blank(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("warrant.text must not be blank")
+        return v
 
 
 class _RawFootnote(BaseModel):

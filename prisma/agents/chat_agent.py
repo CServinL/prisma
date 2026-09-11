@@ -130,7 +130,15 @@ class _RawFootnote(BaseModel):
     a real vault node?) can't happen at this shape-only layer -- see
     `_extract_claims`/`ChatAgent._warrant_resolves`."""
     model_config = ConfigDict(extra="ignore")
-    index: int
+    # StrictInt, not plain `int` -- lax `int` also coerces a bool
+    # ("index": true -> 1) or a whole-number float ("index": 1.0 -> 1),
+    # and `index` is the primary key everything else in this pipeline keys
+    # off ([^N] marker matching, duplicate-index detection, rebuts
+    # resolution) -- the same class of bug `rebuts` below was fixed for.
+    # No string-form use case to preserve here (unlike rebuts, the model
+    # is never taught a "[^N]" form for its own index), so no
+    # mode="before" validator is needed.
+    index: StrictInt
     # The relation vocabulary is validated here by Pydantic, not by letting
     # a bad value fall through to CitedClaimNode and fail there -- an
     # unknown relation ("not-a-real-relation") fails model_validate, so

@@ -181,8 +181,10 @@ and optional with a default, so there's nothing to restructure, only a version-n
 `FOOTNOTES_JSON` entries may optionally carry `qualifier`, `warrant`
 (`{"text": ..., "backing": [...]}`), and `rebuts` (an integer — the *index* of another `[^N]`
 footnote in the **same answer**, the only handle the model's self-report has; it never sees
-stable node ids; `rebuts` is `StrictInt`, not plain `int` — lax `int` would silently coerce
-`true`->`1` and `1.0`->`1`, building a real `REBUTS` edge from what's actually a malformed value).
+stable node ids; `rebuts`, and the entry's own `index`, are both `StrictInt`, not plain `int` —
+lax `int` would silently coerce `true`->`1` and `1.0`->`1`, and `index` is the primary key
+everything else in this pipeline keys off ([^N] matching, duplicate-index detection, `rebuts`
+resolution), so the same coercion there is the more consequential half of this fix).
 `_RawFootnote` validates the shape of all three on parse — an unknown `qualifier` value or a
 `warrant` with no `text` fails that entry, same as an unknown `relation`. A duplicate `index`
 across two entries in one self-report is dropped entirely, both copies — `by_index` (and the UI's
@@ -659,6 +661,10 @@ with nothing populating them):
   (lax `int` silently coerced `true`->`1`/`1.0`->`1` into a real `REBUTS` edge from a malformed
   value); and a duplicate `index` across two entries in one self-report now drops both/all of
   them, rather than `by_index` picking one arbitrarily while the UI's DOM anchor picks another.
+- Copilot's cross-reference from the `rebuts`-coercion finding pointed at the *entry's own*
+  `index` field too, which had the identical plain-`int` gap and is the more consequential of the
+  two -- `index` is the primary key `[^N]` matching, duplicate-index detection, and `rebuts`
+  resolution all key off. Also switched to `StrictInt`.
 - `ChatAgent._warrant_resolves` validates `warrant.backing` exactly like `_sources_resolve`
   validates `sources` — an unresolvable slug drops the claim.
 - `system_prompt_footnote_section()` declares the three keys and their vocab as an optional

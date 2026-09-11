@@ -132,6 +132,11 @@ escape scheme + `{relpath}_{entity}` ids + a reindex — see `TODO.md`.
 e.g. `SURPRISING_CONNECTIONS_MAX` backs both the route's `Query(..., le=...)` and the
 background cache's populate size; `TIMELINE_MAX` / `EXPAND_MAX` likewise.
 
+A route bound (`le=`) must reference the constant it *semantically* depends on, not a
+different one that happens to hold the same number. `/top_entities`' `le=` is the
+cache's row count, so it binds to `knowledge_graph_service.TOP_ENTITIES_CACHE_SIZE`,
+not `kg_queries.DEFAULT_TOP_ENTITIES` (coincidentally also 15 — they'd drift silently).
+
 ## 9. Tests build state through the real write path
 
 Construct the graph with `_upsert` / real extraction / the public service method —

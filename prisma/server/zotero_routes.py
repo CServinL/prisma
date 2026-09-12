@@ -18,6 +18,7 @@ from pydantic import BaseModel
 from prisma.connectivity import monitor as connectivity
 from prisma.integrations.zotero.client import ZoteroStatus
 from prisma.integrations.zotero import ZoteroClient
+from prisma.services import kg_queries
 from prisma.services.knowledge_graph_client import KnowledgeGraphClient
 from prisma.services.renderer import render as vault_render
 from prisma.services.vault import VaultService, pdf_bytes_to_md
@@ -69,6 +70,18 @@ def _fetch_pdf_from_url(url: str | None, doi: str | None) -> bytes | None:
             _log.debug("pdf candidate %s failed, trying next: %s", pdf_url, exc)
             continue
     return None
+
+
+
+def _fetch_zotero_items(zotero: ZoteroClient, collection: str | None, q: str | None) -> list[ZoteroItem]:
+    """Shared dispatch between /items and /items/relevance -- see /items'
+    own docstring for why `collection`+`q` together means a server-side
+    scoped search, not a client-side filter."""
+    if collection:
+        return zotero.get_collection_items(collection, query=q or None)
+    elif q:
+        return zotero.search_items(q)
+    return zotero.get_all_items()
 
 
 def build_zotero_router(
@@ -164,15 +177,44 @@ def build_zotero_router(
         """
         zotero = get_zotero()
         try:
-            if collection:
-                items = zotero.get_collection_items(collection, query=q or None)
-            elif q:
-                items = zotero.search_items(q)
-            else:
-                items = zotero.get_all_items()
+            items = _fetch_zotero_items(zotero, collection, q)
         except Exception as e:
             raise HTTPException(status_code=503, detail=str(e))
         return [item.to_dict() for item in items]
+
+    @router.get("/items/relevance")
+    def zotero_items_relevance(collection: Optional[str] = Query(None), q: Optional[str] = Query(None)):
+        """Same item set as /items, scored and sorted by lightweight
+        graph-relevance (PR #106) -- how much each item's title/abstract/
+        tags text overlaps entity labels already extracted from the vault.
+        A separate endpoint, not a `sort=` param on /items, so that
+        route's response shape stays untouched. No stream/Zotero content
+        is ever indexed into Kùzu for this -- KnowledgeGraphClient.
+        graph_relevance() only scores text against labels already there."""
+        zotero = get_zotero()
+        try:
+            items = _fetch_zotero_items(zotero, collection, q)
+        except Exception as e:
+            raise HTTPException(status_code=503, detail=str(e))
+        # GraphRelevanceRequest (kg_app.py) caps both list length and each
+        # string's length on the kg worker side (directly reachable) --
+        # truncate/batch here rather than let a large collection or a long
+        # abstract 422 the whole listing. Same constants both sides import,
+        # not two literals that happen to match today.
+        texts = [
+            f"{item.title} {item.abstract_note or ''} {' '.join(t.tag for t in item.tags)}"
+            [:kg_queries.GRAPH_RELEVANCE_MAX_TEXT_LENGTH]
+            for item in items
+        ]
+        scores: list = []
+        for i in range(0, len(texts), kg_queries.GRAPH_RELEVANCE_MAX_TEXTS):
+            scores.extend(get_indexer().graph_relevance(texts[i:i + kg_queries.GRAPH_RELEVANCE_MAX_TEXTS]))
+        ranked = sorted(zip(items, scores), key=lambda pair: -pair[1].score)
+        return [
+            {**item.to_dict(), "graph_relevance_score": score.score,
+             "graph_relevance_matched": score.matched_entities}
+            for item, score in ranked
+        ]
 
     @router.post("/import/{key}", response_model=RenderedNode, status_code=201)
     def zotero_import(key: str):

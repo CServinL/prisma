@@ -537,6 +537,7 @@ def test_call_unknown_marker_raises():
 from prisma.storage.models.kg_models import ExpandNodeResponse, TopEntity  # noqa: E402
 from prisma.storage.models.kg_models import EdgeInfo, EntityInfo  # noqa: E402
 from prisma.storage.models.kg_models import SurprisingConnection  # noqa: E402
+from prisma.storage.models.kg_models import SuggestedQuestion  # noqa: E402
 
 
 @pytest.mark.parametrize("marker", ["EXPAND_NODE:", "GOD_NODES:", "SURPRISING_CONNECTIONS:", "READ_SOURCE:"])
@@ -731,6 +732,30 @@ def test_toolbox_surprising_connections_empty(vault):
     toolbox = ChatToolbox(MagicMock(), kg, vault)
 
     result = toolbox.call("SURPRISING_CONNECTIONS", "-")
+
+    assert result.text == ""
+    assert result.raw == []
+
+
+def test_toolbox_suggest_questions_lists_questions_with_a_sources_header(vault):
+    kg = MagicMock()
+    kg.suggest_questions.return_value = [
+        SuggestedQuestion(question="What connects 'A' and 'B'?", grounding_source_file="notes/paper.md"),
+    ]
+    toolbox = ChatToolbox(MagicMock(), kg, vault)
+
+    result = toolbox.call("SUGGEST_QUESTIONS", "-")
+
+    assert "- What connects 'A' and 'B'?" in result.text
+    assert "Sources: notes--paper" in result.text
+
+
+def test_toolbox_suggest_questions_empty_graph(vault):
+    kg = MagicMock()
+    kg.suggest_questions.return_value = []
+    toolbox = ChatToolbox(MagicMock(), kg, vault)
+
+    result = toolbox.call("SUGGEST_QUESTIONS", "-")
 
     assert result.text == ""
     assert result.raw == []

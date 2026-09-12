@@ -105,10 +105,11 @@ ChromaDB's results, not a display feature for the user to browse directly.
       material that's structurally relevant but wouldn't rank highly by
       text/embedding similarity alone. Built (PR #104) as the
       `surprising_connections` chat tool.
-- [ ] **`suggest_questions`-equivalent** — auto-generate questions from graph
+- [x] **`suggest_questions`-equivalent** — auto-generate questions from graph
       structure, primarily to give chat a way to proactively suggest
       follow-ups grounded in what's actually in the vault, not just to
-      display as static conversation starters.
+      display as static conversation starters. Built (PR #106) as the
+      `suggest_questions` chat tool.
 
 ## Chat trust tiers — chats are not sources
 
@@ -268,20 +269,20 @@ see below for what's actually shipped vs. still sketched.
         i.e. a nested agent with its own tool loop, not a flat summarizer
         function. Not scoped/built yet — needs its own design pass, not
         bolted on alongside other in-flight chat work.
-      - `god_nodes()` / `surprising_connections()` — associative exploration
-        tools (see the framing note above — these are retrieval primitives
-        for the model, not user-facing reports) — built (PR #104).
-      - `suggest_questions()` — same framing, **not built yet.**
+      - `god_nodes()` / `surprising_connections()` / `suggest_questions()` —
+        associative exploration tools (see the framing note above — these
+        are retrieval primitives for the model, not user-facing reports)
+        — built (PR #104, `suggest_questions()` PR #106).
 - [x] **Each tool needs a full tool-calling contract, not just an
       implementation.** Built as `ToolSpec` (name, marker, description) in
       `chat_tools.py`, rendered into the system prompt by
-      `system_prompt_tool_section()`. Only `search_vault`/`graph_context`
-      have specs today; `god_nodes`/`surprising_connections`/`expand_node`/
-      `read_source` (the `get_full_text` equivalent) all got specs too, PR
-      #104 — only `suggest_questions()` is still sketch-only, unbuilt:
-      "call to propose grounded follow-ups at the end of an answer, or when
-      the user seems stuck / asks what to explore next." Returns
-      `[{question, grounding_source_file}]`.
+      `system_prompt_tool_section()`. Every sketch below got a spec:
+      `god_nodes`/`surprising_connections`/`expand_node`/`read_source`
+      (the `get_full_text` equivalent) in PR #104, `suggest_questions` in
+      PR #106 — "call to propose grounded follow-ups at the end of an
+      answer, or when the user seems stuck / asks what to explore next,"
+      returning `[{question, grounding_source_file}]` as originally
+      sketched.
 - [x] **Bounded loop** — `MAX_TOOL_ITERATIONS = 4` in `chat_agent.py`, same
       spirit as Graphify's old `max_retry_depth`, so the agentic loop can't
       quietly burn the shared GPU pool indefinitely.

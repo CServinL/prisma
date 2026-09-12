@@ -57,6 +57,8 @@ class _MidStreamFailConn:
     (lambda c: kg_queries.god_nodes(c), []),
     (lambda c: kg_queries.authors(c), []),
     (lambda c: kg_queries.surprising_connections(c, hub_ids=set()), []),
+    (lambda c: kg_queries.suggest_questions(c), []),
+    (lambda c: kg_queries.distinct_entity_labels(c), []),
     (lambda c: kg_queries.timeline_scan(c, "x"), ([], {})),
     (lambda c: kg_queries.expand_node(c, "x"), ExpandNodeResponse(entities=[], edges=[])),
 ])
@@ -449,6 +451,88 @@ def test_surprising_connections_respects_limit(kg, conn):
              [{"source": f"b{i}_bridge", "target": f"c{i}", "relation": "extends"}])
 
     assert len(kg_queries.surprising_connections(conn, hub_ids=set(), limit=2)) == 2
+
+
+# ── suggest_questions ─────────────────────────────────────────────────────────
+
+def test_suggest_questions_phrases_a_grounded_question_from_an_edge(kg, conn):
+    _add(
+        kg, "notes/a.md", "note",
+        [{"id": "a_x", "label": "X"}, {"id": "a_y", "label": "Y"}],
+        [{"source": "a_x", "target": "a_y", "relation": "causes"}],
+    )
+    questions = kg_queries.suggest_questions(conn)
+    assert len(questions) == 1
+    assert questions[0].question == "What connects 'X' and 'Y'?"
+    assert questions[0].grounding_source_file == "notes/a.md"
+
+
+def test_suggest_questions_excludes_chat_tier(kg, conn):
+    _add(kg, "chats/c.md", "chat", [{"id": "x", "label": "X"}, {"id": "y", "label": "Y"}],
+         [{"source": "x", "target": "y", "relation": "cites"}])
+    assert kg_queries.suggest_questions(conn) == []
+
+
+def test_suggest_questions_dedupes_the_same_entity_pair(kg, conn):
+    # The undirected `-` scan returns one real edge from both directions --
+    # a naive read would otherwise phrase the same question twice.
+    _add(
+        kg, "notes/a.md", "note",
+        [{"id": "a_x", "label": "X"}, {"id": "a_y", "label": "Y"}],
+        [{"source": "a_x", "target": "a_y", "relation": "causes"}],
+    )
+    assert len(kg_queries.suggest_questions(conn)) == 1
+
+
+def test_suggest_questions_caps_at_one_per_source_file_before_filling_remaining_slots(kg, conn):
+    # Two edges from the same document, one from another -- the single-doc
+    # document must not crowd out the other document's question when the
+    # limit only allows one question per document on the first pass.
+    _add(
+        kg, "notes/big.md", "note",
+        [{"id": "b_x", "label": "X"}, {"id": "b_y", "label": "Y"}, {"id": "b_z", "label": "Z"}],
+        [
+            {"source": "b_x", "target": "b_y", "relation": "causes"},
+            {"source": "b_y", "target": "b_z", "relation": "extends"},
+        ],
+    )
+    _add(
+        kg, "notes/small.md", "note",
+        [{"id": "s_p", "label": "P"}, {"id": "s_q", "label": "Q"}],
+        [{"source": "s_p", "target": "s_q", "relation": "cites"}],
+    )
+    questions = kg_queries.suggest_questions(conn, limit=2)
+    assert len(questions) == 2
+    assert {q.grounding_source_file for q in questions} == {"notes/big.md", "notes/small.md"}
+
+
+def test_suggest_questions_respects_limit(kg, conn):
+    for i in range(5):
+        _add(
+            kg, f"notes/{i}.md", "note",
+            [{"id": f"{i}_x", "label": f"X{i}"}, {"id": f"{i}_y", "label": f"Y{i}"}],
+            [{"source": f"{i}_x", "target": f"{i}_y", "relation": "cites"}],
+        )
+    assert len(kg_queries.suggest_questions(conn, limit=3)) == 3
+
+
+# ── distinct_entity_labels ────────────────────────────────────────────────────
+
+def test_distinct_entity_labels_returns_unique_labels(kg, conn):
+    _add(kg, "notes/a.md", "note", [{"id": "a1", "label": "Neural Networks"}])
+    _add(kg, "notes/b.md", "note", [{"id": "b1", "label": "Neural Networks"}, {"id": "b2", "label": "Transformers"}])
+    assert set(kg_queries.distinct_entity_labels(conn)) == {"Neural Networks", "Transformers"}
+
+
+def test_distinct_entity_labels_excludes_chat_tier(kg, conn):
+    _add(kg, "chats/c.md", "chat", [{"id": "c1", "label": "Ghost"}])
+    assert kg_queries.distinct_entity_labels(conn) == []
+
+
+def test_distinct_entity_labels_respects_limit(kg, conn):
+    for i in range(5):
+        _add(kg, f"notes/{i}.md", "note", [{"id": f"n{i}", "label": f"Label{i}"}])
+    assert len(kg_queries.distinct_entity_labels(conn, limit=3)) == 3
 
 
 # ── authors ───────────────────────────────────────────────────────────────────

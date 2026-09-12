@@ -27,6 +27,7 @@ from prisma.storage.models.kg_models import (
     EntityInfo,
     ExpandNodeResponse,
     OrphanEntity,
+    SuggestedQuestion,
     SurprisingConnection,
     TimelineEntry,
     TopEntity,
@@ -36,8 +37,22 @@ from prisma.storage.models.search_models import GraphSearchResult
 
 _log = logging.getLogger("prisma.knowledge_graph")
 
-DEFAULT_TOP_ENTITIES = 15  # also the god_nodes / surprising_connections request default
+DEFAULT_TOP_ENTITIES = 15  # also the god_nodes / surprising_connections / suggest_questions request default
 DEFAULT_AUTHORS = 100
+# distinct_entity_labels() backs KnowledgeGraphService.graph_relevance()'s
+# text-overlap scoring (stream-triage lightweight design) -- not behind a
+# public route of its own, so one constant, not a DEFAULT/MAX pair: every
+# label in the vault is a candidate match, not just the highest-degree
+# ones, so this is generous relative to DEFAULT_TOP_ENTITIES on purpose.
+ENTITY_LABELS_MAX = 2000
+
+# kg_app.py's GraphRelevanceRequest validates against these (the kg worker
+# is directly reachable, see that module's docstring); zotero_routes.py
+# batches its own calls to the same size instead of trusting every future
+# caller to stay under the list-length cap -- one shared home for both
+# sides of that literal, not two numbers that happen to match today.
+GRAPH_RELEVANCE_MAX_TEXTS = 200
+GRAPH_RELEVANCE_MAX_TEXT_LENGTH = 512
 
 # timeline_scan() runs its two entity/edge scans under the service's sole
 # Kùzu lock (KnowledgeGraphService.timeline() releases it before
@@ -283,10 +298,12 @@ _MAX_BRIDGE_GROUP_SIZE = 50
 
 # Each pairs a public route's `Query(..., le=...)` with the background cache's
 # populate size, so the cache always holds at least what a request can ask
-# for. god_nodes/authors/vault_health are cache-only reads on the request
-# path (KnowledgeGraphService) -- their full scans run on the index thread.
+# for. god_nodes/authors/vault_health/suggest_questions are cache-only reads
+# on the request path (KnowledgeGraphService) -- their full scans run on the
+# index thread.
 SURPRISING_CONNECTIONS_MAX = 100
 GOD_NODES_MAX = 100
+SUGGEST_QUESTIONS_MAX = 100
 AUTHORS_MAX = 500
 VAULT_HEALTH_MAX = 500
 
@@ -376,6 +393,51 @@ def surprising_connections(
     return out
 
 
+def suggest_questions(conn, limit: int = DEFAULT_TOP_ENTITIES) -> list[SuggestedQuestion]:
+    """Phrases a grounded follow-up question from each of a diverse sample of
+    `RelatesTo` edges -- "what connects X and Y?" -- chat tier excluded on
+    both endpoints, same flat-scan shape `god_nodes`/`surprising_connections`
+    already use. Deduped by unordered entity-id pair (the undirected `-`
+    pattern returns each edge from both directions) and capped at one
+    question per distinct `source_file` on a first pass, so one large
+    document can't crowd out every other document's questions -- remaining
+    slots are then filled from any leftover edges."""
+    if conn is None:
+        return []
+    seen_pairs: set[frozenset] = set()
+    rows: list[tuple[str, str, str]] = []  # (a_label, b_label, source_file)
+    try:
+        result = conn.execute(
+            "MATCH (e:Entity)-[r:RelatesTo]-(o:Entity) "
+            "WHERE e.trust_tier <> 'chat' AND o.trust_tier <> 'chat' "
+            "RETURN e.id, e.label, o.id, o.label, r.source_file"
+        )
+        while result.has_next():
+            e_id, e_label, o_id, o_label, source_file = result.get_next()
+            if not e_label or not o_label or not source_file:
+                continue
+            pair_key = frozenset((e_id, o_id))
+            if pair_key in seen_pairs:
+                continue
+            seen_pairs.add(pair_key)
+            rows.append((e_label, o_label, source_file))
+    except Exception as exc:
+        _log.warning("suggest_questions edge scan failed: %s", exc)
+        return []
+
+    by_source: dict[str, list[tuple[str, str, str]]] = {}
+    for row in rows:
+        by_source.setdefault(row[2], []).append(row)
+    ordered = [source_rows[0] for source_rows in by_source.values()]
+    if len(ordered) < limit:
+        for source_rows in by_source.values():
+            ordered.extend(source_rows[1:])
+    return [
+        SuggestedQuestion(question=f"What connects '{a}' and '{b}'?", grounding_source_file=src)
+        for a, b, src in ordered[:limit]
+    ]
+
+
 def authors(conn, limit: int = DEFAULT_AUTHORS) -> list[AuthorSummary]:
     """Distinct `Entity.author` grouped across the vault. Aggregated in
     Python (see `god_nodes`' rationale)."""
@@ -404,6 +466,31 @@ def authors(conn, limit: int = DEFAULT_AUTHORS) -> list[AuthorSummary]:
         AuthorSummary(author=a, file_count=len(files[a]), sample_entities=ids.get(a, [])[:5])
         for a in ranked
     ]
+
+
+def distinct_entity_labels(conn, limit: int = ENTITY_LABELS_MAX) -> list[str]:
+    """Every distinct entity label in the vault, chat tier excluded --
+    KnowledgeGraphService.graph_relevance()'s cached match list. Deliberately
+    just labels, no ids/degree/provenance: the caller only ever needs "is
+    this label mentioned in this text," never which entity/document it
+    came from."""
+    if conn is None:
+        return []
+    try:
+        result = conn.execute(
+            "MATCH (e:Entity) WHERE e.trust_tier <> 'chat' "
+            "RETURN DISTINCT e.label LIMIT $limit",
+            {"limit": limit},
+        )
+        labels: list[str] = []
+        while result.has_next():
+            (label,) = result.get_next()
+            if label:
+                labels.append(label)
+        return labels
+    except Exception as exc:
+        _log.warning("distinct_entity_labels query failed: %s", exc)
+        return []
 
 
 def vault_health(conn) -> VaultHealthResponse:

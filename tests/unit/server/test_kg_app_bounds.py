@@ -37,6 +37,23 @@ def test_aggregate_routes_reject_oversized_limit():
     assert client.get("/authors", params={"limit": kg_queries.AUTHORS_MAX + 1}).status_code == 422
     assert client.get("/vault_health", params={"limit": kg_queries.VAULT_HEALTH_MAX + 1}).status_code == 422
     assert client.get("/surprising_connections", params={"limit": kg_queries.SURPRISING_CONNECTIONS_MAX + 1}).status_code == 422
+    assert client.get("/suggest_questions", params={"limit": kg_queries.SUGGEST_QUESTIONS_MAX + 1}).status_code == 422
+
+
+def test_graph_relevance_rejects_oversized_list_and_string():
+    # Directly reachable on the kg worker, same as every route above -- an
+    # unbounded batch or an unbounded per-string length is a real cost
+    # (one full label-list scan per text), not just a shape concern.
+    oversized_list = {"texts": ["x"] * (kg_queries.GRAPH_RELEVANCE_MAX_TEXTS + 1)}
+    assert client.post("/graph_relevance", json=oversized_list).status_code == 422
+    oversized_string = {"texts": ["x" * (kg_queries.GRAPH_RELEVANCE_MAX_TEXT_LENGTH + 1)]}
+    assert client.post("/graph_relevance", json=oversized_string).status_code == 422
+
+
+def test_graph_relevance_accepts_a_within_bounds_request():
+    r = client.post("/graph_relevance", json={"texts": ["hello world"]})
+    assert r.status_code == 200
+    assert r.json() == [{"score": 0, "matched_entities": []}]
 
 
 def test_top_entities_limit_is_bound_by_the_cache_size():

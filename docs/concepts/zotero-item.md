@@ -68,6 +68,17 @@ ZoteroItem  →  POST /zotero/import/{key}  →  Source (vault)
 Import reads the ZoteroItem metadata, fetches the PDF if available, runs docu-craft to
 produce a `.md` body, and saves a `Source` with `zotero_key = item.key`.
 
+## Triage by graph relevance (lightweight, 2026-09-12/PR #106)
+
+`GET /zotero/items/relevance` returns the same item set as `GET /zotero/items`, plus a
+`graph_relevance_score`/`graph_relevance_matched` pair per item, sorted descending by score. The
+score is a pure text-overlap count: how many entity labels already extracted into the knowledge
+graph appear (case-insensitive substring match) in the item's title/abstract/tags. This is
+deliberately lightweight — it never indexes a `ZoteroItem`'s text into Kùzu, and no per-item
+extraction runs; it only checks arbitrary text against labels the KG already has. Nothing about
+this feature contradicts [Stream](stream.md)'s "stream metadata should not pollute the knowledge
+graph" boundary — a `ZoteroItem` is scored, never written to the graph.
+
 ## Relevant axioms
 
 > Bookmark-first. See [Axiom 12](../ontology.md).

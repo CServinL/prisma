@@ -51,8 +51,10 @@ from prisma.storage.models.kg_models import (
     DroppedChunkInfo,
     EntitiesForFileResponse,
     GraphQueryResult,
+    GraphRelevance,
     KGStatus,
     RankedNode,
+    SuggestedQuestion,
     SurprisingConnection,
     TimelineEntry,
     TopEntity,
@@ -487,6 +489,12 @@ class KnowledgeGraphService:
         self._god_nodes_cache: list[TopEntity] = []
         self._authors_cache: list[AuthorSummary] = []
         self._vault_health_cache: VaultHealthResponse | None = None
+        self._suggest_questions_cache: list[SuggestedQuestion] = []
+
+        # Backs graph_relevance()'s pure text-match scoring -- not a
+        # /graph/* route of its own, just the match list that method scans
+        # against. Same refresh/drop_index discipline as the caches above.
+        self._entity_labels_cache: list[str] = []
 
         # Knowledge Graph progress page state (replaces an earlier, since
         # reverted, generic "ollama stats" page — this is scoped to what's
@@ -643,6 +651,8 @@ class KnowledgeGraphService:
                     self._god_nodes_cache = []
                     self._authors_cache = []
                     self._vault_health_cache = None
+                    self._suggest_questions_cache = []
+                    self._entity_labels_cache = []
                 except Exception as exc:
                     _log.warning("drop_index failed: %s", exc)
             self._state = "stale"
@@ -1567,6 +1577,29 @@ class KnowledgeGraphService:
         with self._lock:
             return self._authors_cache[:limit]
 
+    def suggest_questions(self, limit: int = TOP_ENTITIES_CACHE_SIZE) -> list[SuggestedQuestion]:
+        """Cache-only read -- see _refresh_suggest_questions()."""
+        with self._lock:
+            return self._suggest_questions_cache[:limit]
+
+    def graph_relevance(self, texts: list[str]) -> list[GraphRelevance]:
+        """Pure text-match scoring against the cached entity-label list --
+        no Kùzu call, unlike every other public method in this section.
+        Lightweight stream-triage design: scores arbitrary caller text
+        (e.g. a Zotero item's title/abstract/tags) against labels already
+        extracted from the vault, without ever indexing that text into
+        Kùzu itself. Case-insensitive substring match -- see this repo's
+        `graph_relevance` design note (PR #106) for why an NLP/embedding
+        step is deliberately out of scope here."""
+        with self._lock:
+            labels = self._entity_labels_cache
+        out = []
+        for text in texts:
+            lowered = text.lower()
+            matched = [label for label in labels if label.lower() in lowered]
+            out.append(GraphRelevance(score=len(matched), matched_entities=matched[:5]))
+        return out
+
     def vault_health(self, limit: int = kg_queries.VAULT_HEALTH_MAX) -> VaultHealthResponse:
         """Cache-only read -- see _refresh_vault_health(). `orphan_count` is
         the true total; `orphans` is sliced to `limit`."""
@@ -1627,6 +1660,16 @@ class KnowledgeGraphService:
         with self._lock:
             self._vault_health_cache = kg_queries.vault_health(self._conn)
 
+    def _refresh_suggest_questions(self) -> None:
+        with self._lock:
+            self._suggest_questions_cache = kg_queries.suggest_questions(
+                self._conn, kg_queries.SUGGEST_QUESTIONS_MAX
+            )
+
+    def _refresh_entity_labels(self) -> None:
+        with self._lock:
+            self._entity_labels_cache = kg_queries.distinct_entity_labels(self._conn)
+
     def _refresh_derived_caches(self) -> None:
         """Recompute every /graph/* aggregate that would otherwise be a full
         scan on the request path. Background-index-thread only."""
@@ -1635,6 +1678,8 @@ class KnowledgeGraphService:
         self._refresh_god_nodes()
         self._refresh_authors()
         self._refresh_vault_health()
+        self._refresh_suggest_questions()
+        self._refresh_entity_labels()
 
     # ── Compatibility wrappers ───────────────────────────────────────────────
     # Same names/shapes as GraphifyIndexer's — app.py's call sites (/search,

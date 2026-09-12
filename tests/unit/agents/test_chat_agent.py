@@ -807,6 +807,18 @@ def test_extract_claims_drops_entry_with_a_blank_warrant_text(blank_text):
     assert claims == []
 
 
+def test_extract_claims_drops_ai_inference_entry_with_nonempty_warrant_backing():
+    footnotes = json.dumps([{
+        "index": 1, "relation": "ai-inference",
+        "warrant": {"text": "reasoning from first principles", "backing": ["a"]},
+    }])
+    reply = f"Some inference[^1].\nFOOTNOTES_JSON: {footnotes}"
+
+    _, claims = _extract_claims(reply)
+
+    assert claims == []
+
+
 def test_extract_claims_resolves_rebuts_index_to_the_target_claims_id():
     reply = (
         'X holds generally[^1], except under Z[^2].\n'
@@ -1103,6 +1115,33 @@ def test_respond_preserves_qualifier_and_warrant_across_the_no_grounding_overrid
     assert reply.claims[0].qualifier == Qualifier.tentative
     assert reply.claims[0].warrant.text == "reasoning from first principles"
     assert reply.claims[0].rebuts is None
+
+
+def test_respond_no_grounding_override_drops_warrant_backing_when_collapsing_a_cited_claim():
+    # The sole self-reported claim was a CitedClaimNode with a warrant
+    # citing real sources -- legitimate there, but the collapsed claim
+    # becomes an InferenceNode, which has no document behind it. Carrying
+    # the backing across would recreate the same source-backed-inference
+    # inconsistency _reject_backed_inference rejects at parse time
+    # (PR #105 Copilot review).
+    llm = MagicMock()
+    llm.model = "test-model"
+    llm.context_window = 1_000_000
+    llm.complete.side_effect = [
+        "SEARCH_VAULT: something",
+        'X causes Y[^1].\n'
+        'FOOTNOTES_JSON: [{"index": 1, "relation": "attribution", "sources": ["a"], '
+        '"warrant": {"text": "the methodology directly measures causation", "backing": ["b"]}}]',
+    ]
+    toolbox = MagicMock()
+    toolbox.call.return_value = ToolResult(text="", raw=[])
+    agent = _agent(llm=llm, toolbox=toolbox)
+
+    reply = agent.respond(history=[], user_text="why?")
+
+    assert len(reply.claims) == 1
+    assert reply.claims[0].kind == "inference"
+    assert reply.claims[0].warrant is None
 
 
 def test_respond_no_grounding_override_drops_qualifier_when_multiple_claims_self_reported():

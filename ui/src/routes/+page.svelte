@@ -2503,7 +2503,7 @@
                             {/if}
                           {/if}
                           {#if soleClaim.warrant}
-                            <div class="claim-warrant" title="Toulmin warrant — why the grounds support this claim">
+                            <div class="claim-warrant" title="Toulmin warrant — the model's reasoning process behind this inference">
                               <span class="claim-warrant-label">Warrant:</span> {soleClaim.warrant.text}
                               {#if soleClaim.warrant.backing.length}
                                 <span class="claim-warrant-backing">(backed by {#each soleClaim.warrant.backing as s, si}{#if si > 0}, {/if}{#if isZoteroSource(s)}<span class="claim-source-zotero">📚 {s.slice(ZOTERO_SOURCE_PREFIX.length)}</span>{:else}<button class="claim-source-link" onclick={() => openNode(s)}>{s}</button>{/if}{/each})</span>
@@ -2582,7 +2582,7 @@
                               {/if}
                             {/if}
                             {#if claim.warrant}
-                              <div class="claim-warrant" title="Toulmin warrant — why the grounds support this claim">
+                              <div class="claim-warrant" title={claim.kind === "inference" ? "Toulmin warrant — the model's reasoning process behind this inference" : "Toulmin warrant — why the grounds support this claim"}>
                                 <span class="claim-warrant-label">Warrant:</span> {claim.warrant.text}
                                 {#if claim.warrant.backing.length}
                                   <span class="claim-warrant-backing">(backed by {#each claim.warrant.backing as s, si}{#if si > 0}, {/if}{#if isZoteroSource(s)}<span class="claim-source-zotero">📚 {s.slice(ZOTERO_SOURCE_PREFIX.length)}</span>{:else}<button class="claim-source-link" onclick={() => openNode(s)}>{s}</button>{/if}{/each})</span>

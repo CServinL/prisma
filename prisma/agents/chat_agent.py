@@ -15,7 +15,9 @@ import logging
 import re
 from typing import Callable, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StrictInt, ValidationError, field_validator
+from pydantic import (
+    BaseModel, ConfigDict, Field, StrictInt, ValidationError, field_validator, model_validator,
+)
 
 from prisma.agents.session_orchestrator import SessionOrchestrator
 from prisma.schema_gov import ContentFormat, RichContent
@@ -129,11 +131,11 @@ class _RawFootnote(BaseModel):
 
     `qualifier`/`warrant`/`rebuts` are the optional Toulmin extension
     (system_prompt_footnote_section()) -- validated here on the same terms
-    as `relation`: a malformed value fails the whole entry, it does not
-    silently degrade to "field omitted." Referential validation (does
-    `rebuts` point at a real claim in this turn? does `backing` resolve to
-    a real vault node?) can't happen at this shape-only layer -- see
-    `_extract_claims`/`ChatAgent._warrant_resolves`."""
+    as `relation`: a malformed value fails the whole entry, including the
+    cross-field case `_reject_backed_inference` checks below. Referential
+    validation (does `rebuts` point at a real claim in this turn? does
+    `backing` resolve to a real vault node?) can't happen at this
+    shape-only layer -- see `_extract_claims`/`ChatAgent._warrant_resolves`."""
     model_config = ConfigDict(extra="ignore")
     # StrictInt, not plain `int` -- lax `int` also coerces a bool
     # ("index": true -> 1) or a whole-number float ("index": 1.0 -> 1),
@@ -175,6 +177,15 @@ class _RawFootnote(BaseModel):
             digits = v.strip().lstrip("[").rstrip("]").lstrip("^")
             return int(digits) if digits.lstrip("-").isdigit() else v
         return v
+
+    # ai-inference means no document is behind the claim -- non-empty
+    # warrant.backing there is a self-contradiction the prompt never
+    # authorizes. Reject the whole entry, same as an unknown relation.
+    @model_validator(mode="after")
+    def _reject_backed_inference(self) -> "_RawFootnote":
+        if self.relation == "ai-inference" and self.warrant and self.warrant.backing:
+            raise ValueError("ai-inference relation cannot carry warrant.backing")
+        return self
 
 
 def _claim_from_raw(item: object, claim_texts: dict[int, str]) -> tuple[ClaimNode, int | None] | None:
@@ -327,6 +338,18 @@ def _prune_dangling_rebuts(claims: list[ClaimNode]) -> tuple[list[ClaimNode], in
         if len(survivors) == len(claims):
             return survivors, total_dropped
         claims = survivors
+
+
+def _inference_safe_warrant(warrant: WarrantNode | None) -> WarrantNode | None:
+    """Drop a warrant that cites real backing when it's about to land on an
+    InferenceNode -- that node type has no document behind it by
+    definition, so carrying backing across (e.g. when the no-grounding
+    override collapses a CitedClaimNode into one) would recreate the
+    source-backed-inference inconsistency _reject_backed_inference
+    rejects at parse time."""
+    if warrant and warrant.backing:
+        return None
+    return warrant
 
 
 # Tools that put citable content in front of the model. Derived from
@@ -600,21 +623,15 @@ class ChatAgent:
                 content, claims = _extract_claims(reply)
                 if _turn_had_no_grounding(tool_calls) and content.strip():
                     # No tool call this turn could have grounded anything --
-                    # override the model's self-report (whatever it was)
-                    # with a single claim covering the whole reply, rather
-                    # than trust per-sentence markers it had no way to
-                    # ground correctly. See _turn_had_no_grounding(). Still
-                    # worth keeping qualifier/warrant when there's exactly
-                    # one self-reported claim to take them from -- they
-                    # describe the model's own reasoning, which the prompt
-                    # explicitly supports for ai-inference, and collapsing
-                    # to one claim is unambiguous only in that case. rebuts
-                    # is never carried over: it'd reference an id about to
-                    # be discarded along with every other claim here, the
-                    # same dangling-reference shape _prune_dangling_rebuts
-                    # exists to prevent.
+                    # override the model's self-report with a single claim
+                    # covering the whole reply, rather than trust
+                    # per-sentence markers it had no way to ground
+                    # correctly. See _turn_had_no_grounding(). Keep
+                    # qualifier/warrant only when there's exactly one
+                    # self-reported claim to take them from (unambiguous
+                    # collapse); rebuts is never carried over, it'd dangle.
                     qualifier = claims[0].qualifier if len(claims) == 1 else None
-                    warrant = claims[0].warrant if len(claims) == 1 else None
+                    warrant = _inference_safe_warrant(claims[0].warrant) if len(claims) == 1 else None
                     content = _FOOTNOTE_MARKER_RE.sub("", content).strip()
                     claims = [InferenceNode(
                         index=1, claim_text=content, qualifier=qualifier, warrant=warrant,

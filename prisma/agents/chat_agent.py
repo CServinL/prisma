@@ -603,9 +603,22 @@ class ChatAgent:
                     # override the model's self-report (whatever it was)
                     # with a single claim covering the whole reply, rather
                     # than trust per-sentence markers it had no way to
-                    # ground correctly. See _turn_had_no_grounding().
+                    # ground correctly. See _turn_had_no_grounding(). Still
+                    # worth keeping qualifier/warrant when there's exactly
+                    # one self-reported claim to take them from -- they
+                    # describe the model's own reasoning, which the prompt
+                    # explicitly supports for ai-inference, and collapsing
+                    # to one claim is unambiguous only in that case. rebuts
+                    # is never carried over: it'd reference an id about to
+                    # be discarded along with every other claim here, the
+                    # same dangling-reference shape _prune_dangling_rebuts
+                    # exists to prevent.
+                    qualifier = claims[0].qualifier if len(claims) == 1 else None
+                    warrant = claims[0].warrant if len(claims) == 1 else None
                     content = _FOOTNOTE_MARKER_RE.sub("", content).strip()
-                    claims = [InferenceNode(index=1, claim_text=content)]
+                    claims = [InferenceNode(
+                        index=1, claim_text=content, qualifier=qualifier, warrant=warrant,
+                    )]
                     content = f"{content} [^1]"
                 # Two separate counters, not one -- a single combined
                 # message can't tell a hallucinated `sources` slug apart

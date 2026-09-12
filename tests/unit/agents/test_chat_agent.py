@@ -1076,6 +1076,59 @@ def test_respond_overrides_self_report_when_grounding_tool_returns_nothing():
     )
 
 
+def test_respond_preserves_qualifier_and_warrant_across_the_no_grounding_override():
+    # The override replaces the model's self-reported claim(s) with one bare
+    # InferenceNode -- but a qualifier/warrant on an ai-inference claim
+    # describes the model's own reasoning, which the prompt explicitly
+    # supports, and there's exactly one self-reported claim here so keeping
+    # its qualifier/warrant on the collapsed claim is unambiguous
+    # (PR #105 Copilot review).
+    llm = MagicMock()
+    llm.model = "test-model"
+    llm.context_window = 1_000_000
+    llm.complete.side_effect = [
+        "SEARCH_VAULT: something",
+        'My own take on this[^1].\n'
+        'FOOTNOTES_JSON: [{"index": 1, "relation": "ai-inference", "sources": [], '
+        '"qualifier": "tentative", "warrant": {"text": "reasoning from first principles"}}]',
+    ]
+    toolbox = MagicMock()
+    toolbox.call.return_value = ToolResult(text="", raw=[])
+    agent = _agent(llm=llm, toolbox=toolbox)
+
+    reply = agent.respond(history=[], user_text="what do you think?")
+
+    assert len(reply.claims) == 1
+    assert reply.claims[0].kind == "inference"
+    assert reply.claims[0].qualifier == Qualifier.tentative
+    assert reply.claims[0].warrant.text == "reasoning from first principles"
+    assert reply.claims[0].rebuts is None
+
+
+def test_respond_no_grounding_override_drops_qualifier_when_multiple_claims_self_reported():
+    # Ambiguous which of several self-reported claims' qualifier should
+    # describe the whole collapsed reply -- default to None rather than
+    # arbitrarily picking one.
+    llm = MagicMock()
+    llm.model = "test-model"
+    llm.context_window = 1_000_000
+    llm.complete.side_effect = [
+        "SEARCH_VAULT: something",
+        'X[^1]. Y[^2].\n'
+        'FOOTNOTES_JSON: [{"index": 1, "relation": "ai-inference", "sources": [], '
+        '"qualifier": "tentative"}, {"index": 2, "relation": "ai-inference", "sources": []}]',
+    ]
+    toolbox = MagicMock()
+    toolbox.call.return_value = ToolResult(text="", raw=[])
+    agent = _agent(llm=llm, toolbox=toolbox)
+
+    reply = agent.respond(history=[], user_text="what do you think?")
+
+    assert len(reply.claims) == 1
+    assert reply.claims[0].qualifier is None
+    assert reply.claims[0].warrant is None
+
+
 def test_respond_does_not_override_when_grounding_tool_returns_content():
     llm = MagicMock()
     llm.model = "test-model"

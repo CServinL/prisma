@@ -2481,6 +2481,37 @@
                     <div class="chat-turn-content chat-turn-content-inference text-body">
                       <div class="chat-turn-content-inference-label">AI inference — not from your vault</div>
                       {msg.content.value.replace(TRAILING_FOOTNOTE_MARKER_RE, "")}
+                      {#if msg.claims[0].qualifier || msg.claims[0].warrant || msg.claims[0].rebuts}
+                        {@const soleClaim = msg.claims[0]}
+                        <!-- Same fields the claim-list rendering below shows, compacted --
+                             a whole-turn inference has no claim row (the References block
+                             is suppressed for it), so this is its only place to surface
+                             qualifier/warrant/rebuts, all of which chat_agent.py's
+                             no-grounding override can now populate (PR #105 review). -->
+                        <div class="chat-turn-content-inference-toulmin">
+                          {#if soleClaim.qualifier}
+                            <span class="claim-qualifier" title="Epistemic strength (Toulmin qualifier)">{soleClaim.qualifier}</span>
+                          {/if}
+                          {#if soleClaim.rebuts}
+                            {@const rebutsTarget = rebutsTargetById.get(soleClaim.rebuts)}
+                            {#if rebutsTarget !== undefined}
+                              <button
+                                class="claim-rebuts"
+                                title="Rebuts claim #{rebutsTarget.index} — click to jump to it"
+                                onclick={() => scrollToClaimOrTurn(rebutsTarget.turn, rebutsTarget.index)}
+                              >⤺ rebuts</button>
+                            {/if}
+                          {/if}
+                          {#if soleClaim.warrant}
+                            <div class="claim-warrant" title="Toulmin warrant — why the grounds support this claim">
+                              <span class="claim-warrant-label">Warrant:</span> {soleClaim.warrant.text}
+                              {#if soleClaim.warrant.backing.length}
+                                <span class="claim-warrant-backing">(backed by {#each soleClaim.warrant.backing as s, si}{#if si > 0}, {/if}{#if isZoteroSource(s)}<span class="claim-source-zotero">📚 {s.slice(ZOTERO_SOURCE_PREFIX.length)}</span>{:else}<button class="claim-source-link" onclick={() => openNode(s)}>{s}</button>{/if}{/each})</span>
+                              {/if}
+                            </div>
+                          {/if}
+                        </div>
+                      {/if}
                     </div>
                   {:else}
                     <div class="chat-turn-content text-body">
@@ -4578,6 +4609,14 @@
     text-transform: uppercase;
     letter-spacing: 0.04em;
     margin-bottom: 4px;
+  }
+  .chat-turn-content-inference-toulmin {
+    margin-top: 6px;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
   }
   .chat-regen-model-picker {
     max-width: 130px;

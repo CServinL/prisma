@@ -1,13 +1,13 @@
 # Qwen3 family evaluation — kg extraction, tool-calling, and summarization
 
 Rigorous, measured re-run of every controlled test this project has already
-run against `qwen2.5:7b-32k` (`docs/kg-extraction-context-length.md`,
-`docs/ollama-concurrency.md`, ADR-014's tool-calling appendix) plus a net-new
+run against `qwen2.5:7b-32k` (`docs/logs/kg-extraction-context-length.md`,
+`docs/logs/ollama-concurrency.md`, ADR-014's tool-calling appendix) plus a net-new
 chat-summarization check, against four Qwen3-generation candidates. Trigger:
 an unsourced secondhand claim that Qwen3-14B has "incredibly low validation
 error rates" on strict schemas like Pydantic — worth checking against real
 evidence rather than trusting, since Instructor's whole mechanism (ADR-016)
-is exactly that kind of validation. Hardware: RTX 4090M laptop GPU, 16GB
+is exactly that kind of validation. Hardware: a single local GPU, 16GB
 dedicated VRAM, `vram_budget_mb: 14000` configured.
 
 Candidates tested: `qwen3:14b`, `qwen3.6:27b`, `qwen3:30b-a3b` (MoE), and
@@ -25,7 +25,7 @@ Candidates tested: `qwen3:14b`, `qwen3.6:27b`, `qwen3:30b-a3b` (MoE), and
 
 All four candidates ship with a default `context_length=4096` regardless of
 architecture — the same "configured vs. enforced" trap this project has now
-hit three times (ADR-013's follow-up, kg-extraction-context-length.md Round
+hit three times (ADR-013's follow-up, docs/logs/kg-extraction-context-length.md Round
 3, and here). All were rebuilt with `PARAMETER num_ctx 32768` and
 re-verified via `/api/ps` before any further testing, same as
 `qwen2.5:7b-32k`'s own setup.
@@ -49,7 +49,7 @@ a 10-word prompt does.
 
 ## Step 2: Context-filling degradation (synthetic, `qwen3:14b` only)
 
-Same methodology as `kg-extraction-context-length.md` Rounds 1-4 — real
+Same methodology as `docs/logs/kg-extraction-context-length.md` Rounds 1-4 — real
 MEMIT target section, increasing unrelated Vaswani-paper padding, target
 position held constant.
 
@@ -67,7 +67,7 @@ levels A/B/C respectively.
 
 ## Step 3: Real extraction quality (the decisive test)
 
-Same 3 real chunks (`Meng_2023_MEMIT_Mass_Editing_Memory.md`, chunked at
+Same 3 real chunks (from Meng et al. 2023's MEMIT paper, chunked at
 production `token_budget=1000` via the real `semchunk` call), run through
 the actual `_call_ollama_extract`-equivalent Instructor pipeline, for a true
 head-to-head — not loosely comparable historical numbers.
@@ -109,7 +109,7 @@ scope answer to what `qwen2.5:7b` gets directly, meaning the visible
 invisible reasoning overhead, confirmed by inspecting the raw completion
 directly rather than trusting parsed counts alone).
 
-## Step 4: Concurrency (`qwen3:14b` only, `docs/ollama-concurrency.md` methodology)
+## Step 4: Concurrency (`qwen3:14b` only, `docs/logs/ollama-concurrency.md` methodology)
 
 3 sequential vs. 3 concurrent short calls (`num_predict: 150`), raw
 `/api/generate`, bypassing `resource_lock`:
@@ -185,9 +185,9 @@ directly by this exact incident.
 
 ## Related
 
-- `docs/kg-extraction-context-length.md` — the original `qwen2.5:7b`
+- `docs/logs/kg-extraction-context-length.md` — the original `qwen2.5:7b`
   investigation this reuses methodology and baseline numbers from.
-- `docs/ollama-concurrency.md` — concurrency methodology reused for Step 4.
+- `docs/logs/ollama-concurrency.md` — concurrency methodology reused for Step 4.
 - ADR-014 — tool-calling reliability appendix, reused for Step 5.
 - ADR-015 — Excerpt/summarization model this evaluation's Step 6 targets.
 - ADR-016 — Instructor adoption; the validation-error-rate claim that

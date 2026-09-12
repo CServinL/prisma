@@ -228,3 +228,7 @@ config.yaml
 # User-specific VS Code settings that shouldn't be shared
 .vscode/launch.json
 .vscode/extensions.json
+
+# Claude Code project instructions/notes -- private working memory, not
+# public project documentation. Never publish this directory.
+.claude/

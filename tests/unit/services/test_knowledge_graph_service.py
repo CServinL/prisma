@@ -154,7 +154,7 @@ def test_no_context_window_override_defaults_to_unresolved(vault, tmp_path):
 
 
 # ── Escape-sequence sanitization ──────────────────────────────────────────────
-# Confirmed live 2026-07-07 (docs/kg-dead-letter-triage-2026-07-07.md): a real
+# Confirmed live 2026-07-07 (docs/logs/kg-dead-letter-triage-2026-07-07.md): a real
 # paper's appendix of raw byte-sequence descriptions (e.g. `Hebrew: "\xd6"?`)
 # made the model try to preserve these sequences verbatim inside its JSON
 # string output, producing malformed `\u` escapes that failed Pydantic
@@ -191,7 +191,7 @@ def test_extract_file_sanitizes_escape_sequences_before_calling_model(kg, vault)
 
 
 # ── Dense data-table stripping ─────────────────────────────────────────────────
-# Confirmed live 2026-07-08 (docs/kg-dead-letter-triage-2026-07-07.md follow-up):
+# Confirmed live 2026-07-08 (docs/logs/kg-dead-letter-triage-2026-07-07.md follow-up):
 # a real paper's flattened benchmark-score table (e.g. "hyperbaton 54.2 51.7
 # movie_dialog_same_or_diff 54.5 50.7 ...") made the model try to enumerate
 # every row as an entity, blowing past the output-budget instruction (64

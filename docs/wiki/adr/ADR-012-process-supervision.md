@@ -200,7 +200,7 @@ usage rather than being designed up front:
 - **`model_affinity`** (default: **true**): a compute pool models one
   hardware unit that can hold exactly one resident model's weights at a time
   (one GPU, or one Ollama instance bound to one GPU) — confirmed by
-  benchmark in `docs/ollama-concurrency.md`: 3 concurrent calls to the
+  benchmark in `docs/logs/ollama-concurrency.md`: 3 concurrent calls to the
   *same* model batch for a real ~2x speedup, but alternating between two
   models costs ~4-9s of reload per switch regardless of concurrency. A
   `model_affinity` pool tracks which model is currently resident and only

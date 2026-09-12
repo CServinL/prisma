@@ -688,7 +688,7 @@ several linked fixes:
       (4→6 / 3→5) to stop artificially capping below what the GPU can
       absorb; `vram_budget_mb` + the live `/api/ps` VRAM check are the real
       backstop now, not a static parallelism number. See
-      `.claude/ollama-concurrency.md`'s follow-up section.
+      `docs/logs/ollama-concurrency.md`'s follow-up section.
 - [x] **Real bug found and fixed while watching live logs**:
       `ChromaIndexer._loop()` cleared `self._pending` *before* attempting
       the embed lease, unconditionally — same class of bug as kg's earlier
@@ -859,19 +859,19 @@ Replaced with a narrower, more useful **Knowledge Graph progress page**
       `token_budget` lowered 2000→1000 (both `~/.config/prisma/config.yaml`
       and the code defaults) after a live dense chunk got dropped for
       exceeding the old `max_tokens` cap — see
-      `.claude/kg-extraction-context-length.md`'s 2026-07-05 follow-up section
+      `docs/logs/kg-extraction-context-length.md`'s 2026-07-05 follow-up section
       for the full reasoning. Chunk size (`chunk_avg_size_tokens`) also now
       tracked, to sanity-check `token_budget` is actually respected in
       practice.
 
-### Resolved: qwen3 family evaluation (2026-07-05/06) — see .claude/qwen3-family-evaluation.md
+### Resolved: qwen3 family evaluation (2026-07-05/06) — see docs/logs/qwen3-family-evaluation.md
 
 - [x] Evaluated `qwen3:14b`, `qwen3.6:27b`, `qwen3:30b-a3b` (MoE), and
       `qwen3.5:9b` against every existing controlled test this project has
-      run for `qwen2.5:7b-32k` (.claude/kg-extraction-context-length.md's Rounds,
-      .claude/ollama-concurrency.md's methodology, ADR-014's tool-calling appendix)
+      run for `qwen2.5:7b-32k` (docs/logs/kg-extraction-context-length.md's Rounds,
+      docs/logs/ollama-concurrency.md's methodology, ADR-014's tool-calling appendix)
       plus a net-new chat-summarization check. Full write-up:
-      `.claude/qwen3-family-evaluation.md`.
+      `docs/logs/qwen3-family-evaluation.md`.
       **kg extraction: no adoption.** None of the four candidates beat
       current production — `qwen3:14b` was slower and lower-quality on
       identical real content (37 vs 47 unique entities, 3.9× slower); the

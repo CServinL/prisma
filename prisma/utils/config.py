@@ -414,7 +414,7 @@ class KGConfig(BaseModel):
         description="File extensions to index, with or without a leading dot (both '.md' and 'md' work). Empty = caller's own default.",
     )
     extraction_concurrency: int = Field(3, description="Concurrent extraction calls to the LLM backend")
-    # See .claude/kg-extraction-context-length.md — a controlled test on real
+    # See docs/logs/kg-extraction-context-length.md — a controlled test on real
     # paper content found the old 8000 default produced ~10x fewer unique
     # entities and ~4x fewer relationships than chunking at ~2000
     # tokens/section, not just marginally worse. Lowered further to 1000

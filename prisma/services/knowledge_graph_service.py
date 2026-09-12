@@ -178,7 +178,7 @@ _ESCAPE_SEQUENCE_RE = re.compile(r"\\x[0-9a-fA-F]{2}|\\u[0-9a-fA-F]{4}")
 def _sanitize_escape_sequences(text: str) -> str:
     """Strip literal backslash-escape-looking sequences (`\\xNN`, `\\uNNNN`)
     before a section reaches the model. Confirmed live 2026-07-07
-    (.claude/kg-dead-letter-triage-2026-07-07.md): a real paper's appendix — a
+    (docs/logs/kg-dead-letter-triage-2026-07-07.md): a real paper's appendix — a
     table of raw byte-sequence descriptions, e.g. `Hebrew: "\\xd6"?` — made
     the model try to preserve these sequences verbatim inside its JSON
     string output, producing malformed `\\u` escapes
@@ -366,7 +366,7 @@ class KnowledgeGraphService:
         self._provider = provider
         # Fraction of the model's real context window max_tokens may use,
         # even when more technically fits — quality degrades well before
-        # the context ceiling (.claude/kg-extraction-context-length.md), and
+        # the context ceiling (docs/logs/kg-extraction-context-length.md), and
         # different models degrade at different rates, so this is a
         # per-deployment config knob (kg.max_output_fraction), not a single
         # hardcoded global constant.
@@ -406,7 +406,7 @@ class KnowledgeGraphService:
         # PARAMETER line). This used to default to 8000 ("leaves generous
         # headroom... while cutting most documents to a single section"),
         # but a controlled test on real paper content
-        # (.claude/kg-extraction-context-length.md) found that traded away most
+        # (docs/logs/kg-extraction-context-length.md) found that traded away most
         # of the graph's actual value: the same ~7,800 tokens of real content
         # produced ~10x fewer unique entities and ~4x fewer relationships as
         # one 8000-token call than as four ~2000-token calls, with far more
@@ -719,7 +719,7 @@ class KnowledgeGraphService:
     def _resolve_context_window(self) -> int | None:
         """The model's real *loaded* context window (not a claimed/configured
         value — see ADR-013's follow-up section on why that distinction
-        matters, and .claude/kg-extraction-context-length.md Round 3 for a
+        matters, and docs/logs/kg-extraction-context-length.md Round 3 for a
         concrete case of it mattering). Queried once and cached — a
         resolution failure (model not loaded yet, backend unreachable) is
         remembered as "give up," not retried every call, so a persistently
@@ -770,7 +770,7 @@ class KnowledgeGraphService:
         2. `max_output_fraction` (config.toml's kg.max_output_fraction,
            default 0.25) of the model's real context window — even if more
            technically fits, quality degrades well before the context limit
-           (see .claude/kg-extraction-context-length.md), and this fraction is
+           (see docs/logs/kg-extraction-context-length.md), and this fraction is
            deliberately per-model-tunable in config rather than a single
            global constant, since different models degrade at different
            rates (cservinl, 2026-07-24).
@@ -1036,7 +1036,7 @@ class KnowledgeGraphService:
         in the dead-letter file body, clearly delimited, for offline
         analysis of *why* — confirmed necessary live: a chunk with adversarial
         Unicode-escape content needed the full multi-generation dump to
-        diagnose (see .claude/kg-dead-letter-triage-2026-07-07.md)."""
+        diagnose (see docs/logs/kg-dead-letter-triage-2026-07-07.md)."""
         timestamp = datetime.now()
         summary = _summarize_error(error)
         dead_letter_path: str | None = None

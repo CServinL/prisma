@@ -4,7 +4,7 @@ Run: .venv/bin/python docs/diagrams/07b_compute_pool_contention.py
 
 What actually happens when two callers want different models on the same
 GPU at once — a real scenario observed live in supervisor.log (see
-.claude/ollama-concurrency.md): the knowledge graph server holds the pool for its extraction
+docs/logs/ollama-concurrency.md): the knowledge graph server holds the pool for its extraction
 model, ChromaDB's embed call is denied (409) and retries with backoff, then
 succeeds once it releases. See 07a_compute_pool_topology.py for the
 static topology this sequence plays out on.

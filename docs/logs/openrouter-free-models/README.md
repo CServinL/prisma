@@ -10,7 +10,7 @@ paid dependency for local dev, worth checking whether any of OpenRouter's
 
 ## Method
 
-Same methodology precedent as `.claude/kg-extraction-context-length.md` ("called
+Same methodology precedent as `docs/logs/kg-extraction-context-length.md` ("called
 directly against Ollama — bypassing resource_lock/the supervisor, a single
 sequential script"): a harness calls OpenRouter directly via the `openai`
 SDK, using Prisma's exact real system prompt — pulled live from

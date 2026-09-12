@@ -9,7 +9,7 @@ Bypasses the full server/vault -- calls OpenRouter directly via the same
 openai-SDK-compatible pattern prisma's own ChatLLM uses (ADR-014), with a
 scripted SEARCH_VAULT tool response instead of a real vault, so every
 model is tested against identical "ground truth" content. Same
-methodology precedent as .claude/kg-extraction-context-length.md ("called
+methodology precedent as docs/logs/kg-extraction-context-length.md ("called
 directly against Ollama -- bypassing resource_lock/the supervisor, a
 single sequential script").
 

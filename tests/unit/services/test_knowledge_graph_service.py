@@ -1141,6 +1141,20 @@ def test_graph_relevance_still_matches_a_short_label_as_a_whole_word(kg):
     assert kg.graph_relevance(["real AI research"])[0].score == 1
 
 
+def test_graph_relevance_matches_a_label_starting_or_ending_in_punctuation(kg):
+    # Plain `\b` (a second self-review round caught this one) fails on any
+    # label that itself starts/ends with punctuation -- there's never a
+    # word/non-word *transition* at a position surrounded by punctuation
+    # and whitespace on both sides, even though the label is verbatim in
+    # the text.
+    kg._entity_labels_cache = [".NET", "Ph.D.", "C++", "e.g.", "U.S."]
+    results = kg.graph_relevance([
+        "built on .NET", "she earned her Ph.D. last year", "we compared C++ vs Rust",
+        "e.g. this example", "the U.S. government",
+    ])
+    assert [r.score for r in results] == [1, 1, 1, 1, 1]
+
+
 def test_graph_relevance_dedupes_case_variant_labels_from_different_documents(kg):
     # Two documents can independently extract "Neural Networks" and
     # "neural networks" as separate cache entries -- both are the same

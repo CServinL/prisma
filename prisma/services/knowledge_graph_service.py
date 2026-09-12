@@ -1594,7 +1594,16 @@ class KnowledgeGraphService:
         text` (an earlier version of this method, caught in self-review
         rather than by the original test suite) matches any short label as
         a substring of an unrelated longer word -- "AI" inside "explain",
-        "US" inside "custom", "ROC" inside "process". Deduped
+        "US" inside "custom", "ROC" inside "process". Not plain `\b` either
+        (a second self-review round caught this one) -- `\b` requires a
+        word/non-word transition, so it silently fails to match any label
+        that itself starts or ends with punctuation: ".NET", "Ph.D.",
+        "C++", "e.g.", "U.S." would never match even when the text says
+        them verbatim, since the position right before/after a punctuation
+        character surrounded by other punctuation/whitespace is never a
+        \\w/\\W transition. `(?<!\w)...(?!\w)` asserts "not immediately
+        preceded/followed by a word character" instead -- true regardless
+        of what the label's own edge characters are. Deduped
         case-insensitively too: two documents extracting "Neural Networks"
         and "neural networks" as separate labels must not double-count one
         concept as two matches. Patterns are compiled once per call, not
@@ -1609,7 +1618,7 @@ class KnowledgeGraphService:
             if not lowered or lowered in seen_lower:
                 continue
             seen_lower.add(lowered)
-            patterns.append((label, re.compile(r"\b" + re.escape(lowered) + r"\b")))
+            patterns.append((label, re.compile(r"(?<!\w)" + re.escape(lowered) + r"(?!\w)")))
         out = []
         for text in texts:
             lowered_text = text.lower()

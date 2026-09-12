@@ -1588,15 +1588,32 @@ class KnowledgeGraphService:
         Lightweight stream-triage design: scores arbitrary caller text
         (e.g. a Zotero item's title/abstract/tags) against labels already
         extracted from the vault, without ever indexing that text into
-        Kùzu itself. Case-insensitive substring match -- see this repo's
-        `graph_relevance` design note (PR #106) for why an NLP/embedding
-        step is deliberately out of scope here."""
+        Kùzu itself.
+
+        Word-boundary regex, not a bare substring check: a naive `label in
+        text` (an earlier version of this method, caught in self-review
+        rather than by the original test suite) matches any short label as
+        a substring of an unrelated longer word -- "AI" inside "explain",
+        "US" inside "custom", "ROC" inside "process". Deduped
+        case-insensitively too: two documents extracting "Neural Networks"
+        and "neural networks" as separate labels must not double-count one
+        concept as two matches. Patterns are compiled once per call, not
+        once per text -- rescanning and re-lowering the whole label list
+        for every single input text doesn't scale with either input size."""
         with self._lock:
             labels = self._entity_labels_cache
+        seen_lower: set[str] = set()
+        patterns: list[tuple[str, re.Pattern]] = []
+        for label in labels:
+            lowered = label.strip().lower()
+            if not lowered or lowered in seen_lower:
+                continue
+            seen_lower.add(lowered)
+            patterns.append((label, re.compile(r"\b" + re.escape(lowered) + r"\b")))
         out = []
         for text in texts:
-            lowered = text.lower()
-            matched = [label for label in labels if label.lower() in lowered]
+            lowered_text = text.lower()
+            matched = [label for label, pattern in patterns if pattern.search(lowered_text)]
             out.append(GraphRelevance(score=len(matched), matched_entities=matched[:5]))
         return out
 

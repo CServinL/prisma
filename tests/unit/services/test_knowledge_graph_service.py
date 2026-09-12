@@ -1126,6 +1126,31 @@ def test_graph_relevance_is_case_insensitive(kg):
     assert kg.graph_relevance(["neural networks are great"])[0].score == 1
 
 
+def test_graph_relevance_does_not_match_a_short_label_inside_an_unrelated_word(kg):
+    # A bare substring check (an earlier version of this method, caught in
+    # self-review rather than by the original test suite) matches "AI"
+    # inside "explain", "US" inside "custom", "ROC" inside "process" --
+    # none of these texts are actually about any of these entities.
+    kg._entity_labels_cache = ["AI", "US", "ROC"]
+    results = kg.graph_relevance(["I will explain this later", "a custom setup", "the process was smooth"])
+    assert [r.score for r in results] == [0, 0, 0]
+
+
+def test_graph_relevance_still_matches_a_short_label_as_a_whole_word(kg):
+    kg._entity_labels_cache = ["AI"]
+    assert kg.graph_relevance(["real AI research"])[0].score == 1
+
+
+def test_graph_relevance_dedupes_case_variant_labels_from_different_documents(kg):
+    # Two documents can independently extract "Neural Networks" and
+    # "neural networks" as separate cache entries -- both are the same
+    # concept and must not double the score or duplicate the match list.
+    kg._entity_labels_cache = ["Neural Networks", "neural networks"]
+    result = kg.graph_relevance(["a paper about neural networks"])[0]
+    assert result.score == 1
+    assert result.matched_entities == ["Neural Networks"]
+
+
 def test_graph_relevance_scores_each_text_independently_and_preserves_order(kg):
     kg._entity_labels_cache = ["X"]
     results = kg.graph_relevance(["has X", "no match", "also has X"])

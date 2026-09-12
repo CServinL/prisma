@@ -73,7 +73,9 @@ produce a `.md` body, and saves a `Source` with `zotero_key = item.key`.
 `GET /zotero/items/relevance` returns the same item set as `GET /zotero/items`, plus a
 `graph_relevance_score`/`graph_relevance_matched` pair per item, sorted descending by score. The
 score is a pure text-overlap count: how many entity labels already extracted into the knowledge
-graph appear (case-insensitive substring match) in the item's title/abstract/tags. This is
+graph appear (case-insensitive, word-boundary matched — not a bare substring check, which would
+match a short label like "AI" inside an unrelated word like "explain") in the item's
+title/abstract/tags. This is
 deliberately lightweight — it never indexes a `ZoteroItem`'s text into Kùzu, and no per-item
 extraction runs; it only checks arbitrary text against labels the KG already has. Nothing about
 this feature contradicts [Stream](stream.md)'s "stream metadata should not pollute the knowledge

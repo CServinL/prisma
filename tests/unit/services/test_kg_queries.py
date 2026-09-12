@@ -473,7 +473,7 @@ def test_suggest_questions_excludes_chat_tier(kg, conn):
     assert kg_queries.suggest_questions(conn) == []
 
 
-def test_suggest_questions_dedupes_the_same_entity_pair(kg, conn):
+def test_suggest_questions_dedupes_the_undirected_double_read(kg, conn):
     # The undirected `-` scan returns one real edge from both directions --
     # a naive read would otherwise phrase the same question twice.
     _add(
@@ -482,6 +482,37 @@ def test_suggest_questions_dedupes_the_same_entity_pair(kg, conn):
         [{"source": "a_x", "target": "a_y", "relation": "causes"}],
     )
     assert len(kg_queries.suggest_questions(conn)) == 1
+
+
+def test_suggest_questions_dedupes_the_same_concept_pair_across_documents(kg, conn):
+    # Each document mints its own `{stem}_{entity}` id namespace (see
+    # surprising_connections' own docstring) -- two papers independently
+    # discussing "Transformer"/"Attention" produce two different id pairs
+    # for the same real-world concept pair. Deduping by id (a real bug,
+    # caught in self-review rather than by the original test suite) let
+    # the identical question through once per paper instead of once total.
+    _add(
+        kg, "papers/doc1.md", "source",
+        [{"id": "doc1_transformer", "label": "Transformer"}, {"id": "doc1_attention", "label": "Attention"}],
+        [{"source": "doc1_transformer", "target": "doc1_attention", "relation": "uses"}],
+    )
+    _add(
+        kg, "papers/doc2.md", "source",
+        [{"id": "doc2_transformer", "label": "Transformer"}, {"id": "doc2_attention", "label": "Attention"}],
+        [{"source": "doc2_transformer", "target": "doc2_attention", "relation": "uses"}],
+    )
+    questions = kg_queries.suggest_questions(conn)
+    assert len(questions) == 1
+    assert questions[0].question == "What connects 'Transformer' and 'Attention'?"
+
+
+def test_suggest_questions_drops_a_self_referential_pair(kg, conn):
+    _add(
+        kg, "notes/a.md", "note",
+        [{"id": "a_x", "label": "X"}],
+        [{"source": "a_x", "target": "a_x", "relation": "self"}],
+    )
+    assert kg_queries.suggest_questions(conn) == []
 
 
 def test_suggest_questions_caps_at_one_per_source_file_before_filling_remaining_slots(kg, conn):

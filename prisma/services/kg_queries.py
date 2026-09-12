@@ -397,28 +397,36 @@ def suggest_questions(conn, limit: int = DEFAULT_TOP_ENTITIES) -> list[Suggested
     """Phrases a grounded follow-up question from each of a diverse sample of
     `RelatesTo` edges -- "what connects X and Y?" -- chat tier excluded on
     both endpoints, same flat-scan shape `god_nodes`/`surprising_connections`
-    already use. Deduped by unordered entity-id pair (the undirected `-`
-    pattern returns each edge from both directions) and capped at one
-    question per distinct `source_file` on a first pass, so one large
-    document can't crowd out every other document's questions -- remaining
-    slots are then filled from any leftover edges."""
+    already use. Deduped by normalised (stripped/lowercased) label pair, NOT
+    entity id: each document mints its own `{stem}_{entity}` id namespace
+    (`surprising_connections`' own docstring explains why), so two different
+    papers both discussing "Transformer"/"Attention" produce two different
+    id pairs for the same real-world concept pair -- deduping by id (as an
+    earlier version of this function did) let the identical question text
+    through once per paper instead of once, total. This also subsumes the
+    original reason for a dedup set at all: the undirected `-` pattern
+    returns each edge from both directions, and both directions collapse to
+    the same label pair too. Capped at one question per distinct
+    `source_file` on a first pass, so one large document can't crowd out
+    every other document's questions -- remaining slots are then filled from
+    any leftover edges."""
     if conn is None:
         return []
-    seen_pairs: set[frozenset] = set()
+    seen_pairs: set[frozenset[str]] = set()
     rows: list[tuple[str, str, str]] = []  # (a_label, b_label, source_file)
     try:
         result = conn.execute(
             "MATCH (e:Entity)-[r:RelatesTo]-(o:Entity) "
             "WHERE e.trust_tier <> 'chat' AND o.trust_tier <> 'chat' "
-            "RETURN e.id, e.label, o.id, o.label, r.source_file"
+            "RETURN e.label, o.label, r.source_file"
         )
         while result.has_next():
-            e_id, e_label, o_id, o_label, source_file = result.get_next()
+            e_label, o_label, source_file = result.get_next()
             if not e_label or not o_label or not source_file:
                 continue
-            pair_key = frozenset((e_id, o_id))
-            if pair_key in seen_pairs:
-                continue
+            pair_key = frozenset((e_label.strip().lower(), o_label.strip().lower()))
+            if len(pair_key) < 2 or pair_key in seen_pairs:
+                continue  # a self-referential edge, or a pair already seen
             seen_pairs.add(pair_key)
             rows.append((e_label, o_label, source_file))
     except Exception as exc:

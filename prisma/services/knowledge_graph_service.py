@@ -307,6 +307,28 @@ def _summarize_error(error: str, max_len: int = 300) -> str:
     return single_line
 
 
+def _compile_label_patterns(labels: list[str]) -> list[tuple[str, re.Pattern]]:
+    r"""One case-insensitive, word-boundary-safe regex per distinct label --
+    see `KnowledgeGraphService.graph_relevance()` for why `(?<!\w)...(?!\w)`
+    rather than a bare substring or plain `\b`. Deduped case-insensitively:
+    two documents extracting "Neural Networks" and "neural networks" as
+    separate labels must not double-count one concept as two matches.
+    Called once per `_refresh_entity_labels()` cycle, not once per
+    `graph_relevance()` call -- a caller can invoke that method several
+    times in a row for one page load, and recompiling every label's regex
+    on each one of those calls was pure waste once the label list itself
+    hadn't changed."""
+    seen_lower: set[str] = set()
+    patterns: list[tuple[str, re.Pattern]] = []
+    for label in labels:
+        lowered = label.strip().lower()
+        if not lowered or lowered in seen_lower:
+            continue
+        seen_lower.add(lowered)
+        patterns.append((label, re.compile(r"(?<!\w)" + re.escape(lowered) + r"(?!\w)")))
+    return patterns
+
+
 class Node(BaseModel):
     id: str
     label: str
@@ -494,7 +516,15 @@ class KnowledgeGraphService:
         # Backs graph_relevance()'s pure text-match scoring -- not a
         # /graph/* route of its own, just the match list that method scans
         # against. Same refresh/drop_index discipline as the caches above.
+        # _entity_labels_cache is the raw label list; _entity_label_
+        # patterns_cache is it precompiled into (label, regex) pairs once
+        # per refresh, not once per graph_relevance() call -- a caller
+        # (zotero_routes.py) can call graph_relevance() several times in a
+        # row for one page load (one call per batch of items), and
+        # recompiling ~ENTITY_LABELS_MAX regexes on every single one of
+        # those calls was pure waste once the cache itself hadn't changed.
         self._entity_labels_cache: list[str] = []
+        self._entity_label_patterns_cache: list[tuple[str, re.Pattern]] = []
 
         # Knowledge Graph progress page state (replaces an earlier, since
         # reverted, generic "ollama stats" page — this is scoped to what's
@@ -653,6 +683,7 @@ class KnowledgeGraphService:
                     self._vault_health_cache = None
                     self._suggest_questions_cache = []
                     self._entity_labels_cache = []
+                    self._entity_label_patterns_cache = []
                 except Exception as exc:
                     _log.warning("drop_index failed: %s", exc)
             self._state = "stale"
@@ -1245,6 +1276,14 @@ class KnowledgeGraphService:
             if not src or not dst:
                 continue
             try:
+                # `e.get(..., default) or default` would launder a
+                # legitimate 0.0 confidence_score/weight into the default,
+                # since 0.0 is falsy in Python -- only a missing/None value
+                # should fall back to the default (caught in review: this
+                # silently defeated suggest_questions()' confidence-based
+                # ranking for any edge extraction had genuinely scored at 0).
+                confidence_score = e.get("confidence_score")
+                weight = e.get("weight")
                 self._conn.execute(
                     "MATCH (a:Entity {id: $src}), (b:Entity {id: $dst}) "
                     "MERGE (a)-[r:RelatesTo {relation: $relation, source_file: $source_file}]->(b) "
@@ -1252,8 +1291,8 @@ class KnowledgeGraphService:
                     {
                         "src": src, "dst": dst, "relation": e.get("relation", "conceptually_related_to"),
                         "source_file": rel, "confidence": e.get("confidence", "AMBIGUOUS"),
-                        "confidence_score": float(e.get("confidence_score", 0.5) or 0.5),
-                        "weight": float(e.get("weight", 1.0) or 1.0),
+                        "confidence_score": float(confidence_score) if confidence_score is not None else 0.5,
+                        "weight": float(weight) if weight is not None else 1.0,
                     },
                 )
             except Exception as exc:
@@ -1583,12 +1622,12 @@ class KnowledgeGraphService:
             return self._suggest_questions_cache[:limit]
 
     def graph_relevance(self, texts: list[str]) -> list[GraphRelevance]:
-        """Pure text-match scoring against the cached entity-label list --
-        no Kùzu call, unlike every other public method in this section.
-        Lightweight stream-triage design: scores arbitrary caller text
-        (e.g. a Zotero item's title/abstract/tags) against labels already
-        extracted from the vault, without ever indexing that text into
-        Kùzu itself.
+        r"""Pure text-match scoring against the precompiled entity-label
+        pattern cache -- no Kùzu call, unlike every other public method in
+        this section. Lightweight stream-triage design: scores arbitrary
+        caller text (e.g. a Zotero item's title/abstract/tags) against
+        labels already extracted from the vault, without ever indexing
+        that text into Kùzu itself.
 
         Word-boundary regex, not a bare substring check: a naive `label in
         text` (an earlier version of this method, caught in self-review
@@ -1606,19 +1645,18 @@ class KnowledgeGraphService:
         of what the label's own edge characters are. Deduped
         case-insensitively too: two documents extracting "Neural Networks"
         and "neural networks" as separate labels must not double-count one
-        concept as two matches. Patterns are compiled once per call, not
-        once per text -- rescanning and re-lowering the whole label list
-        for every single input text doesn't scale with either input size."""
+        concept as two matches.
+
+        Patterns are precompiled once per `_refresh_entity_labels()` cycle
+        (see `_compile_label_patterns`), not once per call here -- a caller
+        (`zotero_routes.py`'s item listing) can call this several times in
+        a row for one page load (one call per item batch), and recompiling
+        the whole label list on every one of those calls was pure waste
+        once the label cache itself hadn't changed (caught in review, not
+        by the original tests -- they never exercised more than one call
+        per test)."""
         with self._lock:
-            labels = self._entity_labels_cache
-        seen_lower: set[str] = set()
-        patterns: list[tuple[str, re.Pattern]] = []
-        for label in labels:
-            lowered = label.strip().lower()
-            if not lowered or lowered in seen_lower:
-                continue
-            seen_lower.add(lowered)
-            patterns.append((label, re.compile(r"(?<!\w)" + re.escape(lowered) + r"(?!\w)")))
+            patterns = self._entity_label_patterns_cache
         out = []
         for text in texts:
             lowered_text = text.lower()
@@ -1695,6 +1733,7 @@ class KnowledgeGraphService:
     def _refresh_entity_labels(self) -> None:
         with self._lock:
             self._entity_labels_cache = kg_queries.distinct_entity_labels(self._conn)
+            self._entity_label_patterns_cache = _compile_label_patterns(self._entity_labels_cache)
 
     def _refresh_derived_caches(self) -> None:
         """Recompute every /graph/* aggregate that would otherwise be a full

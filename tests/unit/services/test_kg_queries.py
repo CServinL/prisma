@@ -506,6 +506,66 @@ def test_suggest_questions_dedupes_the_same_concept_pair_across_documents(kg, co
     assert questions[0].question == "What connects 'Transformer' and 'Attention'?"
 
 
+def test_suggest_questions_cross_document_dedup_keeps_the_best_ranked_edge(kg, conn):
+    # An earlier version deduped during the raw scan itself, keeping
+    # whichever document Kùzu happened to visit first regardless of
+    # confidence -- silently dropping a far-better edge for the same
+    # concept pair asserted by a different document (caught in review,
+    # not by the tests written alongside the original ranking change).
+    _add(
+        kg, "papers/doc_low.md", "source",
+        [{"id": "low_t", "label": "Transformer"}, {"id": "low_a", "label": "Attention"}],
+        [{"source": "low_t", "target": "low_a", "relation": "uses", "confidence_score": 0.05}],
+    )
+    _add(
+        kg, "papers/doc_high.md", "source",
+        [{"id": "high_t", "label": "Transformer"}, {"id": "high_a", "label": "Attention"}],
+        [{"source": "high_t", "target": "high_a", "relation": "uses", "confidence_score": 0.99}],
+    )
+    questions = kg_queries.suggest_questions(conn)
+    assert len(questions) == 1
+    assert questions[0].grounding_source_file == "papers/doc_high.md"
+
+
+def test_suggest_questions_preserves_a_genuine_zero_confidence_score(kg, conn):
+    # `confidence_score or 0.5` would launder a legitimate 0.0 into 0.5
+    # (0.0 is falsy in Python) -- the zero-confidence edge must still rank
+    # below a real, if modest, 0.3-confidence edge.
+    _add(
+        kg, "notes/a.md", "note",
+        [{"id": "a_x", "label": "X"}, {"id": "a_y", "label": "Y"},
+         {"id": "a_p", "label": "P"}, {"id": "a_q", "label": "Q"}],
+        [
+            {"source": "a_x", "target": "a_y", "relation": "cites", "confidence_score": 0.0},
+            {"source": "a_p", "target": "a_q", "relation": "cites", "confidence_score": 0.3},
+        ],
+    )
+    questions = kg_queries.suggest_questions(conn)
+    assert questions[0].question == "What connects 'P' and 'Q'?"
+
+
+def test_suggest_questions_excludes_a_self_loop_from_degree_inflation(kg, conn):
+    # A self-loop (source == target) is emitted twice by the undirected
+    # scan with the same id on both ends -- counting it inflates that
+    # entity's degree by 2 for zero real connectivity. hub-l1's slightly
+    # lower confidence (0.50) is deliberately chosen so that the phantom
+    # +2 degree from hub's self-loop is enough to (wrongly) outrank
+    # iso_a-iso_b's higher confidence (0.52) if the self-loop counted --
+    # without that inflation, the higher-confidence edge must win.
+    _add(
+        kg, "notes/a.md", "note",
+        [{"id": "hub", "label": "Hub"}, {"id": "l1", "label": "L1"},
+         {"id": "iso_a", "label": "A"}, {"id": "iso_b", "label": "B"}],
+        [
+            {"source": "hub", "target": "hub", "relation": "self", "confidence_score": 0.5},
+            {"source": "hub", "target": "l1", "relation": "cites", "confidence_score": 0.50},
+            {"source": "iso_a", "target": "iso_b", "relation": "cites", "confidence_score": 0.52},
+        ],
+    )
+    questions = kg_queries.suggest_questions(conn)
+    assert questions[0].question == "What connects 'A' and 'B'?"
+
+
 def test_suggest_questions_drops_a_self_referential_pair(kg, conn):
     _add(
         kg, "notes/a.md", "note",

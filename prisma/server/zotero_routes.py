@@ -202,7 +202,7 @@ def build_zotero_router(
         # abstract 422 the whole listing. Same constants both sides import,
         # not two literals that happen to match today.
         texts = [
-            f"{item.title} {item.abstract_note or ''} {' '.join(t.tag for t in item.tags)}"
+            f"{item.title or ''} {item.abstract_note or ''} {' '.join(t.tag for t in item.tags)}"
             [:kg_queries.GRAPH_RELEVANCE_MAX_TEXT_LENGTH]
             for item in items
         ]

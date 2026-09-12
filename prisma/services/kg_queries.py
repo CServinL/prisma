@@ -428,13 +428,20 @@ def suggest_questions(conn, limit: int = DEFAULT_TOP_ENTITIES) -> list[Suggested
     together -- doing so would let a source with many high-ranked edges push
     a source with exactly one modestly-ranked edge out of the result
     entirely, defeating the one-per-document guarantee the first phase
-    exists for."""
+    exists for.
+
+    Cross-document dedup happens AFTER ranking, keeping each label pair's
+    best-ranked row -- an earlier version deduped during the raw scan
+    itself (keeping whichever document Kùzu happened to visit first),
+    which silently dropped a far-better edge for the same real-world
+    concept pair asserted by a different, lower-visited document,
+    contradicting this function's own ranking (caught in review, not by
+    the tests written alongside the original ranking change)."""
     if conn is None:
         return []
-    seen_pairs: set[frozenset[str]] = set()
     degree: dict[str, int] = {}
-    # (e_label, o_label, source_file, e_id, o_id, confidence_score)
-    rows: list[tuple[str, str, str, str, str, float]] = []
+    # (pair_key, e_label, o_label, source_file, e_id, o_id, confidence_score)
+    raw_rows: list[tuple[frozenset[str], str, str, str, str, str, float]] = []
     try:
         result = conn.execute(
             "MATCH (e:Entity)-[r:RelatesTo]-(o:Entity) "
@@ -447,28 +454,44 @@ def suggest_questions(conn, limit: int = DEFAULT_TOP_ENTITIES) -> list[Suggested
             # survivors below -- same convention god_nodes/compute_top_
             # entities use, and each real edge appears twice here (once per
             # direction of the undirected scan), so this correctly counts
-            # undirected degree.
-            degree[e_id] = degree.get(e_id, 0) + 1
+            # undirected degree. Excludes a true self-loop (e_id == o_id):
+            # that single edge is emitted twice with the same id on both
+            # ends, which would otherwise inflate that one entity's degree
+            # by 2 for zero real connectivity.
+            if e_id != o_id:
+                degree[e_id] = degree.get(e_id, 0) + 1
             if not e_label or not o_label or not source_file:
                 continue
             pair_key = frozenset((e_label.strip().lower(), o_label.strip().lower()))
-            if len(pair_key) < 2 or pair_key in seen_pairs:
-                continue  # a self-referential edge, or a pair already seen
-            seen_pairs.add(pair_key)
-            rows.append((e_label, o_label, source_file, e_id, o_id, confidence_score or 0.5))
+            if len(pair_key) < 2:
+                continue  # a self-referential edge (by label, not just by id)
+            # `confidence_score or 0.5` would launder a legitimate 0.0 into
+            # 0.5 (0.0 is falsy) -- only a missing/NULL value should default.
+            raw_rows.append((
+                pair_key, e_label, o_label, source_file, e_id, o_id,
+                confidence_score if confidence_score is not None else 0.5,
+            ))
     except Exception as exc:
         _log.warning("suggest_questions edge scan failed: %s", exc)
         return []
 
-    def _rank(row: tuple[str, str, str, str, str, float]) -> float:
-        _, _, _, e_id, o_id, confidence_score = row
+    def _rank(row: tuple[frozenset[str], str, str, str, str, str, float]) -> float:
+        *_, e_id, o_id, confidence_score = row
         avg_degree = (degree.get(e_id, 0) + degree.get(o_id, 0)) / 2
         return confidence_score * (1 + _SUGGEST_QUESTIONS_DEGREE_WEIGHT * math.log1p(avg_degree))
 
+    best_by_pair: dict[frozenset[str], tuple[frozenset[str], str, str, str, str, str, float]] = {}
+    for row in raw_rows:
+        pair_key = row[0]
+        current = best_by_pair.get(pair_key)
+        if current is None or _rank(row) > _rank(current):
+            best_by_pair[pair_key] = row
+    rows = list(best_by_pair.values())
+
     rows.sort(key=_rank, reverse=True)
-    by_source: dict[str, list[tuple[str, str, str, str, str, float]]] = {}
+    by_source: dict[str, list[tuple[frozenset[str], str, str, str, str, str, float]]] = {}
     for row in rows:
-        by_source.setdefault(row[2], []).append(row)
+        by_source.setdefault(row[3], []).append(row)
     # Each by_source[src] list is itself rank-ordered already, since rows
     # was globally rank-sorted before this grouping loop ran.
     ordered = [source_rows[0] for source_rows in by_source.values()]
@@ -478,7 +501,7 @@ def suggest_questions(conn, limit: int = DEFAULT_TOP_ENTITIES) -> list[Suggested
         ordered.extend(leftovers)
     return [
         SuggestedQuestion(question=f"What connects '{a}' and '{b}'?", grounding_source_file=src)
-        for a, b, src, _, _, _ in ordered[:limit]
+        for _, a, b, src, _, _, _ in ordered[:limit]
     ]
 
 

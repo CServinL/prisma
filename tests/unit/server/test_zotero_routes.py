@@ -276,6 +276,24 @@ def test_zotero_items_relevance_attaches_scores_and_sorts_descending(isolated_cl
     assert body[0]["graph_relevance_matched"] == ["A", "B"]
 
 
+def test_zotero_items_relevance_handles_a_missing_title(isolated_client, zotero, indexer):
+    # item.abstract_note has an `or ''` guard on the same line; item.title
+    # didn't, so a titleless item scored the literal string "None"
+    # against KG entity labels instead of being skipped (caught in
+    # review). Asserted via the text graph_relevance() actually receives,
+    # not just that the route doesn't crash.
+    from prisma.storage.models.kg_models import GraphRelevance
+
+    zotero.get_all_items.return_value = [_zotero_item(title=None)]
+    indexer.graph_relevance.return_value = [GraphRelevance(score=0, matched_entities=[])]
+
+    r = isolated_client.get("/zotero/items/relevance")
+
+    assert r.status_code == 200
+    sent_texts = indexer.graph_relevance.call_args[0][0]
+    assert "None" not in sent_texts[0]
+
+
 def test_zotero_items_relevance_passes_collection_and_query_through(isolated_client, zotero, indexer):
     from prisma.storage.models.kg_models import GraphRelevance
 

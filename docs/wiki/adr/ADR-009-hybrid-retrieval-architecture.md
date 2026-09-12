@@ -102,7 +102,7 @@ for owning more code:
 - Graphify's chunking was per-*file*: a single document too large for the
   model's token budget had no further recovery path and silently returned a
   truncated, incomplete extraction on every run — confirmed live with a
-  real paper in the vault (see `docs/ollama-concurrency.md` and
+  real paper in the vault (see `.claude/ollama-concurrency.md` and
   `TODO.md`).
 
 The retrieval flow and hybrid-scoring design in this ADR are unchanged —

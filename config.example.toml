@@ -126,7 +126,7 @@ nltk_dedup_sensitivity = "medium"   # "low" | "medium" | "high" — dedup levels
 # is held back (via the caller's normal retry/backoff) until the pool drains.
 # Without this, two tasks using different models would "concurrently" thrash
 # the GPU reloading each other's weights instead of actually running in
-# parallel. See docs/ollama-concurrency.md for a benchmark backing this up.
+# parallel. See .claude/ollama-concurrency.md for a benchmark backing this up.
 #
 # Set model_affinity = false only for pools with no such constraint at all —
 # an auto-scaled/auto-routed cloud API that switches models with no reload

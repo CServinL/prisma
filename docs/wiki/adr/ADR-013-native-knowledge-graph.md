@@ -21,8 +21,8 @@ using it, not a preference for owning more code:
    token budget had no fallback — it silently returned a truncated,
    incomplete extraction on every run, forever, with no way to recover short
    of manually splitting the source file. This was confirmed live in this
-   vault with a real paper (`Cunningham_2023_SAEs_Interpretable_Features.md`)
-   that never fully indexed under Graphify. See `docs/ollama-concurrency.md`
+   vault with a real paper too large for a single chunk, which never fully
+   indexed under Graphify. See `.claude/ollama-concurrency.md`
    and `TODO.md` for the investigation.
 
 Both problems are structural to Graphify's design, not bugs fixable within
@@ -152,7 +152,7 @@ used for both extraction and chat. `KnowledgeGraphService`'s
 now. `token_budget=8000` (per-section chunk size) is unaffected by this
 correction — it was always comfortably under even the true 32768 ceiling,
 so extraction correctness was never actually at risk, only the documented
-context-window number was wrong. See `docs/ollama-concurrency.md`'s own
+context-window number was wrong. See `.claude/ollama-concurrency.md`'s own
 follow-up section for the full story, including a related
 `OLLAMA_NUM_PARALLEL` 3→4 bump discovered around the same time.
 

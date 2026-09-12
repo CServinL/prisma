@@ -15,15 +15,19 @@ import logging
 import re
 from typing import Callable, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import (
+    BaseModel, ConfigDict, Field, StrictInt, ValidationError, field_validator, model_validator,
+)
 
 from prisma.agents.session_orchestrator import SessionOrchestrator
 from prisma.schema_gov import ContentFormat, RichContent
 from prisma.services.chat_llm import ChatLLM
-from prisma.services.chat_tools import FOOTNOTES_LINE_RE, TOOL_CALL_RE, TOOLS, ChatToolbox
+from prisma.services.chat_tools import (
+    FOOTNOTES_LINE_RE, MAX_WARRANT_BACKING, TOOL_CALL_RE, TOOLS, ChatToolbox,
+)
 from prisma.storage.models.vault_models import (
-    ChatRole, CitedClaimNode, CitedRelation, ClaimNode, InferenceNode, Note, RecallRef, ThinkingNode,
-    ToolCallNode, TurnNode,
+    ChatRole, CitedClaimNode, CitedRelation, ClaimNode, InferenceNode, Note, Qualifier, RecallRef,
+    ThinkingNode, ToolCallNode, TurnNode, WarrantNode,
 )
 
 _log = logging.getLogger("prisma.chat_agent")
@@ -84,6 +88,38 @@ def _extract_claim_texts(content: str) -> dict[int, str]:
     return claims
 
 
+class _RawWarrant(BaseModel):
+    """The optional `warrant` object inside a FOOTNOTES_JSON entry -- the
+    Toulmin reasoning bridge (see WarrantNode). `text` is required: a
+    warrant with nothing to say is not a warrant, so a missing, empty, or
+    whitespace-only one fails `_RawFootnote.model_validate` and the whole
+    entry is skipped, same as a bad `relation` -- not silently coerced to
+    "no warrant"."""
+    model_config = ConfigDict(extra="ignore")
+    text: str
+    # Each backing entry costs one ChatToolbox.slug_resolves() vault lookup
+    # (ChatAgent._warrant_resolves) -- a cap keeps one malformed/adversarial
+    # self-report from ballooning that per-claim cost. sources has no such
+    # cap today, but that's pre-existing code outside this change, not a
+    # reason to let new code repeat the gap unbounded. MAX_WARRANT_BACKING
+    # lives in chat_tools.py (imported below), not here, because
+    # system_prompt_footnote_section() -- the producer this parser's
+    # contract must match -- also needs it, and chat_tools.py is already
+    # the shared home for parser/prompt constants both sides use
+    # (FOOTNOTES_LINE_RE, TOOL_CALL_RE); chat_tools.py doesn't import this
+    # module, so the reverse direction would be circular.
+    backing: list[str] = Field(default_factory=list, max_length=MAX_WARRANT_BACKING)
+
+    # Subsumes a bare min_length=1 -- "" fails .strip() too, so that
+    # constraint would be redundant dead weight alongside this validator.
+    @field_validator("text")
+    @classmethod
+    def _reject_blank(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("warrant.text must not be blank")
+        return v
+
+
 class _RawFootnote(BaseModel):
     """One FOOTNOTES_JSON self-report entry as the model emits it, validated
     on parse -- same typed-block discipline `Extraction` applies to KG
@@ -91,9 +127,27 @@ class _RawFootnote(BaseModel):
     `relation` (including the CitedClaimNode-absent value "ai-inference"),
     never `kind`, so `relation` is what `_claim_from_raw` keys off. Extra
     keys are ignored, not rejected: an LLM self-report drifts, and a
-    stray field must not sink an otherwise-valid entry."""
+    stray field must not sink an otherwise-valid entry.
+
+    `qualifier`/`warrant`/`rebuts` are the optional Toulmin extension
+    (system_prompt_footnote_section()) -- validated here on the same terms
+    as `relation`: a malformed value fails the whole entry, including the
+    cross-field case `_reject_backed_inference` checks below. Referential
+    validation (does `rebuts` point at a real claim in this turn? does
+    `backing` resolve to a real vault node?) can't happen at this
+    shape-only layer -- see `_extract_claims`/`ChatAgent._warrant_resolves`."""
     model_config = ConfigDict(extra="ignore")
-    index: int
+    # StrictInt, not plain `int` -- lax `int` also coerces a bool
+    # ("index": true -> 1) or a whole-number float ("index": 1.0 -> 1),
+    # and `index` is the primary key everything else in this pipeline keys
+    # off ([^N] marker matching, duplicate-index detection, rebuts
+    # resolution) -- the same class of bug `rebuts` below was fixed for.
+    # No string-form use case to preserve here (unlike rebuts, the model
+    # is never taught a "[^N]" form for its own index), so no
+    # mode="before" validator is needed. gt=0: the documented format is
+    # 1-based ([^1], [^2], ...) -- StrictInt alone still let 0/negative
+    # values through, which are strictly-typed but not a real marker.
+    index: StrictInt = Field(gt=0)
     # The relation vocabulary is validated here by Pydantic, not by letting
     # a bad value fall through to CitedClaimNode and fail there -- an
     # unknown relation ("not-a-real-relation") fails model_validate, so
@@ -102,23 +156,60 @@ class _RawFootnote(BaseModel):
     relation: CitedRelation | Literal["ai-inference"]
     sources: list[str] = Field(default_factory=list)
     claim_text: str | None = None
+    qualifier: Qualifier | None = None
+    warrant: _RawWarrant | None = None
+    # The index of another footnote in THIS turn that this one rebuts --
+    # same-turn only, see _extract_claims. Accepts a bare int or the
+    # "[^N]"/"N" string forms a model might emit despite the prompt's
+    # example using a plain int. StrictInt, not int: plain `int` also
+    # coerces bool ("rebuts": true -> 1) and a whole-number float
+    # ("rebuts": 1.0 -> 1) -- neither is the integer the model actually
+    # meant, and silently accepting either would build a real REBUTS edge
+    # from what's actually a malformed self-report. _coerce_rebuts below
+    # still runs first (mode="before") and hands StrictInt a real int for
+    # the string forms it recognizes.
+    rebuts: StrictInt | None = None
+
+    @field_validator("rebuts", mode="before")
+    @classmethod
+    def _coerce_rebuts(cls, v: object) -> object:
+        if isinstance(v, str):
+            digits = v.strip().lstrip("[").rstrip("]").lstrip("^")
+            return int(digits) if digits.lstrip("-").isdigit() else v
+        return v
+
+    # ai-inference means no document is behind the claim -- non-empty
+    # warrant.backing there is a self-contradiction the prompt never
+    # authorizes. Reject the whole entry, same as an unknown relation.
+    @model_validator(mode="after")
+    def _reject_backed_inference(self) -> "_RawFootnote":
+        if self.relation == "ai-inference" and self.warrant and self.warrant.backing:
+            raise ValueError("ai-inference relation cannot carry warrant.backing")
+        return self
 
 
-def _claim_from_raw(item: object, claim_texts: dict[int, str]) -> ClaimNode | None:
-    """One FOOTNOTES_JSON self-reported entry -> a CitedClaimNode or
-    InferenceNode. `item` is a raw `json.loads` element (any shape) --
-    `_RawFootnote.model_validate` is the boundary that rejects a
-    non-conforming entry (missing/typo'd index/relation, wrong types) as None."""
+def _claim_from_raw(item: object, claim_texts: dict[int, str]) -> tuple[ClaimNode, int | None] | None:
+    """One FOOTNOTES_JSON self-reported entry -> a (CitedClaimNode or
+    InferenceNode, raw same-turn `rebuts` index) pair. `item` is a raw
+    `json.loads` element (any shape) -- `_RawFootnote.model_validate` is the
+    boundary that rejects a non-conforming entry (missing/typo'd index/
+    relation, an unknown qualifier, an empty warrant, wrong types) as None.
+    The `rebuts` index is returned unresolved -- `_extract_claims` is what
+    has every claim in the turn to resolve it against."""
     try:
         raw = _RawFootnote.model_validate(item)
     except ValidationError:
         return None
     claim_text = raw.claim_text or claim_texts.get(raw.index) or ""
+    warrant = WarrantNode(text=raw.warrant.text, backing=raw.warrant.backing) if raw.warrant else None
     if raw.relation == "ai-inference":
-        return InferenceNode(index=raw.index, claim_text=claim_text)
+        return InferenceNode(
+            index=raw.index, claim_text=claim_text, qualifier=raw.qualifier, warrant=warrant,
+        ), raw.rebuts
     return CitedClaimNode(
         index=raw.index, claim_text=claim_text, sources=raw.sources, relation=raw.relation,
-    )
+        qualifier=raw.qualifier, warrant=warrant,
+    ), raw.rebuts
 
 
 def _extract_claims(reply: str) -> tuple[str, list[ClaimNode]]:
@@ -158,14 +249,107 @@ def _extract_claims(reply: str) -> tuple[str, list[ClaimNode]]:
         _log.warning("chat claims: FOOTNOTES_JSON was not a JSON array, dropping")
         return content, []
     claim_texts = _extract_claim_texts(content)
-    claims: list[ClaimNode] = []
+    built: list[tuple[ClaimNode, int | None]] = []
     for item in raw_items:
-        claim = _claim_from_raw(item, claim_texts)
-        if claim is None:
+        parsed = _claim_from_raw(item, claim_texts)
+        if parsed is None:
             _log.warning("chat claims: skipping malformed entry %r", item)
             continue
-        claims.append(claim)
-    return content, claims
+        built.append(parsed)
+    return content, _resolve_rebuts(built)
+
+
+def _resolve_rebuts(built: list[tuple[ClaimNode, int | None]]) -> list[ClaimNode]:
+    """Same-turn only: a claim's raw `rebuts` value is the *index* of
+    another footnote in this turn (the only handle the model's self-report
+    has -- it never sees stable node ids), resolved here to that claim's
+    real `id`, which is what `rebuts`/session_graph.py's REBUTS edge/the
+    committed schema actually mean. A `rebuts` pointing at a non-existent
+    index, or at the claim's own index, is a self-report inconsistency --
+    the whole claim is dropped (same "an unsatisfied part of the block
+    rejects the entry" rule sources/relation already enforce), not just the
+    `rebuts` field cleared.
+
+    `by_index` is built once from *every* parsed entry, including ones this
+    loop is about to drop -- so a claim can still resolve its `rebuts` to a
+    target that turns out to be invalid itself (target's own `rebuts` index
+    doesn't exist) and gets dropped in the same pass. `_prune_dangling_
+    rebuts` cleans that up (and the same cascade recurs once more in
+    ChatAgent.respond(), after sources/warrant.backing resolution drops
+    claims this function has no visibility into)."""
+    # A duplicate `index` across two entries in one self-report makes
+    # by_index's {index: claim} mapping pick one arbitrarily (whichever
+    # came last), and the UI's id="chat-turn-N-claim-{index}" DOM anchor
+    # collides the same way -- every claim sharing that index is
+    # untrustworthy, not just whichever rebuts happens to target it, so
+    # all of them are dropped up front, before by_index is even built.
+    seen_indices: set[int] = set()
+    duplicate_indices: set[int] = set()
+    for claim, _ in built:
+        if claim.index in seen_indices:
+            duplicate_indices.add(claim.index)
+        seen_indices.add(claim.index)
+    if duplicate_indices:
+        n_dup = sum(1 for c, _ in built if c.index in duplicate_indices)
+        built = [(c, r) for c, r in built if c.index not in duplicate_indices]
+        _log.warning("chat claims: dropped %d claim(s) sharing a duplicate index", n_dup)
+
+    by_index = {c.index: c for c, _ in built}
+    resolved: list[ClaimNode] = []
+    dropped = 0
+    for claim, rebuts_idx in built:
+        if rebuts_idx is None:
+            resolved.append(claim)
+            continue
+        target = by_index.get(rebuts_idx)
+        if target is None or rebuts_idx == claim.index:
+            dropped += 1
+            continue
+        # model_copy(update=...), not attribute assignment -- same
+        # immutable-update convention _verify_claim already uses below.
+        # by_index keeps referencing the pre-copy object, but `.id` is
+        # identical either way, so later lookups are unaffected.
+        resolved.append(claim.model_copy(update={"rebuts": target.id}))
+    if dropped:
+        _log.warning("chat claims: dropped %d claim(s) with an invalid rebuts index", dropped)
+    survivors, cascaded = _prune_dangling_rebuts(resolved)
+    if cascaded:
+        _log.warning("chat claims: dropped %d claim(s) rebutting an already-dropped claim", cascaded)
+    return survivors
+
+
+def _prune_dangling_rebuts(claims: list[ClaimNode]) -> tuple[list[ClaimNode], int]:
+    """A claim whose `rebuts` id doesn't match any currently-surviving
+    claim is dropped -- and dropping it can dangle another claim's `rebuts`
+    in turn (a same-turn rebuttal chain), so repeat until a full pass
+    removes nothing. Two independent callers each drop claims for unrelated
+    reasons that can leave a *different* claim's already-resolved `rebuts`
+    id pointing at nothing: _resolve_rebuts (an invalid same-turn index)
+    and ChatAgent.respond() (an unresolvable sources/warrant.backing slug).
+    Without this, session_graph.py's `g.add_edge(claim.id, claim.rebuts,
+    kind="REBUTS")` would silently create a phantom, data-less node for the
+    dropped target -- NetworkX auto-creates any edge endpoint that isn't
+    already a node."""
+    total_dropped = 0
+    while True:
+        ids = {c.id for c in claims}
+        survivors = [c for c in claims if c.rebuts is None or c.rebuts in ids]
+        total_dropped += len(claims) - len(survivors)
+        if len(survivors) == len(claims):
+            return survivors, total_dropped
+        claims = survivors
+
+
+def _inference_safe_warrant(warrant: WarrantNode | None) -> WarrantNode | None:
+    """Drop a warrant that cites real backing when it's about to land on an
+    InferenceNode -- that node type has no document behind it by
+    definition, so carrying backing across (e.g. when the no-grounding
+    override collapses a CitedClaimNode into one) would recreate the
+    source-backed-inference inconsistency _reject_backed_inference
+    rejects at parse time."""
+    if warrant and warrant.backing:
+        return None
+    return warrant
 
 
 # Tools that put citable content in front of the model. Derived from
@@ -364,6 +548,16 @@ class ChatAgent:
             return True
         return all(self._toolbox.slug_resolves(s) for s in claim.sources)
 
+    def _warrant_resolves(self, claim: ClaimNode) -> bool:
+        """Same rule as _sources_resolve, for the Toulmin `warrant.backing`
+        extension -- backing is structurally identical to `sources` (a list
+        of vault-node references), so a backing slug the model invented is
+        just as much a hallucinated citation as a bad `sources` entry. A
+        claim with no warrant at all trivially resolves."""
+        if claim.warrant is None:
+            return True
+        return all(self._toolbox.slug_resolves(s) for s in claim.warrant.backing)
+
     def respond(
         self, history: list[TurnNode], user_text: str, excerpt_notes: list[Note] | None = None,
         chat_slug: str | None = None,
@@ -429,21 +623,50 @@ class ChatAgent:
                 content, claims = _extract_claims(reply)
                 if _turn_had_no_grounding(tool_calls) and content.strip():
                     # No tool call this turn could have grounded anything --
-                    # override the model's self-report (whatever it was)
-                    # with a single claim covering the whole reply, rather
-                    # than trust per-sentence markers it had no way to
-                    # ground correctly. See _turn_had_no_grounding().
+                    # override the model's self-report with a single claim
+                    # covering the whole reply, rather than trust
+                    # per-sentence markers it had no way to ground
+                    # correctly. See _turn_had_no_grounding(). Keep
+                    # qualifier/warrant only when there's exactly one
+                    # self-reported claim to take them from (unambiguous
+                    # collapse); rebuts is never carried over, it'd dangle.
+                    qualifier = claims[0].qualifier if len(claims) == 1 else None
+                    warrant = _inference_safe_warrant(claims[0].warrant) if len(claims) == 1 else None
                     content = _FOOTNOTE_MARKER_RE.sub("", content).strip()
-                    claims = [InferenceNode(index=1, claim_text=content)]
+                    claims = [InferenceNode(
+                        index=1, claim_text=content, qualifier=qualifier, warrant=warrant,
+                    )]
                     content = f"{content} [^1]"
-                resolved_claims, dropped = [], 0
+                # Two separate counters, not one -- a single combined
+                # message can't tell a hallucinated `sources` slug apart
+                # from a hallucinated `warrant.backing` one, and those point
+                # at different parts of the self-report to fix.
+                resolved_claims, dropped_sources, dropped_warrant = [], 0, 0
                 for c in claims:
-                    if self._sources_resolve(c):
-                        resolved_claims.append(c)
+                    if not self._sources_resolve(c):
+                        dropped_sources += 1
+                    elif not self._warrant_resolves(c):
+                        dropped_warrant += 1
                     else:
-                        dropped += 1
-                if dropped:
-                    _log.warning("chat claims: dropped %d claim(s) citing an unresolvable slug", dropped)
+                        resolved_claims.append(c)
+                if dropped_sources:
+                    _log.warning("chat claims: dropped %d claim(s) citing an unresolvable slug", dropped_sources)
+                if dropped_warrant:
+                    _log.warning(
+                        "chat claims: dropped %d claim(s) with an unresolvable warrant.backing slug",
+                        dropped_warrant,
+                    )
+                # A claim dropped just above for its own bad sources/backing
+                # can still be another surviving claim's rebuts target --
+                # _resolve_rebuts already resolved same-turn rebuts before
+                # this filter ran, with no visibility into it. Same cascade
+                # as _resolve_rebuts', for the same reason.
+                resolved_claims, dropped_cascaded = _prune_dangling_rebuts(resolved_claims)
+                if dropped_cascaded:
+                    _log.warning(
+                        "chat claims: dropped %d claim(s) rebutting an already-dropped claim",
+                        dropped_cascaded,
+                    )
                 claims = [self._verify_claim(c) for c in resolved_claims]
                 return TurnNode(
                     role=ChatRole.assistant, content=RichContent(format=ContentFormat.markdown, value=content),

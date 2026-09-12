@@ -43,12 +43,12 @@ active feature work, not "is this usable yet." Core pipeline:
   not flat prose — a main line of turns with tool calls and per-claim citations as branches
   off each one, plus a pinning/Excerpt model (ADR-015) that compresses or keeps pinned turns
   verbatim depending on the backend's real context budget.
-  Also on `main`: per-claim citations with real APA formatting (ADR-020, PR #74).
-  **Not yet merged** (branch `chat-schema-v3-toulmin-media-attachments`,
-  `CHAT_SCHEMA_VERSION=4`): the `THINK` tool + reasoning-step branches, Toulmin argumentation
-  fields, media attachments, and the `citation`/`paraphrase` relation split — see
-  `docs/concepts/chat-session-graph.md`'s Status section for exactly what's shipped vs. still
-  on that branch.
+  Also on `main`: per-claim citations with real APA formatting (ADR-020, PR #74). The
+  `THINK` tool + reasoning-step branches, Toulmin argumentation fields (populated as of PR
+  #105), media attachments (human-input direction; no generator yet for assistant-produced
+  media), and the `citation`/`paraphrase` relation split have all since merged too
+  (`CHAT_SCHEMA_VERSION=5`) — see `docs/concepts/chat-session-graph.md`'s Status section for
+  the exact, dated history.
 - **Native knowledge graph module** — ✅ Done. Entity/relationship extraction
   (Instructor-based structured LLM output, ADR-016) and storage (Kùzu, an
   embedded graph DB) are no longer a third-party dependency — see ADR-013

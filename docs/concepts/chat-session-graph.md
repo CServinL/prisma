@@ -64,12 +64,12 @@ around whenever a turn's position shifts.
 |---|---|---|---|
 | `TurnNode` | `id`, `role`, `content: RichContent`, `timestamp`, `model`, plus the branch lists below, plus `media`, `attachments`, `attached_slugs` | the pre-ADR-019 `ChatMessage` — `tool_calls`/`footnotes`/`alternates` moved from flat fields to typed branches | Shipped |
 | `ToolCallNode` | `id`, `tool`, `args`, `result`, `status` | the pre-ADR-019 `ToolCallRecord` — now with a persisted `result`, which the old flat summary discarded | Shipped |
-| `ThinkingNode` | `id`, `thought`, `thought_number`, `revises`, `branches_from` | new — see "Thinking blocks" below. Schema only, see [Status](#status) | Shipped (schema only) |
+| `ThinkingNode` | `id`, `thought`, `thought_number`, `revises`, `branches_from` | new — see "Thinking blocks" below. `revises`/`branches_from` schema only, see [Status](#status) | Shipped |
 | `CitedClaimNode` | `id`, `index`, `claim_text`, `sources`, `relation` (`citation`\|`attribution`\|`relational`), `faithfulness_checked`, `qualifier`, `warrant`, `rebuts` | the three sourced relations of the pre-ADR-019 [Footnote](claim.md) — see below | Shipped |
 | `InferenceNode` | `id`, `index`, `claim_text`, `qualifier`, `warrant`, `rebuts` | the pre-ADR-019 `ai-inference` relation — see below | Shipped |
-| `WarrantNode` | `id`, `text`, `backing` | new — see [Argumentation structure](#argumentation-structure-toulmin) | v3, on branch (unmerged) |
-| `InlineMediaNode` | `id`, `kind` (`svg`\|`latex`\|`drawio`), `value`, `caption` | new — see [Media nodes](#media-nodes) and [Attachments](#attachments-human-turn-input) (both directions) | v3, on branch (unmerged) |
-| `AssetMediaNode` | `id`, `kind` (`jpg`\|`pdf`), `asset_path`, `caption` | new — split from `InlineMediaNode`, not a shared shape (see [Media nodes](#media-nodes)) | v3, on branch (unmerged) |
+| `WarrantNode` | `id`, `text`, `backing` | new — see [Argumentation structure](#argumentation-structure-toulmin) | Shipped |
+| `InlineMediaNode` | `id`, `kind` (`svg`\|`latex`\|`drawio`), `value`, `caption` | new — see [Media nodes](#media-nodes) and [Attachments](#attachments-human-turn-input) (both directions) | Shipped (`ATTACHES`/human-input direction only — see [Media nodes](#media-nodes) for the still-missing `PRODUCES` generator) |
+| `AssetMediaNode` | `id`, `kind` (`jpg`\|`pdf`), `asset_path`, `caption` | new — split from `InlineMediaNode`, not a shared shape (see [Media nodes](#media-nodes)) | Shipped (same caveat as `InlineMediaNode`) |
 
 `MediaNode` (used elsewhere in this doc) is `Annotated[InlineMediaNode | AssetMediaNode,
 Field(discriminator="kind")]` — a type alias for the discriminated union, not its own class, same
@@ -100,10 +100,10 @@ decision layered on top of one uniform shape. See [Claim](claim.md) for the full
 | `CITES` | `CitedClaimNode → Note \| Source \| Chat` | This claim's sourcing (into the knowledge graph's vault nodes, see above) — **not** from `TurnNode` directly, since an `InferenceNode` structurally has nothing to cite | the pre-ADR-019 `Footnote.sources` | Shipped |
 | `PINNED_IN` | `TurnNode → Note` (the Excerpt) | This turn is source material for the Excerpt | `pinned_turns`/`excerpt_slug` (unchanged in shape) | Shipped |
 | `RECALLS` | `TurnNode → any node` | This turn's `RECALL` pulled in this node beyond the default rolling history — persisted as `TurnNode.recalls: list[RecallRef]` (`{node_id, node_kind, chat_slug}`), a pointer only, never a duplicate of the recalled content | new, see [`RECALL`'s resolved behavior](#recalls-resolved-behavior) below | Shipped |
-| `WARRANTS` | `CitedClaimNode \| InferenceNode → WarrantNode` | This claim's warrant — why its grounds support it | — new, see [Argumentation structure](#argumentation-structure-toulmin) | v3, on branch (unmerged) |
-| `REBUTS` | `CitedClaimNode \| InferenceNode → CitedClaimNode \| InferenceNode` | This claim states an exception to, or contradicts, that one | — new, see [Argumentation structure](#argumentation-structure-toulmin) | v3, on branch (unmerged) |
-| `PRODUCES` | `TurnNode → MediaNode` | This turn generated this media artifact | — new, see [Media nodes](#media-nodes) | v3, on branch (unmerged) |
-| `ATTACHES` | `TurnNode → MediaNode` | This turn's input included this media artifact | — new, see [Attachments](#attachments-human-turn-input) | v3, on branch (unmerged) |
+| `WARRANTS` | `CitedClaimNode \| InferenceNode → WarrantNode` | This claim's warrant — why its grounds support it | — new, see [Argumentation structure](#argumentation-structure-toulmin) | Shipped |
+| `REBUTS` | `CitedClaimNode \| InferenceNode → CitedClaimNode \| InferenceNode` | This claim states an exception to, or contradicts, that one | — new, see [Argumentation structure](#argumentation-structure-toulmin) | Shipped |
+| `PRODUCES` | `TurnNode → MediaNode` | This turn generated this media artifact | — new, see [Media nodes](#media-nodes) | Shipped (schema only — no generator produces `media` yet) |
+| `ATTACHES` | `TurnNode → MediaNode` | This turn's input included this media artifact | — new, see [Attachments](#attachments-human-turn-input) | Shipped |
 | `REFERENCES` | `TurnNode → Note \| Source \| Chat` | This turn's input pointed at this existing vault node | — new, see [Attachments](#attachments-human-turn-input) | Field shipped (`attached_slugs`); **not** a real graph edge, deliberately — see Attachments |
 
 The key design call: `ToolCallNode`, `ThinkingNode`, `CitedClaimNode`, `InferenceNode`,
@@ -131,8 +131,10 @@ deferred), not a separate mechanism.
 
 ## Argumentation structure (Toulmin)
 
-**Implemented on branch `chat-schema-v3-toulmin-media-attachments` (not yet merged to `main`) —
-`CHAT_SCHEMA_VERSION = 3`.** Formal academic
+**Schema shipped in `CHAT_SCHEMA_VERSION = 3`; populated from the model's own `FOOTNOTES_JSON`
+self-report as of 2026-09-10** (`prisma/agents/chat_agent.py`'s `_RawFootnote`/`_claim_from_raw`/
+`_resolve_rebuts` — same typed-block-plus-deterministic-validation path `sources`/`relation`
+already use, not prompt-behaviour coaching). Formal academic
 writing is this chat harness's primary use case, and `CitedClaimNode`/`InferenceNode` alone only
 cover two of the six elements of the [Toulmin model of
 argumentation](https://en.wikipedia.org/wiki/Stephen_Toulmin#The_Toulmin_model_of_argumentation)
@@ -175,6 +177,40 @@ Migration v2→v3 (`_migrate_chat_v2_to_v3`) is a no-op identity function — ev
 and optional with a default, so there's nothing to restructure, only a version-number step
 `VersionedModel` requires one callable per version for.
 
+**Population and validation** (mirrors [Claim](claim.md)'s `sources`/`relation` handling):
+`FOOTNOTES_JSON` entries may optionally carry `qualifier`, `warrant`
+(`{"text": ..., "backing": [...]}`), and `rebuts` (an integer — the *index* of another `[^N]`
+footnote in the **same answer**, the only handle the model's self-report has; it never sees
+stable node ids; `rebuts`, and the entry's own `index`, are both `StrictInt` with `index` also
+`gt=0` — lax `int` would silently coerce `true`->`1` and `1.0`->`1`, and `0`/negative values are
+strictly-typed but still not a real 1-based `[^N]` marker; `index` is the primary key everything
+else in this pipeline keys off ([^N] matching, duplicate-index detection, `rebuts` resolution), so
+the coercion there is the more consequential half of this fix).
+`_RawFootnote` validates the shape of all three on parse — an unknown `qualifier` value, a
+`warrant` with no `text`, or an `ai-inference` entry with non-empty `warrant.backing` (an
+`InferenceNode` has no document behind it, so citing one is a self-contradiction) fails that
+entry, same as an unknown `relation`. A duplicate `index`
+across two entries in one self-report is dropped entirely, both copies — `by_index` (and the UI's
+`id="chat-turn-N-claim-{index}"` DOM anchor) can't tell them apart, so every claim sharing that
+index is untrustworthy, not just whichever `rebuts` targets it.
+`_resolve_rebuts` then resolves a valid `rebuts` index to the target claim's real `id` (what the
+schema/`REBUTS` edge above actually store); an index with no matching claim in the turn, or equal
+to the claim's own index, drops the whole claim. `warrant.backing` is validated exactly like
+`sources` (`ChatAgent._warrant_resolves`, alongside `_sources_resolve`) — an unresolvable backing
+slug also drops the claim. Cross-turn `rebuts` is out of scope: the model's self-report has no way
+to reference a claim from an earlier turn.
+
+Dropping a claim can dangle *another* claim's already-resolved `rebuts` — claim B can resolve its
+`rebuts` to claim A's real `id` while A is still a valid same-turn index, only for A to then get
+dropped itself (its own invalid `rebuts`, or later, an unresolvable `sources`/`warrant.backing`
+slug B has no bearing on). Left alone, B would survive with a `rebuts` id pointing at a claim no
+longer in the turn — `session_graph.py`'s `REBUTS` edge would silently create a phantom, data-less
+node for it (NetworkX auto-creates any edge endpoint that isn't already a node). `_prune_dangling_
+rebuts` fixed-point-prunes this: any claim whose `rebuts` id doesn't match a currently-surviving
+claim is dropped, repeated until a full pass removes nothing (handling a rebuttal chain, not just
+one hop). Called from both `_resolve_rebuts` and the end of `ChatAgent.respond()`'s filter, since
+each drops claims for reasons the other has no visibility into.
+
 **Open question, not yet resolved:** can `WarrantNode.backing` / `CitedClaimNode.sources` include
 a `MediaNode.id` (e.g. "this claim is backed by this diagram"), not just vault slugs? `sources` is
 currently documented as vault-wide (Note/Source/Chat), while a `MediaNode` is session-local —
@@ -184,7 +220,8 @@ for now.
 
 ## Media nodes
 
-**Implemented on branch `chat-schema-v3-toulmin-media-attachments` (not yet merged).** Distinct
+**Shipped (schema + the human-input/`ATTACHES` direction) — no generator exists for the
+assistant-output/`PRODUCES` direction (`TurnNode.media`), for any of the four kinds.** Distinct
 from `RichContent.format` (`prisma/schema_gov/content.py`), which already has dormant `svg`/
 `latex` support — but that tags the format of an *entire turn's content*. `MediaNode` is for a
 normal markdown turn that also *produces* an attached artifact (a diagram, a figure, a formula) —
@@ -245,7 +282,7 @@ same way.
 
 ## Attachments (human turn input)
 
-**Implemented on branch `chat-schema-v3-toulmin-media-attachments` (not yet merged).**
+**Shipped**, including the upload/promote endpoints below.
 `MediaNode`/`PRODUCES` above is content the *assistant* generates. This is the input-side mirror:
 a human turn can bring in an image, a diagram, a LaTeX snippet, or a reference to an existing
 vault node, extending plain text with attached data rather than making the model re-derive or
@@ -473,8 +510,8 @@ inside `RECALL` itself.
 ## Status
 
 Shipped 2026-08-05 (ADR-019 v2, `CHAT_SCHEMA_VERSION = 2`, with a v1→v2 migration for chats saved
-before this cutover): the full node/edge taxonomy above (excluding the v3 rows, marked "v3, on
-branch (unmerged)" — see further down), `SessionOrchestrator` (default assembly + `graph_for()`),
+before this cutover): the v2 node/edge taxonomy above (the v3 rows — Toulmin, media, attachments —
+shipped later, see the dated entries below), `SessionOrchestrator` (default assembly + `graph_for()`),
 and `RECALL` (`chat_tools.py`'s `TOOLS`
 registry) — all backed by tests, including a real (not mocked) short `max_wait` exercise of
 `resource_lock.lease()`'s degrade path. The frontend (`+page.svelte`) renders `claims`/`thoughts`/
@@ -609,3 +646,45 @@ Still genuinely open:
   purely recency-driven) was considered and deliberately not built this pass — bigger scope than
   extending `RECALL`, would need its own UI/config, and recency already gives a reasonable default
   without asking the user to curate anything up front.
+
+**Implemented 2026-09-10 — Toulmin `qualifier`/`warrant`/`rebuts` population** (Phase B of the
+knowledge-graph-tools grand plan, no schema/migration change — the v3 fields above had shipped
+with nothing populating them):
+
+- `_RawFootnote` (`prisma/agents/chat_agent.py`) validates the three optional keys on parse —
+  same terms as `relation`, a malformed value fails that entry rather than silently degrading.
+- `_resolve_rebuts` translates the model's same-turn `[^N]` index (the only handle its self-report
+  has) into the target claim's real `id`; an index with no matching claim, or equal to the claim's
+  own, drops the whole claim. Cross-turn `rebuts` stays out of scope.
+- `_prune_dangling_rebuts` fixed-point-drops a claim whose `rebuts` target was itself dropped
+  (its own bad `rebuts`, or later an unresolvable `sources`/`warrant.backing` slug) — added after
+  a PR #105 Copilot review caught the gap: without it, a surviving claim could keep a `rebuts` id
+  pointing at nothing, and `session_graph.py`'s `REBUTS` edge would silently create a phantom node
+  for it.
+- Two more findings from the same PR #105 review round: `rebuts` is `StrictInt`, not plain `int`
+  (lax `int` silently coerced `true`->`1`/`1.0`->`1` into a real `REBUTS` edge from a malformed
+  value); and a duplicate `index` across two entries in one self-report now drops both/all of
+  them, rather than `by_index` picking one arbitrarily while the UI's DOM anchor picks another.
+- Copilot's cross-reference from the `rebuts`-coercion finding pointed at the *entry's own*
+  `index` field too, which had the identical plain-`int` gap and is the more consequential of the
+  two -- `index` is the primary key `[^N]` matching, duplicate-index detection, and `rebuts`
+  resolution all key off. Also switched to `StrictInt`.
+- Same finding, one more layer: `StrictInt` alone still let `0`/negative values through
+  (strictly-typed, but not a real 1-based marker) — added `gt=0`.
+- Separately: `system_prompt_footnote_section()`'s `warrant` description defined it purely as
+  "why the sources support this claim," but `InferenceNode` (`ai-inference`, always empty
+  `sources`) is schema-supported for `warrant` too — the model had no coherent instruction for
+  that case. Reworded to cover both: sourced claims (why the sources support it) and
+  `ai-inference` (the reasoning process itself, `backing` left empty).
+- `ChatAgent._warrant_resolves` validates `warrant.backing` exactly like `_sources_resolve`
+  validates `sources` — an unresolvable slug drops the claim.
+- `system_prompt_footnote_section()` declares the three keys and their vocab as an optional
+  addition to the existing `FOOTNOTES_JSON` block — no new prose behaviour to teach, just a typed
+  slot the model may fill in.
+- Frontend's rebuts jump-link (dead code since the schema-only pass — it assumed `claim.rebuts`
+  was an index) fixed to resolve the `id` it actually receives back to the target's index.
+- Later PR #105 round: `ai-inference` + non-empty `warrant.backing` is a self-contradiction (an
+  `InferenceNode` has no document behind it) — rejected at parse time, and also at the
+  no-grounding override's second `InferenceNode` construction site, which could otherwise carry a
+  collapsed `CitedClaimNode`'s legitimately-backed warrant across the type boundary.
+- See [Argumentation structure](#argumentation-structure-toulmin) for the full validation rules.

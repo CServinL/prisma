@@ -118,9 +118,8 @@ CoordinatorResult(
 
 A `Chat` is stored as pure JSON (`.sess` files, `CHAT_SCHEMA_VERSION`, versioned via
 `schema_gov.VersionedModel` with a migration chain), not `.md` — full design in
-`docs/concepts/chat-session-graph.md`. **`thoughts`/`ThinkingNode`, `relation="paraphrase"`,
-and `CHAT_SCHEMA_VERSION=4` below are not yet merged to `main`** (branch
-`chat-schema-v3-toulmin-media-attachments`) — everything else on this page is. `Chat.messages` is a main line of `TurnNode`s; everything
+`docs/concepts/chat-session-graph.md` (see its Status section for the exact, dated history of
+what shipped when; `CHAT_SCHEMA_VERSION` is at 5 as of this page). `Chat.messages` is a main line of `TurnNode`s; everything
 else (tool calls, reasoning, claims, media) is a typed branch off the turn that produced it,
 built with `SessionOrchestrator`/`session_graph.py` into an in-memory `networkx.MultiDiGraph` per
 active session, not stored as explicit edge objects on disk:

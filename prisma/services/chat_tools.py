@@ -202,6 +202,14 @@ _SPEC_BY_MARKER: dict[str, ToolSpec] = {t.marker: t for t in TOOLS}
 # the model discusses the format itself earlier in its answer.
 FOOTNOTES_LINE_RE = re.compile(r"^FOOTNOTES_JSON:\s*(.+)$", re.MULTILINE)
 
+# The producer (system_prompt_footnote_section, below) and the parser
+# (chat_agent.py's _RawWarrant.backing) must agree on this -- a self-report
+# with a real, otherwise-valid warrant.backing longer than this is dropped
+# entirely by the parser's hard max_length, so the model needs to know the
+# ceiling exists, not just discover it by having a whole claim silently
+# vanish once it names one too many real slugs.
+MAX_WARRANT_BACKING = 20
+
 
 def system_prompt_tool_section(has_native_reasoning: bool = True, zotero_available: bool = False) -> str:
     visible = [
@@ -247,7 +255,7 @@ def system_prompt_tool_section(has_native_reasoning: bool = True, zotero_availab
 def system_prompt_footnote_section() -> str:
     """ADR-017: mark, per claim, whether it's traceable to a specific vault
     document or is the model's own inference -- mirroring academic citation
-    practice. See docs/concepts/footnote.md for the full field reference;
+    practice. See docs/concepts/claim.md for the full field reference;
     this is the operational instruction, not the design rationale."""
     return "\n".join([
         "For every substantive claim in your answer (not filler like "
@@ -301,6 +309,29 @@ def system_prompt_footnote_section() -> str:
         "more sources (this is what a GRAPH_CONTEXT result usually is)",
         "- ai-inference — your own reasoning, no document behind it, "
         "sources must be an empty list",
+        "",
+        "You may optionally add any of these three keys to an entry -- omit "
+        "any you have nothing to say for, they are never required:",
+        '- "qualifier" — one of "certain" / "probable" / "possible" / '
+        '"tentative" (use "tentative" for a hypothesis you are not '
+        "asserting as established) -- the claim's epistemic strength.",
+        '- "warrant": {"text": "...", "backing": ["slug", ...]} -- the '
+        "reasoning bridge explaining *why* the evidence supports this "
+        "specific claim, when that's not obvious from the claim alone. "
+        "For a sourced claim (citation/paraphrase/attribution/relational), "
+        "that's why the sources support it. For ai-inference (no sources), "
+        "it's your own reasoning process itself -- leave backing empty in "
+        "that case, since there's nothing to cite. backing otherwise "
+        "follows the same rule as sources: only real slugs you actually "
+        f"saw, never invented, and at most {MAX_WARRANT_BACKING} of them "
+        "-- past that the whole claim is dropped, not just the extra ones.",
+        '- "rebuts": N -- the index of another [^N] footnote IN THIS SAME '
+        "ANSWER that this claim contradicts or states an exception/"
+        "limitation to (e.g. a caveat on an earlier claim). Only ever "
+        "points at a footnote from this answer, never an earlier turn.",
+        "",
+        'e.g. {"index": 2, "relation": "paraphrase", "sources": ["slug-a"], '
+        '"qualifier": "probable", "rebuts": 1}',
         "",
         "If you added no [^N] markers at all, still write "
         '"FOOTNOTES_JSON: []" as the last line -- do not omit it.',

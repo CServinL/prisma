@@ -62,7 +62,7 @@ to the end.
 | `index` | int | Sequential per turn, 1-based, same numbering space as `CitedClaimNode.index` on the same turn |
 | `claim_text` | str | The model's own reasoning/generalization this marker covers |
 | `qualifier` | `Qualifier` \| None | Same Toulmin field as `CitedClaimNode.qualifier` above |
-| `warrant` | `WarrantNode` \| None | Same Toulmin field as `CitedClaimNode.warrant` above — an inference can have a warrant too, even with no `sources` to ground it |
+| `warrant` | `WarrantNode` \| None | Same Toulmin field as `CitedClaimNode.warrant` above — an inference can have a warrant too, even with no `sources` to ground it, but `backing` must be empty: an `InferenceNode` has no document behind it, so citing one there is rejected as a self-contradiction |
 | `rebuts` | str \| None | Same as `CitedClaimNode.rebuts` above |
 
 No `sources`, no `faithfulness_checked` — there's structurally nothing to check or cite. This is
@@ -123,10 +123,11 @@ did populate them).
 
 Populated (2026-09-10): `_RawFootnote`/`_claim_from_raw` parse all three as optional
 `FOOTNOTES_JSON` keys, validated on parse exactly like `relation`/`sources` — a malformed
-`qualifier`, an empty `warrant.text`, or an unresolvable `warrant.backing`/`rebuts` reference drops
-the claim, never silently degrades. `rebuts` is same-turn only: the model reports another `[^N]`
-footnote's *index* (its self-report has no other handle on a claim), and `_resolve_rebuts`
-translates that to the target's real `id` after every claim in the turn is built. See [Chat
+`qualifier`, an empty `warrant.text`, an `ai-inference` entry with non-empty `warrant.backing`, or
+an unresolvable `warrant.backing`/`rebuts` reference drops the claim, never silently degrades.
+`rebuts` is same-turn only: the model reports another `[^N]` footnote's *index* (its self-report
+has no other handle on a claim), and `_resolve_rebuts` translates that to the target's real `id`
+after every claim in the turn is built. See [Chat
 session graph](chat-session-graph.md#argumentation-structure-toulmin) for the exact rules.
 
 Split further, and verified (2026-08-18, `CHAT_SCHEMA_VERSION=4`): `citation`'s old merged meaning

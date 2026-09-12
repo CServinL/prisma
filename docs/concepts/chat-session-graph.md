@@ -186,8 +186,10 @@ stable node ids; `rebuts`, and the entry's own `index`, are both `StrictInt` wit
 strictly-typed but still not a real 1-based `[^N]` marker; `index` is the primary key everything
 else in this pipeline keys off ([^N] matching, duplicate-index detection, `rebuts` resolution), so
 the coercion there is the more consequential half of this fix).
-`_RawFootnote` validates the shape of all three on parse — an unknown `qualifier` value or a
-`warrant` with no `text` fails that entry, same as an unknown `relation`. A duplicate `index`
+`_RawFootnote` validates the shape of all three on parse — an unknown `qualifier` value, a
+`warrant` with no `text`, or an `ai-inference` entry with non-empty `warrant.backing` (an
+`InferenceNode` has no document behind it, so citing one is a self-contradiction) fails that
+entry, same as an unknown `relation`. A duplicate `index`
 across two entries in one self-report is dropped entirely, both copies — `by_index` (and the UI's
 `id="chat-turn-N-claim-{index}"` DOM anchor) can't tell them apart, so every claim sharing that
 index is untrustworthy, not just whichever `rebuts` targets it.
@@ -681,4 +683,8 @@ with nothing populating them):
   slot the model may fill in.
 - Frontend's rebuts jump-link (dead code since the schema-only pass — it assumed `claim.rebuts`
   was an index) fixed to resolve the `id` it actually receives back to the target's index.
+- Later PR #105 round: `ai-inference` + non-empty `warrant.backing` is a self-contradiction (an
+  `InferenceNode` has no document behind it) — rejected at parse time, and also at the
+  no-grounding override's second `InferenceNode` construction site, which could otherwise carry a
+  collapsed `CitedClaimNode`'s legitimately-backed warrant across the type boundary.
 - See [Argumentation structure](#argumentation-structure-toulmin) for the full validation rules.

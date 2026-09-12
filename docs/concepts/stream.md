@@ -81,8 +81,8 @@ paper. The paper's relevance is determined fresh for this new perspective.
 
 ## Relevant axioms
 
-> Streams expand, never contract. See [Axiom 2](../ontologia.md).
-> Stream runs write to Zotero, not to the vault. See [Axiom 4](../ontologia.md).
-> Bookmark-first. See [Axiom 12](../ontologia.md).
-> Relevance is per-stream. See [Axiom 13](../ontologia.md).
-> Library search is a first-class source. See [Axiom 14](../ontologia.md).
+> Streams expand, never contract. See [Axiom 2](../ontology.md).
+> Stream runs write to Zotero, not to the vault. See [Axiom 4](../ontology.md).
+> Bookmark-first. See [Axiom 12](../ontology.md).
+> Relevance is per-stream. See [Axiom 13](../ontology.md).
+> Library search is a first-class source. See [Axiom 14](../ontology.md).

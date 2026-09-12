@@ -315,6 +315,54 @@ def test_authors_empty_when_unreachable():
         assert client.authors() == []
 
 
+def test_suggest_questions_passes_limit_and_returns_rows():
+    client = KnowledgeGraphClient()
+    payload = [{"question": "What connects 'A' and 'B'?", "grounding_source_file": "notes/a.md"}]
+    with patch("prisma.services.knowledge_graph_client.requests.get",
+               return_value=_mock_response(payload)) as mock_get:
+        result = client.suggest_questions(limit=5)
+    assert result[0].grounding_source_file == "notes/a.md"
+    assert mock_get.call_args.kwargs["params"] == {"limit": 5}
+
+
+def test_suggest_questions_empty_when_unreachable():
+    client = KnowledgeGraphClient()
+    with patch("prisma.services.knowledge_graph_client.requests.get", side_effect=requests.ConnectionError("down")):
+        assert client.suggest_questions() == []
+
+
+def test_graph_relevance_sends_texts_as_json_body_and_returns_scores():
+    client = KnowledgeGraphClient()
+    payload = [{"score": 2, "matched_entities": ["A", "B"]}, {"score": 0, "matched_entities": []}]
+    with patch("prisma.services.knowledge_graph_client.requests.post",
+               return_value=_mock_response(payload)) as mock_post:
+        result = client.graph_relevance(["text one", "text two"])
+    assert [r.score for r in result] == [2, 0]
+    assert mock_post.call_args.kwargs["json"] == {"texts": ["text one", "text two"]}
+
+
+def test_graph_relevance_degrades_to_zero_scores_preserving_length_when_unreachable():
+    # Positional correspondence with the input list must survive a degrade
+    # -- a caller zips this back against its own item list, so this must
+    # not be `[]`, which would misalign every item after the first failure.
+    client = KnowledgeGraphClient()
+    with patch("prisma.services.knowledge_graph_client.requests.post", side_effect=requests.ConnectionError("down")):
+        result = client.graph_relevance(["a", "b", "c"])
+    assert len(result) == 3
+    assert all(r.score == 0 and r.matched_entities == [] for r in result)
+
+
+def test_post_still_works_with_no_json_kwarg_for_existing_call_sites():
+    # Regression guard for extending _post() with an optional `json` kwarg
+    # -- every pre-existing call site (mark_stale, drop_index, taint_file,
+    # clear_dead_letters) passes only `params`, and must keep working
+    # unchanged now that `json` defaults to None.
+    client = KnowledgeGraphClient()
+    with patch("prisma.services.knowledge_graph_client.requests.post") as mock_post:
+        client.mark_stale()
+    assert mock_post.call_args.kwargs["json"] is None
+
+
 def test_vault_health_returns_response():
     client = KnowledgeGraphClient()
     payload = {"orphans": [{"id": "o1", "label": "O1", "source_file": "notes/a.md"}], "orphan_count": 1}

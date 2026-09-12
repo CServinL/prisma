@@ -31,4 +31,4 @@ to prevent infinite loops from circular embeds.
 
 ## Relevant axioms
 
-> Transclusion depth ≤ 5. See [Axiom 7](../ontologia.md).
+> Transclusion depth ≤ 5. See [Axiom 7](../ontology.md).

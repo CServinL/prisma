@@ -24,8 +24,10 @@ from prisma.storage.models.kg_models import (
     EntitiesForFileResponse,
     ExpandNodeResponse,
     GraphQueryResult,
+    GraphRelevance,
     KGStatus,
     RankedNode,
+    SuggestedQuestion,
     SurprisingConnection,
     TimelineEntry,
     TopEntity,
@@ -136,6 +138,25 @@ class KnowledgeGraphClient:
         data = self._get("/authors", params={"limit": limit}) or []
         return [AuthorSummary.model_validate(d) for d in data]
 
+    def suggest_questions(self, limit: int = 15) -> list[SuggestedQuestion]:
+        # Cache-only on the kg side too (KnowledgeGraphService.
+        # suggest_questions()) -- same short-timeout reasoning as
+        # surprising_connections() above.
+        data = self._get("/suggest_questions", params={"limit": limit}, timeout=2.0)
+        if data is None:
+            return []
+        return [SuggestedQuestion.model_validate(d) for d in data]
+
+    def graph_relevance(self, texts: list[str]) -> list[GraphRelevance]:
+        # Positional correspondence with `texts` must survive a degrade --
+        # the caller (a Zotero item listing) zips this back against its own
+        # item list, so `[]` here would misalign every item after the first
+        # failure instead of just scoring everything zero.
+        data = self._post("/graph_relevance", json={"texts": texts}, timeout=2.0)
+        if data is None:
+            return [GraphRelevance(score=0, matched_entities=[]) for _ in texts]
+        return [GraphRelevance.model_validate(d) for d in data]
+
     def vault_health(self, limit: int = 500) -> VaultHealthResponse:
         data = self._get("/vault_health", params={"limit": limit})
         return VaultHealthResponse.model_validate(data) if data else VaultHealthResponse(orphans=[], orphan_count=0)
@@ -174,9 +195,14 @@ class KnowledgeGraphClient:
             _log.warning("kg process unreachable at %s%s: %s", self._base_url, path, exc)
             return None
 
-    def _post(self, path: str, params: dict | None = None, timeout: float | None = None):
+    def _post(
+        self, path: str, params: dict | None = None, json: object | None = None,
+        timeout: float | None = None,
+    ):
         try:
-            resp = requests.post(f"{self._base_url}{path}", params=params, timeout=timeout or self._timeout)
+            resp = requests.post(
+                f"{self._base_url}{path}", params=params, json=json, timeout=timeout or self._timeout,
+            )
             resp.raise_for_status()
             return resp.json()
         except requests.RequestException as exc:

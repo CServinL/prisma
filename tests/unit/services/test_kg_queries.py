@@ -57,6 +57,8 @@ class _MidStreamFailConn:
     (lambda c: kg_queries.god_nodes(c), []),
     (lambda c: kg_queries.authors(c), []),
     (lambda c: kg_queries.surprising_connections(c, hub_ids=set()), []),
+    (lambda c: kg_queries.suggest_questions(c), []),
+    (lambda c: kg_queries.distinct_entity_labels(c), []),
     (lambda c: kg_queries.timeline_scan(c, "x"), ([], {})),
     (lambda c: kg_queries.expand_node(c, "x"), ExpandNodeResponse(entities=[], edges=[])),
 ])
@@ -449,6 +451,181 @@ def test_surprising_connections_respects_limit(kg, conn):
              [{"source": f"b{i}_bridge", "target": f"c{i}", "relation": "extends"}])
 
     assert len(kg_queries.surprising_connections(conn, hub_ids=set(), limit=2)) == 2
+
+
+# ── suggest_questions ─────────────────────────────────────────────────────────
+
+def test_suggest_questions_phrases_a_grounded_question_from_an_edge(kg, conn):
+    _add(
+        kg, "notes/a.md", "note",
+        [{"id": "a_x", "label": "X"}, {"id": "a_y", "label": "Y"}],
+        [{"source": "a_x", "target": "a_y", "relation": "causes"}],
+    )
+    questions = kg_queries.suggest_questions(conn)
+    assert len(questions) == 1
+    assert questions[0].question == "What connects 'X' and 'Y'?"
+    assert questions[0].grounding_source_file == "notes/a.md"
+
+
+def test_suggest_questions_excludes_chat_tier(kg, conn):
+    _add(kg, "chats/c.md", "chat", [{"id": "x", "label": "X"}, {"id": "y", "label": "Y"}],
+         [{"source": "x", "target": "y", "relation": "cites"}])
+    assert kg_queries.suggest_questions(conn) == []
+
+
+def test_suggest_questions_dedupes_the_undirected_double_read(kg, conn):
+    # The undirected `-` scan returns one real edge from both directions --
+    # a naive read would otherwise phrase the same question twice.
+    _add(
+        kg, "notes/a.md", "note",
+        [{"id": "a_x", "label": "X"}, {"id": "a_y", "label": "Y"}],
+        [{"source": "a_x", "target": "a_y", "relation": "causes"}],
+    )
+    assert len(kg_queries.suggest_questions(conn)) == 1
+
+
+def test_suggest_questions_dedupes_the_same_concept_pair_across_documents(kg, conn):
+    # Each document mints its own `{stem}_{entity}` id namespace (see
+    # surprising_connections' own docstring) -- two papers independently
+    # discussing "Transformer"/"Attention" produce two different id pairs
+    # for the same real-world concept pair. Deduping by id (a real bug,
+    # caught in self-review rather than by the original test suite) let
+    # the identical question through once per paper instead of once total.
+    _add(
+        kg, "papers/doc1.md", "source",
+        [{"id": "doc1_transformer", "label": "Transformer"}, {"id": "doc1_attention", "label": "Attention"}],
+        [{"source": "doc1_transformer", "target": "doc1_attention", "relation": "uses"}],
+    )
+    _add(
+        kg, "papers/doc2.md", "source",
+        [{"id": "doc2_transformer", "label": "Transformer"}, {"id": "doc2_attention", "label": "Attention"}],
+        [{"source": "doc2_transformer", "target": "doc2_attention", "relation": "uses"}],
+    )
+    questions = kg_queries.suggest_questions(conn)
+    assert len(questions) == 1
+    assert questions[0].question == "What connects 'Transformer' and 'Attention'?"
+
+
+def test_suggest_questions_drops_a_self_referential_pair(kg, conn):
+    _add(
+        kg, "notes/a.md", "note",
+        [{"id": "a_x", "label": "X"}],
+        [{"source": "a_x", "target": "a_x", "relation": "self"}],
+    )
+    assert kg_queries.suggest_questions(conn) == []
+
+
+def test_suggest_questions_caps_at_one_per_source_file_before_filling_remaining_slots(kg, conn):
+    # Two edges from the same document, one from another -- the single-doc
+    # document must not crowd out the other document's question when the
+    # limit only allows one question per document on the first pass.
+    _add(
+        kg, "notes/big.md", "note",
+        [{"id": "b_x", "label": "X"}, {"id": "b_y", "label": "Y"}, {"id": "b_z", "label": "Z"}],
+        [
+            {"source": "b_x", "target": "b_y", "relation": "causes"},
+            {"source": "b_y", "target": "b_z", "relation": "extends"},
+        ],
+    )
+    _add(
+        kg, "notes/small.md", "note",
+        [{"id": "s_p", "label": "P"}, {"id": "s_q", "label": "Q"}],
+        [{"source": "s_p", "target": "s_q", "relation": "cites"}],
+    )
+    questions = kg_queries.suggest_questions(conn, limit=2)
+    assert len(questions) == 2
+    assert {q.grounding_source_file for q in questions} == {"notes/big.md", "notes/small.md"}
+
+
+def test_suggest_questions_respects_limit(kg, conn):
+    for i in range(5):
+        _add(
+            kg, f"notes/{i}.md", "note",
+            [{"id": f"{i}_x", "label": f"X{i}"}, {"id": f"{i}_y", "label": f"Y{i}"}],
+            [{"source": f"{i}_x", "target": f"{i}_y", "relation": "cites"}],
+        )
+    assert len(kg_queries.suggest_questions(conn, limit=3)) == 3
+
+
+def test_suggest_questions_ranks_by_confidence_score(kg, conn):
+    _add(
+        kg, "notes/a.md", "note",
+        [{"id": "a_x", "label": "X"}, {"id": "a_y", "label": "Y"},
+         {"id": "a_p", "label": "P"}, {"id": "a_q", "label": "Q"}],
+        [
+            {"source": "a_x", "target": "a_y", "relation": "cites", "confidence_score": 0.2},
+            {"source": "a_p", "target": "a_q", "relation": "cites", "confidence_score": 0.9},
+        ],
+    )
+    questions = kg_queries.suggest_questions(conn)
+    assert questions[0].question == "What connects 'P' and 'Q'?"
+
+
+def test_suggest_questions_uses_endpoint_degree_as_a_tiebreak(kg, conn):
+    # Same confidence_score on both edges -- the pair touching the
+    # higher-degree ("Hub") entity should rank first. The isolated pair is
+    # upserted FIRST, hub edges upserted AFTER -- insertion order alone
+    # (what an unranked scan would incidentally follow) would then put the
+    # isolated pair ahead, so this only passes if degree is actually
+    # driving the order, not scan-order luck agreeing with the assertion.
+    _add(
+        kg, "notes/a.md", "note",
+        [{"id": "iso_a", "label": "A"}, {"id": "iso_b", "label": "B"}],
+        [{"source": "iso_a", "target": "iso_b", "relation": "cites", "confidence_score": 0.5}],
+    )
+    _add(
+        kg, "notes/a.md", "note",
+        [{"id": "hub", "label": "Hub"}, {"id": "l1", "label": "L1"}, {"id": "l2", "label": "L2"}],
+        [
+            {"source": "hub", "target": "l1", "relation": "cites", "confidence_score": 0.5},
+            {"source": "hub", "target": "l2", "relation": "cites", "confidence_score": 0.5},
+        ],
+    )
+    questions = kg_queries.suggest_questions(conn)
+    hub_positions = [i for i, q in enumerate(questions) if "Hub" in q.question]
+    iso_position = next(i for i, q in enumerate(questions) if "'A'" in q.question)
+    assert all(pos < iso_position for pos in hub_positions)
+
+
+def test_suggest_questions_diversity_guarantee_survives_ranking(kg, conn):
+    # A document with many high-confidence edges must not push a document
+    # with exactly one modestly-ranked edge out of the result entirely --
+    # the one-per-document guarantee must hold regardless of how that one
+    # edge ranks against everything else.
+    big_nodes = [{"id": f"big_{i}", "label": f"Big{i}"} for i in range(6)]
+    big_edges = [
+        {"source": f"big_{i}", "target": f"big_{i + 1}", "relation": "cites", "confidence_score": 0.95}
+        for i in range(5)
+    ]
+    _add(kg, "papers/big.md", "source", big_nodes, big_edges)
+    _add(
+        kg, "papers/small.md", "source",
+        [{"id": "small_p", "label": "P"}, {"id": "small_q", "label": "Q"}],
+        [{"source": "small_p", "target": "small_q", "relation": "cites", "confidence_score": 0.1}],
+    )
+
+    questions = kg_queries.suggest_questions(conn, limit=3)
+
+    assert any(q.grounding_source_file == "papers/small.md" for q in questions)
+
+
+# ── distinct_entity_labels ────────────────────────────────────────────────────
+
+def test_distinct_entity_labels_returns_unique_labels(kg, conn):
+    _add(kg, "notes/a.md", "note", [{"id": "a1", "label": "Neural Networks"}])
+    _add(kg, "notes/b.md", "note", [{"id": "b1", "label": "Neural Networks"}, {"id": "b2", "label": "Transformers"}])
+    assert set(kg_queries.distinct_entity_labels(conn)) == {"Neural Networks", "Transformers"}
+
+
+def test_distinct_entity_labels_excludes_chat_tier(kg, conn):
+    _add(kg, "chats/c.md", "chat", [{"id": "c1", "label": "Ghost"}])
+    assert kg_queries.distinct_entity_labels(conn) == []
+
+
+def test_distinct_entity_labels_respects_limit(kg, conn):
+    for i in range(5):
+        _add(kg, f"notes/{i}.md", "note", [{"id": f"n{i}", "label": f"Label{i}"}])
+    assert len(kg_queries.distinct_entity_labels(conn, limit=3)) == 3
 
 
 # ── authors ───────────────────────────────────────────────────────────────────

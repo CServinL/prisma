@@ -46,6 +46,6 @@ Being in the library means: discovered. Being in a collection means: accepted by
 
 ## Relevant axioms
 
-> Stream runs write to Zotero, not to the vault. See [Axiom 4](../ontologia.md).
-> Relevance is per-stream. See [Axiom 13](../ontologia.md).
-> Collection membership is the acceptance record. See [Axiom 15](../ontologia.md).
+> Stream runs write to Zotero, not to the vault. See [Axiom 4](../ontology.md).
+> Relevance is per-stream. See [Axiom 13](../ontology.md).
+> Collection membership is the acceptance record. See [Axiom 15](../ontology.md).

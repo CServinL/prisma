@@ -725,6 +725,12 @@
     authors: string[]; year?: number; abstract?: string;
     doi?: string; url?: string; publication?: string;
     tags: string[]; collection_keys: string[];
+    // Present only when fetched via /zotero/items/relevance (lightweight
+    // stream-triage-by-graph-relevance, PR #106) -- text-overlap against
+    // entity labels already extracted from the vault, not a graph
+    // traversal, and never from indexing this item's own text into Kùzu.
+    graph_relevance_score?: number;
+    graph_relevance_matched?: string[];
   }
 
   let zoteroStatus = $state<ZoteroStatus | null>(null);
@@ -732,6 +738,7 @@
   let zoteroItems = $state<ZoteroItem[]>([]);
   let zoteroCollection = $state<string | null>(null);
   let zoteroQ = $state("");
+  let zoteroSortByRelevance = $state(false);
   let zoteroSearchTimer: ReturnType<typeof setTimeout> | null = null;
   let importingKey = $state<string | null>(null);
   let zoteroLoading = $state(false);
@@ -1276,10 +1283,18 @@
     const coll = collection !== undefined ? collection : zoteroCollection;
     if (coll) params.set("collection", coll);
     if (zoteroQ.trim()) params.set("q", zoteroQ.trim());
+    // Separate endpoint, not a `sort=` param on /items -- /items' response
+    // shape stays untouched/stable either way (see PR #106).
+    const path = zoteroSortByRelevance ? "items/relevance" : "items";
     try {
-      const r = await apiFetch(`${apiBase}/zotero/items?${params}`);
+      const r = await apiFetch(`${apiBase}/zotero/${path}?${params}`);
       if (r.ok) zoteroItems = await r.json();
     } catch {} finally { zoteroLoading = false; }
+  }
+
+  function toggleZoteroRelevanceSort() {
+    zoteroSortByRelevance = !zoteroSortByRelevance;
+    loadZoteroItems();
   }
 
   function onZoteroSearch() {
@@ -1998,13 +2013,27 @@
                   placeholder="Filter items…"
                   oninput={onZoteroSearch}
                 />
+                <button
+                  class="zotero-relevance-toggle"
+                  class:active={zoteroSortByRelevance}
+                  title="Sort by how much each item overlaps entities already in your vault's knowledge graph"
+                  onclick={toggleZoteroRelevanceSort}
+                >Sort: Relevance</button>
               </div>
               {#if zoteroItems.length === 0}
                 <div class="sidebar-empty">No items</div>
               {:else}
                 {#each zoteroItems as item}
                   <div class="zotero-item">
-                    <div class="zotero-item-title">{item.title}</div>
+                    <div class="zotero-item-title">
+                      {item.title}
+                      {#if item.graph_relevance_score}
+                        <span
+                          class="zotero-relevance-badge"
+                          title={item.graph_relevance_matched?.length ? `Matches: ${item.graph_relevance_matched.join(", ")}` : ""}
+                        >{item.graph_relevance_score} match{item.graph_relevance_score === 1 ? "" : "es"}</span>
+                      {/if}
+                    </div>
                     <div class="zotero-item-meta">
                       {item.authors[0] ?? ""}
                       {#if item.authors.length > 1} et al.{/if}
@@ -3746,9 +3775,9 @@
     max-width: 120px;
   }
   .zotero-coll-btn.active, .zotero-coll-btn:hover { color: #4a9eff; border-color: #4a9eff; }
-  .zotero-search-row { padding: 4px 8px; }
+  .zotero-search-row { padding: 4px 8px; display: flex; gap: 6px; }
   .zotero-search {
-    width: 100%;
+    flex: 1;
     box-sizing: border-box;
     background: #0a1220;
     border: 1px solid #1a2d4a;
@@ -3759,6 +3788,27 @@
     font-family: inherit;
   }
   .zotero-search:focus { outline: none; border-color: #4a9eff; }
+  .zotero-relevance-toggle {
+    font-size: 10px;
+    padding: 2px 6px;
+    background: none;
+    border: 1px solid #1a3050;
+    border-radius: 3px;
+    color: #3d5470;
+    cursor: pointer;
+    font-family: inherit;
+    white-space: nowrap;
+  }
+  .zotero-relevance-toggle.active, .zotero-relevance-toggle:hover { color: #4a9eff; border-color: #4a9eff; }
+  .zotero-relevance-badge {
+    font-size: 9px;
+    color: #4a9eff;
+    border: 1px solid #1a3050;
+    border-radius: 3px;
+    padding: 0 4px;
+    margin-left: 4px;
+    white-space: nowrap;
+  }
   .zotero-item {
     padding: 5px 10px;
     border-bottom: 1px solid #0a1220;

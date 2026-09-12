@@ -250,3 +250,55 @@ def test_zotero_import_creates_source_from_abstract_when_no_pdf(isolated_client,
     assert source.journal == "Journal of Things"
     assert source.item_type == "journalArticle"
     assert source.url == "https://example.com/paper"
+
+
+# ── /zotero/items/relevance (lightweight stream-triage-by-graph-relevance) ────
+
+def test_zotero_items_relevance_attaches_scores_and_sorts_descending(isolated_client, zotero, indexer):
+    from prisma.storage.models.kg_models import GraphRelevance
+
+    zotero.get_all_items.return_value = [
+        _zotero_item(key="LOW"), _zotero_item(key="HIGH"),
+    ]
+    # graph_relevance() is called with one text per item, same order --
+    # the route must re-sort by score, not just trust that order.
+    indexer.graph_relevance.return_value = [
+        GraphRelevance(score=1, matched_entities=["A"]),
+        GraphRelevance(score=5, matched_entities=["A", "B"]),
+    ]
+
+    r = isolated_client.get("/zotero/items/relevance")
+
+    assert r.status_code == 200
+    body = r.json()
+    assert [item["key"] for item in body] == ["HIGH", "LOW"]
+    assert body[0]["graph_relevance_score"] == 5
+    assert body[0]["graph_relevance_matched"] == ["A", "B"]
+
+
+def test_zotero_items_relevance_passes_collection_and_query_through(isolated_client, zotero, indexer):
+    from prisma.storage.models.kg_models import GraphRelevance
+
+    zotero.get_collection_items.return_value = [_zotero_item()]
+    indexer.graph_relevance.return_value = [GraphRelevance(score=0, matched_entities=[])]
+
+    r = isolated_client.get("/zotero/items/relevance", params={"collection": "COLL1", "q": "neural"})
+
+    assert r.status_code == 200
+    zotero.get_collection_items.assert_called_once_with("COLL1", query="neural")
+
+
+def test_zotero_items_relevance_empty_library_never_calls_graph_relevance(isolated_client, zotero, indexer):
+    zotero.get_all_items.return_value = []
+
+    r = isolated_client.get("/zotero/items/relevance")
+
+    assert r.status_code == 200
+    assert r.json() == []
+    indexer.graph_relevance.assert_not_called()
+
+
+def test_zotero_items_relevance_zotero_failure_returns_503(isolated_client, zotero, indexer):
+    zotero.get_all_items.side_effect = RuntimeError("network down")
+    r = isolated_client.get("/zotero/items/relevance")
+    assert r.status_code == 503

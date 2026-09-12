@@ -68,9 +68,22 @@ ZoteroItem  →  POST /zotero/import/{key}  →  Source (vault)
 Import reads the ZoteroItem metadata, fetches the PDF if available, runs docu-craft to
 produce a `.md` body, and saves a `Source` with `zotero_key = item.key`.
 
+## Triage by graph relevance (lightweight, 2026-09-12/PR #106)
+
+`GET /zotero/items/relevance` returns the same item set as `GET /zotero/items`, plus a
+`graph_relevance_score`/`graph_relevance_matched` pair per item, sorted descending by score. The
+score is a pure text-overlap count: how many entity labels already extracted into the knowledge
+graph appear (case-insensitive, word-boundary matched — not a bare substring check, which would
+match a short label like "AI" inside an unrelated word like "explain") in the item's
+title/abstract/tags. This is
+deliberately lightweight — it never indexes a `ZoteroItem`'s text into Kùzu, and no per-item
+extraction runs; it only checks arbitrary text against labels the KG already has. Nothing about
+this feature contradicts [Stream](stream.md)'s "stream metadata should not pollute the knowledge
+graph" boundary — a `ZoteroItem` is scored, never written to the graph.
+
 ## Relevant axioms
 
-> Bookmark-first. See [Axiom 12](../ontologia.md).
-> Relevance is per-stream. See [Axiom 13](../ontologia.md).
-> Library search is a first-class source. See [Axiom 14](../ontologia.md).
-> Every Source has a `zotero_key`. See [Axiom 11](../ontologia.md).
+> Bookmark-first. See [Axiom 12](../ontology.md).
+> Relevance is per-stream. See [Axiom 13](../ontology.md).
+> Library search is a first-class source. See [Axiom 14](../ontology.md).
+> Every Source has a `zotero_key`. See [Axiom 11](../ontology.md).

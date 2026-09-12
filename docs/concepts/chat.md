@@ -222,11 +222,11 @@ directly. A legacy `.md`-with-`<!-- prisma:meta {...} -->`-comment reader surviv
 
 ## Relevant axioms
 
-> Chats are grounded. A chat uses only vault nodes as context. See [Axiom 5](../ontologia.md).
+> Chats are grounded. A chat uses only vault nodes as context. See [Axiom 5](../ontology.md).
 >
 > Claims are footnoted — distinct from grounding, this is about whether each individual claim
 > in the output is marked as sourced or as the model's own inference. See
-> [Axiom 16](../ontologia.md) and [Claim](claim.md).
+> [Axiom 16](../ontology.md) and [Claim](claim.md).
 
 ## Not yet implemented
 

@@ -40,4 +40,4 @@ For unknown authors: `<first-title-word><year>`. Citekeys are globally unique wi
 
 ## Relevant axioms
 
-> Broken citations surface. See [Axiom 6](../ontologia.md).
+> Broken citations surface. See [Axiom 6](../ontology.md).

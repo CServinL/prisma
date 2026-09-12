@@ -259,7 +259,7 @@ actual source).
   contradiction.
 - `ChatMessage.sources_cited`'s shape is replaced, not extended — this was
   written assuming there was no live caller to migrate (Chat API routes
-  were believed not yet implemented, per `docs/ontologia.md`'s stale "Not
+  were believed not yet implemented, per `docs/ontology.md`'s stale "Not
   yet implemented" claim at the time). **Correction, 2026-07-31**: by the
   time this was actually built, `/chat` was live and `ui/src/routes/
   +page.svelte` already had a working chat UI using the old
@@ -270,9 +270,9 @@ actual source).
 
 ## Related
 
-- Axiom 5 (`docs/ontologia.md`) — grounding (input scope), the axis this
+- Axiom 5 (`docs/ontology.md`) — grounding (input scope), the axis this
   explicitly does not overload.
-- Axiom 16 (`docs/ontologia.md`) — the axiom this ADR implements.
+- Axiom 16 (`docs/ontology.md`) — the axiom this ADR implements.
 - `docs/concepts/claim.md` — the entity-level documentation (current shape; this ADR's original `Footnote` class was later split, see the Status line above).
 - ADR-009 — hybrid retrieval architecture; `relational` footnotes are the
   natural label for `GRAPH_CONTEXT` tool output.

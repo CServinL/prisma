@@ -85,8 +85,8 @@ below).
 
 ## Relevant axioms
 
-> Claims are footnoted. See [Axiom 16](../ontologia.md). Distinct from grounding
-> (chat-wide context scope, [Axiom 5](../ontologia.md)) and from faithfulness (accuracy of
+> Claims are footnoted. See [Axiom 16](../ontology.md). Distinct from grounding
+> (chat-wide context scope, [Axiom 5](../ontology.md)) and from faithfulness (accuracy of
 > representation, tracked per-claim via `faithfulness_checked`, not a `relation` value).
 
 ## Build status

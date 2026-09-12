@@ -51,8 +51,10 @@ from prisma.storage.models.kg_models import (
     DroppedChunkInfo,
     EntitiesForFileResponse,
     GraphQueryResult,
+    GraphRelevance,
     KGStatus,
     RankedNode,
+    SuggestedQuestion,
     SurprisingConnection,
     TimelineEntry,
     TopEntity,
@@ -487,6 +489,12 @@ class KnowledgeGraphService:
         self._god_nodes_cache: list[TopEntity] = []
         self._authors_cache: list[AuthorSummary] = []
         self._vault_health_cache: VaultHealthResponse | None = None
+        self._suggest_questions_cache: list[SuggestedQuestion] = []
+
+        # Backs graph_relevance()'s pure text-match scoring -- not a
+        # /graph/* route of its own, just the match list that method scans
+        # against. Same refresh/drop_index discipline as the caches above.
+        self._entity_labels_cache: list[str] = []
 
         # Knowledge Graph progress page state (replaces an earlier, since
         # reverted, generic "ollama stats" page — this is scoped to what's
@@ -643,6 +651,8 @@ class KnowledgeGraphService:
                     self._god_nodes_cache = []
                     self._authors_cache = []
                     self._vault_health_cache = None
+                    self._suggest_questions_cache = []
+                    self._entity_labels_cache = []
                 except Exception as exc:
                     _log.warning("drop_index failed: %s", exc)
             self._state = "stale"
@@ -1567,6 +1577,55 @@ class KnowledgeGraphService:
         with self._lock:
             return self._authors_cache[:limit]
 
+    def suggest_questions(self, limit: int = TOP_ENTITIES_CACHE_SIZE) -> list[SuggestedQuestion]:
+        """Cache-only read -- see _refresh_suggest_questions()."""
+        with self._lock:
+            return self._suggest_questions_cache[:limit]
+
+    def graph_relevance(self, texts: list[str]) -> list[GraphRelevance]:
+        """Pure text-match scoring against the cached entity-label list --
+        no Kùzu call, unlike every other public method in this section.
+        Lightweight stream-triage design: scores arbitrary caller text
+        (e.g. a Zotero item's title/abstract/tags) against labels already
+        extracted from the vault, without ever indexing that text into
+        Kùzu itself.
+
+        Word-boundary regex, not a bare substring check: a naive `label in
+        text` (an earlier version of this method, caught in self-review
+        rather than by the original test suite) matches any short label as
+        a substring of an unrelated longer word -- "AI" inside "explain",
+        "US" inside "custom", "ROC" inside "process". Not plain `\b` either
+        (a second self-review round caught this one) -- `\b` requires a
+        word/non-word transition, so it silently fails to match any label
+        that itself starts or ends with punctuation: ".NET", "Ph.D.",
+        "C++", "e.g.", "U.S." would never match even when the text says
+        them verbatim, since the position right before/after a punctuation
+        character surrounded by other punctuation/whitespace is never a
+        \\w/\\W transition. `(?<!\w)...(?!\w)` asserts "not immediately
+        preceded/followed by a word character" instead -- true regardless
+        of what the label's own edge characters are. Deduped
+        case-insensitively too: two documents extracting "Neural Networks"
+        and "neural networks" as separate labels must not double-count one
+        concept as two matches. Patterns are compiled once per call, not
+        once per text -- rescanning and re-lowering the whole label list
+        for every single input text doesn't scale with either input size."""
+        with self._lock:
+            labels = self._entity_labels_cache
+        seen_lower: set[str] = set()
+        patterns: list[tuple[str, re.Pattern]] = []
+        for label in labels:
+            lowered = label.strip().lower()
+            if not lowered or lowered in seen_lower:
+                continue
+            seen_lower.add(lowered)
+            patterns.append((label, re.compile(r"(?<!\w)" + re.escape(lowered) + r"(?!\w)")))
+        out = []
+        for text in texts:
+            lowered_text = text.lower()
+            matched = [label for label, pattern in patterns if pattern.search(lowered_text)]
+            out.append(GraphRelevance(score=len(matched), matched_entities=matched[:5]))
+        return out
+
     def vault_health(self, limit: int = kg_queries.VAULT_HEALTH_MAX) -> VaultHealthResponse:
         """Cache-only read -- see _refresh_vault_health(). `orphan_count` is
         the true total; `orphans` is sliced to `limit`."""
@@ -1627,6 +1686,16 @@ class KnowledgeGraphService:
         with self._lock:
             self._vault_health_cache = kg_queries.vault_health(self._conn)
 
+    def _refresh_suggest_questions(self) -> None:
+        with self._lock:
+            self._suggest_questions_cache = kg_queries.suggest_questions(
+                self._conn, kg_queries.SUGGEST_QUESTIONS_MAX
+            )
+
+    def _refresh_entity_labels(self) -> None:
+        with self._lock:
+            self._entity_labels_cache = kg_queries.distinct_entity_labels(self._conn)
+
     def _refresh_derived_caches(self) -> None:
         """Recompute every /graph/* aggregate that would otherwise be a full
         scan on the request path. Background-index-thread only."""
@@ -1635,6 +1704,8 @@ class KnowledgeGraphService:
         self._refresh_god_nodes()
         self._refresh_authors()
         self._refresh_vault_health()
+        self._refresh_suggest_questions()
+        self._refresh_entity_labels()
 
     # ── Compatibility wrappers ───────────────────────────────────────────────
     # Same names/shapes as GraphifyIndexer's — app.py's call sites (/search,

@@ -51,4 +51,4 @@ Status is polled via `GET /review/{job_id}`.
 
 ## Relevant axioms
 
-> Every LiteratureReviewReport becomes a Note. See [Axiom 3](../ontologia.md).
+> Every LiteratureReviewReport becomes a Note. See [Axiom 3](../ontology.md).

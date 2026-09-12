@@ -547,6 +547,68 @@ def test_suggest_questions_respects_limit(kg, conn):
     assert len(kg_queries.suggest_questions(conn, limit=3)) == 3
 
 
+def test_suggest_questions_ranks_by_confidence_score(kg, conn):
+    _add(
+        kg, "notes/a.md", "note",
+        [{"id": "a_x", "label": "X"}, {"id": "a_y", "label": "Y"},
+         {"id": "a_p", "label": "P"}, {"id": "a_q", "label": "Q"}],
+        [
+            {"source": "a_x", "target": "a_y", "relation": "cites", "confidence_score": 0.2},
+            {"source": "a_p", "target": "a_q", "relation": "cites", "confidence_score": 0.9},
+        ],
+    )
+    questions = kg_queries.suggest_questions(conn)
+    assert questions[0].question == "What connects 'P' and 'Q'?"
+
+
+def test_suggest_questions_uses_endpoint_degree_as_a_tiebreak(kg, conn):
+    # Same confidence_score on both edges -- the pair touching the
+    # higher-degree ("Hub") entity should rank first. The isolated pair is
+    # upserted FIRST, hub edges upserted AFTER -- insertion order alone
+    # (what an unranked scan would incidentally follow) would then put the
+    # isolated pair ahead, so this only passes if degree is actually
+    # driving the order, not scan-order luck agreeing with the assertion.
+    _add(
+        kg, "notes/a.md", "note",
+        [{"id": "iso_a", "label": "A"}, {"id": "iso_b", "label": "B"}],
+        [{"source": "iso_a", "target": "iso_b", "relation": "cites", "confidence_score": 0.5}],
+    )
+    _add(
+        kg, "notes/a.md", "note",
+        [{"id": "hub", "label": "Hub"}, {"id": "l1", "label": "L1"}, {"id": "l2", "label": "L2"}],
+        [
+            {"source": "hub", "target": "l1", "relation": "cites", "confidence_score": 0.5},
+            {"source": "hub", "target": "l2", "relation": "cites", "confidence_score": 0.5},
+        ],
+    )
+    questions = kg_queries.suggest_questions(conn)
+    hub_positions = [i for i, q in enumerate(questions) if "Hub" in q.question]
+    iso_position = next(i for i, q in enumerate(questions) if "'A'" in q.question)
+    assert all(pos < iso_position for pos in hub_positions)
+
+
+def test_suggest_questions_diversity_guarantee_survives_ranking(kg, conn):
+    # A document with many high-confidence edges must not push a document
+    # with exactly one modestly-ranked edge out of the result entirely --
+    # the one-per-document guarantee must hold regardless of how that one
+    # edge ranks against everything else.
+    big_nodes = [{"id": f"big_{i}", "label": f"Big{i}"} for i in range(6)]
+    big_edges = [
+        {"source": f"big_{i}", "target": f"big_{i + 1}", "relation": "cites", "confidence_score": 0.95}
+        for i in range(5)
+    ]
+    _add(kg, "papers/big.md", "source", big_nodes, big_edges)
+    _add(
+        kg, "papers/small.md", "source",
+        [{"id": "small_p", "label": "P"}, {"id": "small_q", "label": "Q"}],
+        [{"source": "small_p", "target": "small_q", "relation": "cites", "confidence_score": 0.1}],
+    )
+
+    questions = kg_queries.suggest_questions(conn, limit=3)
+
+    assert any(q.grounding_source_file == "papers/small.md" for q in questions)
+
+
 # ── distinct_entity_labels ────────────────────────────────────────────────────
 
 def test_distinct_entity_labels_returns_unique_labels(kg, conn):

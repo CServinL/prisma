@@ -18,6 +18,7 @@ pipeline emits per entity (see the plan's "Concept timeline" note).
 from __future__ import annotations
 
 import logging
+import math
 import re
 
 from prisma.storage.models.kg_models import (
@@ -393,6 +394,15 @@ def surprising_connections(
     return out
 
 
+# Moderate, deliberately: confidence_score stays the primary signal
+# (already-extracted per-edge data, same one surprising_connections ranks
+# by), degree only nudges/tiebreaks via log1p so one mega-hub with hundreds
+# of edges can't drown out a confident edge between two obscure entities.
+# Start conservative and revisit based on how it actually feels, not by
+# tuning against a synthetic target.
+_SUGGEST_QUESTIONS_DEGREE_WEIGHT = 0.15
+
+
 def suggest_questions(conn, limit: int = DEFAULT_TOP_ENTITIES) -> list[SuggestedQuestion]:
     """Phrases a grounded follow-up question from each of a diverse sample of
     `RelatesTo` edges -- "what connects X and Y?" -- chat tier excluded on
@@ -406,43 +416,69 @@ def suggest_questions(conn, limit: int = DEFAULT_TOP_ENTITIES) -> list[Suggested
     through once per paper instead of once, total. This also subsumes the
     original reason for a dedup set at all: the undirected `-` pattern
     returns each edge from both directions, and both directions collapse to
-    the same label pair too. Capped at one question per distinct
-    `source_file` on a first pass, so one large document can't crowd out
-    every other document's questions -- remaining slots are then filled from
-    any leftover edges."""
+    the same label pair too.
+
+    Ranked by confidence_score, nudged by the endpoints' average undirected
+    degree (see `_SUGGEST_QUESTIONS_DEGREE_WEIGHT`) -- but capped at one
+    question per distinct `source_file` on a first pass (that document's
+    *best*-ranked edge), so one large document can't crowd out every other
+    document's questions regardless of how it ranks; only the remaining
+    slots, once every document has had its one guaranteed shot, are filled
+    from leftover edges in rank order. The two phases are never re-sorted
+    together -- doing so would let a source with many high-ranked edges push
+    a source with exactly one modestly-ranked edge out of the result
+    entirely, defeating the one-per-document guarantee the first phase
+    exists for."""
     if conn is None:
         return []
     seen_pairs: set[frozenset[str]] = set()
-    rows: list[tuple[str, str, str]] = []  # (a_label, b_label, source_file)
+    degree: dict[str, int] = {}
+    # (e_label, o_label, source_file, e_id, o_id, confidence_score)
+    rows: list[tuple[str, str, str, str, str, float]] = []
     try:
         result = conn.execute(
             "MATCH (e:Entity)-[r:RelatesTo]-(o:Entity) "
             "WHERE e.trust_tier <> 'chat' AND o.trust_tier <> 'chat' "
-            "RETURN e.label, o.label, r.source_file"
+            "RETURN e.id, e.label, o.id, o.label, r.source_file, r.confidence_score"
         )
         while result.has_next():
-            e_label, o_label, source_file = result.get_next()
+            e_id, e_label, o_id, o_label, source_file, confidence_score = result.get_next()
+            # Degree must come from every raw edge, not just the deduped
+            # survivors below -- same convention god_nodes/compute_top_
+            # entities use, and each real edge appears twice here (once per
+            # direction of the undirected scan), so this correctly counts
+            # undirected degree.
+            degree[e_id] = degree.get(e_id, 0) + 1
             if not e_label or not o_label or not source_file:
                 continue
             pair_key = frozenset((e_label.strip().lower(), o_label.strip().lower()))
             if len(pair_key) < 2 or pair_key in seen_pairs:
                 continue  # a self-referential edge, or a pair already seen
             seen_pairs.add(pair_key)
-            rows.append((e_label, o_label, source_file))
+            rows.append((e_label, o_label, source_file, e_id, o_id, confidence_score or 0.5))
     except Exception as exc:
         _log.warning("suggest_questions edge scan failed: %s", exc)
         return []
 
-    by_source: dict[str, list[tuple[str, str, str]]] = {}
+    def _rank(row: tuple[str, str, str, str, str, float]) -> float:
+        _, _, _, e_id, o_id, confidence_score = row
+        avg_degree = (degree.get(e_id, 0) + degree.get(o_id, 0)) / 2
+        return confidence_score * (1 + _SUGGEST_QUESTIONS_DEGREE_WEIGHT * math.log1p(avg_degree))
+
+    rows.sort(key=_rank, reverse=True)
+    by_source: dict[str, list[tuple[str, str, str, str, str, float]]] = {}
     for row in rows:
         by_source.setdefault(row[2], []).append(row)
+    # Each by_source[src] list is itself rank-ordered already, since rows
+    # was globally rank-sorted before this grouping loop ran.
     ordered = [source_rows[0] for source_rows in by_source.values()]
     if len(ordered) < limit:
-        for source_rows in by_source.values():
-            ordered.extend(source_rows[1:])
+        leftovers = [row for source_rows in by_source.values() for row in source_rows[1:]]
+        leftovers.sort(key=_rank, reverse=True)
+        ordered.extend(leftovers)
     return [
         SuggestedQuestion(question=f"What connects '{a}' and '{b}'?", grounding_source_file=src)
-        for a, b, src in ordered[:limit]
+        for a, b, src, _, _, _ in ordered[:limit]
     ]
 
 

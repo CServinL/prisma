@@ -39,7 +39,7 @@ this table is just the fields directly on `TurnNode` itself.
 | `content` | `RichContent` | `{format, value, rendered_html}` — the text layer (ADR-019's two-layer model). `format` supports `md`/`html`/`svg`/`latex`; only `md` is actually rendered today. `rendered_html` is API-response-only (sanitized HTML of `value`, computed fresh on every read, never persisted) — the UI deliberately does not use it for chat turns (see "Rendering" below), it exists for future format support and any other consumer |
 | `timestamp` | datetime | |
 | `tool_calls` | list[`ToolCallNode`] | Which tools (`search_vault`, `graph_context`, `recall`) this turn invoked, with what args, and — unlike the pre-ADR-019 model — the persisted `result` too, so a later turn's `RECALL` can find it |
-| `thoughts` | list[`ThinkingNode`] | Reasoning steps. Schema support only today — nothing populates this yet, see [Chat session graph](chat-session-graph.md#status) |
+| `thoughts` | list[`ThinkingNode`] | Reasoning steps, populated by the `THINK:` marker tool when the active model's `has_native_reasoning` is `false`. `revises`/`branches_from` (referencing another thought's id) are still schema only — nothing generates those, see [Chat session graph](chat-session-graph.md#status) |
 | `claims` | list[[Claim](claim.md)] (`CitedClaimNode` \| `InferenceNode`) | Per-claim attribution — what kind of sourcing backs each claim, and which document(s) |
 | `model` | str \| null | The model that actually generated *this* message. `null` for user messages. Distinct from `Chat.model` (the chat's current setting): this is what generated this specific historical reply, so it stays correct even after the chat's active model changes |
 | `alternates` | list[`TurnNode`] | Prior attempts at this same turn, preserved (not discarded) when regenerated via `POST /chats/{slug}/turns/{index}/regenerate` — each alternate keeps its own `model`, so different models' answers to the same prompt stay comparable |
@@ -93,8 +93,9 @@ ADR-020 — the source's formatted APA citation, fetched on demand via `GET /not
 (`services/citation_format.py`'s `format_apa()`, resolved fresh on every request, not cached) and
 cached client-side per slug so re-rendering the same chat doesn't re-fetch.
 
-Since v3, a claim can also carry a Toulmin `qualifier`/`warrant`/`rebuts` — schema and rendering
-exist, nothing populates them yet. See [Claim](claim.md) and
+Since v3, a claim can also carry a Toulmin `qualifier`/`warrant`/`rebuts`, self-reported in the
+same `FOOTNOTES_JSON` block and validated the same way as `relation`/`sources`. See
+[Claim](claim.md) and
 [Chat session graph](chat-session-graph.md#argumentation-structure-toulmin).
 
 ## Attachments

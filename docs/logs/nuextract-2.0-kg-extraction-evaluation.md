@@ -1,11 +1,11 @@
 # NuExtract-2.0-4B evaluation for KG extraction
 
-Closes a gap flagged in `docs/kg-extraction-context-length.md` and
-`docs/qwen3-family-evaluation.md`: both prior investigations tested generic
+Closes a gap flagged in `docs/logs/kg-extraction-context-length.md` and
+`docs/logs/qwen3-family-evaluation.md`: both prior investigations tested generic
 instruct-tuned chat models (qwen2.5:3b/7b, qwen3 family) prompted for
 extraction — neither ever tested a model actually specialized for structured
 extraction. NuExtract-2.0 (NuMind, built on Qwen2.5) is exactly that. Run
-2026-07-24 on the desktop client (Radeon 840M, Vulkan), `NuExtract-2.0-4B-Q4_K_M` served
+2026-07-24 on the desktop client (integrated GPU, Vulkan), `NuExtract-2.0-4B-Q4_K_M` served
 via `llama-swap`.
 
 ## Method
@@ -94,7 +94,7 @@ outside what NuExtract's fine-tuning targeted at all, regardless of
 quantization.
 
 **Recommendation**: don't adopt NuExtract-2.0-4B for Prisma's KG extraction.
-Combined with `docs/qwen3-family-evaluation.md`'s verdict (nothing in the
+Combined with `docs/logs/qwen3-family-evaluation.md`'s verdict (nothing in the
 Qwen3 generation beat it either), `qwen2.5:7b-32k`-class remains the only
 model that has actually demonstrated reliable KG extraction quality across
 every controlled test in this project to date. Untested: NuExtract at

@@ -175,7 +175,7 @@ def _probe_model_vram(base_url: str, model: str, timeout: float = 300.0) -> int 
     """One-time empirical measurement: force `model` to load via a trivial
     generate call, then read its real resident cost back from Ollama's own
     `/api/ps` — the same manual process used throughout
-    docs/qwen3-family-evaluation.md, automated. Returns None (not 0) if the
+    docs/logs/qwen3-family-evaluation.md, automated. Returns None (not 0) if the
     probe itself fails (Ollama unreachable, model not pulled, etc.) — callers
     must not treat that as "this model uses 0MB.\""""
     import urllib.request
@@ -211,7 +211,7 @@ def _check_pool_vram_fit(
     vram_budget_mb — catches "these models don't fit together" at
     startup/config-load time instead of a human reasoning through the
     arithmetic after chat becomes unusable during a sync (the real incident
-    in docs/qwen3-family-evaluation.md's Verdict section: qwen2.5:7b-32k +
+    in docs/logs/qwen3-family-evaluation.md's Verdict section: qwen2.5:7b-32k +
     qwen3:14b-32k + nomic-embed-text summed to 20400MB against a 14000MB
     budget). Models with neither a config value nor a saved profile are
     skipped from the sum (unknown, not zero) and reported separately, since
@@ -240,7 +240,7 @@ def _check_pool_vram_fit(
                 "vram fit: pool=%s configured models sum to %dMB, over its %dMB vram_budget_mb "
                 "(models excluded from this sum for having no config/profile value yet: %s) — "
                 "these models may not all coexist without an evict-and-reload cycle on every "
-                "switch between them; see docs/qwen3-family-evaluation.md's Verdict for a real "
+                "switch between them; see docs/logs/qwen3-family-evaluation.md's Verdict for a real "
                 "example of this failure mode",
                 pool_name, total, budget, unknown or "none",
             )
@@ -269,7 +269,7 @@ def _profile_missing_models(
     used this session, in exchange for every configured model having a real
     profile before anything production-shaped needs one. Motivated directly
     by the qwen3:14b-32k / qwen2.5:7b-32k VRAM-conflict incident (see
-    docs/qwen3-family-evaluation.md's Verdict section) — once every
+    docs/logs/qwen3-family-evaluation.md's Verdict section) — once every
     configured model has a real profile, _check_pool_vram_fit() (called at
     the end of this function) can sum a pool's models against
     vram_budget_mb and flag "these don't fit together" before a config
@@ -279,7 +279,7 @@ def _profile_missing_models(
     load via Ollama's native /api/generate, which llama-server/llama-swap
     don't implement. Those pools must have `vram_mb` set explicitly in
     config for every model (no auto-profiling fallback) — see
-    docs/llamacpp-vulkan-home-server-vs-desktop-client-benchmark.md in this repo for real
+    docs/logs/llamacpp-vulkan-home-server-vs-desktop-client-benchmark.md in this repo for real
     measured numbers to use as a starting point.
     """
     saved_profiles = _load_vram_profiles()

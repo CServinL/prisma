@@ -1,7 +1,7 @@
 # Ollama concurrency benchmark
 
 Empirical test of how many concurrent calls a local Ollama instance can actually
-absorb usefully, run against the real dev machine (WSL2, RTX 4090 laptop GPU,
+absorb usefully, run against the real dev machine (WSL2, a single local GPU,
 16GB VRAM) to decide the `local-ollama` compute pool's `max_concurrent` in
 `~/.config/prisma/config.yaml` (see ADR-012). Motivation: a single inference
 call already under-uses the GPU for parts of its lifetime, but past some point

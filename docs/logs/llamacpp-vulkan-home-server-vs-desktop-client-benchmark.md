@@ -5,16 +5,15 @@ always-on home server (no dedicated GPU) and the daily-driver desktop client
 workstation (also no dedicated GPU) so Prisma can eventually talk to either
 Ollama or llama.cpp as interchangeable backends, tested locally on both
 machines before anything ships to either box for real. Run 2026-07-23, while
-the 4090M laptop (the machine all prior model-evaluation docs in this folder
-used) is out for repair.
+the primary dev GPU (the machine all prior model-evaluation docs in this
+folder used) is out for repair.
 
 ## Hardware
 
 | | home server | desktop client |
 |---|---|---|
-| CPU | AMD Ryzen 7 PRO 6850U (8C/16T) | AMD Ryzen AI 5 PRO 340 (6C/12T, up to 4.9GHz) |
-| GPU | Radeon 680M (RDNA2, "Rembrandt") | Radeon 840M (RDNA3.5, "Krackan1") |
-| Matrix cores (Vulkan) | **none** | **`KHR_coopmat`** (cooperative matrix support) |
+| CPU | 8C/16T mobile-class AMD APU | 6C/12T mobile-class AMD APU (up to 4.9GHz) |
+| GPU | RDNA2 integrated GPU, no matrix-core support | RDNA3.5 integrated GPU, **`KHR_coopmat`** (cooperative matrix) support |
 | RAM | 27GB, shared (UMA, no dedicated VRAM) | 22GB, shared (UMA, no dedicated VRAM) |
 | Role | always-on server, models stay resident (`ttl: 0`) | interactive workstation, models load on-demand (`ttl`-based auto-unload) |
 
@@ -46,11 +45,11 @@ matrix acceleration" would suggest at first glance:
   this is just whichever machine's RAM subsystem is faster.
 - **pp512 (prefill)**: the desktop client is **2.6x slower** than the home
   server, despite having `coopmat` matrix-core support that the home
-  server's 680M completely lacks (it reports `matrix cores: none` in
+  server's GPU completely lacks (it reports `matrix cores: none` in
   `ggml_vulkan`'s device log). Not root-caused yet, but the leading
   hypothesis is **compute unit (CU) count**, not architecture generation:
-  the home server's 680M (Rembrandt) is a relatively CU-generous config for
-  its class; the 840M here is a lower/mid tier "Ryzen AI 5" part, and
+  the home server's GPU is a relatively CU-generous config for its class;
+  the desktop client's is a lower/mid-tier part of its generation, and
   RDNA-generation improvements plus a `coopmat` efficiency win on paper
   don't necessarily overcome having meaningfully fewer raw shader/compute
   units to begin with. Not confirmed via an actual CU-count lookup for

@@ -581,7 +581,7 @@
       "type": "object"
     },
     "WarrantNode": {
-      "description": "Toulmin model's Warrant -- the reasoning bridge explaining *why* a\nclaim's grounds (`sources`) support that specific claim, often left\nimplicit in informal writing but required explicit in formal academic\nargument. `backing` is the Toulmin Backing: support for the warrant\nitself, structurally identical to `sources` (a list of vault-node\nreferences), so it's a field here rather than its own node type.\nSchema support only -- nothing populates this yet. See\ndocs/concepts/chat-session-graph.md's Argumentation structure section.",
+      "description": "Toulmin model's Warrant -- the reasoning bridge explaining *why* the\nevidence behind a claim supports that specific claim, often left\nimplicit in informal writing but required explicit in formal academic\nargument. For a `CitedClaimNode`, that's why its grounds (`sources`)\nsupport it; `InferenceNode` (no `sources`) can carry a warrant too --\nthere the evidence is the model's own reasoning process, not a\ndocument. `backing` is the Toulmin Backing: support for the warrant\nitself, structurally identical to `sources` (a list of vault-node\nreferences, empty when there's nothing to cite), so it's a field here\nrather than its own node type. Populated from the model's\nFOOTNOTES_JSON self-report (chat_agent.py's _RawFootnote/\n_claim_from_raw) as of 2026-09-10. See\ndocs/concepts/chat-session-graph.md's Argumentation structure section.",
       "properties": {
         "backing": {
           "items": {

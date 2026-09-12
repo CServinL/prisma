@@ -9,9 +9,9 @@ propose evaluated fixes.
 
 37 dead letters were written between 2026-07-07T00:03 and 21:50 (still
 running at investigation time), covering **14 distinct source files** out
-of 27 papers in `thesis/Resources/Papers/`. Several files failed
-repeatedly across the day (`Fedus_2022_Switch_Transformers.md` 4 times,
-`Sharma_2023_Sycophancy_in_LLMs.md` 4 times, `Liang_2022_...` 4 times) —
+of 27 papers in the vault's papers folder. Several files failed
+repeatedly across the day (Fedus et al. 2022's Switch Transformers paper 4 times,
+Sharma et al. 2023's sycophancy paper 4 times, Liang et al. 2022's paper 4 times) —
 confirmed **deterministic**, not flaky: two dead letters for the same file
 hours apart contain byte-identical chunk content (`diff` on the two Fedus
 dead letters showed zero difference). This matches the current
@@ -26,12 +26,12 @@ in every case, matching `_call_ollama_extract`'s comment that a
 length-truncated response is treated as immediately fatal) and **3
 "invalid"** (`InstructorRetryException`, JSON validation kept failing
 across all 4 attempts — all 3 are the same paper,
-`Bricken_2023_Towards_Monosemanticity`).
+Bricken et al. 2023's Towards Monosemanticity paper).
 
 Live server stats at investigation time: `chunk_avg_duration_ms: 76066`
 (~76s/chunk average), `dropped_chunks_total: 37`, and — most concerning —
 the KG service was found mid-way through **re-processing
-`Bricken_2023_Towards_Monosemanticity.md` (249 sections) for the 4th time
+Bricken et al. 2023's Towards Monosemanticity paper (249 sections) for the 4th time
 today**, at chunk 54/249. At ~76s/chunk, reaching the same failing chunk
 each cycle burns real hours of GPU time re-doing already-known-good work
 before hitting the same deterministic wall again.
@@ -39,17 +39,17 @@ before hitting the same deterministic wall again.
 ## Root cause 1 (dominant, 34/37): no bound on how much the model tries to enumerate
 
 Every single "truncated" dead letter's chunk content is either:
-- **A long author/reference list** — e.g. the `Huang_2024_Hallucination_Survey.md`
+- **A long author/reference list** — e.g. the Huang et al. 2024's hallucination-survey paper
   dead letter is literally ~200 consecutive author names from a cited
-  Gemini technical report; `Sharma_2023_Sycophancy_in_LLMs.md` and
-  `Liang_2022_...`'s dead letters are the same shape (bibliography/author
+  Gemini technical report; Sharma et al. 2023's sycophancy paper and
+  Liang et al. 2022's paper's dead letters are the same shape (bibliography/author
   lists).
-- **A dense data table** — `Hoffmann_2022_Chinchilla_Compute_Optimal.md`'s
+- **A dense data table** — Hoffmann et al. 2022's Chinchilla paper's
   chunk is a BIG-bench results table (dozens of task names + numbers);
-  `Bramerdorfer_2022_...`'s chunk is dense with KPI/MOE table references.
-- **Dense technical prose** — `Elhage_2021_Mathematical_Framework_Transformer_Circuits.md`
+  Bramerdorfer et al. 2022's paper's chunk is dense with KPI/MOE table references.
+- **Dense technical prose** — Elhage et al. 2021's Mathematical Framework for Transformer Circuits paper
   (heavy math/LaTeX notation, many named circuit concepts per paragraph),
-  `Akyurek_2022_...` (dense variable-heavy math).
+  Akyurek et al. 2022's paper (dense variable-heavy math).
 
 `_EXTRACTION_SYSTEM`'s current rules explicitly say to extract "Authors
 and their institutional affiliations, when given" with no cap — so when a
@@ -59,7 +59,7 @@ objects + edges, which cannot fit in `max_tokens=4000` (or any reasonable
 budget) and isn't useful KG content even when it does fit.
 
 **Confirmed empirically, live, against production `qwen2.5:7b-32k`:**
-re-running the exact `Huang_2024_Hallucination_Survey.md` dead-letter
+re-running the exact Huang et al. 2024's hallucination-survey paper dead-letter
 chunk through the real Instructor call path:
 
 | Prompt | Result |
@@ -83,7 +83,7 @@ run under a higher cap still produces zero-value output (author-name
 stubs with no edges).
 
 **Also confirmed on the dense-math-prose failure class**: re-running the
-exact `Elhage_2021_Mathematical_Framework_Transformer_Circuits.md` dead-
+exact Elhage et al. 2021's Mathematical Framework for Transformer Circuits paper dead-
 letter chunk (the Q/K/V-composition paragraph, heavy LaTeX notation) with
 the capped prompt succeeded cleanly — 430.2s, retries=0, **5 nodes, 5
 edges** (a small, sane extraction of the real named concepts:
@@ -93,7 +93,7 @@ prompt on this same chunk had hit `max_tokens=4000` and failed outright.
 
 **Control check — does capping hurt a normal, already-succeeding chunk?**
 Ran both prompts against a real, ordinary prose chunk from
-`Lieberum_2022_Engineering_Monosemanticity_Toy_Models.md` (a paper with no
+Lieberum et al. 2022's toy-models paper (a paper with no
 dead letters today, picked specifically because it wasn't already a known
 failure): original prompt → 7 nodes/7 edges; capped prompt → 6 nodes/6
 edges. Essentially unchanged (one borderline entity dropped, noise-level
@@ -103,7 +103,7 @@ producing a reasonable, small entity count.
 
 ## Root cause 2 (3/37, but higher-effort each): adversarial escape-sequence content
 
-All 3 "invalid" dead letters are `Bricken_2023_Towards_Monosemanticity.md`
+All 3 "invalid" dead letters are Bricken et al. 2023's Towards Monosemanticity paper
 — a real Anthropic interpretability paper whose appendix is a literal
 table of raw byte-sequence descriptions ("Hebrew: `\xd6`?", "Arabic:
 Unicode start `\xd8`?", "`\xc2` in UTF-8 as latin1 mojibake of Chinese?").
@@ -142,22 +142,20 @@ doesn't touch a content-shape JSON-escaping bug.
 
 ## Root cause 3 (efficiency, not correctness): duplicate ingestion
 
-`Bricken_2023_Towards_Monosemanticity` exists in the vault **twice**:
-`thesis/Resources/Papers/Bricken_2023_Towards_Monosemanticity.md` (a
-cleaned/PDF-derived version) and
-`thesis/Resources/Papers/html/Bricken_2023_Towards_Monosemanticity/index.md`
-(a raw HTML-scrape version) — confirmed near-identical (29368 vs. 29373
+Bricken et al. 2023's paper exists in the vault **twice**: a
+cleaned/PDF-derived `.md` version and a raw HTML-scrape
+`html/<slug>/index.md` version — confirmed near-identical (29368 vs. 29373
 lines, `diff` on the first 50 lines shows only a YAML frontmatter
 difference). The KG service walks all `.md` files in the vault with no
 dedup, so this one paper gets extracted **twice**, doubling both its
 compute cost and its dead-letter count. The same `html/<slug>/index.md`
 pattern exists for two other papers, and **both confirmed near-identical
 to their plain `.md` sibling** (line counts differ only by YAML
-frontmatter, same as Bricken): `Olah_2020_Zoom_In_Circuits` (399 vs. 394
-lines) and `Elhage_2021_Mathematical_Framework_Transformer_Circuits`
-(1699 vs. 1694 lines — this is the same Elhage paper that hit Root cause 1
-above, so it's silently double-indexed too, doubling its dead-letter risk
-specifically).
+frontmatter, same as Bricken): Olah et al. 2020's "Zoom In: An
+Introduction to Circuits" paper (399 vs. 394 lines) and Elhage et al.
+2021's paper (1699 vs. 1694 lines — this is the same Elhage paper that hit
+Root cause 1 above, so it's silently double-indexed too, doubling its
+dead-letter risk specifically).
 
 ## Root cause 4 (efficiency): no memory of "this exact chunk always fails"
 
@@ -222,9 +220,9 @@ path), against the real chunks that dead-lettered earlier today:
 
 | Chunk | Before | After |
 |---|---|---|
-| `Huang_2024_Hallucination_Survey.md` (author list, root cause 1) | truncated / 148 nodes-0 edges | **13 nodes, 12 edges, 43.8s** |
-| `Elhage_2021_...` (dense math prose, root cause 1) | truncated | **3 nodes, 3 edges, 19.7s** |
-| `Bricken_2023_...` (adversarial Unicode, root cause 2) | invalid JSON, 4 retries, 923.7s | **21 nodes, 20 edges, 123.1s** |
+| Huang et al. 2024's hallucination-survey paper (author list, root cause 1) | truncated / 148 nodes-0 edges | **13 nodes, 12 edges, 43.8s** |
+| Elhage et al. 2021's paper (dense math prose, root cause 1) | truncated | **3 nodes, 3 edges, 19.7s** |
+| Bricken et al. 2023's paper (adversarial Unicode, root cause 2) | invalid JSON, 4 retries, 923.7s | **21 nodes, 20 edges, 123.1s** |
 
 All three real dead-lettering chunks from today now succeed cleanly. This
 directly supersedes the earlier finding that "proposal 1 alone would have

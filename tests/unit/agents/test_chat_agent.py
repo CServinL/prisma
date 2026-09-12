@@ -1,6 +1,9 @@
 """Unit tests for the bounded, pattern-based chat tool loop."""
+import json
 from pathlib import Path
 from unittest.mock import MagicMock
+
+import pytest
 
 from prisma.agents.chat_agent import (
     MAX_TOOL_ITERATIONS,
@@ -11,7 +14,9 @@ from prisma.agents.chat_agent import (
 )
 from prisma.schema_gov import RichContent
 from prisma.services.chat_tools import ToolResult
-from prisma.storage.models.vault_models import ChatRole, CitedClaimNode, InferenceNode, Note, ToolCallNode, TurnNode
+from prisma.storage.models.vault_models import (
+    ChatRole, CitedClaimNode, InferenceNode, Note, Qualifier, ToolCallNode, TurnNode,
+)
 
 
 def _msg(role: ChatRole, text: str) -> TurnNode:
@@ -736,6 +741,231 @@ def test_extract_claims_uses_the_last_match_if_model_discusses_format_first():
     assert isinstance(claims[0], InferenceNode)
 
 
+# ── _extract_claims() — Toulmin qualifier/warrant/rebuts extension ───────────
+
+def test_extract_claims_parses_a_qualifier():
+    reply = (
+        'This likely holds[^1].\n'
+        'FOOTNOTES_JSON: [{"index": 1, "relation": "attribution", "sources": ["a"], '
+        '"qualifier": "probable"}]'
+    )
+
+    _, claims = _extract_claims(reply)
+
+    assert claims[0].qualifier == Qualifier.probable
+
+
+def test_extract_claims_drops_entry_with_an_unknown_qualifier():
+    reply = (
+        'Two claims here.\n'
+        'FOOTNOTES_JSON: [{"index": 1, "relation": "citation", "sources": ["a"]}, '
+        '{"index": 2, "relation": "citation", "sources": ["b"], "qualifier": "definitely"}]'
+    )
+
+    _, claims = _extract_claims(reply)
+
+    assert len(claims) == 1
+    assert claims[0].index == 1
+
+
+def test_extract_claims_parses_a_warrant():
+    reply = (
+        'X causes Y[^1].\n'
+        'FOOTNOTES_JSON: [{"index": 1, "relation": "attribution", "sources": ["a"], '
+        '"warrant": {"text": "the methodology directly measures causation", "backing": ["b"]}}]'
+    )
+
+    _, claims = _extract_claims(reply)
+
+    assert claims[0].warrant.text == "the methodology directly measures causation"
+    assert claims[0].warrant.backing == ["b"]
+
+
+def test_extract_claims_drops_entry_with_an_oversized_warrant_backing():
+    # Each backing entry costs a vault lookup (ChatAgent._warrant_resolves)
+    # -- a self-report can't balloon that per-claim cost unbounded.
+    footnotes = json.dumps([{
+        "index": 1, "relation": "attribution", "sources": ["a"],
+        "warrant": {"text": "why", "backing": [f"slug-{n}" for n in range(21)]},
+    }])
+    reply = f"X causes Y[^1].\nFOOTNOTES_JSON: {footnotes}"
+
+    _, claims = _extract_claims(reply)
+
+    assert claims == []
+
+
+@pytest.mark.parametrize("blank_text", ["", "   "])
+def test_extract_claims_drops_entry_with_a_blank_warrant_text(blank_text):
+    footnotes = json.dumps([
+        {"index": 1, "relation": "citation", "sources": ["a"], "warrant": {"text": blank_text}},
+    ])
+    reply = f"Some claim[^1].\nFOOTNOTES_JSON: {footnotes}"
+
+    _, claims = _extract_claims(reply)
+
+    assert claims == []
+
+
+def test_extract_claims_drops_ai_inference_entry_with_nonempty_warrant_backing():
+    footnotes = json.dumps([{
+        "index": 1, "relation": "ai-inference",
+        "warrant": {"text": "reasoning from first principles", "backing": ["a"]},
+    }])
+    reply = f"Some inference[^1].\nFOOTNOTES_JSON: {footnotes}"
+
+    _, claims = _extract_claims(reply)
+
+    assert claims == []
+
+
+def test_extract_claims_resolves_rebuts_index_to_the_target_claims_id():
+    reply = (
+        'X holds generally[^1], except under Z[^2].\n'
+        'FOOTNOTES_JSON: [{"index": 1, "relation": "citation", "sources": ["a"]}, '
+        '{"index": 2, "relation": "citation", "sources": ["b"], "rebuts": 1}]'
+    )
+
+    _, claims = _extract_claims(reply)
+
+    assert len(claims) == 2
+    assert claims[1].rebuts == claims[0].id
+
+
+def test_extract_claims_accepts_string_forms_of_rebuts():
+    reply = (
+        'X holds[^1], except under Z[^2].\n'
+        'FOOTNOTES_JSON: [{"index": 1, "relation": "citation", "sources": ["a"]}, '
+        '{"index": 2, "relation": "citation", "sources": ["b"], "rebuts": "[^1]"}]'
+    )
+
+    _, claims = _extract_claims(reply)
+
+    assert claims[1].rebuts == claims[0].id
+
+
+@pytest.mark.parametrize("bad_rebuts", [True, 1.0])
+def test_extract_claims_rejects_non_integer_rebuts_values(bad_rebuts):
+    # Plain `int` would silently coerce true->1 and 1.0->1 -- neither is
+    # the index the model actually meant, and both would build a REBUTS
+    # edge from a malformed self-report instead of dropping it. Claim 1
+    # exists and isn't claim 2's own index, so a coercion to 1 would
+    # resolve "successfully" if StrictInt weren't in effect -- this isn't
+    # caught by the separate no-such-index/self-reference checks
+    # (github.com/CServinL/prisma/pull/105, Copilot review).
+    footnotes = json.dumps([
+        {"index": 1, "relation": "citation", "sources": ["a"]},
+        {"index": 2, "relation": "citation", "sources": ["b"], "rebuts": bad_rebuts},
+    ])
+    reply = f"X holds[^1]. Except here[^2].\nFOOTNOTES_JSON: {footnotes}"
+
+    _, claims = _extract_claims(reply)
+
+    assert len(claims) == 1
+    assert claims[0].index == 1
+
+
+@pytest.mark.parametrize("bad_index", [True, 1.0, 0, -5])
+def test_extract_claims_rejects_an_invalid_index(bad_index):
+    # Same defect class as rebuts above, on the field everything else in
+    # this pipeline keys off ([^N] matching, duplicate-index detection,
+    # rebuts resolution) -- Copilot's cross-reference from the rebuts
+    # finding to this same-shaped `index` field. 0/negative are strictly-
+    # typed but still not a real 1-based [^N] marker (PR #105 review).
+    footnotes = json.dumps([{"index": bad_index, "relation": "citation", "sources": ["a"]}])
+    reply = f"Weird claim[^1].\nFOOTNOTES_JSON: {footnotes}"
+
+    _, claims = _extract_claims(reply)
+
+    assert claims == []
+
+
+def test_extract_claims_drops_claim_whose_rebuts_index_has_no_match():
+    reply = (
+        'X holds[^1].\n'
+        'FOOTNOTES_JSON: [{"index": 1, "relation": "citation", "sources": ["a"], "rebuts": 9}]'
+    )
+
+    _, claims = _extract_claims(reply)
+
+    assert claims == []
+
+
+def test_extract_claims_drops_claim_that_rebuts_its_own_index():
+    reply = (
+        'Two claims here.\n'
+        'FOOTNOTES_JSON: [{"index": 1, "relation": "citation", "sources": ["a"], "rebuts": 1}, '
+        '{"index": 2, "relation": "citation", "sources": ["b"]}]'
+    )
+
+    _, claims = _extract_claims(reply)
+
+    assert len(claims) == 1
+    assert claims[0].index == 2
+
+
+def test_extract_claims_drops_a_claim_that_rebuts_an_already_dropped_claim():
+    # Claim 1's own rebuts index (99) doesn't exist, so claim 1 is dropped.
+    # Claim 2 rebuts claim 1 -- resolved successfully at parse time (claim 1
+    # was still a valid same-turn index then), but claim 1 no longer
+    # exists, so claim 2 must be dropped too, not left pointing at nothing
+    # (github.com/CServinL/prisma/pull/105, Copilot review).
+    reply = (
+        'Two claims here.\n'
+        'FOOTNOTES_JSON: [{"index": 1, "relation": "citation", "sources": ["a"], "rebuts": 99}, '
+        '{"index": 2, "relation": "citation", "sources": ["b"], "rebuts": 1}]'
+    )
+
+    _, claims = _extract_claims(reply)
+
+    assert claims == []
+
+
+def test_extract_claims_drops_both_claims_sharing_a_duplicate_index():
+    # Two entries both self-report index 1 -- by_index (and the UI's
+    # id="chat-turn-N-claim-1" DOM anchor) can't tell them apart, so both
+    # are dropped rather than one winning arbitrarily
+    # (github.com/CServinL/prisma/pull/105, Copilot review).
+    reply = (
+        'Two claims, same index.\n'
+        'FOOTNOTES_JSON: [{"index": 1, "relation": "citation", "sources": ["a"]}, '
+        '{"index": 1, "relation": "citation", "sources": ["b"]}]'
+    )
+
+    _, claims = _extract_claims(reply)
+
+    assert claims == []
+
+
+def test_extract_claims_drops_a_claim_rebutting_a_duplicate_index():
+    # Claims 1a/1b share index 1; claim 2 rebuts index 1 -- ambiguous, so
+    # it can't resolve to either survivor (there are none) and is dropped
+    # along with them.
+    reply = (
+        'Three claims here.\n'
+        'FOOTNOTES_JSON: [{"index": 1, "relation": "citation", "sources": ["a"]}, '
+        '{"index": 1, "relation": "citation", "sources": ["b"]}, '
+        '{"index": 2, "relation": "citation", "sources": ["c"], "rebuts": 1}]'
+    )
+
+    _, claims = _extract_claims(reply)
+
+    assert claims == []
+
+
+def test_extract_claims_inference_node_also_carries_a_qualifier():
+    reply = (
+        'This is my own reasoning[^1].\n'
+        'FOOTNOTES_JSON: [{"index": 1, "relation": "ai-inference", "sources": [], '
+        '"qualifier": "tentative"}]'
+    )
+
+    _, claims = _extract_claims(reply)
+
+    assert isinstance(claims[0], InferenceNode)
+    assert claims[0].qualifier == Qualifier.tentative
+
+
 def test_respond_final_answer_populates_claims():
     llm = MagicMock()
     llm.model = "test-model"
@@ -856,6 +1086,86 @@ def test_respond_overrides_self_report_when_grounding_tool_returns_nothing():
     assert reply.claims[0].claim_text == (
         "It seems there are no notes on this. I can share general knowledge if you want."
     )
+
+
+def test_respond_preserves_qualifier_and_warrant_across_the_no_grounding_override():
+    # The override replaces the model's self-reported claim(s) with one bare
+    # InferenceNode -- but a qualifier/warrant on an ai-inference claim
+    # describes the model's own reasoning, which the prompt explicitly
+    # supports, and there's exactly one self-reported claim here so keeping
+    # its qualifier/warrant on the collapsed claim is unambiguous
+    # (PR #105 Copilot review).
+    llm = MagicMock()
+    llm.model = "test-model"
+    llm.context_window = 1_000_000
+    llm.complete.side_effect = [
+        "SEARCH_VAULT: something",
+        'My own take on this[^1].\n'
+        'FOOTNOTES_JSON: [{"index": 1, "relation": "ai-inference", "sources": [], '
+        '"qualifier": "tentative", "warrant": {"text": "reasoning from first principles"}}]',
+    ]
+    toolbox = MagicMock()
+    toolbox.call.return_value = ToolResult(text="", raw=[])
+    agent = _agent(llm=llm, toolbox=toolbox)
+
+    reply = agent.respond(history=[], user_text="what do you think?")
+
+    assert len(reply.claims) == 1
+    assert reply.claims[0].kind == "inference"
+    assert reply.claims[0].qualifier == Qualifier.tentative
+    assert reply.claims[0].warrant.text == "reasoning from first principles"
+    assert reply.claims[0].rebuts is None
+
+
+def test_respond_no_grounding_override_drops_warrant_backing_when_collapsing_a_cited_claim():
+    # The sole self-reported claim was a CitedClaimNode with a warrant
+    # citing real sources -- legitimate there, but the collapsed claim
+    # becomes an InferenceNode, which has no document behind it. Carrying
+    # the backing across would recreate the same source-backed-inference
+    # inconsistency _reject_backed_inference rejects at parse time
+    # (PR #105 Copilot review).
+    llm = MagicMock()
+    llm.model = "test-model"
+    llm.context_window = 1_000_000
+    llm.complete.side_effect = [
+        "SEARCH_VAULT: something",
+        'X causes Y[^1].\n'
+        'FOOTNOTES_JSON: [{"index": 1, "relation": "attribution", "sources": ["a"], '
+        '"warrant": {"text": "the methodology directly measures causation", "backing": ["b"]}}]',
+    ]
+    toolbox = MagicMock()
+    toolbox.call.return_value = ToolResult(text="", raw=[])
+    agent = _agent(llm=llm, toolbox=toolbox)
+
+    reply = agent.respond(history=[], user_text="why?")
+
+    assert len(reply.claims) == 1
+    assert reply.claims[0].kind == "inference"
+    assert reply.claims[0].warrant is None
+
+
+def test_respond_no_grounding_override_drops_qualifier_when_multiple_claims_self_reported():
+    # Ambiguous which of several self-reported claims' qualifier should
+    # describe the whole collapsed reply -- default to None rather than
+    # arbitrarily picking one.
+    llm = MagicMock()
+    llm.model = "test-model"
+    llm.context_window = 1_000_000
+    llm.complete.side_effect = [
+        "SEARCH_VAULT: something",
+        'X[^1]. Y[^2].\n'
+        'FOOTNOTES_JSON: [{"index": 1, "relation": "ai-inference", "sources": [], '
+        '"qualifier": "tentative"}, {"index": 2, "relation": "ai-inference", "sources": []}]',
+    ]
+    toolbox = MagicMock()
+    toolbox.call.return_value = ToolResult(text="", raw=[])
+    agent = _agent(llm=llm, toolbox=toolbox)
+
+    reply = agent.respond(history=[], user_text="what do you think?")
+
+    assert len(reply.claims) == 1
+    assert reply.claims[0].qualifier is None
+    assert reply.claims[0].warrant is None
 
 
 def test_respond_does_not_override_when_grounding_tool_returns_content():
@@ -1005,7 +1315,7 @@ def test_respond_forces_relational_for_multi_source_claims_regardless_of_self_re
     assert reply.claims[0].relation == "relational"
 
 
-def test_respond_drops_claim_citing_an_unresolvable_slug():
+def test_respond_drops_claim_citing_an_unresolvable_slug(caplog):
     llm = MagicMock()
     llm.model = "test-model"
     llm.context_window = 1_000_000
@@ -1021,6 +1331,11 @@ def test_respond_drops_claim_citing_an_unresolvable_slug():
 
     assert reply.claims == []
     toolbox.slug_resolves.assert_called_once_with("made-up-slug")
+    # The two drop reasons (sources vs. warrant.backing) point at different
+    # parts of the self-report to fix -- a single combined message couldn't
+    # tell them apart.
+    assert "citing an unresolvable slug" in caplog.text
+    assert "warrant.backing" not in caplog.text
 
 
 def test_respond_keeps_claim_when_all_sources_resolve():
@@ -1040,6 +1355,71 @@ def test_respond_keeps_claim_when_all_sources_resolve():
 
     assert len(reply.claims) == 1
     assert reply.claims[0].sources == ["kg-decision"]
+
+
+def test_respond_drops_claim_with_an_unresolvable_warrant_backing_slug(caplog):
+    llm = MagicMock()
+    llm.model = "test-model"
+    llm.context_window = 1_000_000
+    llm.complete.side_effect = [
+        'Kùzu is embedded, no server process[^1].\n'
+        'FOOTNOTES_JSON: [{"index": 1, "relation": "attribution", "sources": ["kg-decision"], '
+        '"warrant": {"text": "because X", "backing": ["made-up-slug"]}}]',
+    ]
+    toolbox = MagicMock()
+    toolbox.slug_resolves.side_effect = lambda s: s != "made-up-slug"
+    agent = _agent(llm=llm, toolbox=toolbox)
+
+    reply = agent.respond(history=[], user_text="why Kùzu?")
+
+    assert reply.claims == []
+    # Distinct from the plain sources-drop message -- see the test above.
+    assert "warrant.backing" in caplog.text
+    assert "citing an unresolvable slug" not in caplog.text
+
+
+def test_respond_keeps_claim_when_warrant_backing_resolves():
+    llm = MagicMock()
+    llm.model = "test-model"
+    llm.context_window = 1_000_000
+    llm.complete.side_effect = [
+        'Kùzu is embedded, no server process[^1].\n'
+        'FOOTNOTES_JSON: [{"index": 1, "relation": "attribution", "sources": ["kg-decision"], '
+        '"warrant": {"text": "because X", "backing": ["kg-decision"]}}]',
+    ]
+    toolbox = MagicMock()
+    toolbox.slug_resolves.return_value = True
+    toolbox.get_node_text.return_value = None  # skip the faithfulness LLM call
+    agent = _agent(llm=llm, toolbox=toolbox)
+
+    reply = agent.respond(history=[], user_text="why Kùzu?")
+
+    assert len(reply.claims) == 1
+    assert reply.claims[0].warrant.backing == ["kg-decision"]
+
+
+def test_respond_drops_a_claim_rebutting_another_dropped_for_bad_sources():
+    # Claim 1's own rebuts index is valid at parse time (resolved to claim
+    # 2's id by _resolve_rebuts, before either claim's sources are
+    # checked). Claim 2's sources don't resolve, so it's dropped by
+    # respond()'s later filter -- claim 1 must cascade-drop too, not
+    # survive pointing at a claim id no longer in the turn
+    # (github.com/CServinL/prisma/pull/105, Copilot review).
+    llm = MagicMock()
+    llm.model = "test-model"
+    llm.context_window = 1_000_000
+    llm.complete.side_effect = [
+        'Generally true[^1], except here[^2].\n'
+        'FOOTNOTES_JSON: [{"index": 1, "relation": "citation", "sources": ["a"], "rebuts": 2}, '
+        '{"index": 2, "relation": "citation", "sources": ["made-up-slug"]}]',
+    ]
+    toolbox = MagicMock()
+    toolbox.slug_resolves.side_effect = lambda s: s != "made-up-slug"
+    agent = _agent(llm=llm, toolbox=toolbox)
+
+    reply = agent.respond(history=[], user_text="does X always hold?")
+
+    assert reply.claims == []
 
 
 def test_respond_inference_claims_never_check_source_resolution():

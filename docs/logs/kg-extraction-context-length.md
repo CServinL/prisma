@@ -2,7 +2,7 @@
 
 Controlled test of whether `qwen2.5:7b-32k`'s knowledge-graph extraction
 quality degrades as the input section grows — run 2026-07-02 after noticing
-garbled/stray entities on a real paper (`Meng_2023_MEMIT_Mass_Editing_Memory.md`:
+garbled/stray entities on a real paper (Meng et al. 2023's MEMIT paper:
 a hallucinated `EMIX` node, stray `Star Constellations`/`Percy Snow` entities
 pulled from the paper's own illustrative examples rather than its real
 content). Motivation: confirm or rule out context length as a cause before
@@ -23,7 +23,7 @@ Same system prompt (`_EXTRACTION_SYSTEM`) and injection-defense wrapping
 (`wrap_untrusted`) prisma's real `KnowledgeGraphService` uses, called
 directly against Ollama — bypassing `resource_lock`/the supervisor, a single
 sequential script, not testing concurrency (same methodology as
-`docs/ollama-concurrency.md`).
+`docs/logs/ollama-concurrency.md`).
 
 ## Round 1: a false alarm (real bug, not a quality issue)
 

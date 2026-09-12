@@ -90,10 +90,12 @@
   // the end of the turn — see renderContentSegments() below.
   type ClaimRelation = "citation" | "paraphrase" | "attribution" | "relational";
 
-  // v3 (schema-only until the chat-schema-v3 branch): Toulmin argumentation
-  // extension. qualifier/warrant/rebuts exist on both claim kinds but
-  // nothing populates them yet -- same "renders if present" posture as
-  // `thoughts` below.
+  // Toulmin argumentation extension (chat_agent.py's FOOTNOTES_JSON parsing) --
+  // qualifier/warrant/rebuts exist on both claim kinds, populated only when
+  // the model self-reported them for that entry, same "renders if present"
+  // posture as `thoughts` below. `rebuts` is another claim's node `id`
+  // (chat_agent._resolve_rebuts resolves the model's same-turn [^N] index to
+  // it), not that claim's `index` -- see the jump-link below.
   type Qualifier = "certain" | "probable" | "possible" | "tentative";
 
   interface WarrantOut {
@@ -103,6 +105,7 @@
   }
 
   interface CitedClaimOut {
+    id: string;
     kind: "claim";
     index: number;
     claim_text: string;
@@ -111,16 +114,17 @@
     faithfulness_checked: boolean | null;
     qualifier: Qualifier | null;
     warrant: WarrantOut | null;
-    rebuts: string | null;
+    rebuts: string | null;  // another claim's `id` anywhere in this chat (schema-unrestricted; cross-turn is a valid target -- see rebutsTargetById), not its index
   }
 
   interface InferenceClaimOut {
+    id: string;
     kind: "inference";
     index: number;
     claim_text: string;
     qualifier: Qualifier | null;
     warrant: WarrantOut | null;
-    rebuts: string | null;
+    rebuts: string | null;  // another claim's `id` anywhere in this chat (schema-unrestricted; cross-turn is a valid target -- see rebutsTargetById), not its index
   }
 
   type ClaimOut = CitedClaimOut | InferenceClaimOut;
@@ -361,6 +365,19 @@
     return content.replace(TRAILING_FOOTNOTE_MARKER_RE, "").trim() === claims[0].claim_text.trim();
   }
 
+  // A rebuts target's own claim-list anchor doesn't exist when its turn is
+  // wholeTurnInference (the References block is suppressed for those --
+  // isWholeTurnInference above) -- fall back to the turn container itself
+  // rather than a dead click, same "jump to the closest existing anchor"
+  // rationale, checked at click time instead of duplicating the
+  // isWholeTurnInference computation into rebutsTargetById.
+  function scrollToClaimOrTurn(turn: number, index: number) {
+    const el =
+      document.getElementById(`chat-turn-${turn}-claim-${index}`) ??
+      document.getElementById(`chat-turn-${turn}`);
+    el?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }
+
   // Collapsed-by-default toggle line summarizing a turn's process
   // "spin-offs" -- tool calls, reasoning, recalls -- so the reply itself
   // isn't buried under mechanism by default, while still one click away.
@@ -580,6 +597,23 @@
     };
   });
   let activeChat = $state<ChatDetail | null>(null);
+  // Chat-wide id -> {turn, index}, not scoped to one turn's own msg.claims.
+  // CitedClaimNode.rebuts/InferenceNode.rebuts is an unrestricted claim id
+  // -- session_graph.py's REBUTS edge already supports a cross-turn target
+  // (tests/unit/agents/test_session_graph.py has one), even though the
+  // model's own self-report can only ever produce a same-turn one
+  // (chat_agent.py's _resolve_rebuts is deliberately same-turn-only, since
+  // that's the only handle the self-report has). The renderer has to
+  // support whatever the schema allows, not just what today's producer
+  // emits -- a same-turn-only id->index map would silently hide a valid,
+  // schema-supported cross-turn rebuts with no error, just a missing button.
+  let rebutsTargetById = $derived(
+    new Map(
+      (activeChat?.messages ?? []).flatMap((m, turnIdx) =>
+        (m.claims ?? []).map((c) => [c.id, { turn: turnIdx, index: c.index }] as const)
+      )
+    )
+  );
   let excerptPollInterval: ReturnType<typeof setInterval> | undefined;
   let chatInput = $state("");
   let chatSending = $state(false);
@@ -2447,6 +2481,37 @@
                     <div class="chat-turn-content chat-turn-content-inference text-body">
                       <div class="chat-turn-content-inference-label">AI inference — not from your vault</div>
                       {msg.content.value.replace(TRAILING_FOOTNOTE_MARKER_RE, "")}
+                      {#if msg.claims[0].qualifier || msg.claims[0].warrant || msg.claims[0].rebuts}
+                        {@const soleClaim = msg.claims[0]}
+                        <!-- Same fields the claim-list rendering below shows, compacted --
+                             a whole-turn inference has no claim row (the References block
+                             is suppressed for it), so this is its only place to surface
+                             qualifier/warrant/rebuts, all of which chat_agent.py's
+                             no-grounding override can now populate (PR #105 review). -->
+                        <div class="chat-turn-content-inference-toulmin">
+                          {#if soleClaim.qualifier}
+                            <span class="claim-qualifier" title="Epistemic strength (Toulmin qualifier)">{soleClaim.qualifier}</span>
+                          {/if}
+                          {#if soleClaim.rebuts}
+                            {@const rebutsTarget = rebutsTargetById.get(soleClaim.rebuts)}
+                            {#if rebutsTarget !== undefined}
+                              <button
+                                class="claim-rebuts"
+                                title="Rebuts claim #{rebutsTarget.index} — click to jump to it"
+                                onclick={() => scrollToClaimOrTurn(rebutsTarget.turn, rebutsTarget.index)}
+                              >⤺ rebuts</button>
+                            {/if}
+                          {/if}
+                          {#if soleClaim.warrant}
+                            <div class="claim-warrant" title="Toulmin warrant — the model's reasoning process behind this inference">
+                              <span class="claim-warrant-label">Warrant:</span> {soleClaim.warrant.text}
+                              {#if soleClaim.warrant.backing.length}
+                                <span class="claim-warrant-backing">(backed by {#each soleClaim.warrant.backing as s, si}{#if si > 0}, {/if}{#if isZoteroSource(s)}<span class="claim-source-zotero">📚 {s.slice(ZOTERO_SOURCE_PREFIX.length)}</span>{:else}<button class="claim-source-link" onclick={() => openNode(s)}>{s}</button>{/if}{/each})</span>
+                              {/if}
+                            </div>
+                          {/if}
+                        </div>
+                      {/if}
                     </div>
                   {:else}
                     <div class="chat-turn-content text-body">
@@ -2507,14 +2572,17 @@
                               <span class="claim-qualifier" title="Epistemic strength (Toulmin qualifier)">{claim.qualifier}</span>
                             {/if}
                             {#if claim.rebuts}
-                              <button
-                                class="claim-rebuts"
-                                title="Rebuts claim #{claim.rebuts} — click to jump to it"
-                                onclick={() => document.getElementById(`chat-turn-${i}-claim-${claim.rebuts}`)?.scrollIntoView({ behavior: "smooth", block: "nearest" })}
-                              >⤺ rebuts</button>
+                              {@const rebutsTarget = rebutsTargetById.get(claim.rebuts)}
+                              {#if rebutsTarget !== undefined}
+                                <button
+                                  class="claim-rebuts"
+                                  title="Rebuts claim #{rebutsTarget.index} — click to jump to it"
+                                  onclick={() => scrollToClaimOrTurn(rebutsTarget.turn, rebutsTarget.index)}
+                                >⤺ rebuts</button>
+                              {/if}
                             {/if}
                             {#if claim.warrant}
-                              <div class="claim-warrant" title="Toulmin warrant — why the grounds support this claim">
+                              <div class="claim-warrant" title={claim.kind === "inference" ? "Toulmin warrant — the model's reasoning process behind this inference" : "Toulmin warrant — why the grounds support this claim"}>
                                 <span class="claim-warrant-label">Warrant:</span> {claim.warrant.text}
                                 {#if claim.warrant.backing.length}
                                   <span class="claim-warrant-backing">(backed by {#each claim.warrant.backing as s, si}{#if si > 0}, {/if}{#if isZoteroSource(s)}<span class="claim-source-zotero">📚 {s.slice(ZOTERO_SOURCE_PREFIX.length)}</span>{:else}<button class="claim-source-link" onclick={() => openNode(s)}>{s}</button>{/if}{/each})</span>
@@ -4541,6 +4609,14 @@
     text-transform: uppercase;
     letter-spacing: 0.04em;
     margin-bottom: 4px;
+  }
+  .chat-turn-content-inference-toulmin {
+    margin-top: 6px;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
   }
   .chat-regen-model-picker {
     max-width: 130px;

@@ -3,7 +3,9 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from prisma.services.chat_tools import TOOL_CALL_RE, ChatToolbox, system_prompt_tool_section
+from prisma.services.chat_tools import (
+    TOOL_CALL_RE, ChatToolbox, system_prompt_footnote_section, system_prompt_tool_section,
+)
 from prisma.services.vault import VaultService
 from prisma.storage.models.kg_models import GraphQueryResult
 from prisma.storage.models.search_models import GraphSearchResult
@@ -43,6 +45,36 @@ def test_system_prompt_tool_section_shows_zotero_search_when_available():
     assert "SEARCH_VAULT:" in text
     assert "GRAPH_CONTEXT:" in text
     assert "RECALL:" in text
+
+
+def test_system_prompt_footnote_section_advertises_the_toulmin_keys():
+    text = system_prompt_footnote_section()
+    assert "qualifier" in text
+    assert "certain" in text and "probable" in text and "possible" in text and "tentative" in text
+    assert "warrant" in text and "backing" in text
+    assert "rebuts" in text
+
+
+def test_system_prompt_footnote_section_warrant_covers_ai_inference():
+    # WarrantNode is schema-supported on InferenceNode too, but ai-inference
+    # entries always have empty sources -- the description must not define
+    # warrant purely in terms of "why sources support this claim," or the
+    # model has no coherent instruction for the ai-inference case at all
+    # (PR #105 Copilot review).
+    text = system_prompt_footnote_section()
+    warrant_section = text[text.index('"warrant"'):text.index('"rebuts"')]
+    assert "ai-inference" in warrant_section
+
+
+def test_system_prompt_footnote_section_states_the_backing_limit():
+    # _RawWarrant.backing has a hard max_length (MAX_WARRANT_BACKING) --
+    # exceeding it drops the entire otherwise-valid claim, so the model
+    # needs to know the ceiling exists rather than discover it by having a
+    # claim silently vanish (PR #105 Copilot review).
+    from prisma.services.chat_tools import MAX_WARRANT_BACKING
+    text = system_prompt_footnote_section()
+    warrant_section = text[text.index('"warrant"'):text.index('"rebuts"')]
+    assert str(MAX_WARRANT_BACKING) in warrant_section
 
 
 def test_give_up_instruction_routes_through_zotero_search_when_available():

@@ -60,12 +60,12 @@ changes beyond construction. 268 tests passing
 
 ## New capability (the actual point of the token-budget fix)
 
-- [ ] **Per-section extraction, not per-file** — chunk *within* a large
+- [x] **Per-section extraction, not per-file** — chunk *within* a large
       document (by heading/section, token-budget-aware — `semchunk` was
       evaluated and is a good fit for this specific slicing step) so no
       single file can ever be "too big to extract." Each section's nodes/
       edges get upserted independently — no whole-document atomicity
-      requirement, no bisection-recursion needed.
+      requirement, no bisection-recursion needed. Built — see ADR-013.
 - [x] **Extraction invocation model — resolved differently than first
       planned, and better.** Originally sized as "subprocess spawned by api,
       stateless, results piped back for api to upsert." Superseded 2026-07-01:
@@ -96,13 +96,15 @@ related material by graph structure, not just by vector similarity — a
 different, complementary retrieval signal to hand the LLM alongside
 ChromaDB's results, not a display feature for the user to browse directly.
 
-- [ ] **`god_nodes`-equivalent** — surface highly-connected hub entities, so
+- [x] **`god_nodes`-equivalent** — surface highly-connected hub entities, so
       chat can pull in "the entities everything else in this area relates
       to" as anchor context, even if the user's question doesn't name them.
-- [ ] **`surprising_connections`-equivalent** — surface unusual/unexpected
+      Built (PR #104) as the `god_nodes` chat tool.
+- [x] **`surprising_connections`-equivalent** — surface unusual/unexpected
       cross-domain links, so chat can associatively connect a question to
       material that's structurally relevant but wouldn't rank highly by
-      text/embedding similarity alone.
+      text/embedding similarity alone. Built (PR #104) as the
+      `surprising_connections` chat tool.
 - [ ] **`suggest_questions`-equivalent** — auto-generate questions from graph
       structure, primarily to give chat a way to proactively suggest
       follow-ups grounded in what's actually in the vault, not just to
@@ -231,8 +233,8 @@ see below for what's actually shipped vs. still sketched.
       - `graph_context(query)` → `KnowledgeGraphClient.query()` (built —
         `ChatToolbox._graph_context`; not yet the full neighbor-expansion
         sophistication, same deferred scope as ADR-009's follow-up notes)
-      - `expand_node(id)` → one-hop graph traversal, on demand — **not
-        built yet.** These 5 remaining tools need a real user-facing
+      - `expand_node(id)` → one-hop graph traversal, on demand — built
+        (PR #104). These remaining tools need a real user-facing
         *application*, not just an LLM-callable function — cservinl wants
         this revisited periodically, not treated as a checklist item alone
         (2026-07-02). Worked example given for this one: in the chat UI,
@@ -241,7 +243,9 @@ see below for what's actually shipped vs. still sketched.
         directly — a tangible interactive feature, not just a tool the
         model calls on its own initiative.
       - `get_full_text(source_file, section?)` → last resort, deliberate,
-        never the default — **not built yet, and reconsidered 2026-07-02**:
+        never the default — **the bounded-excerpt version built (PR #104,
+        as `read_source`); the consultation-sub-agent redesign below is
+        still not built**, and was reconsidered 2026-07-02:
         cservinl raised that a flat raw-text dump is the wrong shape given
         the chat model's limited context (`qwen2.5:7b-32k` at 32768, real
         headroom already shared with history/tool round-trips) — source
@@ -264,30 +268,20 @@ see below for what's actually shipped vs. still sketched.
         i.e. a nested agent with its own tool loop, not a flat summarizer
         function. Not scoped/built yet — needs its own design pass, not
         bolted on alongside other in-flight chat work.
-      - `god_nodes()` / `surprising_connections()` / `suggest_questions()` —
-        associative exploration tools (see the framing note above — these
-        are retrieval primitives for the model, not user-facing reports)
-        — **not built yet.** Same "needs a real application" open question
-        as `expand_node` above.
+      - `god_nodes()` / `surprising_connections()` — associative exploration
+        tools (see the framing note above — these are retrieval primitives
+        for the model, not user-facing reports) — built (PR #104).
+      - `suggest_questions()` — same framing, **not built yet.**
 - [x] **Each tool needs a full tool-calling contract, not just an
       implementation.** Built as `ToolSpec` (name, marker, description) in
       `chat_tools.py`, rendered into the system prompt by
       `system_prompt_tool_section()`. Only `search_vault`/`graph_context`
-      have specs today; the remaining sketch below is unchanged/not yet built:
-      - `god_nodes()` — "call for broad/orienting questions with no specific
-        narrow target, e.g. 'what are the big themes in my notes about X',
-        or to orient before diving into specifics." Returns ranked
-        `[{entity, connection_count, sample_relations}]`.
-      - `surprising_connections()` — "call when the user explicitly asks for
-        unexpected/creative connections, or when direct search results seem
-        too narrow/obvious for what's being asked." Returns
-        `[{node_a, node_b, relation, why_surprising}]`.
-      - `suggest_questions()` — "call to propose grounded follow-ups at the
-        end of an answer, or when the user seems stuck / asks what to
-        explore next." Returns `[{question, grounding_source_file}]`.
-      - `expand_node(id: str)` / `get_full_text(source_file, section?)` —
-        "last resort — only when a specific document is clearly central and
-        its full content is genuinely needed. Never call by default."
+      have specs today; `god_nodes`/`surprising_connections`/`expand_node`/
+      `read_source` (the `get_full_text` equivalent) all got specs too, PR
+      #104 — only `suggest_questions()` is still sketch-only, unbuilt:
+      "call to propose grounded follow-ups at the end of an answer, or when
+      the user seems stuck / asks what to explore next." Returns
+      `[{question, grounding_source_file}]`.
 - [x] **Bounded loop** — `MAX_TOOL_ITERATIONS = 4` in `chat_agent.py`, same
       spirit as Graphify's old `max_retry_depth`, so the agentic loop can't
       quietly burn the shared GPU pool indefinitely.

@@ -540,7 +540,9 @@ from prisma.storage.models.kg_models import SurprisingConnection  # noqa: E402
 from prisma.storage.models.kg_models import SuggestedQuestion  # noqa: E402
 
 
-@pytest.mark.parametrize("marker", ["EXPAND_NODE:", "GOD_NODES:", "SURPRISING_CONNECTIONS:", "READ_SOURCE:"])
+@pytest.mark.parametrize("marker", [
+    "EXPAND_NODE:", "GOD_NODES:", "SURPRISING_CONNECTIONS:", "READ_SOURCE:", "SUGGEST_QUESTIONS:",
+])
 def test_new_tools_advertised_in_system_prompt(marker):
     assert marker in system_prompt_tool_section()
 
@@ -550,6 +552,7 @@ def test_new_tools_advertised_in_system_prompt(marker):
     ("GOD_NODES", "-"),
     ("SURPRISING_CONNECTIONS", "-"),
     ("READ_SOURCE", "attention-is-all-you-need"),
+    ("SUGGEST_QUESTIONS", "-"),
 ])
 def test_tool_call_re_matches_new_markers(marker, query):
     assert TOOL_CALL_RE.findall(f"{marker}: {query}") == [(marker, query)]

@@ -171,7 +171,20 @@ class KnowledgeGraphClient:
         data = self._post("/graph_relevance", json={"texts": texts}, timeout=2.0)
         if data is None:
             return zero_scores
-        return self._safe(lambda: [GraphRelevance.model_validate(d) for d in data], zero_scores)
+
+        def _parse() -> list[GraphRelevance]:
+            parsed = [GraphRelevance.model_validate(d) for d in data]
+            if len(parsed) != len(texts):
+                # Every item validated individually, but the kg worker sent
+                # back the wrong number of rows -- _safe's except clauses
+                # can't catch this (nothing raised), so the length check
+                # has to be explicit. Treating it as malformed, not just
+                # truncating/padding, since there's no principled way to
+                # know *which* input each surviving row corresponds to.
+                raise ValueError(f"expected {len(texts)} scores, got {len(parsed)}")
+            return parsed
+
+        return self._safe(_parse, zero_scores)
 
     def vault_health(self, limit: int = 500) -> VaultHealthResponse:
         default = VaultHealthResponse(orphans=[], orphan_count=0)
@@ -222,7 +235,12 @@ class KnowledgeGraphClient:
         ad hoc in individual methods, inconsistently across the class)."""
         try:
             return parse()
-        except (ValidationError, TypeError, KeyError, AttributeError) as exc:
+        except (ValidationError, TypeError, KeyError, AttributeError, ValueError) as exc:
+            # ValueError covers int()/float() on a non-numeric field
+            # (clear_dead_letters()'s int(data.get("removed", 0)), e.g.) --
+            # the same "kg responded, body doesn't parse as expected" class
+            # as a ValidationError, just from a plain conversion instead of
+            # a Pydantic model.
             _log.warning("kg process returned malformed data: %s", exc)
             return default
 

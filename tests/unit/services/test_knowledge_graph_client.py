@@ -457,3 +457,28 @@ def test_get_degrades_when_response_body_is_not_json():
     resp.json.side_effect = ValueError("not JSON")
     with patch("prisma.services.knowledge_graph_client.requests.get", return_value=resp):
         assert client.god_nodes() == []
+
+
+def test_clear_dead_letters_degrades_on_a_non_numeric_removed_field():
+    # int()/float() on a malformed field raises ValueError, not caught by
+    # _safe's original (ValidationError, TypeError, KeyError, AttributeError)
+    # tuple -- the exact class of bug this whole hardening pass exists to
+    # close, just from a plain conversion instead of a Pydantic model.
+    client = KnowledgeGraphClient()
+    with patch("prisma.services.knowledge_graph_client.requests.post",
+               return_value=_mock_response({"removed": "not-a-number"})):
+        assert client.clear_dead_letters() == 0
+
+
+def test_graph_relevance_degrades_when_response_length_does_not_match_input():
+    # Every item can validate individually while the kg worker still sends
+    # back the wrong number of rows -- _safe's except clauses can't catch
+    # "nothing raised," so the length check has to be explicit. Without it,
+    # this breaks the exact positional-correspondence invariant the
+    # surrounding code comment promises to preserve on every degrade path.
+    client = KnowledgeGraphClient()
+    with patch("prisma.services.knowledge_graph_client.requests.post",
+               return_value=_mock_response([{"score": 1, "matched_entities": []}])):
+        result = client.graph_relevance(["a", "b", "c"])
+    assert len(result) == 3
+    assert all(r.score == 0 and r.matched_entities == [] for r in result)

@@ -396,3 +396,64 @@ def test_timeline_empty_when_unreachable():
     client = KnowledgeGraphClient()
     with patch("prisma.services.knowledge_graph_client.requests.get", side_effect=requests.ConnectionError("down")):
         assert client.timeline("q") == []
+
+
+# ── Malformed-response degrade (kg worker reachable, body doesn't parse) ──────
+# The kg process responded, but the body doesn't match what the method
+# expected -- a client/server Pydantic model mismatch across a rolling
+# deploy, or a genuinely broken response. Previously unhandled: a
+# ValidationError/AttributeError propagated as an unhandled exception
+# through this client instead of degrading the same way "unreachable" does.
+
+def test_god_nodes_degrades_on_malformed_list_item():
+    client = KnowledgeGraphClient()
+    with patch("prisma.services.knowledge_graph_client.requests.get",
+               return_value=_mock_response([{"not": "a valid TopEntity"}])):
+        assert client.god_nodes() == []
+
+
+def test_status_degrades_to_unreachable_shape_on_malformed_body():
+    client = KnowledgeGraphClient()
+    with patch("prisma.services.knowledge_graph_client.requests.get",
+               return_value=_mock_response({"not": "a valid KGStatus"})):
+        result = client.status()
+    assert result.state == "stale"
+    assert result.last_error == "kg process unreachable"
+
+
+def test_vault_health_degrades_on_malformed_body():
+    client = KnowledgeGraphClient()
+    with patch("prisma.services.knowledge_graph_client.requests.get",
+               return_value=_mock_response({"not": "a valid VaultHealthResponse"})):
+        result = client.vault_health()
+    assert result.orphans == [] and result.orphan_count == 0
+
+
+def test_taint_file_degrades_when_response_is_not_a_dict():
+    # .get() on a non-dict response (e.g. the kg worker returning a bare
+    # JSON list/string) raises AttributeError, same malformed-response
+    # class as a Pydantic ValidationError elsewhere.
+    client = KnowledgeGraphClient()
+    with patch("prisma.services.knowledge_graph_client.requests.post",
+               return_value=_mock_response(["unexpected", "shape"])):
+        assert client.taint_file("notes/a.md") is False
+
+
+def test_graph_relevance_degrades_preserving_length_on_malformed_list_item():
+    # Same positional-correspondence requirement as the network-failure
+    # degrade path -- must stay `len(texts)` long, not collapse to [].
+    client = KnowledgeGraphClient()
+    with patch("prisma.services.knowledge_graph_client.requests.post",
+               return_value=_mock_response([{"not": "a valid GraphRelevance"}, {"also": "bad"}])):
+        result = client.graph_relevance(["a", "b"])
+    assert len(result) == 2
+    assert all(r.score == 0 and r.matched_entities == [] for r in result)
+
+
+def test_get_degrades_when_response_body_is_not_json():
+    client = KnowledgeGraphClient()
+    resp = MagicMock()
+    resp.raise_for_status.return_value = None
+    resp.json.side_effect = ValueError("not JSON")
+    with patch("prisma.services.knowledge_graph_client.requests.get", return_value=resp):
+        assert client.god_nodes() == []

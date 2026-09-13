@@ -1581,3 +1581,18 @@ mention (no relationship) is still invisible there. The real fix is putting the
 relative path in the id (`{relpath}_{entity}`) — an extraction-prompt change plus
 a full graph rebuild — so it belongs with the escape-scheme work above, not a
 review-fix.
+
+**Same root cause, a citability angle (2026-09-13, PR #106 review):** the id
+collision means an entity's `trust_tier` can drift out of sync with an edge it
+was originally asserted alongside — a chat file and a same-stem non-chat file
+merge onto the same entity id, `trust_tier` becomes whatever wrote last, but an
+existing edge's own `r.source_file` still points at whichever file asserted
+*that specific edge*, unchanged. `god_nodes`/`surprising_connections`/
+`suggest_questions` all filter `WHERE e.trust_tier <> 'chat' AND o.trust_tier <>
+'chat'` on the *entities'* current tier, then cite the *edge's* `source_file` —
+so a chat-asserted edge whose endpoints later got relabeled non-chat could be
+surfaced as a citable, grounded question, even though it originated from
+non-citable content (Axiom 5). Persisting `trust_tier` on `RelatesTo` itself
+(set once, at edge-creation time, never relabeled) would close this — same
+"needs a full reindex" shape as the `{relpath}_{entity}` fix above, so grouped
+here rather than fixed piecemeal in one function.

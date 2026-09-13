@@ -1470,16 +1470,15 @@
         if (activeNode?.collection_key) {
           zoteroCollection = activeNode.collection_key;
           if (zoteroStatus?.available) {
-            zoteroLoading = true;
-            try {
-              if (zoteroCollections.length === 0) {
-                const rc = await apiFetch(`${apiBase}/zotero/collections`);
-                if (rc.ok) zoteroCollections = await rc.json();
-              }
-              const params = new URLSearchParams({ collection: activeNode.collection_key });
-              const ri = await apiFetch(`${apiBase}/zotero/items?${params}`);
-              if (ri.ok) zoteroItems = await ri.json();
-            } finally { zoteroLoading = false; }
+            if (zoteroCollections.length === 0) {
+              const rc = await apiFetch(`${apiBase}/zotero/collections`);
+              if (rc.ok) zoteroCollections = await rc.json();
+            }
+            // Routed through loadZoteroItems(), not a direct fetch here --
+            // it participates in zoteroRequestSeq's last-request-wins
+            // guard and honors zoteroSortByRelevance, neither of which
+            // this call site tracked on its own (caught in review).
+            await loadZoteroItems(activeNode.collection_key);
             // Prepares the collection/items data only -- does not force
             // the panel open, which would override a user's explicit
             // close every time this stream re-renders.
@@ -2030,6 +2029,7 @@
                   class="zotero-relevance-toggle"
                   class:active={zoteroSortByRelevance}
                   title="Sort by how much each item overlaps entities already in your vault's knowledge graph"
+                  aria-pressed={zoteroSortByRelevance}
                   onclick={toggleZoteroRelevanceSort}
                 >Sort: Relevance</button>
               </div>
@@ -2040,7 +2040,7 @@
                   <div class="zotero-item">
                     <div class="zotero-item-title">
                       {item.title}
-                      {#if item.graph_relevance_score}
+                      {#if item.graph_relevance_score !== undefined}
                         <span
                           class="zotero-relevance-badge"
                           title={item.graph_relevance_matched?.length ? `Matches: ${item.graph_relevance_matched.join(", ")}` : ""}

@@ -13,6 +13,7 @@ from prisma.storage.models.kg_models import (
     AuthorSummary,
     EntityInfo,
     ExpandNodeResponse,
+    SuggestedQuestion,
     SurprisingConnection,
     TimelineEntry,
     TopEntity,
@@ -79,6 +80,25 @@ def test_surprising_connections_passes_limit(client, client_stub):
 def test_surprising_connections_rejects_out_of_range_limit(client):
     assert client.get("/graph/surprising_connections", params={"limit": 0}).status_code == 422
     assert client.get("/graph/surprising_connections", params={"limit": 999}).status_code == 422
+
+
+def test_suggest_questions_passes_limit(client, client_stub):
+    # Same Phase-A "public capability surface" contract every other tool-
+    # backed capability here follows (see this module's own docstring) --
+    # missing this route entirely was caught in review (PR #106), since
+    # nothing else exercised /graph/suggest_questions at all.
+    client_stub.suggest_questions.return_value = [
+        SuggestedQuestion(question="What connects 'A' and 'B'?", grounding_source_file="notes/a.md"),
+    ]
+    r = client.get("/graph/suggest_questions", params={"limit": 5})
+    assert r.status_code == 200
+    assert r.json()[0]["grounding_source_file"] == "notes/a.md"
+    client_stub.suggest_questions.assert_called_once_with(limit=5)
+
+
+def test_suggest_questions_rejects_out_of_range_limit(client):
+    assert client.get("/graph/suggest_questions", params={"limit": 0}).status_code == 422
+    assert client.get("/graph/suggest_questions", params={"limit": 999}).status_code == 422
 
 
 def test_authors_default_limit(client, client_stub):

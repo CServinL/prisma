@@ -739,6 +739,7 @@
   let zoteroCollection = $state<string | null>(null);
   let zoteroQ = $state("");
   let zoteroSortByRelevance = $state(false);
+  let zoteroRequestSeq = 0; // last-request-wins guard, see loadZoteroItems()
   let zoteroSearchTimer: ReturnType<typeof setTimeout> | null = null;
   let importingKey = $state<string | null>(null);
   let zoteroLoading = $state(false);
@@ -1278,6 +1279,13 @@
   }
 
   async function loadZoteroItems(collection?: string | null) {
+    // Last-request-wins sequencing: a collection click, the debounced
+    // search box, and the relevance toggle can all fire loadZoteroItems()
+    // in overlapping succession, and /items/relevance's kg round-trip has
+    // a materially different latency than plain /items -- without this, a
+    // faster response arriving after a slower one was issued could
+    // overwrite it with stale/mismatched results (caught in review, PR #106).
+    const seq = ++zoteroRequestSeq;
     zoteroLoading = true;
     const params = new URLSearchParams();
     const coll = collection !== undefined ? collection : zoteroCollection;
@@ -1288,8 +1296,13 @@
     const path = zoteroSortByRelevance ? "items/relevance" : "items";
     try {
       const r = await apiFetch(`${apiBase}/zotero/${path}?${params}`);
-      if (r.ok) zoteroItems = await r.json();
-    } catch {} finally { zoteroLoading = false; }
+      const body = r.ok ? await r.json() : null;
+      if (seq !== zoteroRequestSeq) return; // superseded by a newer call
+      if (body !== null) zoteroItems = body;
+    } catch {
+    } finally {
+      if (seq === zoteroRequestSeq) zoteroLoading = false;
+    }
   }
 
   function toggleZoteroRelevanceSort() {

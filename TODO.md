@@ -1389,7 +1389,7 @@ has tray/background OS-integration via Tauri, which this can build on.
 Design settled: distinguishing which claims in an assistant turn are traceable to a specific
 vault document vs. the model's own inference — mirroring academic citation practice ("what is
 self-made is not confused with what belongs to others"). Ontology done
-(`docs/ontology.md` Axiom 16, `docs/concepts/footnote.md`); data model done
+(`docs/ontology.md` Axiom 16, `docs/concepts/claim.md`); data model done
 (`FootnoteRelation`, `Footnote`, `ChatMessage.footnotes` in `storage/models/vault_models.py`,
 replacing the unused `sources_cited` field).
 

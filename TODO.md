@@ -1582,17 +1582,29 @@ relative path in the id (`{relpath}_{entity}`) — an extraction-prompt change p
 a full graph rebuild — so it belongs with the escape-scheme work above, not a
 review-fix.
 
-**Same root cause, a citability angle (2026-09-13, PR #106 review):** the id
-collision means an entity's `trust_tier` can drift out of sync with an edge it
-was originally asserted alongside — a chat file and a same-stem non-chat file
-merge onto the same entity id, `trust_tier` becomes whatever wrote last, but an
-existing edge's own `r.source_file` still points at whichever file asserted
-*that specific edge*, unchanged. `god_nodes`/`surprising_connections`/
-`suggest_questions` all filter `WHERE e.trust_tier <> 'chat' AND o.trust_tier <>
-'chat'` on the *entities'* current tier, then cite the *edge's* `source_file` —
-so a chat-asserted edge whose endpoints later got relabeled non-chat could be
-surfaced as a citable, grounded question, even though it originated from
-non-citable content (Axiom 5). Persisting `trust_tier` on `RelatesTo` itself
-(set once, at edge-creation time, never relabeled) would close this — same
-"needs a full reindex" shape as the `{relpath}_{entity}` fix above, so grouped
-here rather than fixed piecemeal in one function.
+**Same root cause, a dormant citability angle (2026-09-13, PR #106 review) —
+currently unreachable, tracked anyway since it's cheap to note:** the id
+collision means an entity's `trust_tier` can in principle drift out of sync
+with an edge it was originally asserted alongside — a chat file and a
+same-stem non-chat file merge onto the same entity id, `trust_tier` becomes
+whatever wrote last, but an existing edge's own `r.source_file` still points
+at whichever file asserted *that specific edge*, unchanged. `god_nodes`/
+`surprising_connections`/`suggest_questions` all filter
+`WHERE e.trust_tier <> 'chat' AND o.trust_tier <> 'chat'` on the *entities'*
+current tier, then cite the *edge's* `source_file` — so in principle a
+chat-asserted edge whose endpoints later got relabeled non-chat could be
+surfaced as a citable, grounded question.
+
+Not a live gap today: chats are never indexed into the graph at all (`.sess`,
+not `.md`/`.txt` — `KnowledgeGraphService._full_index()` only walks
+`index_extensions`), so `trust_tier == 'chat'` never actually occurs on a
+real entity/edge. And this filter was never the thing enforcing "chats
+aren't sources" in the first place — that's independently guaranteed by
+chats' storage format, `ChromaIndexer`'s explicit `chats/` exclusion, and
+`RECALL` being the one deliberately separate, non-citable path for chat
+content (see "Chat trust tiers" above). This is a gap in a redundant backup
+layer for a rule two other mechanisms already hold, not a threat to the rule
+itself. Worth closing eventually (persisting `trust_tier` on `RelatesTo`
+itself, set once at edge-creation time) alongside the `{relpath}_{entity}`
+id fix above, since it's the same "needs a full reindex" shape — not because
+it's urgent.

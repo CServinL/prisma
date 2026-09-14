@@ -270,3 +270,90 @@ def test_read_rejects_path_traversal_slug(client, vault, tmp_path):
     r = client.get("/notes/..--secret/read")
     assert r.status_code == 404
     assert "leaked" not in r.text
+
+
+def test_create_source_with_auto_citekey(client, recorder):
+    r = client.post("/notes/sources", json={
+        "title": "A Great Paper", "authors": ["Jane Smith"], "year": 2024,
+    })
+    assert r.status_code == 201
+    data = r.json()
+    assert data["citekey"] == "smith2024"
+    assert data["authors"] == ["Jane Smith"]
+    assert data["year"] == 2024
+    assert recorder.mark_stale_calls == 1
+    assert recorder.broadcasts[0][0]["action"] == "create"
+
+
+def test_create_source_with_explicit_citekey(client):
+    r = client.post("/notes/sources", json={"title": "A Great Paper", "citekey": "custom2024"})
+    assert r.status_code == 201
+    assert r.json()["citekey"] == "custom2024"
+
+
+def test_create_source_rejects_duplicate_citekey(client):
+    client.post("/notes/sources", json={"title": "First", "citekey": "dup2024"})
+    r = client.post("/notes/sources", json={"title": "Second", "citekey": "dup2024"})
+    assert r.status_code == 409
+
+
+def test_create_source_no_metadata_still_works(client):
+    # Metadata-only Source, no companion at all -- e.g. a physical book.
+    r = client.post("/notes/sources", json={"title": "A Physical Book"})
+    assert r.status_code == 201
+    assert r.json()["original_ext"] is None
+
+
+def test_edit_source_merges_only_given_fields(client, vault):
+    source = vault.create_source_from_citekey(
+        "smith2024", "A Great Paper", "body",
+        zotero_key="ABC", authors=["Jane Smith"], tags=[], journal="Original Journal",
+    )
+    r = client.patch(f"/notes/sources/{source.slug}", json={"doi": "10.1/new"})
+    assert r.status_code == 200
+    data = r.json()
+    assert data["doi"] == "10.1/new"
+    assert data["journal"] == "Original Journal"
+
+
+def test_edit_source_not_found(client):
+    r = client.patch("/notes/sources/does-not-exist", json={"doi": "10.1/x"})
+    assert r.status_code == 404
+
+
+def test_edit_source_rejects_non_source_slug(client, vault):
+    note = vault.create_note("My Note", "body")
+    r = client.patch(f"/notes/sources/{note.slug}", json={"doi": "10.1/x"})
+    assert r.status_code == 400
+
+
+def test_upload_companion_rejects_bad_extension(client, vault):
+    source = vault.create_source_from_citekey(
+        "smith2024", "A Great Paper", "body", zotero_key="ABC", authors=[], tags=[],
+    )
+    r = client.post(f"/notes/sources/{source.slug}/companion",
+                     files={"file": ("archive.zip", b"data", "application/zip")})
+    assert r.status_code == 400
+
+
+def test_upload_companion_attaches_svg(client, vault):
+    source = vault.create_source_from_citekey(
+        "smith2024", "A Great Paper", "body", zotero_key="ABC", authors=[], tags=[],
+    )
+    r = client.post(f"/notes/sources/{source.slug}/companion",
+                     files={"file": ("figure.svg", b"<svg></svg>", "image/svg+xml")})
+    assert r.status_code == 200
+    assert r.json()["original_ext"] == ".svg"
+
+
+def test_upload_companion_not_found(client):
+    r = client.post("/notes/sources/does-not-exist/companion",
+                     files={"file": ("figure.svg", b"<svg></svg>", "image/svg+xml")})
+    assert r.status_code == 404
+
+
+def test_upload_companion_rejects_non_source_slug(client, vault):
+    note = vault.create_note("My Note", "body")
+    r = client.post(f"/notes/sources/{note.slug}/companion",
+                     files={"file": ("figure.svg", b"<svg></svg>", "image/svg+xml")})
+    assert r.status_code == 400

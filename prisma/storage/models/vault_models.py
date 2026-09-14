@@ -622,6 +622,20 @@ class RenderedNode(BaseModel):
     next_update: datetime | None = None
     query: str | None = None
     collection_key: str | None = None
+    # Source-only — echoed back so the UI can prefill the edit-metadata
+    # dialog straight from GET /notes/{slug} without a second round-trip.
+    citekey: str | None = None
+    source_kind: SourceKind | None = None
+    authors: list[str] = Field(default_factory=list)
+    year: int | None = None
+    doi: str | None = None
+    journal: str | None = None
+    volume: str | None = None
+    issue: str | None = None
+    pages: str | None = None
+    publisher: str | None = None
+    url: str | None = None
+    item_type: str | None = None
 
 
 class StreamRunResult(BaseModel):

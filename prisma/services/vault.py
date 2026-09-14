@@ -12,7 +12,7 @@ import yaml
 
 from prisma.schema_gov import ContentFormat, RichContent
 from prisma.storage.models.vault_models import (
-    Chat, ChatRole, Note, NodeType, Source, Stream, StreamStatus,
+    Chat, ChatRole, Note, NodeType, Source, SourceKind, SourceOrigin, Stream, StreamStatus,
     RefreshFrequency, TurnNode, VaultListing, VaultNodeMeta, VaultTreeNode,
     _migrate_message_v1_to_v2,
 )
@@ -610,23 +610,34 @@ class VaultService:
             publisher=fm.get("publisher"),
             url=fm.get("url"),
             item_type=fm.get("item_type"),
+            origin=SourceOrigin(fm.get("origin") or "zotero"),
+            source_kind=SourceKind(fm.get("source_kind") or "paper"),
         )
 
     def create_source_from_citekey(
         self, citekey: str, title: str, body: str, *,
-        zotero_key: str, authors: list[str], tags: list[str],
+        zotero_key: str | None = None,
+        origin: SourceOrigin = SourceOrigin.zotero,
+        source_kind: SourceKind = SourceKind.paper,
+        authors: list[str], tags: list[str],
         year: int | None = None, doi: str | None = None, url: str | None = None,
         journal: str | None = None, volume: str | None = None, issue: str | None = None,
         pages: str | None = None, publisher: str | None = None, item_type: str | None = None,
     ) -> Source:
-        """Create a source node from Zotero-derived metadata -- the
-        vault-side half of POST /zotero/import/{key}."""
+        """Create a source node -- the vault-side half of both
+        POST /zotero/import/{key} (zotero_key set, origin defaults to
+        zotero) and the manual-create route (zotero_key=None, origin=
+        upload)."""
         self.ensure_dirs()
         slug = self.unique_slug(citekey)
         fm: dict = {
             "type": "source", "title": title, "citekey": citekey,
-            "zotero_key": zotero_key, "authors": authors, "tags": tags,
+            "authors": authors, "tags": tags, "origin": origin.value,
         }
+        if zotero_key:
+            fm["zotero_key"] = zotero_key
+        if source_kind != SourceKind.paper:
+            fm["source_kind"] = source_kind.value
         if year:
             fm["year"] = year
         if doi:
@@ -650,28 +661,83 @@ class VaultService:
         return self.get_source(slug)
 
     def update_source_bibliographic_fields(
-        self, slug: str, *, journal: str | None = None, volume: str | None = None,
+        self, slug: str, *, title: str | None = None, authors: list[str] | None = None,
+        year: int | None = None, doi: str | None = None, tags: list[str] | None = None,
+        journal: str | None = None, volume: str | None = None,
         issue: str | None = None, pages: str | None = None, publisher: str | None = None,
         url: str | None = None, item_type: str | None = None,
     ) -> Source:
         """Merges the given fields into `slug`'s existing frontmatter,
-        leaving the body and every other field untouched -- the ADR-020
-        backfill command's write path, for sources imported before these
-        fields existed on Source. Only overwrites a field when a non-empty
-        value is given, so re-running backfill against a partially-filled
-        source doesn't blank out fields Zotero didn't return this time."""
+        leaving the body and every other field untouched. Originally the
+        ADR-020 backfill command's write path (journal/volume/issue/pages/
+        publisher/url/item_type only, for sources imported before those
+        fields existed on Source), now doubling as the manual edit-metadata
+        route's write path too (adds title/authors/year/doi/tags). Only
+        overwrites a field when a non-empty value is given, so re-running
+        backfill against a partially-filled source doesn't blank out fields
+        Zotero didn't return this time -- same reason a manual edit can't
+        blank a field either, just set a new value.
+
+        Deliberately excludes `citekey`: renderer.py's citation index
+        resolves [[@citekey]] against current frontmatter values, so
+        changing it after creation would silently orphan or misdirect any
+        citation already pointing at this source elsewhere in the vault."""
         path = self._find_md(slug)
         if path is None:
             raise FileNotFoundError(f"source not found: {slug!r}")
         raw = path.read_text(encoding="utf-8")
         fm, content = _parse_frontmatter(raw)
         for key, value in [
-            ("journal", journal), ("volume", volume), ("issue", issue), ("pages", pages),
-            ("publisher", publisher), ("url", url), ("item_type", item_type),
+            ("title", title), ("authors", authors), ("year", year), ("doi", doi),
+            ("tags", tags), ("journal", journal), ("volume", volume), ("issue", issue),
+            ("pages", pages), ("publisher", publisher), ("url", url), ("item_type", item_type),
         ]:
             if value:
                 fm[key] = value
         path.write_text(_render_frontmatter(fm) + content, encoding="utf-8")
+        return self.get_source(slug)
+
+    def citekey_exists(self, citekey: str) -> bool:
+        """Scans current vault files' frontmatter for a matching citekey --
+        used by the manual-create route's collision guard, since (unlike a
+        Zotero key) a hand-entered citekey has no external uniqueness
+        guarantee. A few lines of overlap with renderer.py's
+        _build_citekey_index() (same frontmatter scan) is cheaper than
+        reaching into that module's private, differently-shaped internals
+        (it builds a citekey->slug index for citation *resolution*; this is
+        a plain existence check) just to avoid the duplication."""
+        for path in self.iter_files():
+            fm, _ = _parse_frontmatter(path.read_text(encoding="utf-8", errors="replace"))
+            if fm.get("citekey") == citekey:
+                return True
+        return False
+
+    def attach_source_companion(self, slug: str, filename: str, data: bytes) -> Source:
+        """Attach or replace `slug`'s companion file from raw bytes -- the
+        manual-upload counterpart to what Zotero import's pdf_bytes_to_md()
+        path does automatically. Regenerates the sibling .md body via
+        ensure_md_format() for pdf/html/htm companions only, matching
+        generate_md_format() route's own restriction; other companion kinds
+        are a no-op body-wise (image OCR/extraction is a tracked, separate
+        gap -- not attempted here).
+
+        Note: ensure_md_format() only fills the body when it's currently
+        empty, so *replacing* a companion on a source that already has body
+        text won't regenerate it -- inherited from that method's existing
+        contract, not a new inconsistency introduced here."""
+        path = self._find_md(slug)
+        if path is None:
+            raise FileNotFoundError(f"source not found: {slug!r}")
+        ext = Path(filename).suffix.lower()
+        if ext not in COMPANION_EXTS:
+            raise ValueError(f"unsupported companion extension: {ext!r}")
+        existing = self.find_companion(slug)
+        if existing is not None and existing.suffix != ext:
+            existing.unlink()
+        companion_path = path.with_suffix(ext)
+        companion_path.write_bytes(data)
+        if ext in (".pdf", ".html", ".htm"):
+            self.ensure_md_format(companion_path)
         return self.get_source(slug)
 
     def get_chat(self, slug: str) -> Chat:

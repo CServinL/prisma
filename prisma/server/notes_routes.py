@@ -15,14 +15,16 @@ from __future__ import annotations
 import logging
 from typing import Callable, Optional
 
-from fastapi import APIRouter, HTTPException, Query, Request
-from pydantic import BaseModel
+from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile
+from pydantic import BaseModel, Field
 
 from prisma.services.asset_rewrite import asset_prefix, rewrite_html
 from prisma.services.renderer import render as vault_render
 from prisma.services.vault import VaultService
 from prisma.storage.models.kg_models import ReadSourceResponse
-from prisma.storage.models.vault_models import NodeType, RenderedNode, Source, Stream, VaultListing
+from prisma.storage.models.vault_models import (
+    NodeType, RenderedNode, Source, SourceKind, SourceOrigin, Stream, VaultListing,
+)
 
 _activity = logging.getLogger("prisma.activity")
 
@@ -44,6 +46,39 @@ class NoteCreateRequest(BaseModel):
 
 class NoteSaveRequest(BaseModel):
     body: str
+
+
+class SourceCreateRequest(BaseModel):
+    title: str
+    body: str = ""
+    citekey: Optional[str] = None
+    authors: list[str] = Field(default_factory=list)
+    tags: list[str] = Field(default_factory=list)
+    year: Optional[int] = None
+    doi: Optional[str] = None
+    url: Optional[str] = None
+    journal: Optional[str] = None
+    volume: Optional[str] = None
+    issue: Optional[str] = None
+    pages: Optional[str] = None
+    publisher: Optional[str] = None
+    item_type: Optional[str] = None
+    source_kind: SourceKind = SourceKind.paper
+
+
+class SourceEditRequest(BaseModel):
+    title: Optional[str] = None
+    authors: Optional[list[str]] = None
+    tags: Optional[list[str]] = None
+    year: Optional[int] = None
+    doi: Optional[str] = None
+    journal: Optional[str] = None
+    volume: Optional[str] = None
+    issue: Optional[str] = None
+    pages: Optional[str] = None
+    publisher: Optional[str] = None
+    url: Optional[str] = None
+    item_type: Optional[str] = None
 
 
 def render_note(vault: VaultService, slug: str, request: Request, format: str = "html") -> RenderedNode:
@@ -109,7 +144,39 @@ def render_note(vault: VaultService, slug: str, request: Request, format: str = 
         rn.next_update = node.next_update
         rn.query = node.query
         rn.collection_key = node.collection_key
+    if isinstance(node, Source):
+        rn.citekey = node.citekey
+        rn.source_kind = node.source_kind
+        rn.authors = node.authors
+        rn.year = node.year
+        rn.doi = node.doi
+        rn.journal = node.journal
+        rn.volume = node.volume
+        rn.issue = node.issue
+        rn.pages = node.pages
+        rn.publisher = node.publisher
+        rn.url = node.url
+        rn.item_type = node.item_type
     return rn
+
+
+def _render_source(vault: VaultService, source: Source) -> RenderedNode:
+    """Builds a full RenderedNode for a Source object already in hand --
+    shared by the create/edit/companion-upload routes below, which all
+    need the same Source-echo fields render_note() populates for GET, but
+    don't have a Request object on hand (no .html-companion iframe logic
+    applies to a just-created/just-edited Source)."""
+    rel = str(source.path.relative_to(vault.root).as_posix())
+    html, broken_links, broken_citations = vault_render(source.body, vault)
+    return RenderedNode(
+        slug=source.slug, path=rel, title=source.title, node_type=source.node_type,
+        html=html, broken_links=broken_links, broken_citations=broken_citations,
+        original_ext=source.original_ext,
+        citekey=source.citekey, source_kind=source.source_kind, authors=source.authors,
+        year=source.year, doi=source.doi, journal=source.journal, volume=source.volume,
+        issue=source.issue, pages=source.pages, publisher=source.publisher,
+        url=source.url, item_type=source.item_type,
+    )
 
 
 def build_notes_router(
@@ -145,6 +212,69 @@ def build_notes_router(
             if isinstance(node, Source):
                 result[slug] = format_apa(node)
         return result
+
+    @router.post("/sources", response_model=RenderedNode, status_code=201)
+    def create_source(req: SourceCreateRequest):
+        """Manual Source creation — the non-Zotero counterpart to
+        POST /zotero/import/{key}. Grouped near /apa above, not required
+        for correctness (no existing /{slug}-shaped route shares this
+        method+path), just for readability alongside the other
+        Source-specific routes."""
+        from prisma.utils.text import make_citekey
+        vault = get_vault()
+        citekey = req.citekey or make_citekey(req.authors, req.year, req.title)
+        if vault.citekey_exists(citekey):
+            raise HTTPException(status_code=409, detail=f"citekey already in use: {citekey!r}")
+        source = vault.create_source_from_citekey(
+            citekey, req.title, req.body,
+            origin=SourceOrigin.upload, source_kind=req.source_kind,
+            authors=req.authors, tags=req.tags, year=req.year, doi=req.doi, url=req.url,
+            journal=req.journal, volume=req.volume, issue=req.issue, pages=req.pages,
+            publisher=req.publisher, item_type=req.item_type,
+        )
+        mark_stale_fn()
+        _activity.info("action=create_source slug=%s title=%r citekey=%s", source.slug, source.title, citekey)
+        rel = str(source.path.relative_to(vault.root).as_posix())
+        broadcast_fn({"type": "vault_change", "action": "create", "path": rel})
+        return _render_source(vault, source)
+
+    @router.patch("/sources/{slug}", response_model=RenderedNode)
+    def edit_source(slug: str, req: SourceEditRequest):
+        vault = get_vault()
+        try:
+            node = vault.get_any(slug)
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail=f"source not found: {slug!r}")
+        if not isinstance(node, Source):
+            raise HTTPException(status_code=400, detail=f"{slug!r} is not a source")
+        source = vault.update_source_bibliographic_fields(
+            slug, title=req.title, authors=req.authors, year=req.year, doi=req.doi, tags=req.tags,
+            journal=req.journal, volume=req.volume, issue=req.issue, pages=req.pages,
+            publisher=req.publisher, url=req.url, item_type=req.item_type,
+        )
+        mark_stale_fn()
+        rel = str(source.path.relative_to(vault.root).as_posix())
+        broadcast_fn({"type": "vault_change", "action": "save", "path": rel})
+        return _render_source(vault, source)
+
+    @router.post("/sources/{slug}/companion", response_model=RenderedNode)
+    async def upload_source_companion(slug: str, file: UploadFile = File(...)):
+        vault = get_vault()
+        try:
+            node = vault.get_any(slug)
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail=f"source not found: {slug!r}")
+        if not isinstance(node, Source):
+            raise HTTPException(status_code=400, detail=f"{slug!r} is not a source")
+        data = await file.read()
+        try:
+            source = vault.attach_source_companion(slug, file.filename or "", data)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        mark_stale_fn()
+        rel = str(source.path.relative_to(vault.root).as_posix())
+        broadcast_fn({"type": "vault_change", "action": "save", "path": rel})
+        return _render_source(vault, source)
 
     @router.get("/{slug}", response_model=RenderedNode)
     def get_note(slug: str, request: Request, format: str = "html"):

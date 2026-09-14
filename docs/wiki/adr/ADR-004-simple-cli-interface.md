@@ -154,8 +154,8 @@ hash-password` (bootstraps the password before one exists), and `prisma
 reload-resources` (a thin wrapper over the supervisor's own control port —
 see the next follow-up entry in this file for where that one is headed).
 
-See TODO.md's "CLI minimization" entry and `docs/wiki/cli.md`'s "Moved to
-the API" table for the full command→route mapping.
+See `docs/wiki/cli.md`'s "Moved to the API" table for the full
+command→route mapping.
 def status(job_id: str):
     """Check job status from database."""
     # Query SQLite for job status

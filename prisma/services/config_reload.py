@@ -1,11 +1,10 @@
 """Config-section diffing for `POST /reload` (see prisma_cli.py's
 `reload-config` command).
 
-Deliberately not a generic recursive diff engine: only 4 PrismaConfig
-sections are ever cached in a long-lived server object that needs an
-explicit rebuild to pick up a change (see TODO.md's "CLI minimization"
-entry for the full investigation of which sections are already read fresh
-per-call and need nothing done at all).
+Deliberately not a generic recursive diff engine: only the 4 sections
+listed below are ever cached in a long-lived server object that needs an
+explicit rebuild to pick up a change -- every other section is already
+read fresh per-call and needs nothing done at all.
 """
 from __future__ import annotations
 

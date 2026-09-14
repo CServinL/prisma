@@ -156,17 +156,6 @@ see the next follow-up entry in this file for where that one is headed).
 
 See `docs/wiki/cli.md`'s "Moved to the API" table for the full
 command→route mapping.
-def status(job_id: str):
-    """Check job status from database."""
-    # Query SQLite for job status
-    pass
-
-@app.command()
-def results(job_id: str):
-    """Get job results."""
-    # Return final report from job
-    pass
-```
 
 ### Configuration Format
 ```yaml

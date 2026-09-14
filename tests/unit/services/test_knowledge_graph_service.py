@@ -1,6 +1,5 @@
 """Unit tests for KnowledgeGraphService — the native, Kùzu-backed knowledge
-graph module that replaces the third-party `graphify` pip dependency.
-See TODO.md and docs/wiki/adr/ADR-012-process-supervision.md.
+graph module. See docs/wiki/adr/ADR-012-process-supervision.md.
 """
 import hashlib
 from pathlib import Path

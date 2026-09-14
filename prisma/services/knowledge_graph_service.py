@@ -1,15 +1,13 @@
-"""Native knowledge-graph service — replaces the third-party `graphify` pip
-dependency (see TODO.md and docs/wiki/adr/ADR-012-process-supervision.md).
+"""Native knowledge-graph service — extracts entities/relationships from
+vault docs/papers/images via LLM, so search can rank by graph structure, not
+just vector similarity.
 
-Same conceptual job Graphify did — extract entities/relationships from vault
-docs/papers/images via LLM, so search can rank by graph structure, not just
-vector similarity — but with two structural fixes:
+Two structural properties worth calling out:
 
   - Extraction is per-*section* (heading/token-budget-aware, via `semchunk`),
-    not per-file. Graphify's per-file chunking bottomed out on a single file
-    too big for the model's token budget, with no further recovery path
-    (confirmed live with a real paper). Chunking within a document means no
-    single file can ever be "too big to extract."
+    not per-file, so no single file can ever be "too big to extract" — a
+    document exceeding the model's token budget just gets chunked, not
+    dropped.
   - Storage is Kùzu (embedded graph DB), not a flat `graph.json` blob —
     real per-note upsert, no whole-file reparse per query. Kùzu allows only
     one process to hold the database open at all (a READ_WRITE connection
@@ -19,8 +17,9 @@ vector similarity — but with two structural fixes:
     persistent connection for the process lifetime is the right design — no
     separate supervised server needed, unlike ChromaDB.
 
-Every LLM call goes through `resource_lock.lease()` exactly like Graphify's
-did — same holder, same `local-ollama` pool, same `model_affinity` behavior.
+Every LLM call goes through `resource_lock.lease()` — same holder, same
+`local-ollama` pool, same `model_affinity` behavior every other LLM caller
+uses.
 """
 from __future__ import annotations
 
@@ -1747,12 +1746,10 @@ class KnowledgeGraphService:
         self._refresh_entity_labels()
 
     # ── Compatibility wrappers ───────────────────────────────────────────────
-    # Same names/shapes as GraphifyIndexer's — app.py's call sites (/search,
-    # ollama_deep_search) need no changes. Deliberately thin for now: full
-    # ranked_nodes/query sophistication (neighbor-expansion proximity
-    # weighting, BFS-token-budgeted context text) is explicitly deferred —
-    # see TODO.md. These wrap the same basic `search()` this module actually
-    # implements today.
+    # Deliberately thin for now: full ranked_nodes/query sophistication
+    # (neighbor-expansion proximity weighting, BFS-token-budgeted context
+    # text) is explicitly deferred — see TODO.md. These wrap the same basic
+    # `search()` this module actually implements today.
 
     def ranked_nodes(self, question: str, top_k: int = 20) -> list[RankedNode]:
         results = self.search(question, top_k=top_k)

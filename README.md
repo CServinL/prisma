@@ -3,7 +3,7 @@
 </p>
 
 # Prisma
-*Research workspace with semantic search over your papers and notes — Zotero-integrated, local-first, and reachable from a browser or desktop app.*
+*Research workspace with grounded chat and a native knowledge graph over your papers and notes — Zotero-integrated, local-first, and reachable from a browser or desktop app.*
 
 [![Sponsor](https://img.shields.io/badge/Sponsor-CServinL-ea4aaa?logo=github)](https://github.com/sponsors/CServinL)
 
@@ -12,7 +12,7 @@
 
 ## Overview
 
-**Prisma** is a Research Library Assistant that helps researchers intelligently organize, curate, and enhance their research libraries using **Zotero as the primary organization tool**. It discovers research content, assesses relevance, and provides intelligent library management.
+**Prisma** is a research library assistant that discovers academic papers and books, assesses their relevance using an LLM (local or cloud-capable), organizes them into Zotero, and provides a flat-Markdown vault workspace with grounded chat and a native knowledge graph over your notes and sources.
 
 **Architecture:** `prisma serve` runs a small supervisor that isolates the API, Web UI, ChromaDB, and native knowledge-graph module into independent, crash-recoverable processes — a flat-Markdown vault (notes, sources, chats, streams) is the shared workspace, with a CLI, REST/WebSocket API, and installable PWA/desktop UI all operating on it.
 
@@ -36,7 +36,7 @@
 - **🤖 AI-Powered Curation**: Local or cloud-capable LLMs (Ollama, OpenRouter, llama.cpp) assess relevance, score confidence, and summarize what's found
 - **🏷️ Smart Tagging (Streams only)**: Papers saved via a Research Stream are auto-tagged with confidence score, source, topic, and stream ID
 - **🗂️ Vault Workspace**: A local, flat-Markdown second brain for notes, sources, and chats — `prisma serve` opens it as a web app, installable PWA, or native desktop shell
-- **💬 Chat**: Ask Prisma questions about your vault — grounded in ChromaDB semantic search + native knowledge-graph context, with tool-calling and per-claim citations. Each chat is itself a session graph — a main line of turns with tool calls, reasoning, claims, and regeneration attempts as branches off each one — so a `RECALL` tool can pull back anything that's rolled off the active context window instead of losing it, alongside a pinning/Excerpt model for managing context budget across local or cloud-capable LLM backends
+- **💬 Chat**: Grounded Q&A over your vault — semantic search (ChromaDB) plus a native knowledge-graph toolbox the model can call mid-turn (`expand_node`, `god_nodes`, `surprising_connections`, `suggest_questions`, `read_source`, Zotero search) to follow threads across your notes and sources instead of answering from one search hit alone. Every claim in a reply is tagged with what backs it — a specific source, an inference, or neither — using a Toulmin argumentation model (qualifier, warrant, rebuttal), so an answer states not just *what* it's citing but how confidently and why. Each chat is itself a session graph — a main line of turns with tool calls, reasoning, claims, and regeneration attempts as branches off each one — so a `RECALL` tool can pull back anything that's rolled off the active context window instead of losing it, alongside a pinning/Excerpt model for managing context budget across local or cloud-capable LLM backends. Tool results are treated as untrusted input, never as instructions, to resist prompt injection from vault/search content
 - **🕸️ Native Knowledge Graph**: Entity/relationship extraction (structured LLM output, no third-party dependency) stored in an embedded graph DB, re-ranking search results and answering "what connects to what" — with a live progress UI (sync status, extraction stats, failure inspection)
 - **🔍 Semantic Search**: ChromaDB embeddings + the knowledge graph re-rank results beyond keyword matching
 - **🧹 Deduplication**: Multi-level matching (DOI, exact title, year+author, NLTK stem overlap, LLM identity check) catches duplicates other tools miss, on demand or during stream refresh
@@ -95,22 +95,8 @@ curl http://127.0.0.1:8765/zotero/status
 
 ## Quick Start
 
-### Regular users (install from PyPI)
-
-```bash
-pip install prisma
-prisma serve
-```
-
-### Run the workspace UI
-
-```bash
-prisma serve
-```
-
-Opens the vault workspace at `http://127.0.0.1:8766/app` — installable as a PWA, or wrapped in the [Tauri desktop shell](https://github.com/CServinL/prisma-desktop). See [Installation](docs/wiki/installation.md) for the full setup.
-
-### Developers (install from source, editable)
+Not yet published to PyPI — install from source (editable install, so changes
+to source files are immediately active, no reinstall needed):
 
 ```bash
 git clone https://github.com/CServinL/prisma.git
@@ -118,10 +104,10 @@ cd prisma
 python3 -m venv ~/prisma
 source ~/prisma/bin/activate
 pip install -e ".[dev]"
-prisma --help
+prisma serve
 ```
 
-Changes to source files are immediately active — no reinstall needed.
+Opens the vault workspace at `http://127.0.0.1:8766/app` — installable as a PWA, or wrapped in the [Tauri desktop shell](https://github.com/CServinL/prisma-desktop). See [Installation](docs/wiki/installation.md) for the full setup.
 
 ## Documentation
 
@@ -136,6 +122,7 @@ Changes to source files are immediately active — no reinstall needed.
 - [Zotero Integration](docs/wiki/zotero.md) — Web API client, connectivity/reachability, offline write queue
 - [Architecture](docs/wiki/architecture.md) — components and data flow
 - [Roadmap](docs/wiki/roadmap.md) — planned features
+- [Agent Skill](docs/agent-skills/prisma/SKILL.md) — REST API reference and vault link/citation syntax, for AI agents working with a running Prisma instance
 
 ## Technology Stack
 
@@ -145,7 +132,7 @@ Changes to source files are immediately active — no reinstall needed.
 - **⌨️ Click** for the command-line interface
 - **🗂️ Flat Markdown vault** — no database; notes, sources, chats, and streams are plain `.md`/`.yaml` files
 - **🔍 ChromaDB** for semantic search, running as its own supervised server process
-- **🕸️ Kùzu** — embedded graph DB backing the native knowledge graph (entity/relationship extraction via structured LLM output, no third-party `graphify` dependency)
+- **🕸️ Kùzu** — embedded graph DB backing the native knowledge graph (entity/relationship extraction via structured LLM output, no third-party dependency)
 - **🌐 FastAPI + SvelteKit** — REST + WebSocket API, installable as a PWA on any platform, or wrapped in a native [Tauri desktop shell](https://github.com/CServinL/prisma-desktop)
 - **🛡️ Supervised processes** — `prisma serve` runs a small supervisor that isolates the API, Web UI, ChromaDB, and knowledge-graph module into independent, crash-recoverable processes
 

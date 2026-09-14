@@ -1,37 +1,15 @@
 # Installation
 
-Prisma is a PyPI module. Install it once, use the `prisma` command — same pattern as `pip` or `jupyter`.
+Not yet published to PyPI — install from source (editable install). Changes to
+source are immediately active — no reinstall needed.
 
 ---
 
-## Regular Users
+## Install (editable)
 
-```bash
-python -m venv ~/envs/research
-source ~/envs/research/bin/activate
-pip install prisma
-prisma --help
-```
-
-To upgrade:
-```bash
-pip install --upgrade prisma
-```
-
-To pin a version:
-```bash
-pip install "prisma==0.2.1"
-```
-
-> Always use a venv. Never `sudo pip install`.
-
----
-
-## Developers (editable install)
-
-Editable mode installs a pointer to the repo instead of copying files. Changes to source are immediately active — no reinstall needed.
-
-The runtime venv lives at the XDG data path. `docu-craft` is also a local package and must be installed first.
+The runtime venv lives at the XDG data path. `docu-craft` is a normal
+dependency in `pyproject.toml` and installs from PyPI automatically — no
+separate local checkout needed.
 
 ```bash
 # 1. Create the runtime venv (XDG standard location)
@@ -40,10 +18,8 @@ python3 -m venv ~/.local/share/prisma/venv
 # 2. Upgrade pip first (avoids a Python 3.14 MetadataFile bug in older pip)
 ~/.local/share/prisma/venv/bin/python3 -m pip install --upgrade pip
 
-# 3. Install docu-craft then prisma (both editable)
-~/.local/share/prisma/venv/bin/pip install \
-    -e /path/to/docu-craft \
-    -e /path/to/prisma
+# 3. Install prisma, editable
+~/.local/share/prisma/venv/bin/pip install -e /path/to/prisma
 
 # 4. Expose the CLI via ~/.local/bin (XDG user executables)
 mkdir -p ~/.local/bin
@@ -138,7 +114,7 @@ See ADR-013 and ADR-014's appendix for the full VRAM/concurrency
 measurements behind these numbers, and the correction once the 65536
 claim turned out to be wrong.
 
-> **Upgrade note:** after `pip install --upgrade prisma`, re-run `ollama pull nomic-embed-text` if the configured embedding model changes — check `retrieval.embedding_model` in `config.toml`.
+> **Upgrade note:** after pulling new commits, re-run `ollama pull nomic-embed-text` if the configured embedding model changes — check `retrieval.embedding_model` in `config.toml`.
 
 **From WSL:**
 ```bash

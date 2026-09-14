@@ -4,7 +4,7 @@
 
 ```
 prisma/                        # repo root
-├── prisma/                    # Python package (pip install prisma)
+├── prisma/                    # Python package (`prisma` console script)
 │   ├── coordinator.py         # Literature review pipeline orchestrator
 │   ├── connectivity.py        # Network monitor (online/offline detection)
 │   ├── agents/
@@ -207,7 +207,7 @@ One daemon thread starts in the **Knowledge graph process** (`kg_app.py`, its ow
 
 | Service | What it does |
 |---------|--------------|
-| Knowledge graph indexer | Watchdog on vault root; on change, extracts entities/relationships via the configured `[llm]` backend (Ollama, llama.cpp, or OpenRouter — same backend-agnostic interface chat uses, ADR-014) **per section** (chunked with `semchunk`, token-budget-aware — not per-file, so no single oversized document can exceed the model's budget) and upserts into an embedded Kùzu graph DB at `{vault_root}/kg-out/`. Owns the sole Kùzu connection for the process's lifetime. `app.py` talks to it over HTTP via `KnowledgeGraphClient`. Replaces the third-party `graphify` dependency — see `TODO.md`. |
+| Knowledge graph indexer | Watchdog on vault root; on change, extracts entities/relationships via the configured `[llm]` backend (Ollama, llama.cpp, or OpenRouter — same backend-agnostic interface chat uses, ADR-014) **per section** (chunked with `semchunk`, token-budget-aware — not per-file, so no single oversized document can exceed the model's budget) and upserts into an embedded Kùzu graph DB at `{vault_root}/kg-out/`. Owns the sole Kùzu connection for the process's lifetime. `app.py` talks to it over HTTP via `KnowledgeGraphClient`. |
 
 One daemon thread starts in the **Web process**:
 
@@ -248,6 +248,16 @@ see ADR-012. Clients differ only in how they wrap the page.
 > Native Windows/macOS Tauri builds are planned once I've got hardware to test on,
 > but aren't a port of the old WSL2-aware code (see `prisma-desktop`'s own
 > `.claude/CLAUDE.md` and its CI workflow comments for the current state).
+
+> The two rows above differ in more than delivery mechanism: only the Tauri
+> build has a local vault-sync engine (`prisma-desktop/src-tauri/src/sync/`
+> — fs-watcher push, WS pull, offline-first reconciliation). The browser/PWA
+> path has no persistent local filesystem to sync at all — everything it
+> shows comes live from the API, no offline vault copy. Closing that gap
+> would need the File System Access API (Chromium-only, no Firefox/Safari/
+> iOS, no native fs-watch, weaker permission persistence) — a genuinely
+> different implementation, not an extension of the Tauri engine. Deferred,
+> not started; see `TODO.md`.
 
 **Tauri shell** (`prisma-desktop/src-tauri/`) is thin — Rust handles only:
 - Window lifecycle (create, resize, minimize, maximize, close, drag)

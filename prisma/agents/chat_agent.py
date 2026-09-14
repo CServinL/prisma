@@ -5,8 +5,7 @@ local model).
 Each iteration: ask the LLM, check whether it wrote a tool-call marker line
 (SEARCH_VAULT:/GRAPH_CONTEXT:), and if so call the matching tool and feed
 the result back as another turn. Bounded to MAX_TOOL_ITERATIONS so a
-confused model can't loop indefinitely against the shared compute pool —
-same spirit as Graphify's old max_retry_depth.
+confused model can't loop indefinitely against the shared compute pool.
 """
 from __future__ import annotations
 

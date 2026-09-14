@@ -14,14 +14,22 @@ is a backlog, not a log.
 - **No output-truncation handling.** Nothing detects/retries a model response
   that got cut off mid-answer (mirroring the old `finish_reason=length` case).
   `semchunk` only bounds *input* size.
-- **Optional local ML injection classifier, off by default.** Baseline defense
-  (`injection_defense.py`'s mechanical `<untrusted_source>` wrapping) is built
-  and mandatory; a small standalone INT8 ONNX classifier
+- **Optional local ML injection classifier, off by default — low priority.**
+  Baseline defense (`injection_defense.py`'s mechanical `<untrusted_source>`
+  wrapping) is built and mandatory; a small standalone INT8 ONNX classifier
   (`hlyn/prompt-injection-judge-deberta-70m` or
   `protectai/deberta-v3-small-prompt-injection-v2`, ~83MB, CPU-only, no
   framework) would add semantic detection on tool-result content specifically —
   not user input, and not needed until real ingested-content volume justifies
-  the extra cost.
+  the extra cost. Lower urgency than the wording alone suggests: every chat
+  tool (`search_vault`, `graph_context`, `expand_node`, `god_nodes`,
+  `surprising_connections`, `suggest_questions`, `read_source`, `recall`,
+  `think`, `zotero_search`) is read-only — nothing writes, deletes, or
+  reaches outside the vault/Zotero read — so there's no capability for an
+  injected instruction to hijack. The residual risk this would catch is
+  narrower: a poisoned document making the model state a false claim with a
+  confident `qualifier`/fabricated `warrant` rather than the model *doing*
+  something.
 - **Consultation sub-agent for large sources** — `get_full_text`'s bounded
   excerpt (`read_source`) is built; a deeper redesign was proposed instead of
   extending it further: a dedicated sub-agent that map-reduces over one
@@ -47,6 +55,98 @@ is a backlog, not a log.
   new backend representation. Not scoped or designed (open question: toggle
   on the same chat, or a separate page?).
 
+## Vault
+
+- **No UI to view a companion file** — `COMPANION_EXTS` covers pdf/html/htm/
+  svg/epub/docx/tex/drawio/jpg/jpeg, and the backend already serves any of
+  them generically (`GET /notes/{slug}/original`, `FileResponse`), but the
+  UI only ever does anything with `.html` companions (the existing
+  `format-toggle`/`Open HTML` buttons and `<iframe class="html-frame">` in
+  `+page.svelte`, backed by the html-specific `GET /notes/{slug}/view`).
+  Every other companion type is currently invisible in the UI — a source
+  with a PDF/SVG/EPUB/DOCX/TeX/drawio/JPG companion only ever shows its
+  derived `.md` text, with no way to see the original at all. Needs
+  generalizing the existing html-only toggle into a per-companion-type "view
+  original" affordance (a tab, in the existing toolbar location).
+  Per-format choice is driven by DOM-pollution risk, not by "can a browser
+  render this," and not by trust/origin (our own first-party generated HTML,
+  e.g. `docs/diagrams/*.html`, is exactly as DOM-polluting as an imported
+  one if ever shown inline — the format is what matters, not who made it):
+  - **html** — `<iframe>`, as today. This is the one format that must always
+    be isolated.
+  - **pdf** — `<iframe>`/`<embed>` pointed at `/original` is fine as-is: the
+    browser's native PDF viewer already runs in its own sandboxed context,
+    not against our page's DOM.
+  - **svg** — safe via `<img src=".../original">` (browsers never execute a
+    `<script>`/event handler embedded in an `<img>`-sourced SVG). Must
+    *never* be inlined into the DOM directly (e.g. a Svelte `{@html}` of the
+    raw markup) — that would need the same iframe treatment as html.
+  - **jpg/jpeg** (and any future png/gif/webp, see the image-extraction-gap
+    item above) — plain `<img>`, no isolation concern, it's raster data.
+  - **docx/epub/drawio/tex** — no reasonable inline browser renderer either
+    way; download-link fallback, not an embed decision.
+  Separately, a real gap in the *existing* html iframe: `<iframe
+  class="html-frame">` sets no `sandbox` attribute today, so the isolation
+  it's supposed to provide is only partial (a bare `<iframe src>` does put
+  the content in its own document, but without `sandbox` it still gets full
+  script execution, top-level navigation, form submission, etc.). Worth
+  fixing regardless of the broader per-format work — needs
+  `sandbox="allow-scripts"` at minimum to keep the existing `postMessage`
+  external-link-click interceptor working, tightened further if nothing
+  else in that script needs more than that. Deliberately **not**
+  `allow-same-origin` alongside `allow-scripts` — that combo is a known
+  sandbox-escape antipattern when the framed document shares an origin with
+  the embedding app (a real possibility here, API and web app both being
+  localhost), since it lets the framed script reach back into the parent
+  page's own DOM, defeating the isolation entirely. The consequence: without
+  `allow-same-origin` the framed document's origin is opaque (`Origin:
+  null`), and `app.py`'s CORS middleware (`allow_origin_regex=
+  r"^http://(localhost|127\.0\.0\.1)(:\d+)?$"`) correctly does *not* match
+  `null` — so any script inside an arbitrary imported HTML companion that
+  tries a same-origin-relative `fetch()`/XHR back to the API will be
+  silently blocked. That's the right default (fail closed on arbitrary
+  imported content, not fail open), not a bug to "fix" by special-casing
+  `null` in the CORS allow-list later — a `null`-origin CORS allowance isn't
+  scoped to *this* iframe, it would apply to any sandboxed frame from
+  anywhere. Our own self-contained content (e.g. the `docs/diagrams/*.html`
+  atlas) doesn't hit this at all — checked, none of them do a live `fetch()`,
+  data is embedded inline — so this only matters for arbitrary imported HTML
+  companions, and only if one ever legitimately needs to call back to the
+  API from inside the frame (none currently do).
+  Not scoped in detail — needs its own small design pass on the toolbar/tab
+  UI, not just wiring up `/original`.
+- **No real Source CRUD outside Zotero — next up.** `create_source_from_
+  citekey()` is only ever called from `/zotero/import/{key}`; nothing else
+  creates a genuine Source (real bibliographic fields — author/year/
+  citekey/etc. — plus a companion file). The type-toggle
+  (`PATCH /notes/{slug}/type`, `VaultService.set_node_type()`) has zero
+  validation — it just rewrites the frontmatter `type:` string on whatever
+  `.md` already exists, so "create a plain note locally, sync it up, flip
+  the type badge" produces something that's a `Source` in the type system
+  with no citekey, no bibliographic fields, and no companion at all (`GET
+  /notes/apa` would have nothing real to format). `PUT /notes/{slug}` only
+  ever saves `body` too — no endpoint edits bibliographic fields after
+  creation, Zotero-imported or not. By contrast Note/Chat/Stream all have
+  genuinely complete CRUD already (Stream in particular: `PATCH
+  /streams/{slug}` covers title/query/description/status/
+  refresh_frequency/tags, `DELETE /streams/{slug}` exists) — this is
+  specifically a Source gap, not a general pattern. Needs a real
+  `POST /notes` equivalent for Source (bibliographic fields + optional
+  companion upload — ties into the upload-path gap below) and a PATCH for
+  editing them after the fact. Not scoped — needs its own design pass on
+  what fields are required vs. optional without a citekey to anchor them.
+- **No upload path for a new companion file outside chat.** The only file-
+  upload endpoint anywhere in the server is `POST /chats/{slug}/attachments/
+  upload`, scoped to chat attachments; `/chats/{slug}/attachments/promote`
+  can turn one into a real vault Note afterward, but that's a side door
+  through the chat feature, not a first-class "add a Source from a local
+  file" action. The vault sidebar's drag-and-drop only reorganizes existing
+  vault nodes between folders, not external OS files. For anything not
+  already in Zotero, routing a file through a chat attachment first is
+  currently the only generic way to get it into the vault at all. Belongs
+  together with the Source-CRUD item above — a real "create Source" flow
+  needs this upload path as part of it, not as a separate feature.
+
 ## Knowledge graph
 
 - **`ranked_nodes`/`query`'s full neighbor-expansion-with-proximity-weighting
@@ -54,14 +154,42 @@ is a backlog, not a log.
   term-match scan, not the richer graph-proximity ranking from the original
   design. Deliberate, not an oversight (see ADR-013).
 - **Image extraction gap** — the KG module's file scan is `.md`-only;
-  vision-model extraction for `.png`/`.jpg`/`.jpeg`/`.webp`/`.gif` (present in
-  the old Graphify-era config) was never carried over.
-- **KG entity ids aren't directory-unique** — extraction mints ids as
-  `{stem}_{entity}`, so same-stem files in different directories collide and
-  `_upsert()`'s `MERGE (e:Entity {id})` silently collapses them into one row
-  (last-writer-wins `source_file`/`trust_tier`). Same root cause as the
-  compound-slug issue below. Real fix: `{relpath}_{entity}` ids + a full graph
-  rebuild.
+  vision-model extraction for `.png`/`.jpg`/`.jpeg`/`.webp`/`.gif` was never
+  carried over. Two separate pieces:
+  (1) `docu-craft` has no image→markdown path at all yet — that's the actual
+  extraction work, and belongs in `docu-craft` itself, not here, since
+  `VaultService.ensure_md_format()` already delegates any non-PDF companion
+  to a generic `docu_craft.render(format="md")` call; once docu-craft can
+  handle images, this side likely needs no new extraction code, just wiring.
+  (2) On this side: `jpg`/`jpeg` are already recognized (`COMPANION_EXTS`,
+  `MediaKind.jpg`) but produce no text today (the generic docu-craft render
+  call fails quietly on a bare image); `png`/`webp`/`gif` aren't recognized
+  as companions or `MediaKind` at all — they only appear in `app.py`'s
+  unrelated static-asset allowlist (`_ALLOWED_ASSET_EXTS`, shared with
+  `.css`/`.js`/fonts). Both are attachments, never first-class vault/KG
+  nodes, by design — extraction would only ever populate a caption/text
+  handle in the sibling `.md`, same role PDF extraction already plays.
+- **KG entity ids aren't directory-unique** — the extraction system prompt
+  (not Python code) tells the model to mint ids as `{stem}_{entity}`, so
+  same-stem files in different directories collide and `_upsert()`'s
+  `MERGE (e:Entity {id})` silently collapses them into one row
+  (last-writer-wins `source_file`/`trust_tier`/`label`). Same root cause as
+  the compound-slug issue below. No LLM re-run needed either to fix this or
+  to migrate existing data — `_upsert(rel, ...)` already has `rel` in scope,
+  so ids should be minted in Python from `rel` + the extracted label,
+  ignoring whatever id string the model self-reports (needs the same
+  `/`-escaping care as the compound-slug fix below). For existing data: `id`
+  is a Kùzu primary key (can't be renamed via `SET`, needs node
+  replace-and-repoint), but `RelatesTo.source_file` was never clobbered by
+  the collision — it's stamped per edge, so the distinct `source_file`s
+  among an entity's edges tell you exactly how many real files are
+  coalesced into it. A pure Cypher/Python migration can replace each
+  colliding node with one new node per distinct `source_file`, re-pointing
+  each edge to the split node matching its own `source_file` — no LLM call.
+  The one gap: whichever file's attributes lost the original last-write race
+  (label casing, author/source_location specifics) can't be perfectly
+  recovered by this migration — split copies inherit the currently-surviving
+  merged values as an approximation. Acceptable; not a reason to re-extract.
   - One consequence of the collision worth naming: an entity's `trust_tier`
     can end up out of sync with an edge asserted alongside it, so a
     chat-tier-drifted edge could in principle be cited as if it were a real
@@ -91,6 +219,13 @@ is a backlog, not a log.
 
 ## Infra
 
+- **PyPI distribution name `prisma` is already taken** — by the unrelated
+  Prisma ORM's Python client ("Prisma Client Python"). `pyproject.toml` still
+  declares `name = "prisma"`; the project was never actually published (docs
+  said "install from PyPI" but that never happened). `pip install prisma`
+  installs the wrong package. Needs a distribution-name decision (the
+  `prisma` console script/CLI name can likely stay as-is even under a
+  different PyPI project name) before ever publishing.
 - **`pending_queue.py`'s default queue file path is CWD-relative**
   (`./data/pending_writes.json`), not anchored to an explicit data directory —
   works by accident under a working directory that happens to be on
@@ -107,3 +242,41 @@ is a backlog, not a log.
   undecided: a pragmatic unsandboxed build (fast, not Flathub-submittable) vs.
   a Flathub-correct sandboxed build (needs vendoring every crate's sources
   offline first via `flatpak-cargo-generator`).
+- **Desktop app is single-window** — `tauri.conf.json`'s `app.windows` array
+  declares exactly one window, and the whole UI's state is one global
+  `activeNode` in `+page.svelte` — no way to have two nodes (a source and
+  the chat discussing it, say) open side by side today, in either the
+  desktop shell or the browser/PWA. Preferred direction, modeled on Zen
+  Browser: a vertical/sidebar tab list (not a horizontal top bar — maximizes
+  vertical work area, which matters more here than horizontal for reading
+  long note/source/chat content, and fits naturally alongside the existing
+  resizable/collapsible left `.sidebar` rather than adding a second,
+  competing UI convention), where each tab is a genuinely independent app
+  instance — its own state, own WebSocket connection, not just a shared
+  `activeNode` swapped in place — plus Zen's side-by-side split view so two
+  tabs can be viewed at once. Several concrete pairings want exactly this:
+  a chat next to the source(s) it's grounded in, a node next to its
+  companion (see the companion-viewer item above), a note next to a
+  linked-item it references.
+  Two different mechanisms could deliver "independent," not decided between:
+  (1) Tauri v2 supports multiple independent webviews within a single
+  window (verify current API surface when scoping) — each sidebar tab backed
+  by its own real webview, positioned/sized to fill the content area or
+  split it in two; desktop-only, no equivalent in the browser/PWA. (2) An
+  `<iframe>` per tab, each loading `/app` fresh — a genuinely separate
+  browsing context/JS realm even in a plain browser, so the same mechanism
+  works identically in the desktop shell, browser, and PWA, at the cost of
+  N full app reloads instead of native multi-webview efficiency. Not
+  scoped — needs a decision between the two before either is worth
+  designing further.
+- **Browser/PWA has no local vault sync** — only the Tauri build
+  (`prisma-desktop/src-tauri/src/sync/`) has a local vault-sync engine
+  (fs-watcher push, WS pull, offline-first reconciliation); the browser/PWA
+  path has no persistent local filesystem at all, so it always talks live to
+  the API with no offline copy. Deliberate, not an oversight (Tauri is the
+  primary/official app for now, per 2026-07-25 decision) — but a real,
+  unstarted gap, not just a lower-priority version of the same feature.
+  Would need the File System Access API (Chromium-only, no Firefox/Safari/
+  iOS, no native fs-watch, weaker permission persistence) — a genuinely
+  different implementation from `prisma-desktop`'s Rust engine, not a port
+  of it. Not scoped — its own future session, not a quick follow-up.

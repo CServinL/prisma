@@ -2,10 +2,9 @@
 attempts hiding in untrusted content (a downloaded paper, a web page, a
 vault note) before it enters any LLM's context.
 
-Originally graphify's `llm.py` `_wrap_untrusted`/`_neutralise_injection_sentinels`,
-ported into `knowledge_graph_service.py`, and now shared with the chat
-module's tool results — same threat model, same mitigation, one place to
-fix it. See TODO.md's sanitizer section.
+Shared between `knowledge_graph_service.py`'s extraction pipeline and the
+chat module's tool results — same threat model, same mitigation, one place
+to fix it.
 """
 from __future__ import annotations
 

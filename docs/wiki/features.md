@@ -156,7 +156,7 @@ Deep search is slower than regular search but finds semantically related content
 
 ## Knowledge Graph
 
-A background indexer (`KnowledgeGraphService`, native — replaced the third-party `graphify` pip dependency, see ADR-012's follow-up section and `TODO.md`) watches the vault root and extracts a knowledge graph via the configured `[llm]` backend (Ollama, llama.cpp, or OpenRouter — ADR-014), chunked **per section** (not per-file) so no single oversized document can exceed the model's token budget. The graph is persisted to an embedded Kùzu database at `{vault_root}/kg-out/`. On query, it returns related concepts and connections relevant to the search query.
+A background indexer (`KnowledgeGraphService`, native — see ADR-012's follow-up section) watches the vault root and extracts a knowledge graph via the configured `[llm]` backend (Ollama, llama.cpp, or OpenRouter — ADR-014), chunked **per section** (not per-file) so no single oversized document can exceed the model's token budget. The graph is persisted to an embedded Kùzu database at `{vault_root}/kg-out/`. On query, it returns related concepts and connections relevant to the search query.
 
 Status is exposed at `GET /status` under `knowledge_graph` and shown in the desktop app status popover.
 

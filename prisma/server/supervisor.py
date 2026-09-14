@@ -1,9 +1,9 @@
 """Prisma process supervisor — see ADR-012.
 
 Deliberately imports nothing beyond the standard library — no fastapi, no
-chromadb, no graphify, not even pydantic, and (since the config format
-moved to TOML) not even yaml anymore: `tomllib` is stdlib as of Python
-3.11. This is the "most basic and safe" layer: if every other dependency in
+chromadb, not even pydantic, and (since the config format moved to TOML)
+not even yaml anymore: `tomllib` is stdlib as of Python 3.11. This is the
+"most basic and safe" layer: if every other dependency in
 this codebase has a bug, the supervisor should still be able to report that
 and attempt recovery.
 

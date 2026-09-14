@@ -315,6 +315,54 @@ def test_authors_empty_when_unreachable():
         assert client.authors() == []
 
 
+def test_suggest_questions_passes_limit_and_returns_rows():
+    client = KnowledgeGraphClient()
+    payload = [{"question": "What connects 'A' and 'B'?", "grounding_source_file": "notes/a.md"}]
+    with patch("prisma.services.knowledge_graph_client.requests.get",
+               return_value=_mock_response(payload)) as mock_get:
+        result = client.suggest_questions(limit=5)
+    assert result[0].grounding_source_file == "notes/a.md"
+    assert mock_get.call_args.kwargs["params"] == {"limit": 5}
+
+
+def test_suggest_questions_empty_when_unreachable():
+    client = KnowledgeGraphClient()
+    with patch("prisma.services.knowledge_graph_client.requests.get", side_effect=requests.ConnectionError("down")):
+        assert client.suggest_questions() == []
+
+
+def test_graph_relevance_sends_texts_as_json_body_and_returns_scores():
+    client = KnowledgeGraphClient()
+    payload = [{"score": 2, "matched_entities": ["A", "B"]}, {"score": 0, "matched_entities": []}]
+    with patch("prisma.services.knowledge_graph_client.requests.post",
+               return_value=_mock_response(payload)) as mock_post:
+        result = client.graph_relevance(["text one", "text two"])
+    assert [r.score for r in result] == [2, 0]
+    assert mock_post.call_args.kwargs["json"] == {"texts": ["text one", "text two"]}
+
+
+def test_graph_relevance_degrades_to_zero_scores_preserving_length_when_unreachable():
+    # Positional correspondence with the input list must survive a degrade
+    # -- a caller zips this back against its own item list, so this must
+    # not be `[]`, which would misalign every item after the first failure.
+    client = KnowledgeGraphClient()
+    with patch("prisma.services.knowledge_graph_client.requests.post", side_effect=requests.ConnectionError("down")):
+        result = client.graph_relevance(["a", "b", "c"])
+    assert len(result) == 3
+    assert all(r.score == 0 and r.matched_entities == [] for r in result)
+
+
+def test_post_still_works_with_no_json_kwarg_for_existing_call_sites():
+    # Regression guard for extending _post() with an optional `json` kwarg
+    # -- every pre-existing call site (mark_stale, drop_index, taint_file,
+    # clear_dead_letters) passes only `params`, and must keep working
+    # unchanged now that `json` defaults to None.
+    client = KnowledgeGraphClient()
+    with patch("prisma.services.knowledge_graph_client.requests.post") as mock_post:
+        client.mark_stale()
+    assert mock_post.call_args.kwargs["json"] is None
+
+
 def test_vault_health_returns_response():
     client = KnowledgeGraphClient()
     payload = {"orphans": [{"id": "o1", "label": "O1", "source_file": "notes/a.md"}], "orphan_count": 1}
@@ -348,3 +396,89 @@ def test_timeline_empty_when_unreachable():
     client = KnowledgeGraphClient()
     with patch("prisma.services.knowledge_graph_client.requests.get", side_effect=requests.ConnectionError("down")):
         assert client.timeline("q") == []
+
+
+# ── Malformed-response degrade (kg worker reachable, body doesn't parse) ──────
+# The kg process responded, but the body doesn't match what the method
+# expected -- a client/server Pydantic model mismatch across a rolling
+# deploy, or a genuinely broken response. Previously unhandled: a
+# ValidationError/AttributeError propagated as an unhandled exception
+# through this client instead of degrading the same way "unreachable" does.
+
+def test_god_nodes_degrades_on_malformed_list_item():
+    client = KnowledgeGraphClient()
+    with patch("prisma.services.knowledge_graph_client.requests.get",
+               return_value=_mock_response([{"not": "a valid TopEntity"}])):
+        assert client.god_nodes() == []
+
+
+def test_status_degrades_to_unreachable_shape_on_malformed_body():
+    client = KnowledgeGraphClient()
+    with patch("prisma.services.knowledge_graph_client.requests.get",
+               return_value=_mock_response({"not": "a valid KGStatus"})):
+        result = client.status()
+    assert result.state == "stale"
+    assert result.last_error == "kg process unreachable"
+
+
+def test_vault_health_degrades_on_malformed_body():
+    client = KnowledgeGraphClient()
+    with patch("prisma.services.knowledge_graph_client.requests.get",
+               return_value=_mock_response({"not": "a valid VaultHealthResponse"})):
+        result = client.vault_health()
+    assert result.orphans == [] and result.orphan_count == 0
+
+
+def test_taint_file_degrades_when_response_is_not_a_dict():
+    # .get() on a non-dict response (e.g. the kg worker returning a bare
+    # JSON list/string) raises AttributeError, same malformed-response
+    # class as a Pydantic ValidationError elsewhere.
+    client = KnowledgeGraphClient()
+    with patch("prisma.services.knowledge_graph_client.requests.post",
+               return_value=_mock_response(["unexpected", "shape"])):
+        assert client.taint_file("notes/a.md") is False
+
+
+def test_graph_relevance_degrades_preserving_length_on_malformed_list_item():
+    # Same positional-correspondence requirement as the network-failure
+    # degrade path -- must stay `len(texts)` long, not collapse to [].
+    client = KnowledgeGraphClient()
+    with patch("prisma.services.knowledge_graph_client.requests.post",
+               return_value=_mock_response([{"not": "a valid GraphRelevance"}, {"also": "bad"}])):
+        result = client.graph_relevance(["a", "b"])
+    assert len(result) == 2
+    assert all(r.score == 0 and r.matched_entities == [] for r in result)
+
+
+def test_get_degrades_when_response_body_is_not_json():
+    client = KnowledgeGraphClient()
+    resp = MagicMock()
+    resp.raise_for_status.return_value = None
+    resp.json.side_effect = ValueError("not JSON")
+    with patch("prisma.services.knowledge_graph_client.requests.get", return_value=resp):
+        assert client.god_nodes() == []
+
+
+def test_clear_dead_letters_degrades_on_a_non_numeric_removed_field():
+    # int()/float() on a malformed field raises ValueError, not caught by
+    # _safe's original (ValidationError, TypeError, KeyError, AttributeError)
+    # tuple -- the exact class of bug this whole hardening pass exists to
+    # close, just from a plain conversion instead of a Pydantic model.
+    client = KnowledgeGraphClient()
+    with patch("prisma.services.knowledge_graph_client.requests.post",
+               return_value=_mock_response({"removed": "not-a-number"})):
+        assert client.clear_dead_letters() == 0
+
+
+def test_graph_relevance_degrades_when_response_length_does_not_match_input():
+    # Every item can validate individually while the kg worker still sends
+    # back the wrong number of rows -- _safe's except clauses can't catch
+    # "nothing raised," so the length check has to be explicit. Without it,
+    # this breaks the exact positional-correspondence invariant the
+    # surrounding code comment promises to preserve on every degrade path.
+    client = KnowledgeGraphClient()
+    with patch("prisma.services.knowledge_graph_client.requests.post",
+               return_value=_mock_response([{"score": 1, "matched_entities": []}])):
+        result = client.graph_relevance(["a", "b", "c"])
+    assert len(result) == 3
+    assert all(r.score == 0 and r.matched_entities == [] for r in result)

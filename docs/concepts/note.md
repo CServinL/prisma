@@ -47,5 +47,5 @@ loaded `Note` reports which one — if any — actually exists.
 
 ## Relevant axioms
 
-> Every LiteratureReviewReport becomes a Note. See [Axiom 3](../ontologia.md).
-> The knowledge graph indexer re-indexes on save. See [Axiom 8](../ontologia.md).
+> Every LiteratureReviewReport becomes a Note. See [Axiom 3](../ontology.md).
+> The knowledge graph indexer re-indexes on save. See [Axiom 8](../ontology.md).

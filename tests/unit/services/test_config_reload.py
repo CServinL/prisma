@@ -1,7 +1,6 @@
 """Unit tests for diff_config_sections() — the smart POST /reload's section
-diffing (see docs/wiki/cli.md's reload-config entry, TODO.md's "CLI
-minimization" note for the fuller investigation of which sections need this
-at all).
+diffing (see docs/wiki/cli.md's reload-config entry, and
+config_reload.py's own docstring for which sections need this at all).
 """
 
 from prisma.services.config_reload import diff_config_sections

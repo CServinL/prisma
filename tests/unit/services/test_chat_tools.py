@@ -537,9 +537,12 @@ def test_call_unknown_marker_raises():
 from prisma.storage.models.kg_models import ExpandNodeResponse, TopEntity  # noqa: E402
 from prisma.storage.models.kg_models import EdgeInfo, EntityInfo  # noqa: E402
 from prisma.storage.models.kg_models import SurprisingConnection  # noqa: E402
+from prisma.storage.models.kg_models import SuggestedQuestion  # noqa: E402
 
 
-@pytest.mark.parametrize("marker", ["EXPAND_NODE:", "GOD_NODES:", "SURPRISING_CONNECTIONS:", "READ_SOURCE:"])
+@pytest.mark.parametrize("marker", [
+    "EXPAND_NODE:", "GOD_NODES:", "SURPRISING_CONNECTIONS:", "READ_SOURCE:", "SUGGEST_QUESTIONS:",
+])
 def test_new_tools_advertised_in_system_prompt(marker):
     assert marker in system_prompt_tool_section()
 
@@ -549,6 +552,7 @@ def test_new_tools_advertised_in_system_prompt(marker):
     ("GOD_NODES", "-"),
     ("SURPRISING_CONNECTIONS", "-"),
     ("READ_SOURCE", "attention-is-all-you-need"),
+    ("SUGGEST_QUESTIONS", "-"),
 ])
 def test_tool_call_re_matches_new_markers(marker, query):
     assert TOOL_CALL_RE.findall(f"{marker}: {query}") == [(marker, query)]
@@ -731,6 +735,30 @@ def test_toolbox_surprising_connections_empty(vault):
     toolbox = ChatToolbox(MagicMock(), kg, vault)
 
     result = toolbox.call("SURPRISING_CONNECTIONS", "-")
+
+    assert result.text == ""
+    assert result.raw == []
+
+
+def test_toolbox_suggest_questions_lists_questions_with_a_sources_header(vault):
+    kg = MagicMock()
+    kg.suggest_questions.return_value = [
+        SuggestedQuestion(question="What connects 'A' and 'B'?", grounding_source_file="notes/paper.md"),
+    ]
+    toolbox = ChatToolbox(MagicMock(), kg, vault)
+
+    result = toolbox.call("SUGGEST_QUESTIONS", "-")
+
+    assert "- What connects 'A' and 'B'?" in result.text
+    assert "Sources: notes--paper" in result.text
+
+
+def test_toolbox_suggest_questions_empty_graph(vault):
+    kg = MagicMock()
+    kg.suggest_questions.return_value = []
+    toolbox = ChatToolbox(MagicMock(), kg, vault)
+
+    result = toolbox.call("SUGGEST_QUESTIONS", "-")
 
     assert result.text == ""
     assert result.raw == []

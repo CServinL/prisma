@@ -9,7 +9,8 @@ calls the matching function here, and feeds the (sanitized) result back.
 
 Only search_vault and graph_context are implemented for this first
 increment — TODO.md's design also sketches expand_node, get_full_text,
-god_nodes, surprising_connections, suggest_questions, deferred for later.
+god_nodes, surprising_connections, suggest_questions; only get_full_text's
+consultation-sub-agent redesign remains deferred, the rest are built.
 """
 from __future__ import annotations
 
@@ -128,6 +129,18 @@ TOOLS: list[ToolSpec] = [
             "creative connections, or when direct search results seem too "
             "narrow/obvious for what's being asked. The query text is "
             "ignored; write SURPRISING_CONNECTIONS: -"
+        ),
+    ),
+    ToolSpec(
+        name="suggest_questions",
+        marker="SUGGEST_QUESTIONS",
+        handler="_suggest_questions",
+        grounding=True,
+        description=(
+            "Proposes grounded follow-up questions, each tied to one vault "
+            "document. Call at the end of an answer, or when the user seems "
+            "stuck / asks what to explore next. The query text is ignored; "
+            "write SUGGEST_QUESTIONS: -"
         ),
     ),
     ToolSpec(
@@ -593,6 +606,27 @@ class ChatToolbox:
             self._vault.slug_for_relpath(s) for c in citable
             for s in (c.source_file_a, c.source_file_b)
         ))
+        wrapped = wrap_untrusted(
+            "knowledge-graph", f"Sources: {', '.join(slugs)}\n\n" + "\n".join(lines)
+        )
+        return ToolResult(text=wrapped, raw=raw)
+
+    def _suggest_questions(self, query: str) -> ToolResult:
+        """Grounded follow-up questions, each tied to one document -- cached
+        (see KnowledgeGraphService.suggest_questions()). Query text ignored,
+        same as GOD_NODES/SURPRISING_CONNECTIONS."""
+        questions = self._kg.suggest_questions(limit=15)
+        raw = [q.model_dump() for q in questions]
+        # Defensive, same as _god_nodes/_surprising_connections above, even
+        # though every row is constructed with a source_file by design --
+        # citability must never be assumed from shape alone.
+        citable = [q for q in questions if q.grounding_source_file]
+        if not citable:
+            return ToolResult(text="", raw=raw)
+        slugs = list(dict.fromkeys(
+            self._vault.slug_for_relpath(q.grounding_source_file) for q in citable
+        ))
+        lines = [f"- {q.question}" for q in citable]
         wrapped = wrap_untrusted(
             "knowledge-graph", f"Sources: {', '.join(slugs)}\n\n" + "\n".join(lines)
         )

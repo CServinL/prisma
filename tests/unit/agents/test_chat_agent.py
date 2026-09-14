@@ -392,11 +392,13 @@ def test_respond_returns_overflow_message_without_calling_llm_when_assembly_exce
 def test_respond_checks_context_window_again_after_a_tool_result_grows_the_assembly():
     llm = MagicMock()
     llm.model = "test-model"
-    # Fits the initial system+history+user assembly (~1550 estimated tokens
-    # for this agent's system prompt + tool section), but not once a big
-    # tool result's text (~1000 more estimated tokens) gets appended to
-    # messages for the second completion call.
-    llm.context_window = 2000
+    # Fits the initial system+history+user assembly (~2038 estimated tokens
+    # for this agent's system prompt + tool section -- grows as tools are
+    # added, so this margin is deliberately generous, not tuned tight to
+    # today's exact count), but not once a big tool result's text (~1000
+    # more estimated tokens) gets appended to messages for the second
+    # completion call.
+    llm.context_window = 2500
     llm.complete.return_value = "SEARCH_VAULT: something"
     toolbox = MagicMock()
     toolbox.call.return_value = ToolResult(text="y" * 4000, raw=[])

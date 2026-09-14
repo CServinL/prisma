@@ -2,8 +2,7 @@
 
 **Date:** 2026-07-03
 **Author:** CServinL
-**Status:** Accepted — fully built (2026-07-03). See `TODO.md`'s "Chat
-memory model" section for the concrete implementation of all three pieces:
+**Status:** Accepted — fully built (2026-07-03). All three pieces are live:
 compressed mode, verbatim mode + the budget-driven mode switch
 (`ChatAgent.excerpt_mode()`), and the context-usage label
 (`ChatAgent.context_usage()` + the UI's `k`/`M`-formatted display). Verbatim

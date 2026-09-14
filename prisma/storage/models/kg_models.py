@@ -190,6 +190,26 @@ class SurprisingConnection(BaseModel):
     source_file_b: str | None = None
 
 
+class SuggestedQuestion(BaseModel):
+    """A grounded follow-up question phrased from one `RelatesTo` edge --
+    see kg_queries.suggest_questions() for the exact definition.
+    `grounding_source_file` is the edge's own document, singular: one edge,
+    one document, unlike SurprisingConnection's two-hop pair."""
+    question: str
+    grounding_source_file: str
+
+
+class GraphRelevance(BaseModel):
+    """How much a caller-supplied text overlaps the vault's known entity
+    labels -- KnowledgeGraphService.graph_relevance()'s pure text-match
+    score, not a graph traversal. Backs stream-triage-by-graph-relevance
+    (lightweight design: no stream/Zotero content is ever indexed into
+    Kùzu, this only scores arbitrary text against labels already
+    extracted from the vault)."""
+    score: int
+    matched_entities: list[str] = []
+
+
 class ReadSourceResponse(BaseModel):
     """A bounded slice of one vault document's own raw text — never the
     whole file. `mode` is one of summary/section/literal."""

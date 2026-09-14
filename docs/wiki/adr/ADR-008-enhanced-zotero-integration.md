@@ -224,9 +224,8 @@ worked, and nothing in prisma-desktop currently consumes Zotero data at all).
   key is present) and backs both `ZoteroService.status()`'s new `reachable` field
   (surfaced in the UI's status panel) and the CLI's `zotero status` command.
 
-See `TODO.md`'s "Code quality assessment" #1 for the fuller before/after and the
-lesson drawn from this reversal (duplication that looks like "needs a refactor" can
-sometimes actually be "needs three of the four things deleted").
+The lesson worth keeping: duplication that looks like "needs a refactor" can
+sometimes actually be "needs three of the four things deleted."
 
 ## Follow-up (2026-07-28): the two remaining Web API clients merged into one
 

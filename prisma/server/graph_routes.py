@@ -25,6 +25,7 @@ from prisma.services.kg_queries import (
     DEFAULT_TOP_ENTITIES,
     EXPAND_MAX,
     GOD_NODES_MAX,
+    SUGGEST_QUESTIONS_MAX,
     SURPRISING_CONNECTIONS_MAX,
     TIMELINE_MAX,
     VAULT_HEALTH_MAX,
@@ -33,6 +34,7 @@ from prisma.services.knowledge_graph_client import KnowledgeGraphClient
 from prisma.storage.models.kg_models import (
     AuthorSummary,
     ExpandNodeResponse,
+    SuggestedQuestion,
     SurprisingConnection,
     TimelineEntry,
     TopEntity,
@@ -63,6 +65,13 @@ def build_graph_router(get_client: Callable[[], KnowledgeGraphClient]) -> APIRou
         asserted directly — cached, background-computed (see
         KnowledgeGraphService.surprising_connections())."""
         return get_client().surprising_connections(limit=limit)
+
+    @router.get("/suggest_questions", response_model=list[SuggestedQuestion])
+    def suggest_questions(limit: int = Query(DEFAULT_TOP_ENTITIES, ge=1, le=SUGGEST_QUESTIONS_MAX)):
+        """Grounded follow-up questions phrased from graph structure, each
+        tied to one vault document. Cache-only read, ranked by confidence
+        and endpoint degree (see KnowledgeGraphService.suggest_questions())."""
+        return get_client().suggest_questions(limit=limit)
 
     @router.get("/authors", response_model=list[AuthorSummary])
     def authors(limit: int = Query(DEFAULT_AUTHORS, ge=1, le=AUTHORS_MAX)):

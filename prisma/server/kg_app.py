@@ -15,7 +15,10 @@ import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+from typing import Annotated
+
 from fastapi import FastAPI, Query
+from pydantic import BaseModel, Field
 
 from prisma.server import log_setup as _log_setup
 from prisma.services import kg_queries
@@ -28,12 +31,14 @@ from prisma.storage.models.kg_models import (
     EntitiesForFileResponse,
     ExpandNodeResponse,
     GraphQueryResult,
+    GraphRelevance,
     GraphSearchResult,
     KGStatus,
     MarkStaleResponse,
     OllamaReadyResponse,
     RankedNode,
     StatusResponse,
+    SuggestedQuestion,
     SurprisingConnection,
     TaintFileResponse,
     TimelineEntry,
@@ -226,6 +231,36 @@ def surprising_connections(limit: int = Query(kg_queries.DEFAULT_TOP_ENTITIES, g
 def authors(limit: int = Query(kg_queries.DEFAULT_AUTHORS, ge=1, le=kg_queries.AUTHORS_MAX)):
     """Distinct Entity.author values grouped across the vault."""
     return _kg.authors(limit=limit)
+
+
+@app.get("/suggest_questions", response_model=list[SuggestedQuestion])
+def suggest_questions(
+    limit: int = Query(kg_queries.DEFAULT_TOP_ENTITIES, ge=1, le=kg_queries.SUGGEST_QUESTIONS_MAX),
+):
+    """Cached ranking only -- no live Cypher on this request path, see
+    KnowledgeGraphService.suggest_questions()."""
+    return _kg.suggest_questions(limit=limit)
+
+
+class GraphRelevanceRequest(BaseModel):
+    # This route is directly reachable on the kg worker (see this module's
+    # docstring) -- same validated-limit discipline as every other free-text
+    # param below (e.g. `search`'s `q`). Both bounds live in kg_queries.py,
+    # not as literals here, since zotero_routes.py's caller-side batching
+    # must agree with them exactly.
+    texts: list[Annotated[str, Field(max_length=kg_queries.GRAPH_RELEVANCE_MAX_TEXT_LENGTH)]] = (
+        Field(max_length=kg_queries.GRAPH_RELEVANCE_MAX_TEXTS)
+    )
+
+
+@app.post("/graph_relevance", response_model=list[GraphRelevance])
+def graph_relevance(body: GraphRelevanceRequest):
+    """Text-overlap score against the vault's known entity labels, one per
+    input text, same order -- lightweight stream-triage-by-graph-relevance
+    design (see PR #106): no stream/Zotero content is ever indexed into
+    Kùzu, this only scores arbitrary caller text against labels already
+    extracted from the vault."""
+    return _kg.graph_relevance(body.texts)
 
 
 @app.get("/vault_health", response_model=VaultHealthResponse)

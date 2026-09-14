@@ -14,6 +14,7 @@ from prisma.services.knowledge_graph_service import (
     KnowledgeGraphService,
     Node,
     TOP_ENTITIES_CACHE_SIZE,
+    _compile_label_patterns,
     _extraction_system_prompt,
     _KUZU_BUFFER_POOL_SIZE_BYTES,
     _sanitize_escape_sequences,
@@ -23,7 +24,9 @@ from prisma.services.knowledge_graph_service import (
 )
 from prisma.storage.models.kg_models import (
     AuthorSummary,
+    GraphRelevance,
     OrphanEntity,
+    SuggestedQuestion,
     SurprisingConnection,
     TopEntity,
     VaultHealthResponse,
@@ -56,6 +59,56 @@ def _extraction(nodes=None, edges=None) -> Extraction:
 
 def _patch_create(kg, **kwargs):
     return patch.object(kg._instructor_client.chat.completions, "create", **kwargs)
+
+
+# ── _upsert() confidence_score/weight ────────────────────────────────────────
+
+def test_upsert_preserves_a_genuine_zero_confidence_score(kg):
+    # `e.get("confidence_score", 0.5) or 0.5` would launder a legitimate
+    # 0.0 into 0.5 (0.0 is falsy in Python) -- caught in review once
+    # suggest_questions()' confidence-based ranking made the effect
+    # observable, but the bug is in the write path here, not the ranking.
+    with kg._lock:
+        kg._upsert(
+            "notes/a.md", "note",
+            [{"id": "a_x", "label": "X"}, {"id": "a_y", "label": "Y"}],
+            [{"source": "a_x", "target": "a_y", "relation": "cites", "confidence_score": 0.0}],
+        )
+        result = kg._conn.execute(
+            "MATCH (a:Entity {id: 'a_x'})-[r:RelatesTo]->(b:Entity {id: 'a_y'}) RETURN r.confidence_score"
+        )
+        (score,) = result.get_next()
+    assert score == 0.0
+
+
+def test_upsert_preserves_a_genuine_zero_weight(kg):
+    with kg._lock:
+        kg._upsert(
+            "notes/a.md", "note",
+            [{"id": "a_x", "label": "X"}, {"id": "a_y", "label": "Y"}],
+            [{"source": "a_x", "target": "a_y", "relation": "cites", "weight": 0.0}],
+        )
+        result = kg._conn.execute(
+            "MATCH (a:Entity {id: 'a_x'})-[r:RelatesTo]->(b:Entity {id: 'a_y'}) RETURN r.weight"
+        )
+        (weight,) = result.get_next()
+    assert weight == 0.0
+
+
+def test_upsert_still_defaults_a_missing_confidence_score_and_weight(kg):
+    with kg._lock:
+        kg._upsert(
+            "notes/a.md", "note",
+            [{"id": "a_x", "label": "X"}, {"id": "a_y", "label": "Y"}],
+            [{"source": "a_x", "target": "a_y", "relation": "cites"}],
+        )
+        result = kg._conn.execute(
+            "MATCH (a:Entity {id: 'a_x'})-[r:RelatesTo]->(b:Entity {id: 'a_y'}) "
+            "RETURN r.confidence_score, r.weight"
+        )
+        score, weight = result.get_next()
+    assert score == 0.5
+    assert weight == 1.0
 
 
 # ── Kùzu buffer pool sizing ───────────────────────────────────────────────────
@@ -1044,11 +1097,15 @@ def test_god_nodes_authors_vault_health_are_cache_only_reads(kg):
     kg._authors_cache = [AuthorSummary(author="Ada", file_count=1)]
     kg._vault_health_cache = VaultHealthResponse(
         orphans=[OrphanEntity(id="o", label="O")], orphan_count=1)
+    kg._suggest_questions_cache = [
+        SuggestedQuestion(question="What connects 'A' and 'B'?", grounding_source_file="notes/a.md"),
+    ]
 
     with patch.object(kg._conn, "execute") as mock_execute:
         assert kg.god_nodes()[0].id == "h"
         assert kg.authors()[0].author == "Ada"
         assert kg.vault_health().orphan_count == 1
+        assert kg.suggest_questions()[0].grounding_source_file == "notes/a.md"
     mock_execute.assert_not_called()
 
 
@@ -1060,6 +1117,151 @@ def test_refresh_derived_caches_populates_the_new_caches(kg):
     assert any(e.id == "hub" for e in kg.god_nodes())
     assert any(a.author == "Ada Lovelace" for a in kg.authors())
     assert any(o.id == "lonely" for o in kg.vault_health().orphans)
+    assert any(q.grounding_source_file == "sources/a.md" for q in kg.suggest_questions())
+    assert "Hub" in kg._entity_labels_cache
+    # The precompiled pattern cache must be populated by the same refresh
+    # cycle, not just the raw label list -- graph_relevance() reads only
+    # the former.
+    assert any(label == "Hub" for label, _ in kg._entity_label_patterns_cache)
+
+
+def test_drop_index_clears_suggest_questions_cache(kg):
+    kg._suggest_questions_cache = [
+        SuggestedQuestion(question="What connects 'A' and 'B'?", grounding_source_file="notes/a.md"),
+    ]
+    _set_entity_labels(kg, ["A", "B"])
+
+    with patch("prisma.services.resource_lock.acquire", return_value=(True, "local-ollama", "req-1")), \
+         patch.object(kg, "_full_index"):  # avoid the real background re-index racing this assertion
+        kg.drop_index()
+
+    assert kg.suggest_questions() == []
+    assert kg._entity_labels_cache == []
+    assert kg._entity_label_patterns_cache == []
+
+
+def test_refresh_suggest_questions_scans_and_publishes_under_one_lock_hold(kg):
+    with kg._lock:
+        kg._upsert("notes/a.md", "note",
+                   [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}],
+                   [{"source": "a", "target": "b", "relation": "cites"}])
+    kg._lock = _CountingLock(kg._lock)
+
+    kg._refresh_suggest_questions()
+
+    assert kg._lock.entries == 1
+    assert kg.suggest_questions()
+
+
+def test_refresh_entity_labels_scans_and_publishes_under_one_lock_hold(kg):
+    with kg._lock:
+        kg._upsert("notes/a.md", "note", [{"id": "a", "label": "A"}], [])
+    kg._lock = _CountingLock(kg._lock)
+
+    kg._refresh_entity_labels()
+
+    assert kg._lock.entries == 1
+    assert kg._entity_labels_cache == ["A"]
+    assert [label for label, _ in kg._entity_label_patterns_cache] == ["A"]
+
+
+# ── graph_relevance (lightweight stream-triage design) ─────────────────────────
+
+def _set_entity_labels(kg, labels: list[str]) -> None:
+    """graph_relevance() reads the precompiled pattern cache, not the raw
+    label list directly (see _compile_label_patterns) -- tests that want
+    to control the match set must set both, the same way
+    _refresh_entity_labels() does, or graph_relevance() sees an empty
+    pattern cache regardless of what _entity_labels_cache holds."""
+    kg._entity_labels_cache = labels
+    kg._entity_label_patterns_cache = _compile_label_patterns(labels)
+
+def test_graph_relevance_scores_text_overlap_against_cached_labels(kg):
+    _set_entity_labels(kg, ["Neural Networks", "Transformers"])
+
+    results = kg.graph_relevance(["A paper about Neural Networks and Transformers", "Unrelated topic"])
+
+    assert results[0].score == 2
+    assert set(results[0].matched_entities) == {"Neural Networks", "Transformers"}
+    assert results[1].score == 0
+    assert results[1].matched_entities == []
+
+
+def test_graph_relevance_is_case_insensitive(kg):
+    _set_entity_labels(kg, ["Neural Networks"])
+    assert kg.graph_relevance(["neural networks are great"])[0].score == 1
+
+
+def test_graph_relevance_does_not_match_a_short_label_inside_an_unrelated_word(kg):
+    # A bare substring check (an earlier version of this method, caught in
+    # self-review rather than by the original test suite) matches "AI"
+    # inside "explain", "US" inside "custom", "ROC" inside "process" --
+    # none of these texts are actually about any of these entities.
+    _set_entity_labels(kg, ["AI", "US", "ROC"])
+    results = kg.graph_relevance(["I will explain this later", "a custom setup", "the process was smooth"])
+    assert [r.score for r in results] == [0, 0, 0]
+
+
+def test_graph_relevance_still_matches_a_short_label_as_a_whole_word(kg):
+    _set_entity_labels(kg, ["AI"])
+    assert kg.graph_relevance(["real AI research"])[0].score == 1
+
+
+def test_graph_relevance_matches_a_label_starting_or_ending_in_punctuation(kg):
+    # Plain `\b` (a second self-review round caught this one) fails on any
+    # label that itself starts/ends with punctuation -- there's never a
+    # word/non-word *transition* at a position surrounded by punctuation
+    # and whitespace on both sides, even though the label is verbatim in
+    # the text.
+    _set_entity_labels(kg, [".NET", "Ph.D.", "C++", "e.g.", "U.S."])
+    results = kg.graph_relevance([
+        "built on .NET", "she earned her Ph.D. last year", "we compared C++ vs Rust",
+        "e.g. this example", "the U.S. government",
+    ])
+    assert [r.score for r in results] == [1, 1, 1, 1, 1]
+
+
+def test_graph_relevance_dedupes_case_variant_labels_from_different_documents(kg):
+    # Two documents can independently extract "Neural Networks" and
+    # "neural networks" as separate cache entries -- both are the same
+    # concept and must not double the score or duplicate the match list.
+    _set_entity_labels(kg, ["Neural Networks", "neural networks"])
+    result = kg.graph_relevance(["a paper about neural networks"])[0]
+    assert result.score == 1
+    assert result.matched_entities == ["Neural Networks"]
+
+
+def test_graph_relevance_scores_each_text_independently_and_preserves_order(kg):
+    _set_entity_labels(kg, ["X"])
+    results = kg.graph_relevance(["has X", "no match", "also has X"])
+    assert [r.score for r in results] == [1, 0, 1]
+
+
+def test_graph_relevance_empty_label_cache_scores_everything_zero(kg):
+    _set_entity_labels(kg, [])
+    assert kg.graph_relevance(["anything"]) == [GraphRelevance(score=0, matched_entities=[])]
+
+
+def test_graph_relevance_is_a_cache_only_read_no_kuzu_call(kg):
+    _set_entity_labels(kg, ["X"])
+    with patch.object(kg._conn, "execute") as mock_execute:
+        kg.graph_relevance(["has X"])
+    mock_execute.assert_not_called()
+
+
+def test_graph_relevance_does_not_recompile_patterns_per_call(kg):
+    # A caller (zotero_routes.py's item listing) can call graph_relevance()
+    # several times in a row for one page load (one call per item batch)
+    # -- patterns must be precompiled once by _refresh_entity_labels(),
+    # not rebuilt from _entity_labels_cache inside graph_relevance() itself
+    # (caught in review: an earlier version did exactly that).
+    _set_entity_labels(kg, ["X"])
+    with patch(
+        "prisma.services.knowledge_graph_service._compile_label_patterns",
+    ) as mock_compile:
+        kg.graph_relevance(["has X"])
+        kg.graph_relevance(["has X again"])
+    mock_compile.assert_not_called()
 
 
 def test_vault_health_slices_orphans_but_keeps_the_true_count(kg):

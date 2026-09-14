@@ -39,7 +39,7 @@ The graph is used for:
 
 ## Relevant axioms
 
-> The knowledge graph indexer re-indexes on save. See [Axiom 8](../ontologia.md).
+> The knowledge graph indexer re-indexes on save. See [Axiom 8](../ontology.md).
 
 ## Not yet implemented
 

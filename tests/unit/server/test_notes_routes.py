@@ -119,6 +119,20 @@ def test_set_note_type_not_found(client):
     assert r.status_code == 404
 
 
+def test_set_note_type_not_shadowed_by_a_node_literally_named_sources(client, vault):
+    # Regression: PATCH /notes/sources/{slug} (the source-edit route's
+    # original shape) collided with this route whenever a node's slug is
+    # literally "sources" -- PATCH /notes/sources/type matched the edit
+    # route with slug="type" instead of this one with slug="sources".
+    # Confirmed live before the fix (routes now live at /{slug}/source and
+    # /{slug}/companion instead, matching every other action route's
+    # segment order in this file).
+    vault.create_note("Sources", "body")
+    r = client.patch("/notes/sources/type", json={"node_type": "source"})
+    assert r.status_code == 200
+    assert r.json()["node_type"] == "source"
+
+
 def test_get_original_returns_companion_file(client, vault):
     _make_html_source(vault, "my-source")
     r = client.get("/notes/my-source/original")
@@ -270,3 +284,146 @@ def test_read_rejects_path_traversal_slug(client, vault, tmp_path):
     r = client.get("/notes/..--secret/read")
     assert r.status_code == 404
     assert "leaked" not in r.text
+
+
+def test_create_source_with_auto_citekey(client, recorder):
+    r = client.post("/notes/sources", json={
+        "title": "A Great Paper", "authors": ["Jane Smith"], "year": 2024,
+    })
+    assert r.status_code == 201
+    data = r.json()
+    assert data["citekey"] == "smith2024"
+    assert data["authors"] == ["Jane Smith"]
+    assert data["year"] == 2024
+    assert recorder.mark_stale_calls == 1
+    assert recorder.broadcasts[0][0]["action"] == "create"
+
+
+def test_create_source_with_explicit_citekey(client):
+    r = client.post("/notes/sources", json={"title": "A Great Paper", "citekey": "custom2024"})
+    assert r.status_code == 201
+    assert r.json()["citekey"] == "custom2024"
+
+
+def test_create_source_rejects_duplicate_citekey(client):
+    client.post("/notes/sources", json={"title": "First", "citekey": "dup2024"})
+    r = client.post("/notes/sources", json={"title": "Second", "citekey": "dup2024"})
+    assert r.status_code == 409
+
+
+def test_create_source_no_metadata_still_works(client):
+    # Metadata-only Source, no companion at all -- e.g. a physical book.
+    r = client.post("/notes/sources", json={"title": "A Physical Book"})
+    assert r.status_code == 201
+    assert r.json()["original_ext"] is None
+
+
+def test_create_source_rejects_when_no_citekey_can_be_generated(client):
+    # make_citekey() legitimately returns "" for an author name with no
+    # ASCII letters (e.g. non-Latin script) and no year/usable title word --
+    # letting an empty citekey through would silently store citekey: "" and
+    # 409 every subsequent unrelated source with the same fate, instead of
+    # surfacing that this one genuinely needs an explicit citekey.
+    r = client.post("/notes/sources", json={"title": "!!!", "authors": ["田中太郎"]})
+    assert r.status_code == 400
+
+
+def test_create_source_rejects_whitespace_only_explicit_citekey(client):
+    r = client.post("/notes/sources", json={"title": "X", "citekey": "   "})
+    assert r.status_code == 400
+
+
+def test_create_source_rejects_an_absurdly_long_title(client):
+    # Regression: used to 500 (OSError, filename too long) instead of a
+    # clean validation error -- unique_slug()/_slugify() turn the title
+    # directly into a filesystem filename with no length cap upstream.
+    r = client.post("/notes/sources", json={"title": "a" * 5000})
+    assert r.status_code == 422
+
+
+def test_create_source_accepts_a_long_but_not_absurd_title(client):
+    # Regression: the request-level max_length=512 check alone did NOT
+    # fix the underlying bug -- a single-word, all-ASCII title as short
+    # as ~300 characters still exceeded ext4's 255-byte-per-component
+    # filename limit and 500'd. The real fix is _slugify()'s own length
+    # cap; this confirms a title comfortably under max_length=512 but
+    # over the old (unfixed) crash threshold now succeeds instead of
+    # 500ing.
+    r = client.post("/notes/sources", json={"title": "a" * 400})
+    assert r.status_code == 201
+
+
+def test_create_note_accepts_a_long_but_not_absurd_title(client):
+    # Same underlying bug, pre-existing in create_note() (no request-level
+    # length constraint on NoteCreateRequest.title at all) -- fixed by the
+    # same _slugify() change, not by anything specific to Source.
+    r = client.post("/notes", json={"title": "a" * 400})
+    assert r.status_code == 201
+
+
+def test_create_source_rejects_negative_year(client):
+    r = client.post("/notes/sources", json={"title": "X", "year": -100})
+    assert r.status_code == 422
+
+
+def test_edit_source_rejects_negative_year(client, vault):
+    source = vault.create_source_from_citekey(
+        "smith2024", "A Great Paper", "body", zotero_key="ABC", authors=[], tags=[],
+    )
+    r = client.patch(f"/notes/{source.slug}/source", json={"year": -100})
+    assert r.status_code == 422
+
+
+def test_edit_source_merges_only_given_fields(client, vault):
+    source = vault.create_source_from_citekey(
+        "smith2024", "A Great Paper", "body",
+        zotero_key="ABC", authors=["Jane Smith"], tags=[], journal="Original Journal",
+    )
+    r = client.patch(f"/notes/{source.slug}/source", json={"doi": "10.1/new"})
+    assert r.status_code == 200
+    data = r.json()
+    assert data["doi"] == "10.1/new"
+    assert data["journal"] == "Original Journal"
+
+
+def test_edit_source_not_found(client):
+    r = client.patch("/notes/does-not-exist/source", json={"doi": "10.1/x"})
+    assert r.status_code == 404
+
+
+def test_edit_source_rejects_non_source_slug(client, vault):
+    note = vault.create_note("My Note", "body")
+    r = client.patch(f"/notes/{note.slug}/source", json={"doi": "10.1/x"})
+    assert r.status_code == 400
+
+
+def test_upload_companion_rejects_bad_extension(client, vault):
+    source = vault.create_source_from_citekey(
+        "smith2024", "A Great Paper", "body", zotero_key="ABC", authors=[], tags=[],
+    )
+    r = client.post(f"/notes/{source.slug}/companion",
+                     files={"file": ("archive.zip", b"data", "application/zip")})
+    assert r.status_code == 400
+
+
+def test_upload_companion_attaches_svg(client, vault):
+    source = vault.create_source_from_citekey(
+        "smith2024", "A Great Paper", "body", zotero_key="ABC", authors=[], tags=[],
+    )
+    r = client.post(f"/notes/{source.slug}/companion",
+                     files={"file": ("figure.svg", b"<svg></svg>", "image/svg+xml")})
+    assert r.status_code == 200
+    assert r.json()["original_ext"] == ".svg"
+
+
+def test_upload_companion_not_found(client):
+    r = client.post("/notes/does-not-exist/companion",
+                     files={"file": ("figure.svg", b"<svg></svg>", "image/svg+xml")})
+    assert r.status_code == 404
+
+
+def test_upload_companion_rejects_non_source_slug(client, vault):
+    note = vault.create_note("My Note", "body")
+    r = client.post(f"/notes/{note.slug}/companion",
+                     files={"file": ("figure.svg", b"<svg></svg>", "image/svg+xml")})
+    assert r.status_code == 400

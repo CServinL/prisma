@@ -15,14 +15,16 @@ from __future__ import annotations
 import logging
 from typing import Callable, Optional
 
-from fastapi import APIRouter, HTTPException, Query, Request
-from pydantic import BaseModel
+from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile
+from pydantic import BaseModel, Field
 
 from prisma.services.asset_rewrite import asset_prefix, rewrite_html
 from prisma.services.renderer import render as vault_render
 from prisma.services.vault import VaultService
 from prisma.storage.models.kg_models import ReadSourceResponse
-from prisma.storage.models.vault_models import NodeType, RenderedNode, Source, Stream, VaultListing
+from prisma.storage.models.vault_models import (
+    NodeType, RenderedNode, Source, SourceKind, SourceOrigin, Stream, VaultListing,
+)
 
 _activity = logging.getLogger("prisma.activity")
 
@@ -44,6 +46,48 @@ class NoteCreateRequest(BaseModel):
 
 class NoteSaveRequest(BaseModel):
     body: str
+
+
+class SourceCreateRequest(BaseModel):
+    # max_length matches the existing Query(..., max_length=512) convention
+    # for short human-typed strings elsewhere (graph_routes.py/kg_app.py) --
+    # without it, an absurdly long title (e.g. one 5000-char word with no
+    # whitespace) flows straight into unique_slug()'s filesystem filename,
+    # 500ing on OSError instead of failing request validation cleanly.
+    title: str = Field(min_length=1, max_length=512)
+    body: str = ""
+    citekey: Optional[str] = None
+    authors: list[str] = Field(default_factory=list)
+    tags: list[str] = Field(default_factory=list)
+    # ge=0: make_citekey()/create_source_from_citekey() both now honor
+    # year=0 correctly (falsy-zero fix), but a *negative* year or a JSON
+    # `true` (Python bool subtypes int, so it'd otherwise pass silently as
+    # 1) are just bad data, not a value worth preserving.
+    year: Optional[int] = Field(None, ge=0)
+    doi: Optional[str] = None
+    url: Optional[str] = None
+    journal: Optional[str] = None
+    volume: Optional[str] = None
+    issue: Optional[str] = None
+    pages: Optional[str] = None
+    publisher: Optional[str] = None
+    item_type: Optional[str] = None
+    source_kind: SourceKind = SourceKind.paper
+
+
+class SourceEditRequest(BaseModel):
+    title: Optional[str] = Field(None, min_length=1, max_length=512)
+    authors: Optional[list[str]] = None
+    tags: Optional[list[str]] = None
+    year: Optional[int] = Field(None, ge=0)
+    doi: Optional[str] = None
+    journal: Optional[str] = None
+    volume: Optional[str] = None
+    issue: Optional[str] = None
+    pages: Optional[str] = None
+    publisher: Optional[str] = None
+    url: Optional[str] = None
+    item_type: Optional[str] = None
 
 
 def render_note(vault: VaultService, slug: str, request: Request, format: str = "html") -> RenderedNode:
@@ -109,7 +153,51 @@ def render_note(vault: VaultService, slug: str, request: Request, format: str = 
         rn.next_update = node.next_update
         rn.query = node.query
         rn.collection_key = node.collection_key
+    if isinstance(node, Source):
+        rn.citekey = node.citekey
+        rn.source_kind = node.source_kind
+        rn.authors = node.authors
+        rn.year = node.year
+        rn.doi = node.doi
+        rn.journal = node.journal
+        rn.volume = node.volume
+        rn.issue = node.issue
+        rn.pages = node.pages
+        rn.publisher = node.publisher
+        rn.url = node.url
+        rn.item_type = node.item_type
     return rn
+
+
+def _render_source(vault: VaultService, source: Source) -> RenderedNode:
+    """Builds a full RenderedNode for a Source object already in hand --
+    shared by the create/edit/companion-upload routes below, which all
+    need the same Source-echo fields render_note() populates for GET.
+
+    Deliberately simpler than render_note(): always renders `source.body`
+    as markdown, with none of render_note()'s original_ext-aware companion
+    branching (raw-HTML fragment/iframe fallback, get_md_body() lookup) --
+    that logic needs a Request (for asset_prefix) this helper doesn't have,
+    and more importantly needs to key off whatever the companion's current
+    state actually is post-write, which a follow-up GET /notes/{slug}
+    already does correctly. So the `html` field in this response can be
+    stale/wrong for a Source whose companion is `.html`/`.pdf` with a
+    still-empty or partial body -- every current caller (the UI) already
+    re-fetches via GET right after create/edit/companion-upload and
+    overwrites its local state with that response, not this one's `html`.
+    A caller that trusted this endpoint's `html` directly without
+    re-fetching would not."""
+    rel = str(source.path.relative_to(vault.root).as_posix())
+    html, broken_links, broken_citations = vault_render(source.body, vault)
+    return RenderedNode(
+        slug=source.slug, path=rel, title=source.title, node_type=source.node_type,
+        html=html, broken_links=broken_links, broken_citations=broken_citations,
+        original_ext=source.original_ext,
+        citekey=source.citekey, source_kind=source.source_kind, authors=source.authors,
+        year=source.year, doi=source.doi, journal=source.journal, volume=source.volume,
+        issue=source.issue, pages=source.pages, publisher=source.publisher,
+        url=source.url, item_type=source.item_type,
+    )
 
 
 def build_notes_router(
@@ -145,6 +233,92 @@ def build_notes_router(
             if isinstance(node, Source):
                 result[slug] = format_apa(node)
         return result
+
+    @router.post("/sources", response_model=RenderedNode, status_code=201)
+    def create_source(req: SourceCreateRequest):
+        """Manual Source creation — the non-Zotero counterpart to
+        POST /zotero/import/{key}. Grouped near /apa above, not required
+        for correctness (no existing /{slug}-shaped route shares this
+        method+path), just for readability alongside the other
+        Source-specific routes."""
+        from prisma.utils.text import make_citekey
+        vault = get_vault()
+        citekey = (req.citekey or make_citekey(req.authors, req.year, req.title)).strip()
+        if not citekey:
+            # make_citekey() can legitimately return "" -- an author name
+            # with no ASCII letters after re.sub(r"[^a-z]", "", ...) (e.g.
+            # non-Latin script) and no year, with a title whose first word
+            # is the same. Letting that through would silently store
+            # citekey: "" and 409 every subsequent unrelated source with
+            # the same fate on citekey_exists()'s collision check, rather
+            # than surfacing the real problem: this source needs an
+            # explicit citekey, auto-generation couldn't produce one.
+            raise HTTPException(
+                status_code=400,
+                detail="could not generate a citekey from the given title/authors — provide one explicitly",
+            )
+        try:
+            source = vault.create_source_from_citekey_if_free(
+                citekey, req.title, req.body,
+                origin=SourceOrigin.upload, source_kind=req.source_kind,
+                authors=req.authors, tags=req.tags, year=req.year, doi=req.doi, url=req.url,
+                journal=req.journal, volume=req.volume, issue=req.issue, pages=req.pages,
+                publisher=req.publisher, item_type=req.item_type,
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=409, detail=str(e))
+        mark_stale_fn()
+        _activity.info("action=create_source slug=%s title=%r citekey=%s", source.slug, source.title, citekey)
+        rel = str(source.path.relative_to(vault.root).as_posix())
+        broadcast_fn({"type": "vault_change", "action": "create", "path": rel})
+        return _render_source(vault, source)
+
+    # /{slug}/source and /{slug}/companion, not /sources/{slug} -- matching
+    # the same segment order every other action route in this file already
+    # uses (/{slug}/type, /{slug}/md, /{slug}/view, /{slug}/read). Using
+    # /sources/{slug} instead was a real bug, not just a style choice: it
+    # collided with PATCH /{slug}/type below whenever a node's slug is
+    # literally "sources" (a plausible index-note name) -- PATCH
+    # /notes/sources/type matched *this* route with slug="type" instead of
+    # /{slug}/type with slug="sources", silently swallowing the intended
+    # type-toggle. Confirmed live before this fix, not just theorized.
+    @router.patch("/{slug}/source", response_model=RenderedNode)
+    def edit_source(slug: str, req: SourceEditRequest):
+        vault = get_vault()
+        try:
+            node = vault.get_any(slug)
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail=f"source not found: {slug!r}")
+        if not isinstance(node, Source):
+            raise HTTPException(status_code=400, detail=f"{slug!r} is not a source")
+        source = vault.update_source_bibliographic_fields(
+            slug, title=req.title, authors=req.authors, year=req.year, doi=req.doi, tags=req.tags,
+            journal=req.journal, volume=req.volume, issue=req.issue, pages=req.pages,
+            publisher=req.publisher, url=req.url, item_type=req.item_type,
+        )
+        mark_stale_fn()
+        rel = str(source.path.relative_to(vault.root).as_posix())
+        broadcast_fn({"type": "vault_change", "action": "save", "path": rel})
+        return _render_source(vault, source)
+
+    @router.post("/{slug}/companion", response_model=RenderedNode)
+    async def upload_source_companion(slug: str, file: UploadFile = File(...)):
+        vault = get_vault()
+        try:
+            node = vault.get_any(slug)
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail=f"source not found: {slug!r}")
+        if not isinstance(node, Source):
+            raise HTTPException(status_code=400, detail=f"{slug!r} is not a source")
+        data = await file.read()
+        try:
+            source = vault.attach_source_companion(slug, file.filename or "", data)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        mark_stale_fn()
+        rel = str(source.path.relative_to(vault.root).as_posix())
+        broadcast_fn({"type": "vault_change", "action": "save", "path": rel})
+        return _render_source(vault, source)
 
     @router.get("/{slug}", response_model=RenderedNode)
     def get_note(slug: str, request: Request, format: str = "html"):

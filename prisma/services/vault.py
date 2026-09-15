@@ -12,7 +12,7 @@ import yaml
 
 from prisma.schema_gov import ContentFormat, RichContent
 from prisma.storage.models.vault_models import (
-    Chat, ChatRole, Note, NodeType, Source, Stream, StreamStatus,
+    Chat, ChatRole, Note, NodeType, Source, SourceKind, SourceOrigin, Stream, StreamStatus,
     RefreshFrequency, TurnNode, VaultListing, VaultNodeMeta, VaultTreeNode,
     _migrate_message_v1_to_v2,
 )
@@ -49,10 +49,25 @@ def pdf_bytes_to_md(data: bytes) -> str:
 _SKIP_DIRS = {".git", ".svn", "__pycache__", "node_modules", ".venv", "venv", "dist", "build"}
 
 
+# Most Linux filesystems (ext4 etc.) cap a single path component at 255
+# bytes. A slug is always pure ASCII (the regex below strips everything
+# outside [a-z0-9] to a single hyphen, so non-ASCII input collapses rather
+# than expanding), so 200 characters leaves real headroom for a
+# disambiguation suffix (unique_slug()'s "-1", "-2", ...) and an
+# extension (".md") without ever approaching that limit -- found live:
+# an all-ASCII single-word title as short as ~300 characters (nowhere
+# near an intuitively "absurd" length) already raised OSError("File name
+# too long") from path.write_text(), a pre-existing bug in create_note()
+# and every other _slugify() caller, not new to whichever one happens to
+# get noticed first.
+_MAX_SLUG_LENGTH = 200
+
+
 def _slugify(name: str) -> str:
     slug = name.lower().strip()
     slug = re.sub(r"[^a-z0-9]+", "-", slug)
-    return slug.strip("-") or "untitled"
+    slug = slug.strip("-") or "untitled"
+    return slug[:_MAX_SLUG_LENGTH].rstrip("-") or "untitled"
 
 
 def _file_slug(stem: str) -> str:
@@ -111,6 +126,25 @@ def _parse_frontmatter(body: str) -> tuple[dict, str]:
 
 def _render_frontmatter(fm: dict) -> str:
     return "---\n" + yaml.dump(fm, default_flow_style=False, allow_unicode=True) + "---\n\n"
+
+
+def _source_origin_from_frontmatter(fm: dict) -> SourceOrigin:
+    """Same defensive-fallback shape as VaultService.node_type_from_
+    frontmatter() -- an unrecognized/legacy/forward-incompatible `origin`
+    value (hand-edited file, or a newer app version's future enum member)
+    must not crash GET /notes/{slug} for that one node."""
+    try:
+        return SourceOrigin(fm.get("origin") or "zotero")
+    except ValueError:
+        return SourceOrigin.zotero
+
+
+def _source_kind_from_frontmatter(fm: dict) -> SourceKind:
+    """Same reasoning as _source_origin_from_frontmatter()."""
+    try:
+        return SourceKind(fm.get("source_kind") or "paper")
+    except ValueError:
+        return SourceKind.paper
 
 
 # ── Legacy chat .md format (ADR-019) ─────────────────────────────────────────
@@ -323,6 +357,9 @@ class VaultService:
         self._chat_write_lock = threading.Lock()
         # Same rationale as _chat_write_lock, for /sync/file's writes.
         self._path_write_lock = threading.Lock()
+        # Same rationale again, for the manual-create route's citekey-
+        # uniqueness check-then-write (see create_source_from_citekey_if_free).
+        self._source_write_lock = threading.Lock()
 
     def ensure_dirs(self) -> None:
         for d in self.default_dirs.values():
@@ -610,24 +647,41 @@ class VaultService:
             publisher=fm.get("publisher"),
             url=fm.get("url"),
             item_type=fm.get("item_type"),
+            origin=_source_origin_from_frontmatter(fm),
+            source_kind=_source_kind_from_frontmatter(fm),
         )
 
     def create_source_from_citekey(
         self, citekey: str, title: str, body: str, *,
-        zotero_key: str, authors: list[str], tags: list[str],
+        zotero_key: str | None = None,
+        origin: SourceOrigin = SourceOrigin.zotero,
+        source_kind: SourceKind = SourceKind.paper,
+        authors: list[str], tags: list[str],
         year: int | None = None, doi: str | None = None, url: str | None = None,
         journal: str | None = None, volume: str | None = None, issue: str | None = None,
         pages: str | None = None, publisher: str | None = None, item_type: str | None = None,
     ) -> Source:
-        """Create a source node from Zotero-derived metadata -- the
-        vault-side half of POST /zotero/import/{key}."""
+        """Create a source node -- the vault-side half of both
+        POST /zotero/import/{key} (zotero_key set, origin defaults to
+        zotero) and the manual-create route (zotero_key=None, origin=
+        upload). No citekey-uniqueness enforcement here -- see
+        create_source_from_citekey_if_free() for that, used by the manual-
+        create route; Zotero import doesn't currently go through it."""
         self.ensure_dirs()
         slug = self.unique_slug(citekey)
         fm: dict = {
             "type": "source", "title": title, "citekey": citekey,
-            "zotero_key": zotero_key, "authors": authors, "tags": tags,
+            "authors": authors, "tags": tags, "origin": origin.value,
         }
-        if year:
+        if zotero_key:
+            fm["zotero_key"] = zotero_key
+        if source_kind != SourceKind.paper:
+            fm["source_kind"] = source_kind.value
+        # is not None, not truthy -- year=0 is a real (if unrealistic)
+        # value, and this must agree with update_source_bibliographic_
+        # fields()'s handling of the same field or POST /notes/sources and
+        # PATCH /{slug}/source disagree on whether year=0 sticks.
+        if year is not None:
             fm["year"] = year
         if doi:
             fm["doi"] = doi
@@ -650,28 +704,133 @@ class VaultService:
         return self.get_source(slug)
 
     def update_source_bibliographic_fields(
-        self, slug: str, *, journal: str | None = None, volume: str | None = None,
+        self, slug: str, *, title: str | None = None, authors: list[str] | None = None,
+        year: int | None = None, doi: str | None = None, tags: list[str] | None = None,
+        journal: str | None = None, volume: str | None = None,
         issue: str | None = None, pages: str | None = None, publisher: str | None = None,
         url: str | None = None, item_type: str | None = None,
     ) -> Source:
         """Merges the given fields into `slug`'s existing frontmatter,
-        leaving the body and every other field untouched -- the ADR-020
-        backfill command's write path, for sources imported before these
-        fields existed on Source. Only overwrites a field when a non-empty
-        value is given, so re-running backfill against a partially-filled
-        source doesn't blank out fields Zotero didn't return this time."""
+        leaving the body and every other field untouched.
+
+        Two different "was this given" rules for two different groups of
+        callers, deliberately:
+        - journal/volume/issue/pages/publisher/url/item_type: the original
+          ADR-020 backfill command's write path, for sources imported
+          before these fields existed on Source. Uses a *truthy* check
+          (`if value:`) so re-running backfill against a partially-filled
+          source never blanks a field just because Zotero returned an
+          empty string for it this time -- source_backfill.py depends on
+          this exact behavior (see test_does_not_blank_out_fields_when_
+          called_with_none), not changed here.
+        - title/authors/year/doi/tags: added for the manual edit-metadata
+          route. Uses `is not None` instead -- an explicit `authors: []`
+          from that route means "clear the authors," a real, expected edit
+          action; a truthy check would silently no-op it. Omitting the
+          field (Pydantic default None) still means "leave it alone"
+          either way, so this doesn't regress the "don't touch what wasn't
+          given" guarantee, it just makes an explicit empty value actually
+          take effect for the fields where that's a meaningful edit.
+
+        Deliberately excludes `citekey`: renderer.py's citation index
+        resolves [[@citekey]] against current frontmatter values, so
+        changing it after creation would silently orphan or misdirect any
+        citation already pointing at this source elsewhere in the vault."""
         path = self._find_md(slug)
         if path is None:
             raise FileNotFoundError(f"source not found: {slug!r}")
         raw = path.read_text(encoding="utf-8")
         fm, content = _parse_frontmatter(raw)
+        for key, value in [("title", title), ("authors", authors), ("year", year), ("doi", doi), ("tags", tags)]:
+            if value is not None:
+                fm[key] = value
         for key, value in [
-            ("journal", journal), ("volume", volume), ("issue", issue), ("pages", pages),
-            ("publisher", publisher), ("url", url), ("item_type", item_type),
+            ("journal", journal), ("volume", volume), ("issue", issue),
+            ("pages", pages), ("publisher", publisher), ("url", url), ("item_type", item_type),
         ]:
             if value:
                 fm[key] = value
         path.write_text(_render_frontmatter(fm) + content, encoding="utf-8")
+        return self.get_source(slug)
+
+    def citekey_exists(self, citekey: str) -> bool:
+        """Scans current vault files' frontmatter for a matching citekey --
+        used by the manual-create route's collision guard, since (unlike a
+        Zotero key) a hand-entered citekey has no external uniqueness
+        guarantee. A few lines of overlap with renderer.py's
+        _build_citekey_index() (same frontmatter scan) is cheaper than
+        reaching into that module's private, differently-shaped internals
+        (it builds a citekey->slug index for citation *resolution*; this is
+        a plain existence check) just to avoid the duplication."""
+        for path in self.iter_files():
+            try:
+                raw = path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                # A file can vanish between iter_files()'s walk yielding it
+                # and this read (a concurrent delete/move) -- harmless to
+                # this existence check either way, so skip it rather than
+                # letting POST /notes/sources 500 on an unrelated race.
+                continue
+            fm, _ = _parse_frontmatter(raw)
+            if fm.get("citekey") == citekey:
+                return True
+        return False
+
+    def create_source_from_citekey_if_free(self, citekey: str, title: str, body: str, **kwargs) -> Source:
+        """Atomic check-and-create: holds _source_write_lock across the
+        citekey_exists() check and the actual write. Calling those two as
+        separate steps from the route layer (check, then create) leaves a
+        real TOCTOU window -- two concurrent manual-create requests (a
+        double-submit, or two auto-generated citekeys landing on the same
+        author+year) can both see "free" before either has written, and
+        both create a Source with the same citekey. renderer.py's
+        _build_citekey_index() then resolves [[@citekey]] to whichever one
+        it scans last -- the other becomes silently unreachable by
+        citation, with no error to either creator. Raises ValueError (not
+        FileExistsError) on collision to match this module's other
+        caller-facing validation errors (see attach_source_companion).
+
+        Not used by Zotero import -- that path has its own, separate
+        citekey-collision behavior via unique_slug() on the *file slug*
+        (not the citekey field itself), unchanged here; folding it into
+        this same guard would change POST /zotero/import/{key}'s existing
+        behavior, out of scope for the manual-create gap this exists to
+        close."""
+        with self._source_write_lock:
+            if self.citekey_exists(citekey):
+                raise ValueError(f"citekey already in use: {citekey!r}")
+            return self.create_source_from_citekey(citekey, title, body, **kwargs)
+
+    def attach_source_companion(self, slug: str, filename: str, data: bytes) -> Source:
+        """Attach or replace `slug`'s companion file from raw bytes -- the
+        manual-upload counterpart to what Zotero import's pdf_bytes_to_md()
+        path does automatically. Regenerates the sibling .md body via
+        ensure_md_format(force=True) for pdf/html/htm companions only,
+        matching generate_md_format() route's own extension restriction;
+        other companion kinds are a no-op body-wise (image OCR/extraction
+        is a tracked, separate gap -- not attempted here).
+
+        force=True (not ensure_md_format()'s default): the whole point of
+        re-uploading a companion is to refresh its extracted text, so the
+        empty-body-only gate that protects a hand-edited note elsewhere
+        would otherwise silently keep serving the first upload's stale
+        extraction forever after every subsequent replace. A failed new
+        extraction still leaves the old body untouched either way --
+        ensure_md_format() returns before writing whenever conversion
+        produces nothing, force or not."""
+        path = self._find_md(slug)
+        if path is None:
+            raise FileNotFoundError(f"source not found: {slug!r}")
+        ext = Path(filename).suffix.lower()
+        if ext not in COMPANION_EXTS:
+            raise ValueError(f"unsupported companion extension: {ext!r}")
+        existing = self.find_companion(slug)
+        if existing is not None and existing.suffix != ext:
+            existing.unlink()
+        companion_path = path.with_suffix(ext)
+        companion_path.write_bytes(data)
+        if ext in (".pdf", ".html", ".htm"):
+            self.ensure_md_format(companion_path, force=True)
         return self.get_source(slug)
 
     def get_chat(self, slug: str) -> Chat:
@@ -856,19 +1015,27 @@ class VaultService:
 
     # ── Format generation ─────────────────────────────────────────────────────
 
-    def ensure_md_format(self, companion_path: Path) -> bool:
+    def ensure_md_format(self, companion_path: Path, force: bool = False) -> bool:
         """Convert a companion file (.html or .pdf) to Markdown and store it
         in the sibling .md body. Returns True if the companion .md was
         created/updated, False if already present. .pdf uses pdf_bytes_to_md
         (module-level, above) -- the same conversion zotero_import() uses,
         generalized here so a manually-attached PDF (no Zotero import
         involved) gets real extracted text too, not just whatever metadata
-        the user typed by hand. See TODO.md's now-closed PDF->MD gap."""
+        the user typed by hand. See TODO.md's now-closed PDF->MD gap.
+
+        `force`: skip the "only fill an empty body" gate below. Default
+        False protects a hand-edited note from being clobbered by a
+        redundant call (the existing /notes/{slug}/md route's use case).
+        `attach_source_companion()` passes force=True when *replacing* an
+        existing companion -- the whole point of re-uploading is to
+        refresh stale content, so the empty-body gate would otherwise
+        silently keep serving the old extraction forever."""
         companion = companion_path.with_suffix(".md")
         if companion.exists():
             raw = companion.read_text(encoding="utf-8")
             fm, body = _parse_frontmatter(raw)
-            if body.strip():
+            if body.strip() and not force:
                 return False
         else:
             fm, body = {"title": companion_path.stem}, ""

@@ -6,7 +6,7 @@ underscore-prefixed private equivalents."""
 import pytest
 
 from prisma.services.vault import VaultService
-from prisma.storage.models.vault_models import NodeType
+from prisma.storage.models.vault_models import NodeType, SourceKind, SourceOrigin
 
 
 @pytest.fixture
@@ -257,6 +257,16 @@ class TestCreateSourceFromCitekey:
         assert source.publisher == "Example Press"
         assert source.item_type == "journalArticle"
 
+    def test_year_zero_is_not_silently_dropped_at_creation(self, vault):
+        # Same falsy-zero bug class fixed on the update side
+        # (test_year_zero_is_not_silently_dropped below) -- must agree, or
+        # POST /notes/sources and PATCH /{slug}/source disagree on whether
+        # year=0 sticks for the identical field.
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "body", zotero_key="ABC123", authors=[], tags=[], year=0,
+        )
+        assert source.year == 0
+
     def test_slug_disambiguated_on_citekey_collision(self, vault):
         vault.create_source_from_citekey(
             "smith2024", "First", "body1", zotero_key="A", authors=[], tags=[],
@@ -265,6 +275,190 @@ class TestCreateSourceFromCitekey:
             "smith2024", "Second", "body2", zotero_key="B", authors=[], tags=[],
         )
         assert second.slug == "smith2024-1"
+
+    def test_origin_defaults_to_zotero_when_zotero_key_given(self, vault):
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "body", zotero_key="ABC123", authors=[], tags=[],
+        )
+        assert source.origin == SourceOrigin.zotero
+
+    def test_creates_upload_source_with_no_zotero_key(self, vault):
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "body",
+            zotero_key=None, origin=SourceOrigin.upload, authors=[], tags=[],
+        )
+        assert source.zotero_key is None
+        assert source.origin == SourceOrigin.upload
+        # Not just None after parsing -- the key must be absent from the
+        # raw frontmatter entirely, not written as `zotero_key: null`.
+        raw = source.path.read_text(encoding="utf-8")
+        assert "zotero_key" not in raw
+
+    def test_source_kind_round_trips(self, vault):
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "body",
+            zotero_key="ABC123", authors=[], tags=[], source_kind=SourceKind.web,
+        )
+        assert vault.get_source(source.slug).source_kind == SourceKind.web
+
+    def test_source_kind_defaults_to_paper_when_absent_from_frontmatter(self, vault):
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "body", zotero_key="ABC123", authors=[], tags=[],
+        )
+        # Not written to frontmatter at all for the default -- only a
+        # non-default source_kind gets persisted (see create_source_from_
+        # citekey). Confirms get_source() still falls back correctly.
+        raw = source.path.read_text(encoding="utf-8")
+        assert "source_kind" not in raw
+        assert vault.get_source(source.slug).source_kind == SourceKind.paper
+
+    def test_unrecognized_origin_falls_back_instead_of_raising(self, vault):
+        # Same defensive-fallback contract as VaultService.node_type_from_
+        # frontmatter() (an unrecognized `type:` value degrades to `note`
+        # rather than crashing the read) -- origin/source_kind must do the
+        # same for a hand-edited or forward-incompatible frontmatter value,
+        # or GET /notes/{slug} 500s for that one node instead of degrading.
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "body", zotero_key="ABC123", authors=[], tags=[],
+        )
+        raw = source.path.read_text(encoding="utf-8")
+        source.path.write_text(raw.replace("origin: zotero", "origin: some-future-value"), encoding="utf-8")
+        assert vault.get_source(source.slug).origin == SourceOrigin.zotero
+
+    def test_unrecognized_source_kind_falls_back_instead_of_raising(self, vault):
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "body",
+            zotero_key="ABC123", authors=[], tags=[], source_kind=SourceKind.web,
+        )
+        raw = source.path.read_text(encoding="utf-8")
+        source.path.write_text(raw.replace("source_kind: web", "source_kind: some-future-value"), encoding="utf-8")
+        assert vault.get_source(source.slug).source_kind == SourceKind.paper
+
+
+class TestCitekeyExists:
+    def test_true_for_an_existing_citekey(self, vault):
+        vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "body", zotero_key="ABC123", authors=[], tags=[],
+        )
+        assert vault.citekey_exists("smith2024") is True
+
+    def test_false_for_an_unused_citekey(self, vault):
+        assert vault.citekey_exists("nobody2099") is False
+
+
+class TestCreateSourceFromCitekeyIfFree:
+    def test_raises_on_collision(self, vault):
+        vault.create_source_from_citekey_if_free(
+            "smith2024", "First", "body1", zotero_key="A", authors=[], tags=[],
+        )
+        with pytest.raises(ValueError):
+            vault.create_source_from_citekey_if_free(
+                "smith2024", "Second", "body2", zotero_key="B", authors=[], tags=[],
+            )
+
+    def test_concurrent_creates_with_the_same_citekey_lock_out_one_of_them(self, vault, monkeypatch):
+        # A purely sequential duplicate-citekey test (test_raises_on_collision
+        # above) passes identically whether or not _source_write_lock exists
+        # at all -- it never has two requests in flight together, so it can't
+        # prove the TOCTOU race is actually closed. This widens the window
+        # between the check and the write (real file I/O in both already
+        # releases the GIL, so genuine OS-thread interleaving is possible
+        # even without this, just not reliably reproducible on demand) and
+        # asserts exactly one of two truly concurrent callers wins.
+        import threading
+        import time
+
+        real_citekey_exists = VaultService.citekey_exists
+
+        def slow_citekey_exists(self, citekey):
+            result = real_citekey_exists(self, citekey)
+            time.sleep(0.05)
+            return result
+
+        monkeypatch.setattr(VaultService, "citekey_exists", slow_citekey_exists)
+
+        results: list[str] = []
+
+        def worker():
+            try:
+                vault.create_source_from_citekey_if_free(
+                    "smith2024", "A Great Paper", "body", zotero_key="X", authors=[], tags=[],
+                )
+                results.append("created")
+            except ValueError:
+                results.append("rejected")
+
+        threads = [threading.Thread(target=worker) for _ in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert sorted(results) == ["created", "rejected"]
+
+
+class TestAttachSourceCompanion:
+    def test_attaches_svg_without_touching_body(self, vault):
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "original body", zotero_key="ABC123", authors=[], tags=[],
+        )
+        updated = vault.attach_source_companion(source.slug, "figure.svg", b"<svg></svg>")
+        assert updated.original_ext == ".svg"
+        assert updated.body == "original body"
+
+    def test_attaches_html_and_reaches_ensure_md_format(self, vault):
+        # Real docu_craft HTML->MD conversion, same non-committal assertion
+        # style as test_notes_routes.py's test_generate_md_format_creates_
+        # companion -- whether the body actually gets populated depends on
+        # docu_craft's own conversion succeeding for this snippet, not this
+        # method's concern to assert on. What matters: the companion file
+        # exists, original_ext updates, and the call doesn't raise.
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "", zotero_key="ABC123", authors=[], tags=[],
+        )
+        updated = vault.attach_source_companion(source.slug, "paper.html", b"<html><body>hi</body></html>")
+        assert updated.original_ext == ".html"
+
+    def test_rejects_unsupported_extension(self, vault):
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "body", zotero_key="ABC123", authors=[], tags=[],
+        )
+        with pytest.raises(ValueError):
+            vault.attach_source_companion(source.slug, "archive.zip", b"data")
+
+    def test_replacing_extension_removes_stale_companion(self, vault):
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "body", zotero_key="ABC123", authors=[], tags=[],
+        )
+        vault.attach_source_companion(source.slug, "figure.svg", b"<svg></svg>")
+        vault.attach_source_companion(source.slug, "figure.jpg", b"\xff\xd8\xff")
+        updated = vault.get_source(source.slug)
+        assert updated.original_ext == ".jpg"
+        assert vault.find_companion(source.slug).suffix == ".jpg"
+
+    def test_raises_file_not_found_for_missing_slug(self, vault):
+        with pytest.raises(FileNotFoundError):
+            vault.attach_source_companion("does-not-exist", "figure.svg", b"<svg></svg>")
+
+    def test_replacing_a_pdf_companion_reextracts_the_body(self, vault, monkeypatch):
+        # Regression: attach_source_companion() originally called
+        # ensure_md_format() without force=True, which only fills an EMPTY
+        # body -- so re-uploading a corrected PDF after the first extraction
+        # already populated the body silently kept serving the stale first
+        # extraction forever. docu_craft's real pdf/html conversion isn't
+        # installed in this dev venv (confirmed: both raise ModuleNotFound
+        # for fitz/beautifulsoup4 and degrade to "", which would mask this
+        # entirely), so pdf_bytes_to_md is monkeypatched here to control its
+        # return value directly and actually exercise the force-vs-not gate.
+        calls = iter(["first extracted text", "second extracted text"])
+        monkeypatch.setattr("prisma.services.vault.pdf_bytes_to_md", lambda data: next(calls))
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "", zotero_key="ABC123", authors=[], tags=[],
+        )
+        vault.attach_source_companion(source.slug, "paper.pdf", b"pdf bytes v1")
+        assert vault.get_source(source.slug).body == "first extracted text"
+        vault.attach_source_companion(source.slug, "paper.pdf", b"pdf bytes v2")
+        assert vault.get_source(source.slug).body == "second extracted text"
 
 
 class TestUpdateSourceBibliographicFields:
@@ -301,6 +495,78 @@ class TestUpdateSourceBibliographicFields:
     def test_raises_file_not_found_for_missing_slug(self, vault):
         with pytest.raises(FileNotFoundError):
             vault.update_source_bibliographic_fields("does-not-exist", journal="X")
+
+    def test_merges_title_authors_year_doi_tags(self, vault):
+        source = vault.create_source_from_citekey(
+            "smith2024", "Original Title", "body",
+            zotero_key="ABC123", authors=["Jane Smith"], tags=["ml"],
+            year=2020, journal="Original Journal",
+        )
+
+        updated = vault.update_source_bibliographic_fields(
+            source.slug, title="New Title", authors=["Jane Smith", "Bob Jones"],
+            year=2024, doi="10.1/new", tags=["ml", "nlp"],
+        )
+
+        assert updated.title == "New Title"
+        assert updated.authors == ["Jane Smith", "Bob Jones"]
+        assert updated.year == 2024
+        assert updated.doi == "10.1/new"
+        assert updated.tags == ["ml", "nlp"]
+        # journal was set at creation and not passed to this update call --
+        # must stay untouched, same merge-only-given-fields guarantee the
+        # original 7-field version already had.
+        assert updated.journal == "Original Journal"
+
+    def test_explicit_empty_string_clears_doi(self, vault):
+        # doi uses `is not None` too (it's in the same new-field group as
+        # authors/tags/title/year) -- an explicit "" must actually clear it,
+        # matching the UI's edit-metadata dialog, which relies on this to
+        # let a user blank out a wrong DOI (see +page.svelte's
+        # submitSourceForm() comment on why doi isn't converted to null on
+        # blank the way url/journal/etc. are).
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "body", zotero_key="ABC123", authors=[], tags=[], doi="10.1/wrong",
+        )
+        updated = vault.update_source_bibliographic_fields(source.slug, doi="")
+        assert updated.doi == ""
+
+    def test_citekey_is_not_an_accepted_parameter(self, vault):
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "body", zotero_key="ABC123", authors=[], tags=[],
+        )
+        with pytest.raises(TypeError):
+            vault.update_source_bibliographic_fields(source.slug, citekey="hijacked2024")
+
+    def test_explicit_empty_authors_and_tags_actually_clear_them(self, vault):
+        # authors/tags use `is not None`, not the original 7 fields' truthy
+        # check -- an explicit [] from the edit route means "clear it," a
+        # real edit action, not "field wasn't given."
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "body",
+            zotero_key="ABC123", authors=["Jane Smith"], tags=["ml"],
+        )
+        updated = vault.update_source_bibliographic_fields(source.slug, authors=[], tags=[])
+        assert updated.authors == []
+        assert updated.tags == []
+
+    def test_omitting_authors_leaves_it_untouched(self, vault):
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "body",
+            zotero_key="ABC123", authors=["Jane Smith"], tags=[],
+        )
+        updated = vault.update_source_bibliographic_fields(source.slug, doi="10.1/x")
+        assert updated.authors == ["Jane Smith"]
+
+    def test_year_zero_is_not_silently_dropped(self, vault):
+        # year uses `is not None` too, unlike the original 7 fields' `if
+        # value:` -- a falsy-but-meaningful value must actually take effect,
+        # not silently no-op.
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "body", zotero_key="ABC123", authors=[], tags=[], year=2020,
+        )
+        updated = vault.update_source_bibliographic_fields(source.slug, year=0)
+        assert updated.year == 0
 
 
 class TestMoveNodeRejectsPathTraversal:

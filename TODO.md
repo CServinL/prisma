@@ -57,6 +57,21 @@ is a backlog, not a log.
 
 ## Vault
 
+- **Vault file writes have no per-file locking, anywhere.** `save_note()`,
+  `set_node_type()`, and now also `update_source_bibliographic_fields()`/
+  `attach_source_companion()` are all a plain read-parse-write of a whole
+  `.md` file with no lock — two requests touching the *same* node close
+  together (edit metadata + upload a companion at once, two browser tabs,
+  a double-click) can each read stale frontmatter and one write silently
+  clobbers the other's change, no error to either caller. Pre-existing
+  (found auditing the new Source routes, not introduced by them — `save_
+  note`/`set_node_type` already had this gap) and systemic, not
+  Source-specific: `_chat_write_lock`/`_path_write_lock` show the
+  established one-lock-per-concern pattern for exactly this class of race,
+  but nothing plays that role for the general note/source write path. A
+  real fix needs a per-slug (or global) write lock applied consistently
+  across every vault-file-mutating method, not a lock added piecemeal to
+  whichever route happens to get touched next — its own design pass.
 - **No UI to view a companion file** — `COMPANION_EXTS` covers pdf/html/htm/
   svg/epub/docx/tex/drawio/jpg/jpeg, and the backend already serves any of
   them generically (`GET /notes/{slug}/original`, `FileResponse`), but the
@@ -115,37 +130,6 @@ is a backlog, not a log.
   API from inside the frame (none currently do).
   Not scoped in detail — needs its own small design pass on the toolbar/tab
   UI, not just wiring up `/original`.
-- **No real Source CRUD outside Zotero — next up.** `create_source_from_
-  citekey()` is only ever called from `/zotero/import/{key}`; nothing else
-  creates a genuine Source (real bibliographic fields — author/year/
-  citekey/etc. — plus a companion file). The type-toggle
-  (`PATCH /notes/{slug}/type`, `VaultService.set_node_type()`) has zero
-  validation — it just rewrites the frontmatter `type:` string on whatever
-  `.md` already exists, so "create a plain note locally, sync it up, flip
-  the type badge" produces something that's a `Source` in the type system
-  with no citekey, no bibliographic fields, and no companion at all (`GET
-  /notes/apa` would have nothing real to format). `PUT /notes/{slug}` only
-  ever saves `body` too — no endpoint edits bibliographic fields after
-  creation, Zotero-imported or not. By contrast Note/Chat/Stream all have
-  genuinely complete CRUD already (Stream in particular: `PATCH
-  /streams/{slug}` covers title/query/description/status/
-  refresh_frequency/tags, `DELETE /streams/{slug}` exists) — this is
-  specifically a Source gap, not a general pattern. Needs a real
-  `POST /notes` equivalent for Source (bibliographic fields + optional
-  companion upload — ties into the upload-path gap below) and a PATCH for
-  editing them after the fact. Not scoped — needs its own design pass on
-  what fields are required vs. optional without a citekey to anchor them.
-- **No upload path for a new companion file outside chat.** The only file-
-  upload endpoint anywhere in the server is `POST /chats/{slug}/attachments/
-  upload`, scoped to chat attachments; `/chats/{slug}/attachments/promote`
-  can turn one into a real vault Note afterward, but that's a side door
-  through the chat feature, not a first-class "add a Source from a local
-  file" action. The vault sidebar's drag-and-drop only reorganizes existing
-  vault nodes between folders, not external OS files. For anything not
-  already in Zotero, routing a file through a chat attachment first is
-  currently the only generic way to get it into the vault at all. Belongs
-  together with the Source-CRUD item above — a real "create Source" flow
-  needs this upload path as part of it, not as a separate feature.
 
 ## Knowledge graph
 

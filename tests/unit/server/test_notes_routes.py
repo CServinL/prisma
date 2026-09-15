@@ -119,6 +119,20 @@ def test_set_note_type_not_found(client):
     assert r.status_code == 404
 
 
+def test_set_note_type_not_shadowed_by_a_node_literally_named_sources(client, vault):
+    # Regression: PATCH /notes/sources/{slug} (the source-edit route's
+    # original shape) collided with this route whenever a node's slug is
+    # literally "sources" -- PATCH /notes/sources/type matched the edit
+    # route with slug="type" instead of this one with slug="sources".
+    # Confirmed live before the fix (routes now live at /{slug}/source and
+    # /{slug}/companion instead, matching every other action route's
+    # segment order in this file).
+    vault.create_note("Sources", "body")
+    r = client.patch("/notes/sources/type", json={"node_type": "source"})
+    assert r.status_code == 200
+    assert r.json()["node_type"] == "source"
+
+
 def test_get_original_returns_companion_file(client, vault):
     _make_html_source(vault, "my-source")
     r = client.get("/notes/my-source/original")
@@ -309,7 +323,7 @@ def test_edit_source_merges_only_given_fields(client, vault):
         "smith2024", "A Great Paper", "body",
         zotero_key="ABC", authors=["Jane Smith"], tags=[], journal="Original Journal",
     )
-    r = client.patch(f"/notes/sources/{source.slug}", json={"doi": "10.1/new"})
+    r = client.patch(f"/notes/{source.slug}/source", json={"doi": "10.1/new"})
     assert r.status_code == 200
     data = r.json()
     assert data["doi"] == "10.1/new"
@@ -317,13 +331,13 @@ def test_edit_source_merges_only_given_fields(client, vault):
 
 
 def test_edit_source_not_found(client):
-    r = client.patch("/notes/sources/does-not-exist", json={"doi": "10.1/x"})
+    r = client.patch("/notes/does-not-exist/source", json={"doi": "10.1/x"})
     assert r.status_code == 404
 
 
 def test_edit_source_rejects_non_source_slug(client, vault):
     note = vault.create_note("My Note", "body")
-    r = client.patch(f"/notes/sources/{note.slug}", json={"doi": "10.1/x"})
+    r = client.patch(f"/notes/{note.slug}/source", json={"doi": "10.1/x"})
     assert r.status_code == 400
 
 
@@ -331,7 +345,7 @@ def test_upload_companion_rejects_bad_extension(client, vault):
     source = vault.create_source_from_citekey(
         "smith2024", "A Great Paper", "body", zotero_key="ABC", authors=[], tags=[],
     )
-    r = client.post(f"/notes/sources/{source.slug}/companion",
+    r = client.post(f"/notes/{source.slug}/companion",
                      files={"file": ("archive.zip", b"data", "application/zip")})
     assert r.status_code == 400
 
@@ -340,20 +354,20 @@ def test_upload_companion_attaches_svg(client, vault):
     source = vault.create_source_from_citekey(
         "smith2024", "A Great Paper", "body", zotero_key="ABC", authors=[], tags=[],
     )
-    r = client.post(f"/notes/sources/{source.slug}/companion",
+    r = client.post(f"/notes/{source.slug}/companion",
                      files={"file": ("figure.svg", b"<svg></svg>", "image/svg+xml")})
     assert r.status_code == 200
     assert r.json()["original_ext"] == ".svg"
 
 
 def test_upload_companion_not_found(client):
-    r = client.post("/notes/sources/does-not-exist/companion",
+    r = client.post("/notes/does-not-exist/companion",
                      files={"file": ("figure.svg", b"<svg></svg>", "image/svg+xml")})
     assert r.status_code == 404
 
 
 def test_upload_companion_rejects_non_source_slug(client, vault):
     note = vault.create_note("My Note", "body")
-    r = client.post(f"/notes/sources/{note.slug}/companion",
+    r = client.post(f"/notes/{note.slug}/companion",
                      files={"file": ("figure.svg", b"<svg></svg>", "image/svg+xml")})
     assert r.status_code == 400

@@ -357,6 +357,26 @@ class TestAttachSourceCompanion:
         with pytest.raises(FileNotFoundError):
             vault.attach_source_companion("does-not-exist", "figure.svg", b"<svg></svg>")
 
+    def test_replacing_a_pdf_companion_reextracts_the_body(self, vault, monkeypatch):
+        # Regression: attach_source_companion() originally called
+        # ensure_md_format() without force=True, which only fills an EMPTY
+        # body -- so re-uploading a corrected PDF after the first extraction
+        # already populated the body silently kept serving the stale first
+        # extraction forever. docu_craft's real pdf/html conversion isn't
+        # installed in this dev venv (confirmed: both raise ModuleNotFound
+        # for fitz/beautifulsoup4 and degrade to "", which would mask this
+        # entirely), so pdf_bytes_to_md is monkeypatched here to control its
+        # return value directly and actually exercise the force-vs-not gate.
+        calls = iter(["first extracted text", "second extracted text"])
+        monkeypatch.setattr("prisma.services.vault.pdf_bytes_to_md", lambda data: next(calls))
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "", zotero_key="ABC123", authors=[], tags=[],
+        )
+        vault.attach_source_companion(source.slug, "paper.pdf", b"pdf bytes v1")
+        assert vault.get_source(source.slug).body == "first extracted text"
+        vault.attach_source_companion(source.slug, "paper.pdf", b"pdf bytes v2")
+        assert vault.get_source(source.slug).body == "second extracted text"
+
 
 class TestUpdateSourceBibliographicFields:
     def test_merges_new_fields_leaving_existing_ones_untouched(self, vault):
@@ -421,6 +441,36 @@ class TestUpdateSourceBibliographicFields:
         )
         with pytest.raises(TypeError):
             vault.update_source_bibliographic_fields(source.slug, citekey="hijacked2024")
+
+    def test_explicit_empty_authors_and_tags_actually_clear_them(self, vault):
+        # authors/tags use `is not None`, not the original 7 fields' truthy
+        # check -- an explicit [] from the edit route means "clear it," a
+        # real edit action, not "field wasn't given."
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "body",
+            zotero_key="ABC123", authors=["Jane Smith"], tags=["ml"],
+        )
+        updated = vault.update_source_bibliographic_fields(source.slug, authors=[], tags=[])
+        assert updated.authors == []
+        assert updated.tags == []
+
+    def test_omitting_authors_leaves_it_untouched(self, vault):
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "body",
+            zotero_key="ABC123", authors=["Jane Smith"], tags=[],
+        )
+        updated = vault.update_source_bibliographic_fields(source.slug, doi="10.1/x")
+        assert updated.authors == ["Jane Smith"]
+
+    def test_year_zero_is_not_silently_dropped(self, vault):
+        # year uses `is not None` too, unlike the original 7 fields' `if
+        # value:` -- a falsy-but-meaningful value must actually take effect,
+        # not silently no-op.
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "body", zotero_key="ABC123", authors=[], tags=[], year=2020,
+        )
+        updated = vault.update_source_bibliographic_fields(source.slug, year=0)
+        assert updated.year == 0
 
 
 class TestMoveNodeRejectsPathTraversal:

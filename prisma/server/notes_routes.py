@@ -163,9 +163,21 @@ def render_note(vault: VaultService, slug: str, request: Request, format: str = 
 def _render_source(vault: VaultService, source: Source) -> RenderedNode:
     """Builds a full RenderedNode for a Source object already in hand --
     shared by the create/edit/companion-upload routes below, which all
-    need the same Source-echo fields render_note() populates for GET, but
-    don't have a Request object on hand (no .html-companion iframe logic
-    applies to a just-created/just-edited Source)."""
+    need the same Source-echo fields render_note() populates for GET.
+
+    Deliberately simpler than render_note(): always renders `source.body`
+    as markdown, with none of render_note()'s original_ext-aware companion
+    branching (raw-HTML fragment/iframe fallback, get_md_body() lookup) --
+    that logic needs a Request (for asset_prefix) this helper doesn't have,
+    and more importantly needs to key off whatever the companion's current
+    state actually is post-write, which a follow-up GET /notes/{slug}
+    already does correctly. So the `html` field in this response can be
+    stale/wrong for a Source whose companion is `.html`/`.pdf` with a
+    still-empty or partial body -- every current caller (the UI) already
+    re-fetches via GET right after create/edit/companion-upload and
+    overwrites its local state with that response, not this one's `html`.
+    A caller that trusted this endpoint's `html` directly without
+    re-fetching would not."""
     rel = str(source.path.relative_to(vault.root).as_posix())
     html, broken_links, broken_citations = vault_render(source.body, vault)
     return RenderedNode(
@@ -223,22 +235,32 @@ def build_notes_router(
         from prisma.utils.text import make_citekey
         vault = get_vault()
         citekey = req.citekey or make_citekey(req.authors, req.year, req.title)
-        if vault.citekey_exists(citekey):
-            raise HTTPException(status_code=409, detail=f"citekey already in use: {citekey!r}")
-        source = vault.create_source_from_citekey(
-            citekey, req.title, req.body,
-            origin=SourceOrigin.upload, source_kind=req.source_kind,
-            authors=req.authors, tags=req.tags, year=req.year, doi=req.doi, url=req.url,
-            journal=req.journal, volume=req.volume, issue=req.issue, pages=req.pages,
-            publisher=req.publisher, item_type=req.item_type,
-        )
+        try:
+            source = vault.create_source_from_citekey_if_free(
+                citekey, req.title, req.body,
+                origin=SourceOrigin.upload, source_kind=req.source_kind,
+                authors=req.authors, tags=req.tags, year=req.year, doi=req.doi, url=req.url,
+                journal=req.journal, volume=req.volume, issue=req.issue, pages=req.pages,
+                publisher=req.publisher, item_type=req.item_type,
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=409, detail=str(e))
         mark_stale_fn()
         _activity.info("action=create_source slug=%s title=%r citekey=%s", source.slug, source.title, citekey)
         rel = str(source.path.relative_to(vault.root).as_posix())
         broadcast_fn({"type": "vault_change", "action": "create", "path": rel})
         return _render_source(vault, source)
 
-    @router.patch("/sources/{slug}", response_model=RenderedNode)
+    # /{slug}/source and /{slug}/companion, not /sources/{slug} -- matching
+    # the same segment order every other action route in this file already
+    # uses (/{slug}/type, /{slug}/md, /{slug}/view, /{slug}/read). Using
+    # /sources/{slug} instead was a real bug, not just a style choice: it
+    # collided with PATCH /{slug}/type below whenever a node's slug is
+    # literally "sources" (a plausible index-note name) -- PATCH
+    # /notes/sources/type matched *this* route with slug="type" instead of
+    # /{slug}/type with slug="sources", silently swallowing the intended
+    # type-toggle. Confirmed live before this fix, not just theorized.
+    @router.patch("/{slug}/source", response_model=RenderedNode)
     def edit_source(slug: str, req: SourceEditRequest):
         vault = get_vault()
         try:
@@ -257,7 +279,7 @@ def build_notes_router(
         broadcast_fn({"type": "vault_change", "action": "save", "path": rel})
         return _render_source(vault, source)
 
-    @router.post("/sources/{slug}/companion", response_model=RenderedNode)
+    @router.post("/{slug}/companion", response_model=RenderedNode)
     async def upload_source_companion(slug: str, file: UploadFile = File(...)):
         vault = get_vault()
         try:

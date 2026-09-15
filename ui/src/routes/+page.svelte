@@ -1859,7 +1859,7 @@
           body: JSON.stringify(payload),
         });
       } else {
-        r = await apiFetch(`${apiBase}/notes/sources/${encodeURIComponent(sourceForm.slug)}`, {
+        r = await apiFetch(`${apiBase}/notes/${encodeURIComponent(sourceForm.slug)}/source`, {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload),
@@ -1875,7 +1875,7 @@
       if (sourceFormFile) {
         const form = new FormData();
         form.append("file", sourceFormFile);
-        const cr = await apiFetch(`${apiBase}/notes/sources/${encodeURIComponent(targetSlug)}/companion`, {
+        const cr = await apiFetch(`${apiBase}/notes/${encodeURIComponent(targetSlug)}/companion`, {
           method: "POST",
           body: form,
         });
@@ -1899,7 +1899,7 @@
     if (!activeNode || activeNode.node_type !== "source") return;
     const form = new FormData();
     form.append("file", file);
-    const r = await apiFetch(`${apiBase}/notes/sources/${encodeURIComponent(activeNode.slug)}/companion`, {
+    const r = await apiFetch(`${apiBase}/notes/${encodeURIComponent(activeNode.slug)}/companion`, {
       method: "POST",
       body: form,
     });

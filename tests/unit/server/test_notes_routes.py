@@ -318,6 +318,42 @@ def test_create_source_no_metadata_still_works(client):
     assert r.json()["original_ext"] is None
 
 
+def test_create_source_rejects_when_no_citekey_can_be_generated(client):
+    # make_citekey() legitimately returns "" for an author name with no
+    # ASCII letters (e.g. non-Latin script) and no year/usable title word --
+    # letting an empty citekey through would silently store citekey: "" and
+    # 409 every subsequent unrelated source with the same fate, instead of
+    # surfacing that this one genuinely needs an explicit citekey.
+    r = client.post("/notes/sources", json={"title": "!!!", "authors": ["田中太郎"]})
+    assert r.status_code == 400
+
+
+def test_create_source_rejects_whitespace_only_explicit_citekey(client):
+    r = client.post("/notes/sources", json={"title": "X", "citekey": "   "})
+    assert r.status_code == 400
+
+
+def test_create_source_rejects_an_absurdly_long_title(client):
+    # Regression: used to 500 (OSError, filename too long) instead of a
+    # clean validation error -- unique_slug()/_slugify() turn the title
+    # directly into a filesystem filename with no length cap upstream.
+    r = client.post("/notes/sources", json={"title": "a" * 5000})
+    assert r.status_code == 422
+
+
+def test_create_source_rejects_negative_year(client):
+    r = client.post("/notes/sources", json={"title": "X", "year": -100})
+    assert r.status_code == 422
+
+
+def test_edit_source_rejects_negative_year(client, vault):
+    source = vault.create_source_from_citekey(
+        "smith2024", "A Great Paper", "body", zotero_key="ABC", authors=[], tags=[],
+    )
+    r = client.patch(f"/notes/{source.slug}/source", json={"year": -100})
+    assert r.status_code == 422
+
+
 def test_edit_source_merges_only_given_fields(client, vault):
     source = vault.create_source_from_citekey(
         "smith2024", "A Great Paper", "body",

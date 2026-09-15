@@ -49,12 +49,21 @@ class NoteSaveRequest(BaseModel):
 
 
 class SourceCreateRequest(BaseModel):
-    title: str
+    # max_length matches the existing Query(..., max_length=512) convention
+    # for short human-typed strings elsewhere (graph_routes.py/kg_app.py) --
+    # without it, an absurdly long title (e.g. one 5000-char word with no
+    # whitespace) flows straight into unique_slug()'s filesystem filename,
+    # 500ing on OSError instead of failing request validation cleanly.
+    title: str = Field(min_length=1, max_length=512)
     body: str = ""
     citekey: Optional[str] = None
     authors: list[str] = Field(default_factory=list)
     tags: list[str] = Field(default_factory=list)
-    year: Optional[int] = None
+    # ge=0: make_citekey()/create_source_from_citekey() both now honor
+    # year=0 correctly (falsy-zero fix), but a *negative* year or a JSON
+    # `true` (Python bool subtypes int, so it'd otherwise pass silently as
+    # 1) are just bad data, not a value worth preserving.
+    year: Optional[int] = Field(None, ge=0)
     doi: Optional[str] = None
     url: Optional[str] = None
     journal: Optional[str] = None
@@ -67,10 +76,10 @@ class SourceCreateRequest(BaseModel):
 
 
 class SourceEditRequest(BaseModel):
-    title: Optional[str] = None
+    title: Optional[str] = Field(None, min_length=1, max_length=512)
     authors: Optional[list[str]] = None
     tags: Optional[list[str]] = None
-    year: Optional[int] = None
+    year: Optional[int] = Field(None, ge=0)
     doi: Optional[str] = None
     journal: Optional[str] = None
     volume: Optional[str] = None
@@ -234,7 +243,20 @@ def build_notes_router(
         Source-specific routes."""
         from prisma.utils.text import make_citekey
         vault = get_vault()
-        citekey = req.citekey or make_citekey(req.authors, req.year, req.title)
+        citekey = (req.citekey or make_citekey(req.authors, req.year, req.title)).strip()
+        if not citekey:
+            # make_citekey() can legitimately return "" -- an author name
+            # with no ASCII letters after re.sub(r"[^a-z]", "", ...) (e.g.
+            # non-Latin script) and no year, with a title whose first word
+            # is the same. Letting that through would silently store
+            # citekey: "" and 409 every subsequent unrelated source with
+            # the same fate on citekey_exists()'s collision check, rather
+            # than surfacing the real problem: this source needs an
+            # explicit citekey, auto-generation couldn't produce one.
+            raise HTTPException(
+                status_code=400,
+                detail="could not generate a citekey from the given title/authors — provide one explicitly",
+            )
         try:
             source = vault.create_source_from_citekey_if_free(
                 citekey, req.title, req.body,

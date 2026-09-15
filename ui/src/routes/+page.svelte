@@ -1799,6 +1799,7 @@
   let sourceFormFile: File | null = $state(null);
   let sourceFormSaving = $state(false);
   let sourceFormError = $state("");
+  let companionUploading = $state(false);
 
   function openNewSourceForm() {
     sourceFormMode = "create";
@@ -1837,7 +1838,15 @@
     const payload: Record<string, unknown> = {
       title: sourceForm.title,
       authors,
-      year: sourceForm.year ? Number(sourceForm.year) : null,
+      // Not a truthy check -- Svelte's bind:value on a type="number" input
+      // coerces to a real JS number once touched (not the string the
+      // EMPTY_SOURCE_FORM default holds), so `sourceForm.year ? ... : null`
+      // would treat an explicitly typed 0 as "not entered" and silently
+      // send null instead -- the exact falsy-zero bug already fixed on the
+      // backend (create_source_from_citekey()/update_source_bibliographic_
+      // fields() both use `is not None`), reintroduced here if this used
+      // truthiness instead.
+      year: sourceForm.year === "" || sourceForm.year == null ? null : Number(sourceForm.year),
       // doi isn't converted to null on blank like the others below -- the
       // backend checks it with `is not None` (so it can be cleared), unlike
       // url/journal/volume/issue/pages/publisher/item_type, which check
@@ -1902,19 +1911,24 @@
   }
 
   async function uploadSourceCompanion(file: File) {
-    if (!activeNode || activeNode.node_type !== "source") return;
-    const form = new FormData();
-    form.append("file", file);
-    const r = await apiFetch(`${apiBase}/notes/${encodeURIComponent(activeNode.slug)}/companion`, {
-      method: "POST",
-      body: form,
-    });
-    if (r.ok) {
-      await loadTree();
-      await openNode(activeNode.slug);
-    } else {
-      const err = await r.json().catch(() => ({}));
-      alert(err.detail ?? "Couldn't upload companion file.");
+    if (!activeNode || activeNode.node_type !== "source" || companionUploading) return;
+    companionUploading = true;
+    try {
+      const form = new FormData();
+      form.append("file", file);
+      const r = await apiFetch(`${apiBase}/notes/${encodeURIComponent(activeNode.slug)}/companion`, {
+        method: "POST",
+        body: form,
+      });
+      if (r.ok) {
+        await loadTree();
+        await openNode(activeNode.slug);
+      } else {
+        const err = await r.json().catch(() => ({}));
+        alert(err.detail ?? "Couldn't upload companion file.");
+      }
+    } finally {
+      companionUploading = false;
     }
   }
 
@@ -2472,8 +2486,9 @@
               Edit metadata
             </button>
             <label class="toolbar-btn" title="Attach or replace this source's companion file">
-              Upload companion
-              <input type="file" hidden accept=".pdf,.html,.htm,.svg,.epub,.docx,.tex,.drawio,.jpg,.jpeg" onchange={(e) => {
+              {companionUploading ? "Uploading…" : "Upload companion"}
+              <input type="file" hidden disabled={companionUploading}
+                accept=".pdf,.html,.htm,.svg,.epub,.docx,.tex,.drawio,.jpg,.jpeg" onchange={(e) => {
                 const f = (e.currentTarget as HTMLInputElement).files?.[0];
                 if (f) uploadSourceCompanion(f);
                 e.currentTarget.value = "";

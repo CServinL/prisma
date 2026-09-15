@@ -49,10 +49,25 @@ def pdf_bytes_to_md(data: bytes) -> str:
 _SKIP_DIRS = {".git", ".svn", "__pycache__", "node_modules", ".venv", "venv", "dist", "build"}
 
 
+# Most Linux filesystems (ext4 etc.) cap a single path component at 255
+# bytes. A slug is always pure ASCII (the regex below strips everything
+# outside [a-z0-9] to a single hyphen, so non-ASCII input collapses rather
+# than expanding), so 200 characters leaves real headroom for a
+# disambiguation suffix (unique_slug()'s "-1", "-2", ...) and an
+# extension (".md") without ever approaching that limit -- found live:
+# an all-ASCII single-word title as short as ~300 characters (nowhere
+# near an intuitively "absurd" length) already raised OSError("File name
+# too long") from path.write_text(), a pre-existing bug in create_note()
+# and every other _slugify() caller, not new to whichever one happens to
+# get noticed first.
+_MAX_SLUG_LENGTH = 200
+
+
 def _slugify(name: str) -> str:
     slug = name.lower().strip()
     slug = re.sub(r"[^a-z0-9]+", "-", slug)
-    return slug.strip("-") or "untitled"
+    slug = slug.strip("-") or "untitled"
+    return slug[:_MAX_SLUG_LENGTH].rstrip("-") or "untitled"
 
 
 def _file_slug(stem: str) -> str:

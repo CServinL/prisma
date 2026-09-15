@@ -341,6 +341,26 @@ def test_create_source_rejects_an_absurdly_long_title(client):
     assert r.status_code == 422
 
 
+def test_create_source_accepts_a_long_but_not_absurd_title(client):
+    # Regression: the request-level max_length=512 check alone did NOT
+    # fix the underlying bug -- a single-word, all-ASCII title as short
+    # as ~300 characters still exceeded ext4's 255-byte-per-component
+    # filename limit and 500'd. The real fix is _slugify()'s own length
+    # cap; this confirms a title comfortably under max_length=512 but
+    # over the old (unfixed) crash threshold now succeeds instead of
+    # 500ing.
+    r = client.post("/notes/sources", json={"title": "a" * 400})
+    assert r.status_code == 201
+
+
+def test_create_note_accepts_a_long_but_not_absurd_title(client):
+    # Same underlying bug, pre-existing in create_note() (no request-level
+    # length constraint on NoteCreateRequest.title at all) -- fixed by the
+    # same _slugify() change, not by anything specific to Source.
+    r = client.post("/notes", json={"title": "a" * 400})
+    assert r.status_code == 201
+
+
 def test_create_source_rejects_negative_year(client):
     r = client.post("/notes/sources", json={"title": "X", "year": -100})
     assert r.status_code == 422

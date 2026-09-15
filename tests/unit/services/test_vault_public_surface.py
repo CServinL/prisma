@@ -257,6 +257,16 @@ class TestCreateSourceFromCitekey:
         assert source.publisher == "Example Press"
         assert source.item_type == "journalArticle"
 
+    def test_year_zero_is_not_silently_dropped_at_creation(self, vault):
+        # Same falsy-zero bug class fixed on the update side
+        # (test_year_zero_is_not_silently_dropped below) -- must agree, or
+        # POST /notes/sources and PATCH /{slug}/source disagree on whether
+        # year=0 sticks for the identical field.
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "body", zotero_key="ABC123", authors=[], tags=[], year=0,
+        )
+        assert source.year == 0
+
     def test_slug_disambiguated_on_citekey_collision(self, vault):
         vault.create_source_from_citekey(
             "smith2024", "First", "body1", zotero_key="A", authors=[], tags=[],
@@ -302,6 +312,28 @@ class TestCreateSourceFromCitekey:
         assert "source_kind" not in raw
         assert vault.get_source(source.slug).source_kind == SourceKind.paper
 
+    def test_unrecognized_origin_falls_back_instead_of_raising(self, vault):
+        # Same defensive-fallback contract as VaultService.node_type_from_
+        # frontmatter() (an unrecognized `type:` value degrades to `note`
+        # rather than crashing the read) -- origin/source_kind must do the
+        # same for a hand-edited or forward-incompatible frontmatter value,
+        # or GET /notes/{slug} 500s for that one node instead of degrading.
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "body", zotero_key="ABC123", authors=[], tags=[],
+        )
+        raw = source.path.read_text(encoding="utf-8")
+        source.path.write_text(raw.replace("origin: zotero", "origin: some-future-value"), encoding="utf-8")
+        assert vault.get_source(source.slug).origin == SourceOrigin.zotero
+
+    def test_unrecognized_source_kind_falls_back_instead_of_raising(self, vault):
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "body",
+            zotero_key="ABC123", authors=[], tags=[], source_kind=SourceKind.web,
+        )
+        raw = source.path.read_text(encoding="utf-8")
+        source.path.write_text(raw.replace("source_kind: web", "source_kind: some-future-value"), encoding="utf-8")
+        assert vault.get_source(source.slug).source_kind == SourceKind.paper
+
 
 class TestCitekeyExists:
     def test_true_for_an_existing_citekey(self, vault):
@@ -312,6 +344,57 @@ class TestCitekeyExists:
 
     def test_false_for_an_unused_citekey(self, vault):
         assert vault.citekey_exists("nobody2099") is False
+
+
+class TestCreateSourceFromCitekeyIfFree:
+    def test_raises_on_collision(self, vault):
+        vault.create_source_from_citekey_if_free(
+            "smith2024", "First", "body1", zotero_key="A", authors=[], tags=[],
+        )
+        with pytest.raises(ValueError):
+            vault.create_source_from_citekey_if_free(
+                "smith2024", "Second", "body2", zotero_key="B", authors=[], tags=[],
+            )
+
+    def test_concurrent_creates_with_the_same_citekey_lock_out_one_of_them(self, vault, monkeypatch):
+        # A purely sequential duplicate-citekey test (test_raises_on_collision
+        # above) passes identically whether or not _source_write_lock exists
+        # at all -- it never has two requests in flight together, so it can't
+        # prove the TOCTOU race is actually closed. This widens the window
+        # between the check and the write (real file I/O in both already
+        # releases the GIL, so genuine OS-thread interleaving is possible
+        # even without this, just not reliably reproducible on demand) and
+        # asserts exactly one of two truly concurrent callers wins.
+        import threading
+        import time
+
+        real_citekey_exists = VaultService.citekey_exists
+
+        def slow_citekey_exists(self, citekey):
+            result = real_citekey_exists(self, citekey)
+            time.sleep(0.05)
+            return result
+
+        monkeypatch.setattr(VaultService, "citekey_exists", slow_citekey_exists)
+
+        results: list[str] = []
+
+        def worker():
+            try:
+                vault.create_source_from_citekey_if_free(
+                    "smith2024", "A Great Paper", "body", zotero_key="X", authors=[], tags=[],
+                )
+                results.append("created")
+            except ValueError:
+                results.append("rejected")
+
+        threads = [threading.Thread(target=worker) for _ in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert sorted(results) == ["created", "rejected"]
 
 
 class TestAttachSourceCompanion:
@@ -434,6 +517,19 @@ class TestUpdateSourceBibliographicFields:
         # must stay untouched, same merge-only-given-fields guarantee the
         # original 7-field version already had.
         assert updated.journal == "Original Journal"
+
+    def test_explicit_empty_string_clears_doi(self, vault):
+        # doi uses `is not None` too (it's in the same new-field group as
+        # authors/tags/title/year) -- an explicit "" must actually clear it,
+        # matching the UI's edit-metadata dialog, which relies on this to
+        # let a user blank out a wrong DOI (see +page.svelte's
+        # submitSourceForm() comment on why doi isn't converted to null on
+        # blank the way url/journal/etc. are).
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "body", zotero_key="ABC123", authors=[], tags=[], doi="10.1/wrong",
+        )
+        updated = vault.update_source_bibliographic_fields(source.slug, doi="")
+        assert updated.doi == ""
 
     def test_citekey_is_not_an_accepted_parameter(self, vault):
         source = vault.create_source_from_citekey(

@@ -113,6 +113,25 @@ def _render_frontmatter(fm: dict) -> str:
     return "---\n" + yaml.dump(fm, default_flow_style=False, allow_unicode=True) + "---\n\n"
 
 
+def _source_origin_from_frontmatter(fm: dict) -> SourceOrigin:
+    """Same defensive-fallback shape as VaultService.node_type_from_
+    frontmatter() -- an unrecognized/legacy/forward-incompatible `origin`
+    value (hand-edited file, or a newer app version's future enum member)
+    must not crash GET /notes/{slug} for that one node."""
+    try:
+        return SourceOrigin(fm.get("origin") or "zotero")
+    except ValueError:
+        return SourceOrigin.zotero
+
+
+def _source_kind_from_frontmatter(fm: dict) -> SourceKind:
+    """Same reasoning as _source_origin_from_frontmatter()."""
+    try:
+        return SourceKind(fm.get("source_kind") or "paper")
+    except ValueError:
+        return SourceKind.paper
+
+
 # ── Legacy chat .md format (ADR-019) ─────────────────────────────────────────
 # Chats used to be stored as plain markdown -- role carried by a heading per
 # turn, tool calls as `>` blockquote lines, model/footnotes as a
@@ -613,8 +632,8 @@ class VaultService:
             publisher=fm.get("publisher"),
             url=fm.get("url"),
             item_type=fm.get("item_type"),
-            origin=SourceOrigin(fm.get("origin") or "zotero"),
-            source_kind=SourceKind(fm.get("source_kind") or "paper"),
+            origin=_source_origin_from_frontmatter(fm),
+            source_kind=_source_kind_from_frontmatter(fm),
         )
 
     def create_source_from_citekey(
@@ -643,7 +662,11 @@ class VaultService:
             fm["zotero_key"] = zotero_key
         if source_kind != SourceKind.paper:
             fm["source_kind"] = source_kind.value
-        if year:
+        # is not None, not truthy -- year=0 is a real (if unrealistic)
+        # value, and this must agree with update_source_bibliographic_
+        # fields()'s handling of the same field or POST /notes/sources and
+        # PATCH /{slug}/source disagree on whether year=0 sticks.
+        if year is not None:
             fm["year"] = year
         if doi:
             fm["doi"] = doi
@@ -725,7 +748,15 @@ class VaultService:
         (it builds a citekey->slug index for citation *resolution*; this is
         a plain existence check) just to avoid the duplication."""
         for path in self.iter_files():
-            fm, _ = _parse_frontmatter(path.read_text(encoding="utf-8", errors="replace"))
+            try:
+                raw = path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                # A file can vanish between iter_files()'s walk yielding it
+                # and this read (a concurrent delete/move) -- harmless to
+                # this existence check either way, so skip it rather than
+                # letting POST /notes/sources 500 on an unrelated race.
+                continue
+            fm, _ = _parse_frontmatter(raw)
             if fm.get("citekey") == citekey:
                 return True
         return False

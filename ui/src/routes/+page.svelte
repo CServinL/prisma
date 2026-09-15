@@ -1838,7 +1838,13 @@
       title: sourceForm.title,
       authors,
       year: sourceForm.year ? Number(sourceForm.year) : null,
-      doi: sourceForm.doi || null,
+      // doi isn't converted to null on blank like the others below -- the
+      // backend checks it with `is not None` (so it can be cleared), unlike
+      // url/journal/volume/issue/pages/publisher/item_type, which check
+      // truthiness and can only ever be set, never cleared, by design (see
+      // update_source_bibliographic_fields()'s docstring). Sending null
+      // here for a blanked field would silently leave the stale value.
+      doi: sourceForm.doi,
       url: sourceForm.url || null,
       journal: sourceForm.journal || null,
       volume: sourceForm.volume || null,

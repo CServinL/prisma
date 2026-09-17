@@ -3,6 +3,8 @@ find_file, node_type_from_frontmatter, unique_slug, find_stream_path,
 create_source_from_citekey — previously reached externally (renderer.py,
 app.py, chroma_service.py, knowledge_graph_service.py) only through their
 underscore-prefixed private equivalents."""
+from pathlib import Path
+
 import pytest
 
 from prisma.services.vault import VaultService
@@ -345,6 +347,20 @@ class TestCitekeyExists:
     def test_false_for_an_unused_citekey(self, vault):
         assert vault.citekey_exists("nobody2099") is False
 
+    def test_finds_citekey_even_with_a_large_body(self, vault):
+        # citekey_exists() reads only each file's head (bounded by
+        # _FRONTMATTER_READ_BYTES), not the whole file -- it runs inside
+        # create_source_from_citekey_if_free()'s lock, so a full-body read
+        # per file would serialize every manual create behind a scan whose
+        # cost scales with total vault content, not just file count. This
+        # confirms the bound doesn't break detection: frontmatter is always
+        # at the start of the file, so a body far larger than the bound
+        # (e.g. a full PDF-extracted paper) doesn't hide the citekey.
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "x" * 50_000, zotero_key="ABC123", authors=[], tags=[],
+        )
+        assert vault.citekey_exists("smith2024") is True
+
 
 class TestCreateSourceFromCitekeyIfFree:
     def test_raises_on_collision(self, vault):
@@ -470,6 +486,38 @@ class TestAttachSourceCompanion:
         assert len(calls) == 1
         vault.attach_source_companion(source.slug, "paper.pdf", b"identical bytes")
         assert len(calls) == 1  # not called a second time -- byte-identical re-upload is a no-op
+
+
+class TestEnsureMdFormatCleansUpOnFailure:
+    def test_temp_file_is_removed_when_docu_craft_render_raises(self, vault, monkeypatch, tmp_path):
+        # Regression: NamedTemporaryFile(delete=False) creates the temp
+        # file before _dc_render() runs; the old code only unlinked it on
+        # the success path, so a render failure leaked it. Made worse by
+        # attach_source_companion()'s force=True: a user retrying a
+        # failing companion upload now leaked one temp file per retry, not
+        # just once.
+        import tempfile as tempfile_module
+
+        created: list[Path] = []
+        real_ntf = tempfile_module.NamedTemporaryFile
+
+        def recording_ntf(*args, **kwargs):
+            tf = real_ntf(*args, **kwargs)
+            created.append(Path(tf.name))
+            return tf
+
+        monkeypatch.setattr(tempfile_module, "NamedTemporaryFile", recording_ntf)
+        monkeypatch.setattr("docu_craft.render", lambda **kwargs: (_ for _ in ()).throw(RuntimeError("boom")))
+
+        companion = vault.default_dirs[NodeType.source] / "paper.html"
+        companion.parent.mkdir(parents=True, exist_ok=True)
+        companion.write_text("<html><body>hi</body></html>", encoding="utf-8")
+
+        result = vault.ensure_md_format(companion)
+
+        assert result is False
+        assert len(created) == 1
+        assert not created[0].exists()
 
 
 class TestUpdateSourceBibliographicFields:

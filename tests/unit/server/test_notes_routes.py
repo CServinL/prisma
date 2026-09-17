@@ -357,9 +357,11 @@ def test_create_source_rejects_whitespace_only_explicit_citekey(client):
 
 
 def test_create_source_rejects_an_absurdly_long_title(client):
-    # Regression: used to 500 (OSError, filename too long) instead of a
-    # clean validation error -- unique_slug()/_slugify() turn the title
-    # directly into a filesystem filename with no length cap upstream.
+    # Rejected by SourceCreateRequest.title's own max_length=512 during
+    # request validation -- never reaches unique_slug()/_slugify() at all.
+    # The real regression test for _slugify()'s own length cap (a title
+    # under 512 but still long enough to have crashed before that fix) is
+    # test_create_source_accepts_a_long_but_not_absurd_title, below.
     r = client.post("/notes/sources", json={"title": "a" * 5000})
     assert r.status_code == 422
 

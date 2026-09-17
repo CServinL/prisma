@@ -766,17 +766,26 @@ class VaultService:
         _build_citekey_index() (same frontmatter scan) is cheaper than
         reaching into that module's private, differently-shaped internals
         (it builds a citekey->slug index for citation *resolution*; this is
-        a plain existence check) just to avoid the duplication."""
+        a plain existence check) just to avoid the duplication.
+
+        Reads only each file's head (_FRONTMATTER_READ_BYTES, same bound
+        frontmatter_for_relpath() uses), not the whole file -- this runs
+        inside create_source_from_citekey_if_free()'s lock, so a full-body
+        read per file (a Source's body can be a full PDF-extracted paper,
+        tens of KB+) would serialize every manual create behind a scan
+        whose cost scales with total vault content size, not just file
+        count."""
         for path in self.iter_files():
             try:
-                raw = path.read_text(encoding="utf-8", errors="replace")
+                with path.open("r", encoding="utf-8", errors="replace") as f:
+                    head = f.read(_FRONTMATTER_READ_BYTES)
             except OSError:
                 # A file can vanish between iter_files()'s walk yielding it
                 # and this read (a concurrent delete/move) -- harmless to
                 # this existence check either way, so skip it rather than
                 # letting POST /notes/sources 500 on an unrelated race.
                 continue
-            fm, _ = _parse_frontmatter(raw)
+            fm, _ = _parse_frontmatter(head)
             if fm.get("citekey") == citekey:
                 return True
         return False
@@ -1065,9 +1074,19 @@ class VaultService:
                 import tempfile
                 with tempfile.NamedTemporaryFile(suffix=".md", delete=False) as tf:
                     tmp = Path(tf.name)
-                _dc_render(source=companion_path, format="md", output=tmp)
-                md_content = tmp.read_text(encoding="utf-8")
-                tmp.unlink(missing_ok=True)
+                try:
+                    _dc_render(source=companion_path, format="md", output=tmp)
+                    md_content = tmp.read_text(encoding="utf-8")
+                finally:
+                    # Must run even when _dc_render()/read_text() raises --
+                    # the file already exists on disk from NamedTemporaryFile
+                    # above regardless of what happens next. Previously only
+                    # unlinked on the success path, leaking one temp file per
+                    # failed conversion -- attach_source_companion()'s
+                    # force=True re-extraction on every companion re-upload
+                    # means a retried failing upload now leaks one per retry,
+                    # not just once.
+                    tmp.unlink(missing_ok=True)
             except Exception as exc:
                 _log.warning("docu_craft render failed for %s, no .md companion generated: %s", companion_path, exc)
                 return False

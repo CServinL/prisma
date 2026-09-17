@@ -124,9 +124,8 @@ def test_set_note_type_not_shadowed_by_a_node_literally_named_sources(client, va
     # original shape) collided with this route whenever a node's slug is
     # literally "sources" -- PATCH /notes/sources/type matched the edit
     # route with slug="type" instead of this one with slug="sources".
-    # Confirmed live before the fix (routes now live at /{slug}/source and
-    # /{slug}/companion instead, matching every other action route's
-    # segment order in this file).
+    # Fixed by moving those routes to /{slug}/source and /{slug}/companion,
+    # matching every other action route's segment order in this file.
     vault.create_note("Sources", "body")
     r = client.patch("/notes/sources/type", json={"node_type": "source"})
     assert r.status_code == 200
@@ -311,6 +310,30 @@ def test_create_source_rejects_duplicate_citekey(client):
     assert r.status_code == 409
 
 
+def test_get_note_echoes_tags_for_prefilling_the_edit_dialog(client, vault):
+    # Regression: RenderedNode never echoed `tags` at all (any node type,
+    # not just Source) -- the edit-metadata dialog would always show an
+    # empty Tags field regardless of what was actually set, and saving
+    # would silently wipe real tags via update_source_bibliographic_
+    # fields()'s `is not None` check treating that empty field as "clear".
+    source = vault.create_source_from_citekey(
+        "smith2024", "A Great Paper", "body", zotero_key="ABC", authors=[], tags=["ml", "nlp"],
+    )
+    r = client.get(f"/notes/{source.slug}")
+    assert r.json()["tags"] == ["ml", "nlp"]
+
+
+def test_edit_source_updates_tags_and_source_kind(client, vault):
+    source = vault.create_source_from_citekey(
+        "smith2024", "A Great Paper", "body", zotero_key="ABC", authors=[], tags=["ml"],
+    )
+    r = client.patch(f"/notes/{source.slug}/source", json={"tags": ["ml", "nlp"], "source_kind": "web"})
+    assert r.status_code == 200
+    data = r.json()
+    assert data["tags"] == ["ml", "nlp"]
+    assert data["source_kind"] == "web"
+
+
 def test_create_source_no_metadata_still_works(client):
     # Metadata-only Source, no companion at all -- e.g. a physical book.
     r = client.post("/notes/sources", json={"title": "A Physical Book"})
@@ -361,6 +384,19 @@ def test_create_note_accepts_a_long_but_not_absurd_title(client):
     assert r.status_code == 201
 
 
+def test_two_long_titles_sharing_a_slugified_prefix_dont_collide(client):
+    # _slugify()'s 200-char truncation cap means two different long titles
+    # that agree on their first 200 alphanumeric characters now produce the
+    # same base slug -- unique_slug()'s existing "-1"/"-2" disambiguation
+    # already handles this (same mechanism as any other title collision),
+    # confirming no data loss: both notes exist, distinctly, under it.
+    long_prefix = "a" * 250
+    r1 = client.post("/notes", json={"title": long_prefix + "-ending-one"})
+    r2 = client.post("/notes", json={"title": long_prefix + "-ending-two"})
+    assert r1.status_code == 201 and r2.status_code == 201
+    assert r1.json()["slug"] != r2.json()["slug"]
+
+
 def test_create_source_rejects_negative_year(client):
     r = client.post("/notes/sources", json={"title": "X", "year": -100})
     assert r.status_code == 422
@@ -372,6 +408,42 @@ def test_edit_source_rejects_negative_year(client, vault):
     )
     r = client.patch(f"/notes/{source.slug}/source", json={"year": -100})
     assert r.status_code == 422
+
+
+def test_edit_source_returns_404_not_500_on_concurrent_delete(client, vault, monkeypatch):
+    # edit_source's try/except around get_any() didn't cover the actual
+    # write call -- a delete landing in that window surfaced as an
+    # unhandled 500 instead of the 404 both the check and the write intend.
+    source = vault.create_source_from_citekey(
+        "smith2024", "A Great Paper", "body", zotero_key="ABC", authors=[], tags=[],
+    )
+    real_get_any = VaultService.get_any
+
+    def get_any_then_delete(self, slug):
+        node = real_get_any(self, slug)
+        self._find_md(slug).unlink()
+        return node
+
+    monkeypatch.setattr(VaultService, "get_any", get_any_then_delete)
+    r = client.patch(f"/notes/{source.slug}/source", json={"doi": "10.1/x"})
+    assert r.status_code == 404
+
+
+def test_upload_companion_returns_404_not_500_on_concurrent_delete(client, vault, monkeypatch):
+    source = vault.create_source_from_citekey(
+        "smith2024", "A Great Paper", "body", zotero_key="ABC", authors=[], tags=[],
+    )
+    real_get_any = VaultService.get_any
+
+    def get_any_then_delete(self, slug):
+        node = real_get_any(self, slug)
+        self._find_md(slug).unlink()
+        return node
+
+    monkeypatch.setattr(VaultService, "get_any", get_any_then_delete)
+    r = client.post(f"/notes/{source.slug}/companion",
+                     files={"file": ("figure.svg", b"<svg></svg>", "image/svg+xml")})
+    assert r.status_code == 404
 
 
 def test_edit_source_merges_only_given_fields(client, vault):

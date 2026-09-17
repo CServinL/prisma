@@ -81,6 +81,7 @@ class SourceEditRequest(BaseModel):
     tags: Optional[list[str]] = None
     year: Optional[int] = Field(None, ge=0)
     doi: Optional[str] = None
+    source_kind: Optional[SourceKind] = None
     journal: Optional[str] = None
     volume: Optional[str] = None
     issue: Optional[str] = None
@@ -139,6 +140,7 @@ def render_note(vault: VaultService, slug: str, request: Request, format: str = 
         path=str(node_path.relative_to(vault.root).as_posix()) if node_path else "",
         title=node.title,
         node_type=node.node_type,
+        tags=getattr(node, "tags", []),
         html=html,
         broken_links=broken_links,
         broken_citations=broken_citations,
@@ -154,19 +156,28 @@ def render_note(vault: VaultService, slug: str, request: Request, format: str = 
         rn.query = node.query
         rn.collection_key = node.collection_key
     if isinstance(node, Source):
-        rn.citekey = node.citekey
-        rn.source_kind = node.source_kind
-        rn.authors = node.authors
-        rn.year = node.year
-        rn.doi = node.doi
-        rn.journal = node.journal
-        rn.volume = node.volume
-        rn.issue = node.issue
-        rn.pages = node.pages
-        rn.publisher = node.publisher
-        rn.url = node.url
-        rn.item_type = node.item_type
+        _echo_source_fields(rn, node)
     return rn
+
+
+def _echo_source_fields(rn: RenderedNode, source: Source) -> None:
+    """The one place both render_note() (GET) and _render_source() (create/
+    edit/companion-upload) populate a RenderedNode's Source-only fields --
+    previously duplicated verbatim in both, so a future field added to one
+    and not the other would make GET and the mutating routes silently
+    disagree on what they echo back."""
+    rn.citekey = source.citekey
+    rn.source_kind = source.source_kind
+    rn.authors = source.authors
+    rn.year = source.year
+    rn.doi = source.doi
+    rn.journal = source.journal
+    rn.volume = source.volume
+    rn.issue = source.issue
+    rn.pages = source.pages
+    rn.publisher = source.publisher
+    rn.url = source.url
+    rn.item_type = source.item_type
 
 
 def _render_source(vault: VaultService, source: Source) -> RenderedNode:
@@ -189,15 +200,14 @@ def _render_source(vault: VaultService, source: Source) -> RenderedNode:
     re-fetching would not."""
     rel = str(source.path.relative_to(vault.root).as_posix())
     html, broken_links, broken_citations = vault_render(source.body, vault)
-    return RenderedNode(
+    rn = RenderedNode(
         slug=source.slug, path=rel, title=source.title, node_type=source.node_type,
+        tags=source.tags,
         html=html, broken_links=broken_links, broken_citations=broken_citations,
         original_ext=source.original_ext,
-        citekey=source.citekey, source_kind=source.source_kind, authors=source.authors,
-        year=source.year, doi=source.doi, journal=source.journal, volume=source.volume,
-        issue=source.issue, pages=source.pages, publisher=source.publisher,
-        url=source.url, item_type=source.item_type,
     )
+    _echo_source_fields(rn, source)
+    return rn
 
 
 def build_notes_router(
@@ -281,7 +291,8 @@ def build_notes_router(
     # literally "sources" (a plausible index-note name) -- PATCH
     # /notes/sources/type matched *this* route with slug="type" instead of
     # /{slug}/type with slug="sources", silently swallowing the intended
-    # type-toggle. Confirmed live before this fix, not just theorized.
+    # type-toggle. See test_set_note_type_not_shadowed_by_a_node_literally_
+    # named_sources for the reproduction.
     @router.patch("/{slug}/source", response_model=RenderedNode)
     def edit_source(slug: str, req: SourceEditRequest):
         vault = get_vault()
@@ -291,11 +302,19 @@ def build_notes_router(
             raise HTTPException(status_code=404, detail=f"source not found: {slug!r}")
         if not isinstance(node, Source):
             raise HTTPException(status_code=400, detail=f"{slug!r} is not a source")
-        source = vault.update_source_bibliographic_fields(
-            slug, title=req.title, authors=req.authors, year=req.year, doi=req.doi, tags=req.tags,
-            journal=req.journal, volume=req.volume, issue=req.issue, pages=req.pages,
-            publisher=req.publisher, url=req.url, item_type=req.item_type,
-        )
+        try:
+            source = vault.update_source_bibliographic_fields(
+                slug, title=req.title, authors=req.authors, year=req.year, doi=req.doi, tags=req.tags,
+                source_kind=req.source_kind,
+                journal=req.journal, volume=req.volume, issue=req.issue, pages=req.pages,
+                publisher=req.publisher, url=req.url, item_type=req.item_type,
+            )
+        except FileNotFoundError:
+            # A concurrent delete between the get_any() check above and this
+            # call -- an unlikely but real window, not just theoretical (see
+            # the same class of race citekey_exists()/create_source_from_
+            # citekey_if_free() already guard against elsewhere in this file).
+            raise HTTPException(status_code=404, detail=f"source not found: {slug!r}")
         mark_stale_fn()
         rel = str(source.path.relative_to(vault.root).as_posix())
         broadcast_fn({"type": "vault_change", "action": "save", "path": rel})
@@ -315,6 +334,10 @@ def build_notes_router(
             source = vault.attach_source_companion(slug, file.filename or "", data)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
+        except FileNotFoundError:
+            # Same concurrent-delete window as edit_source above -- the
+            # await file.read() makes it wider here, not narrower.
+            raise HTTPException(status_code=404, detail=f"source not found: {slug!r}")
         mark_stale_fn()
         rel = str(source.path.relative_to(vault.root).as_posix())
         broadcast_fn({"type": "vault_change", "action": "save", "path": rel})

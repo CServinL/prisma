@@ -609,6 +609,13 @@ class RenderedNode(BaseModel):
     path: str
     title: str
     node_type: NodeType
+    # Every node type inherits `tags` from VaultNodeBase -- echoed here (not
+    # Source-only, unlike the block below) so an edit dialog can prefill
+    # the source's *current* tags. Without this, "Edit metadata" always
+    # showed an empty tags field regardless of what was actually set, and
+    # saving would silently wipe real tags via update_source_bibliographic_
+    # fields()'s `is not None` check treating that empty field as "clear it".
+    tags: list[str] = Field(default_factory=list)
     html: str
     broken_links: list[str] = Field(default_factory=list)
     broken_citations: list[str] = Field(default_factory=list)

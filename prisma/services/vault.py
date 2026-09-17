@@ -53,13 +53,12 @@ _SKIP_DIRS = {".git", ".svn", "__pycache__", "node_modules", ".venv", "venv", "d
 # bytes. A slug is always pure ASCII (the regex below strips everything
 # outside [a-z0-9] to a single hyphen, so non-ASCII input collapses rather
 # than expanding), so 200 characters leaves real headroom for a
-# disambiguation suffix (unique_slug()'s "-1", "-2", ...) and an
-# extension (".md") without ever approaching that limit -- found live:
-# an all-ASCII single-word title as short as ~300 characters (nowhere
-# near an intuitively "absurd" length) already raised OSError("File name
-# too long") from path.write_text(), a pre-existing bug in create_note()
-# and every other _slugify() caller, not new to whichever one happens to
-# get noticed first.
+# disambiguation suffix (unique_slug()'s "-1", "-2", ...) and an extension
+# (".md") without ever approaching that limit. An all-ASCII single-word
+# title as short as ~300 characters (nowhere near an intuitively "absurd"
+# length) raises OSError("File name too long") from path.write_text()
+# without this cap -- affects every _slugify() caller (create_note
+# included), not just whichever one happens to get noticed first.
 _MAX_SLUG_LENGTH = 200
 
 
@@ -706,6 +705,7 @@ class VaultService:
     def update_source_bibliographic_fields(
         self, slug: str, *, title: str | None = None, authors: list[str] | None = None,
         year: int | None = None, doi: str | None = None, tags: list[str] | None = None,
+        source_kind: SourceKind | None = None,
         journal: str | None = None, volume: str | None = None,
         issue: str | None = None, pages: str | None = None, publisher: str | None = None,
         url: str | None = None, item_type: str | None = None,
@@ -723,14 +723,17 @@ class VaultService:
           empty string for it this time -- source_backfill.py depends on
           this exact behavior (see test_does_not_blank_out_fields_when_
           called_with_none), not changed here.
-        - title/authors/year/doi/tags: added for the manual edit-metadata
-          route. Uses `is not None` instead -- an explicit `authors: []`
-          from that route means "clear the authors," a real, expected edit
-          action; a truthy check would silently no-op it. Omitting the
-          field (Pydantic default None) still means "leave it alone"
-          either way, so this doesn't regress the "don't touch what wasn't
-          given" guarantee, it just makes an explicit empty value actually
-          take effect for the fields where that's a meaningful edit.
+        - title/authors/year/doi/tags/source_kind: added for the manual
+          edit-metadata route. Uses `is not None` instead -- an explicit
+          `authors: []` from that route means "clear the authors," a real,
+          expected edit action; a truthy check would silently no-op it.
+          Omitting the field (Pydantic default None) still means "leave it
+          alone" either way, so this doesn't regress the "don't touch what
+          wasn't given" guarantee, it just makes an explicit empty value
+          actually take effect for the fields where that's a meaningful
+          edit. source_kind has no meaningful "empty" value (it's an enum,
+          not a string/list) but is grouped here anyway since it's the
+          same "settable after creation" capability the others gained.
 
         Deliberately excludes `citekey`: renderer.py's citation index
         resolves [[@citekey]] against current frontmatter values, so
@@ -744,6 +747,8 @@ class VaultService:
         for key, value in [("title", title), ("authors", authors), ("year", year), ("doi", doi), ("tags", tags)]:
             if value is not None:
                 fm[key] = value
+        if source_kind is not None:
+            fm["source_kind"] = source_kind.value
         for key, value in [
             ("journal", journal), ("volume", volume), ("issue", issue),
             ("pages", pages), ("publisher", publisher), ("url", url), ("item_type", item_type),
@@ -817,7 +822,16 @@ class VaultService:
         extraction forever after every subsequent replace. A failed new
         extraction still leaves the old body untouched either way --
         ensure_md_format() returns before writing whenever conversion
-        produces nothing, force or not."""
+        produces nothing, force or not.
+
+        Skips the write and re-extraction entirely when the uploaded bytes
+        are byte-identical to the existing companion -- a retried/duplicate
+        upload of the same file would otherwise still pay for a full
+        re-extraction (a real cost for a large PDF) for a change that
+        didn't actually happen. The calling route still marks the vault
+        stale and broadcasts a vault_change regardless (this method has no
+        way to tell it not to) -- a smaller, separate waste than the
+        extraction this actually avoids, not chased further here."""
         path = self._find_md(slug)
         if path is None:
             raise FileNotFoundError(f"source not found: {slug!r}")
@@ -825,6 +839,8 @@ class VaultService:
         if ext not in COMPANION_EXTS:
             raise ValueError(f"unsupported companion extension: {ext!r}")
         existing = self.find_companion(slug)
+        if existing is not None and existing.suffix == ext and existing.read_bytes() == data:
+            return self.get_source(slug)
         if existing is not None and existing.suffix != ext:
             existing.unlink()
         companion_path = path.with_suffix(ext)

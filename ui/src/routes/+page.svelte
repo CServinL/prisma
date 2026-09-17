@@ -219,6 +219,7 @@
     path: string;
     title: string;
     node_type: NodeType;
+    tags?: string[];
     html: string;
     broken_links: string[];
     broken_citations: string[];
@@ -1793,7 +1794,7 @@
   const EMPTY_SOURCE_FORM = {
     slug: "", title: "", body: "", citekey: "", authorsText: "", tagsText: "",
     year: "", doi: "", url: "", journal: "", volume: "", issue: "", pages: "",
-    publisher: "", item_type: "",
+    publisher: "", item_type: "", source_kind: "paper",
   };
   let sourceForm = $state({ ...EMPTY_SOURCE_FORM });
   let sourceFormFile: File | null = $state(null);
@@ -1816,11 +1817,12 @@
       slug: activeNode.slug, title: activeNode.title, body: "",
       citekey: activeNode.citekey ?? "",
       authorsText: (activeNode.authors ?? []).join(", "),
-      tagsText: "",
+      tagsText: (activeNode.tags ?? []).join(", "),
       year: activeNode.year != null ? String(activeNode.year) : "",
       doi: activeNode.doi ?? "", url: activeNode.url ?? "",
       journal: activeNode.journal ?? "", volume: activeNode.volume ?? "", issue: activeNode.issue ?? "",
       pages: activeNode.pages ?? "", publisher: activeNode.publisher ?? "", item_type: activeNode.item_type ?? "",
+      source_kind: activeNode.source_kind ?? "paper",
     };
     sourceFormFile = null;
     sourceFormError = "";
@@ -1835,9 +1837,12 @@
     sourceFormSaving = true;
     sourceFormError = "";
     const authors = sourceForm.authorsText.split(",").map((s) => s.trim()).filter(Boolean);
+    const tags = sourceForm.tagsText.split(",").map((s) => s.trim()).filter(Boolean);
     const payload: Record<string, unknown> = {
       title: sourceForm.title,
       authors,
+      tags,
+      source_kind: sourceForm.source_kind,
       // Not a truthy check -- Svelte's bind:value on a type="number" input
       // coerces to a real JS number once touched (not the string the
       // EMPTY_SOURCE_FORM default holds), so `sourceForm.year ? ... : null`
@@ -1867,7 +1872,6 @@
       if (sourceFormMode === "create") {
         payload.body = sourceForm.body;
         payload.citekey = sourceForm.citekey || null;
-        payload.tags = sourceForm.tagsText.split(",").map((s) => s.trim()).filter(Boolean);
         r = await apiFetch(`${apiBase}/notes/sources`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -1887,6 +1891,17 @@
       }
       const saved = await r.json();
       const targetSlug = sourceFormMode === "create" ? saved.slug : sourceForm.slug;
+      // Close and refresh as soon as the metadata save succeeds, before
+      // attempting the companion upload -- the metadata IS saved at this
+      // point regardless of what happens next. Leaving the dialog open on
+      // a companion-upload failure used to mean retrying re-submitted the
+      // same create call, which then 409'd on the citekey the first,
+      // already-successful attempt had claimed. A failed companion upload
+      // is now a separate, best-effort step reported via alert(), with the
+      // toolbar's own "Upload companion" action as the natural retry path.
+      showSourceForm = false;
+      await loadTree();
+      await openNode(targetSlug);
       if (sourceFormFile) {
         const form = new FormData();
         form.append("file", sourceFormFile);
@@ -1894,15 +1909,13 @@
           method: "POST",
           body: form,
         });
-        if (!cr.ok) {
+        if (cr.ok) {
+          await openNode(targetSlug);
+        } else {
           const err = await cr.json().catch(() => ({}));
-          sourceFormError = `Source saved, but companion upload failed: ${err.detail ?? cr.status}`;
-          return;
+          alert(`Source saved, but the companion upload failed: ${err.detail ?? cr.status}. Use "Upload companion" to retry.`);
         }
       }
-      showSourceForm = false;
-      await loadTree();
-      await openNode(targetSlug);
     } catch (e) {
       sourceFormError = String(e);
     } finally {
@@ -3487,11 +3500,19 @@
         <span class="setting-label">Item type</span>
         <input bind:value={sourceForm.item_type} placeholder="e.g. journalArticle, book" />
       </label>
+      <label class="setting-row">
+        <span class="setting-label">Kind</span>
+        <select bind:value={sourceForm.source_kind}>
+          {#each ["paper", "document", "web", "media"] as k}
+            <option value={k}>{k.charAt(0).toUpperCase() + k.slice(1)}</option>
+          {/each}
+        </select>
+      </label>
+      <label class="setting-row">
+        <span class="setting-label">Tags</span>
+        <input bind:value={sourceForm.tagsText} placeholder="Comma-separated" />
+      </label>
       {#if sourceFormMode === "create"}
-        <label class="setting-row">
-          <span class="setting-label">Tags</span>
-          <input bind:value={sourceForm.tagsText} placeholder="Comma-separated" />
-        </label>
         <label class="setting-row">
           <span class="setting-label">Companion file</span>
           <input type="file" accept=".pdf,.html,.htm,.svg,.epub,.docx,.tex,.drawio,.jpg,.jpeg" onchange={(e) => sourceFormFile = (e.currentTarget as HTMLInputElement).files?.[0] ?? null} />

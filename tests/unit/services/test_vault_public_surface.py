@@ -460,6 +460,17 @@ class TestAttachSourceCompanion:
         vault.attach_source_companion(source.slug, "paper.pdf", b"pdf bytes v2")
         assert vault.get_source(source.slug).body == "second extracted text"
 
+    def test_reuploading_identical_bytes_does_not_reextract(self, vault, monkeypatch):
+        calls = []
+        monkeypatch.setattr("prisma.services.vault.pdf_bytes_to_md", lambda data: calls.append(data) or "extracted once")
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "", zotero_key="ABC123", authors=[], tags=[],
+        )
+        vault.attach_source_companion(source.slug, "paper.pdf", b"identical bytes")
+        assert len(calls) == 1
+        vault.attach_source_companion(source.slug, "paper.pdf", b"identical bytes")
+        assert len(calls) == 1  # not called a second time -- byte-identical re-upload is a no-op
+
 
 class TestUpdateSourceBibliographicFields:
     def test_merges_new_fields_leaving_existing_ones_untouched(self, vault):
@@ -517,6 +528,14 @@ class TestUpdateSourceBibliographicFields:
         # must stay untouched, same merge-only-given-fields guarantee the
         # original 7-field version already had.
         assert updated.journal == "Original Journal"
+
+    def test_source_kind_is_editable_after_creation(self, vault):
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "body", zotero_key="ABC123", authors=[], tags=[],
+        )
+        assert source.source_kind == SourceKind.paper
+        updated = vault.update_source_bibliographic_fields(source.slug, source_kind=SourceKind.web)
+        assert updated.source_kind == SourceKind.web
 
     def test_explicit_empty_string_clears_doi(self, vault):
         # doi uses `is not None` too (it's in the same new-field group as

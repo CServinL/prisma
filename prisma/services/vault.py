@@ -80,6 +80,18 @@ def _file_slug(stem: str) -> str:
 # block larger than this is malformed, and its year lookup degrades to None.
 _FRONTMATTER_READ_BYTES = 8192
 
+# citekey_exists() needs a much larger bound than the one above: that one is
+# fine to silently degrade on overflow (a best-effort year lookup), but a
+# truncated read here means _parse_frontmatter can't find the closing '---'
+# at all and returns {} -- a false "citekey not in use" that lets
+# create_source_from_citekey_if_free() create a real collision despite its
+# own lock. A long author list plus an abstract/tags can realistically push
+# a Source's frontmatter past 8192 bytes; 65536 comfortably covers that
+# while still being negligible next to a full PDF-extracted body (the actual
+# cost this bound exists to avoid reading in full for every file, every
+# manual create).
+_CITEKEY_SCAN_READ_BYTES = 65536
+
 
 def _parse_frontmatter(body: str) -> tuple[dict, str]:
     """Return (frontmatter_dict, body_without_frontmatter).
@@ -734,6 +746,14 @@ class VaultService:
           edit. source_kind has no meaningful "empty" value (it's an enum,
           not a string/list) but is grouped here anyway since it's the
           same "settable after creation" capability the others gained.
+          `year` is the one exception within this group: unlike authors/
+          tags/doi, there is no value distinct from "omitted" that means
+          "clear this" for a plain `int | None` -- sending `year: null`
+          is indistinguishable from not sending `year` at all, so a year
+          can be set or changed but never cleared back to unset through
+          this method, same practical limitation as the truthy-checked
+          group below (grouped with them in the UI's edit-metadata hint
+          for that reason), just for a different underlying cause.
 
         Deliberately excludes `citekey`: renderer.py's citation index
         resolves [[@citekey]] against current frontmatter values, so
@@ -768,17 +788,20 @@ class VaultService:
         (it builds a citekey->slug index for citation *resolution*; this is
         a plain existence check) just to avoid the duplication.
 
-        Reads only each file's head (_FRONTMATTER_READ_BYTES, same bound
-        frontmatter_for_relpath() uses), not the whole file -- this runs
-        inside create_source_from_citekey_if_free()'s lock, so a full-body
-        read per file (a Source's body can be a full PDF-extracted paper,
-        tens of KB+) would serialize every manual create behind a scan
-        whose cost scales with total vault content size, not just file
-        count."""
+        Reads only each file's head (_CITEKEY_SCAN_READ_BYTES), not the
+        whole file -- this runs inside create_source_from_citekey_if_free()'s
+        lock, so a full-body read per file (a Source's body can be a full
+        PDF-extracted paper, tens of KB+) would serialize every manual
+        create behind a scan whose cost scales with total vault content
+        size, not just file count. Uses a larger bound than frontmatter_
+        for_relpath()'s _FRONTMATTER_READ_BYTES -- that one is fine to
+        silently degrade on overflow (a best-effort lookup), but a
+        truncated read here would falsely report an in-use citekey as
+        free, letting a real collision through despite the lock."""
         for path in self.iter_files():
             try:
                 with path.open("r", encoding="utf-8", errors="replace") as f:
-                    head = f.read(_FRONTMATTER_READ_BYTES)
+                    head = f.read(_CITEKEY_SCAN_READ_BYTES)
             except OSError:
                 # A file can vanish between iter_files()'s walk yielding it
                 # and this read (a concurrent delete/move) -- harmless to

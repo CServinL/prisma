@@ -348,17 +348,35 @@ class TestCitekeyExists:
         assert vault.citekey_exists("nobody2099") is False
 
     def test_finds_citekey_even_with_a_large_body(self, vault):
-        # citekey_exists() reads only each file's head (bounded by
-        # _FRONTMATTER_READ_BYTES), not the whole file -- it runs inside
-        # create_source_from_citekey_if_free()'s lock, so a full-body read
-        # per file would serialize every manual create behind a scan whose
-        # cost scales with total vault content, not just file count. This
-        # confirms the bound doesn't break detection: frontmatter is always
-        # at the start of the file, so a body far larger than the bound
-        # (e.g. a full PDF-extracted paper) doesn't hide the citekey.
+        # citekey_exists() reads only each file's head (_CITEKEY_SCAN_READ_
+        # BYTES), not the whole file -- it runs inside create_source_from_
+        # citekey_if_free()'s lock, so a full-body read per file would
+        # serialize every manual create behind a scan whose cost scales
+        # with total vault content, not just file count. This confirms the
+        # bound doesn't break detection: frontmatter is always at the start
+        # of the file, so a body far larger than the bound (e.g. a full
+        # PDF-extracted paper) doesn't hide the citekey.
         source = vault.create_source_from_citekey(
             "smith2024", "A Great Paper", "x" * 50_000, zotero_key="ABC123", authors=[], tags=[],
         )
+        assert vault.citekey_exists("smith2024") is True
+
+    def test_finds_citekey_even_with_a_huge_frontmatter_block(self, vault):
+        # Regression: the bound used to be _FRONTMATTER_READ_BYTES (8192),
+        # copied from frontmatter_for_relpath()'s best-effort use case where
+        # silently degrading on overflow is fine. Here it isn't -- a long
+        # author list can push the frontmatter block itself (not just the
+        # body) past that, truncating mid-YAML so _parse_frontmatter can't
+        # find the closing '---' and returns {}, silently reporting an
+        # in-use citekey as free and letting a real collision through
+        # despite create_source_from_citekey_if_free()'s lock.
+        huge_authors = [f"Author Number {i}" for i in range(500)]
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "body", zotero_key="ABC123", authors=huge_authors, tags=[],
+        )
+        raw = source.path.read_text(encoding="utf-8")
+        frontmatter_end = raw.index("\n---", 3) + 4
+        assert frontmatter_end > 8192  # confirms this actually exercises the old, too-small bound
         assert vault.citekey_exists("smith2024") is True
 
 

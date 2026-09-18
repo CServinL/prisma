@@ -16,7 +16,7 @@ import logging
 from typing import Callable, Optional
 
 from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from prisma.services.asset_rewrite import asset_prefix, rewrite_html
 from prisma.services.renderer import render as vault_render
@@ -48,6 +48,15 @@ class NoteSaveRequest(BaseModel):
     body: str
 
 
+def _reject_blank_title(v: Optional[str]) -> Optional[str]:
+    """min_length=1 alone counts raw characters, not stripped content -- a
+    whitespace-only title (e.g. a single space) passes it despite being
+    just as blank as an empty string in practice."""
+    if v is not None and not v.strip():
+        raise ValueError("title cannot be blank")
+    return v
+
+
 class SourceCreateRequest(BaseModel):
     # max_length matches the existing Query(..., max_length=512) convention
     # for short human-typed strings elsewhere (graph_routes.py/kg_app.py) --
@@ -74,6 +83,8 @@ class SourceCreateRequest(BaseModel):
     item_type: Optional[str] = None
     source_kind: SourceKind = SourceKind.paper
 
+    _validate_title = field_validator("title")(_reject_blank_title)
+
 
 class SourceEditRequest(BaseModel):
     title: Optional[str] = Field(None, min_length=1, max_length=512)
@@ -89,6 +100,8 @@ class SourceEditRequest(BaseModel):
     publisher: Optional[str] = None
     url: Optional[str] = None
     item_type: Optional[str] = None
+
+    _validate_title = field_validator("title")(_reject_blank_title)
 
 
 def render_note(vault: VaultService, slug: str, request: Request, format: str = "html") -> RenderedNode:

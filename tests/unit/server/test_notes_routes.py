@@ -351,6 +351,21 @@ def test_create_source_no_metadata_still_works(client):
     assert r.json()["original_ext"] is None
 
 
+def test_create_source_rejects_whitespace_only_title(client):
+    # Regression: min_length=1 counts raw characters, not stripped content
+    # -- a single space passed it despite being just as blank as "".
+    r = client.post("/notes/sources", json={"title": "   "})
+    assert r.status_code == 422
+
+
+def test_edit_source_rejects_whitespace_only_title(client, vault):
+    source = vault.create_source_from_citekey(
+        "smith2024", "A Great Paper", "body", zotero_key="ABC", authors=[], tags=[],
+    )
+    r = client.patch(f"/notes/{source.slug}/source", json={"title": "   "})
+    assert r.status_code == 422
+
+
 def test_create_source_rejects_when_no_citekey_can_be_generated(client):
     # make_citekey() legitimately returns "" for an author name with no
     # ASCII letters (e.g. non-Latin script) and no year/usable title word --

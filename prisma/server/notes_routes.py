@@ -38,16 +38,6 @@ class SetTypeRequest(BaseModel):
     node_type: NodeType
 
 
-class NoteCreateRequest(BaseModel):
-    title: str
-    body: str = ""
-    tags: Optional[list[str]] = None
-
-
-class NoteSaveRequest(BaseModel):
-    body: str
-
-
 def _reject_blank_title(v: Optional[str]) -> Optional[str]:
     """min_length=1 alone counts raw characters, not stripped content -- a
     whitespace-only title (e.g. a single space) passes it despite being
@@ -55,6 +45,18 @@ def _reject_blank_title(v: Optional[str]) -> Optional[str]:
     if v is not None and not v.strip():
         raise ValueError("title cannot be blank")
     return v
+
+
+class NoteCreateRequest(BaseModel):
+    title: str
+    body: str = ""
+    tags: Optional[list[str]] = None
+
+    _validate_title = field_validator("title")(_reject_blank_title)
+
+
+class NoteSaveRequest(BaseModel):
+    body: str
 
 
 class SourceCreateRequest(BaseModel):
@@ -467,7 +469,7 @@ def build_notes_router(
         broadcast_fn({"type": "vault_change", "action": "create", "path": rel})
         html, broken_links, broken_citations = vault_render(note.body, vault)
         return RenderedNode(slug=note.slug, path=rel,
-                            title=note.title, node_type=note.node_type,
+                            title=note.title, node_type=note.node_type, tags=note.tags,
                             html=html, broken_links=broken_links, broken_citations=broken_citations)
 
     @router.put("/{slug}", response_model=RenderedNode)
@@ -482,7 +484,7 @@ def build_notes_router(
         broadcast_fn({"type": "vault_change", "action": "save", "path": rel})
         html, broken_links, broken_citations = vault_render(note.body, vault)
         return RenderedNode(slug=note.slug, path=rel,
-                            title=note.title, node_type=note.node_type,
+                            title=note.title, node_type=note.node_type, tags=note.tags,
                             html=html, broken_links=broken_links, broken_citations=broken_citations)
 
     return router

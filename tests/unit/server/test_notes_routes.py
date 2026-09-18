@@ -80,6 +80,23 @@ def test_create_note_then_list(client, vault, recorder):
     assert len(r2.json()["notes"]) == 1
 
 
+def test_create_note_response_echoes_tags(client):
+    # Regression: this route's own literal RenderedNode(...) omitted
+    # tags=, unlike render_note() (GET) and every Source-related
+    # RenderedNode constructor -- the response reported tags: [] even
+    # though the note was saved with real tags.
+    r = client.post("/notes", json={"title": "My Note", "tags": ["ml"]})
+    assert r.json()["tags"] == ["ml"]
+
+
+def test_create_note_rejects_whitespace_only_title(client):
+    # Regression: _reject_blank_title() was written for Source but never
+    # applied to the sibling NoteCreateRequest.title sitting right above
+    # it in this same file.
+    r = client.post("/notes", json={"title": "   "})
+    assert r.status_code == 422
+
+
 def test_get_note_not_found(client):
     r = client.get("/notes/does-not-exist")
     assert r.status_code == 404
@@ -100,6 +117,12 @@ def test_save_note_updates_body(client, vault, recorder):
     assert r.status_code == 200
     assert recorder.mark_stale_calls == 1
     assert recorder.broadcasts[-1][0]["action"] == "save"
+
+
+def test_save_note_response_echoes_tags(client, vault):
+    vault.create_note("My Note", "body", tags=["ml"])
+    r = client.put("/notes/my-note", json={"body": "updated body"})
+    assert r.json()["tags"] == ["ml"]
 
 
 def test_save_note_not_found(client):

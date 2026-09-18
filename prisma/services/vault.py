@@ -847,14 +847,18 @@ class VaultService:
         other companion kinds are a no-op body-wise (image OCR/extraction
         is a tracked, separate gap -- not attempted here).
 
-        force=True (not ensure_md_format()'s default): the whole point of
-        re-uploading a companion is to refresh its extracted text, so the
-        empty-body-only gate that protects a hand-edited note elsewhere
-        would otherwise silently keep serving the first upload's stale
-        extraction forever after every subsequent replace. A failed new
-        extraction still leaves the old body untouched either way --
-        ensure_md_format() returns before writing whenever conversion
-        produces nothing, force or not.
+        Passes force=True to ensure_md_format() only when *replacing* an
+        existing companion, not on a first attachment -- the whole point of
+        re-uploading is to refresh stale extracted text, so the empty-
+        body-only gate would otherwise keep serving the first upload's
+        extraction forever after every subsequent replace. A first
+        attachment still goes through with the default force=False,
+        protecting a genuinely hand-typed body (or one synthesized at
+        Zotero-import time from the abstract when no PDF was available)
+        from being silently overwritten the moment any companion is
+        attached. A failed new extraction still leaves the old body
+        untouched either way -- ensure_md_format() returns before writing
+        whenever conversion produces nothing, force or not.
 
         Skips the write and re-extraction entirely when the uploaded bytes
         are byte-identical to the existing companion -- a retried/duplicate
@@ -873,12 +877,20 @@ class VaultService:
         existing = self.find_companion(slug)
         if existing is not None and existing.suffix == ext and existing.read_bytes() == data:
             return self.get_source(slug)
+        # force=True only when actually *replacing* a prior companion --
+        # a first attachment must still respect ensure_md_format()'s
+        # empty-body-only gate, or it would overwrite a genuinely hand-
+        # typed body (a manually created Source's own prose, or a
+        # Zotero-import body synthesized from the abstract when no PDF was
+        # available) the moment any companion is attached, exactly the
+        # clobber that gate exists to prevent everywhere else it's used.
+        is_replace = existing is not None
         if existing is not None and existing.suffix != ext:
             existing.unlink()
         companion_path = path.with_suffix(ext)
         companion_path.write_bytes(data)
         if ext in (".pdf", ".html", ".htm"):
-            self.ensure_md_format(companion_path, force=True)
+            self.ensure_md_format(companion_path, force=is_replace)
         return self.get_source(slug)
 
     def get_chat(self, slug: str) -> Chat:

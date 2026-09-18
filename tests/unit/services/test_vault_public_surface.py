@@ -474,6 +474,21 @@ class TestAttachSourceCompanion:
         with pytest.raises(FileNotFoundError):
             vault.attach_source_companion("does-not-exist", "figure.svg", b"<svg></svg>")
 
+    def test_first_attach_does_not_clobber_a_hand_typed_body(self, vault, monkeypatch):
+        # Regression: force=True was passed unconditionally, even on a
+        # FIRST attachment (existing is None) -- overwriting the exact
+        # kind of genuinely hand-typed body (a manually created Source's
+        # own prose, or one synthesized at Zotero-import time from the
+        # abstract when no PDF was available) that ensure_md_format()'s
+        # empty-body-only gate exists to protect everywhere else it's used.
+        monkeypatch.setattr("prisma.services.vault.pdf_bytes_to_md", lambda data: "extracted text")
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "hand-typed body, no companion yet",
+            zotero_key="ABC123", authors=[], tags=[],
+        )
+        updated = vault.attach_source_companion(source.slug, "paper.pdf", b"pdf bytes")
+        assert updated.body == "hand-typed body, no companion yet"
+
     def test_replacing_a_pdf_companion_reextracts_the_body(self, vault, monkeypatch):
         # Regression: attach_source_companion() originally called
         # ensure_md_format() without force=True, which only fills an EMPTY

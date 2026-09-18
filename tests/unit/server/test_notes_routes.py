@@ -429,6 +429,15 @@ def test_create_source_rejects_negative_year(client):
     assert r.status_code == 422
 
 
+def test_create_source_rejects_boolean_year(client):
+    # Regression: Pydantic's default (lax) mode coerces a JSON bool to int
+    # for an int field, so ge=0 alone doesn't reject `year: true` (True
+    # satisfies >=0 once coerced to 1) -- needs strict=True to actually
+    # block the cross-type coercion.
+    r = client.post("/notes/sources", json={"title": "X", "year": True})
+    assert r.status_code == 422
+
+
 def test_edit_source_rejects_negative_year(client, vault):
     source = vault.create_source_from_citekey(
         "smith2024", "A Great Paper", "body", zotero_key="ABC", authors=[], tags=[],

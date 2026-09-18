@@ -69,10 +69,13 @@ class SourceCreateRequest(BaseModel):
     authors: list[str] = Field(default_factory=list)
     tags: list[str] = Field(default_factory=list)
     # ge=0: make_citekey()/create_source_from_citekey() both now honor
-    # year=0 correctly (falsy-zero fix), but a *negative* year or a JSON
-    # `true` (Python bool subtypes int, so it'd otherwise pass silently as
-    # 1) are just bad data, not a value worth preserving.
-    year: Optional[int] = Field(None, ge=0)
+    # year=0 correctly (falsy-zero fix), but a negative year is just bad
+    # data, not a value worth preserving. strict=True: Pydantic's default
+    # (lax) mode coerces a JSON bool to int for an int field -- ge=0 alone
+    # doesn't reject `year: true`, since True satisfies >=0 once coerced
+    # to 1. strict mode still accepts a normal JSON number/null fine, it
+    # only blocks cross-type coercion like this one.
+    year: Optional[int] = Field(None, ge=0, strict=True)
     doi: Optional[str] = None
     url: Optional[str] = None
     journal: Optional[str] = None

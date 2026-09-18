@@ -298,6 +298,16 @@ def test_create_source_with_auto_citekey(client, recorder):
     assert recorder.broadcasts[0][0]["action"] == "create"
 
 
+def test_create_source_auto_citekey_does_not_drop_year_zero(client):
+    # Regression: make_citekey()'s own `year or ''` dropped year=0 even
+    # after create_source_from_citekey()/update_source_bibliographic_
+    # fields() were both fixed to honor it -- this route calls
+    # make_citekey() directly for auto-generated citekeys.
+    r = client.post("/notes/sources", json={"title": "A Great Paper", "authors": ["Jane Smith"], "year": 0})
+    assert r.status_code == 201
+    assert r.json()["citekey"] == "smith0"
+
+
 def test_create_source_with_explicit_citekey(client):
     r = client.post("/notes/sources", json={"title": "A Great Paper", "citekey": "custom2024"})
     assert r.status_code == 201

@@ -3472,6 +3472,11 @@
         <span class="setting-label">DOI</span>
         <input bind:value={sourceForm.doi} />
       </label>
+      {#if sourceFormMode === "edit"}
+        <span class="setting-hint">
+          URL/Journal/Volume/Issue/Pages/Publisher/Item type below can be set or changed, but not cleared back to blank once saved — leaving one empty here won't remove an existing value.
+        </span>
+      {/if}
       <label class="setting-row">
         <span class="setting-label">URL</span>
         <input bind:value={sourceForm.url} />

@@ -93,7 +93,9 @@ class SourceEditRequest(BaseModel):
     title: Optional[str] = Field(None, min_length=1, max_length=512)
     authors: Optional[list[str]] = None
     tags: Optional[list[str]] = None
-    year: Optional[int] = Field(None, ge=0)
+    # strict=True: see SourceCreateRequest.year's comment -- same bool-to-int
+    # coercion gap, missed here on the first pass of that fix.
+    year: Optional[int] = Field(None, ge=0, strict=True)
     doi: Optional[str] = None
     source_kind: Optional[SourceKind] = None
     journal: Optional[str] = None

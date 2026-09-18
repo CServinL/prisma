@@ -489,6 +489,22 @@ class TestAttachSourceCompanion:
         updated = vault.attach_source_companion(source.slug, "paper.pdf", b"pdf bytes")
         assert updated.body == "hand-typed body, no companion yet"
 
+    def test_first_pdf_attach_after_a_non_extraction_companion_does_not_clobber(self, vault, monkeypatch):
+        # Regression: is_replace was set whenever ANY prior companion
+        # existed, not only when the prior one was itself extraction-
+        # relevant (.pdf/.html/.htm) -- a .jpg cover attached first never
+        # ran extraction, so the following .pdf attach is still a FIRST
+        # real extraction, not a refresh; treating it as a "replace" forced
+        # through the empty-body-only gate and clobbered the hand-typed body.
+        monkeypatch.setattr("prisma.services.vault.pdf_bytes_to_md", lambda data: "extracted text")
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "My own hand-typed summary.",
+            zotero_key="ABC123", authors=[], tags=[],
+        )
+        vault.attach_source_companion(source.slug, "cover.jpg", b"\xff\xd8\xff")
+        updated = vault.attach_source_companion(source.slug, "paper.pdf", b"pdf bytes")
+        assert updated.body == "My own hand-typed summary."
+
     def test_replacing_a_pdf_companion_reextracts_the_body(self, vault, monkeypatch):
         # Regression: attach_source_companion() originally called
         # ensure_md_format() without force=True, which only fills an EMPTY

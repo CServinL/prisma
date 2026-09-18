@@ -446,6 +446,17 @@ def test_edit_source_rejects_negative_year(client, vault):
     assert r.status_code == 422
 
 
+def test_edit_source_rejects_boolean_year(client, vault):
+    # Regression: SourceCreateRequest.year got strict=True to block the
+    # bool-to-int coercion (year: true -> 1, satisfying ge=0), but
+    # SourceEditRequest.year was missed on that same pass.
+    source = vault.create_source_from_citekey(
+        "smith2024", "A Great Paper", "body", zotero_key="ABC", authors=[], tags=[],
+    )
+    r = client.patch(f"/notes/{source.slug}/source", json={"year": True})
+    assert r.status_code == 422
+
+
 def test_edit_source_returns_404_not_500_on_concurrent_delete(client, vault, monkeypatch):
     # edit_source's try/except around get_any() didn't cover the actual
     # write call -- a delete landing in that window surfaced as an

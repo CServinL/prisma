@@ -877,14 +877,17 @@ class VaultService:
         existing = self.find_companion(slug)
         if existing is not None and existing.suffix == ext and existing.read_bytes() == data:
             return self.get_source(slug)
-        # force=True only when actually *replacing* a prior companion --
-        # a first attachment must still respect ensure_md_format()'s
-        # empty-body-only gate, or it would overwrite a genuinely hand-
-        # typed body (a manually created Source's own prose, or a
-        # Zotero-import body synthesized from the abstract when no PDF was
-        # available) the moment any companion is attached, exactly the
-        # clobber that gate exists to prevent everywhere else it's used.
-        is_replace = existing is not None
+        # force=True only when *replacing an extraction-relevant companion*
+        # -- not just "any prior companion existed". A prior .jpg/.svg/etc.
+        # never ran extraction at all, so a first-ever .pdf/.html attach
+        # after one of those is still a first extraction, not a refresh:
+        # checking existing is not None alone would call this a "replace"
+        # and force through the empty-body-only gate, clobbering a
+        # genuinely hand-typed body (a manually created Source's own
+        # prose, or a Zotero-import body synthesized from the abstract
+        # when no PDF was available) on what is actually its first real
+        # extraction.
+        is_replace = existing is not None and existing.suffix in (".pdf", ".html", ".htm")
         if existing is not None and existing.suffix != ext:
             existing.unlink()
         companion_path = path.with_suffix(ext)

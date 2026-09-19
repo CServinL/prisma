@@ -894,12 +894,22 @@ class VaultService:
         # extraction.
         is_replace = existing is not None and existing.suffix in (".pdf", ".html", ".htm")
         companion_path = path.with_suffix(ext)
-        companion_path.write_bytes(data)
+        # Write to a temp file and atomically replace, rather than writing
+        # companion_path directly -- when ext matches the existing
+        # companion's extension, companion_path IS that existing file, and
+        # opening it "wb" truncates it immediately, before the write can
+        # even fail. A write failure partway through (disk full, permission
+        # error, killed mid-write) then left the original destroyed, not
+        # untouched. Path.replace() is atomic on the same filesystem, so
+        # this either fully succeeds or leaves the original companion
+        # exactly as it was.
+        tmp_path = companion_path.with_name(companion_path.name + ".upload.tmp")
+        tmp_path.write_bytes(data)
+        tmp_path.replace(companion_path)
         # Unlink the stale, different-extension companion only AFTER the new
         # one is safely on disk -- unlinking first meant a write failure in
-        # between (disk full, permission error, killed mid-write) left the
-        # Source with no companion at all instead of the original, untouched
-        # one.
+        # between left the Source with no companion at all instead of the
+        # original, untouched one.
         if existing is not None and existing.suffix != ext:
             existing.unlink()
         if ext in (".pdf", ".html", ".htm"):

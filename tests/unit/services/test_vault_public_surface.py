@@ -494,6 +494,38 @@ class TestAttachSourceCompanion:
             vault.attach_source_companion(source.slug, "figure.jpg", b"\xff\xd8\xff")
         assert old_companion.exists(), "old companion must survive a failed replacement write"
 
+    def test_same_extension_reupload_preserves_old_companion_if_write_fails(self, vault, monkeypatch):
+        # Regression: the cross-extension fix above only reordered unlink
+        # vs. write -- it did nothing for the (more common) same-extension
+        # case, e.g. re-uploading a corrected paper.pdf over an existing
+        # paper.pdf. There, companion_path IS the existing file, so writing
+        # straight to it truncates it immediately; a failure mid-write left
+        # the original destroyed (empty/corrupt), not "untouched" as the
+        # adjacent comment claimed.
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "body", zotero_key="ABC123", authors=[], tags=[],
+        )
+        vault.attach_source_companion(source.slug, "paper.pdf", b"original pdf bytes v1")
+        companion = vault.find_companion(source.slug)
+        assert companion.suffix == ".pdf"
+
+        # A bare raise-only stub wouldn't reproduce the real bug: real
+        # write_bytes() opens the target in "wb" (truncating immediately)
+        # before the write can fail, so the fake must truncate too, or this
+        # test would pass even against the unfixed code.
+        original_write_bytes = Path.write_bytes
+
+        def boom(self, data):
+            original_write_bytes(self, b"")
+            raise OSError("disk full")
+
+        monkeypatch.setattr(Path, "write_bytes", boom)
+        with pytest.raises(OSError):
+            vault.attach_source_companion(source.slug, "paper.pdf", b"corrected pdf bytes v2")
+        assert companion.read_bytes() == b"original pdf bytes v1", (
+            "a failed re-upload must not destroy the existing companion"
+        )
+
     def test_first_attach_does_not_clobber_a_hand_typed_body(self, vault, monkeypatch):
         # Regression: force=True was passed unconditionally, even on a
         # FIRST attachment (existing is None) -- overwriting the exact

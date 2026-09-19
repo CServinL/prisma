@@ -251,6 +251,33 @@ def test_zotero_import_creates_source_from_abstract_when_no_pdf(isolated_client,
     assert source.item_type == "journalArticle"
     assert source.url == "https://example.com/paper"
 
+    # Regression: the response itself (not just the persisted file) must
+    # echo the Source-only fields via _echo_source_fields() -- the UI sets
+    # activeNode straight from this response with no follow-up GET
+    # (importZoteroItem(), +page.svelte), so a bare RenderedNode missing
+    # authors/tags/doi/citekey meant "Edit metadata" right after an import
+    # would silently send authors: []/tags: []/doi: "" and wipe them, since
+    # update_source_bibliographic_fields() treats those as explicit clears.
+    assert data["citekey"] == "smith2024"
+    assert data["authors"] == ["Jane Smith"]
+    assert data["tags"] == ["ml"]
+    assert data["doi"] == "10.1/xyz"
+
+
+def test_zotero_import_existing_source_response_also_echoes_fields(isolated_client, vault, zotero):
+    vault.create_source_from_citekey(
+        "smith2024", "Already Here", "body text",
+        zotero_key="K1", authors=["Jane Smith"], tags=["ml"],
+    )
+    zotero.get_item.return_value = _zotero_item(key="K1")
+
+    r = isolated_client.post("/zotero/import/K1")
+    assert r.status_code == 201
+    data = r.json()
+    assert data["citekey"] == "smith2024"
+    assert data["authors"] == ["Jane Smith"]
+    assert data["tags"] == ["ml"]
+
 
 # ── /zotero/items/relevance (lightweight stream-triage-by-graph-relevance) ────
 

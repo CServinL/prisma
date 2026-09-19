@@ -609,6 +609,13 @@ class RenderedNode(BaseModel):
     path: str
     title: str
     node_type: NodeType
+    # Every node type inherits `tags` from VaultNodeBase -- echoed here (not
+    # Source-only, unlike the block below) so an edit dialog can prefill
+    # the source's *current* tags. Without this, "Edit metadata" always
+    # showed an empty tags field regardless of what was actually set, and
+    # saving would silently wipe real tags via update_source_bibliographic_
+    # fields()'s `is not None` check treating that empty field as "clear it".
+    tags: list[str] = Field(default_factory=list)
     html: str
     broken_links: list[str] = Field(default_factory=list)
     broken_citations: list[str] = Field(default_factory=list)
@@ -622,6 +629,20 @@ class RenderedNode(BaseModel):
     next_update: datetime | None = None
     query: str | None = None
     collection_key: str | None = None
+    # Source-only — echoed back so the UI can prefill the edit-metadata
+    # dialog straight from GET /notes/{slug} without a second round-trip.
+    citekey: str | None = None
+    source_kind: SourceKind | None = None
+    authors: list[str] = Field(default_factory=list)
+    year: int | None = None
+    doi: str | None = None
+    journal: str | None = None
+    volume: str | None = None
+    issue: str | None = None
+    pages: str | None = None
+    publisher: str | None = None
+    url: str | None = None
+    item_type: str | None = None
 
 
 class StreamRunResult(BaseModel):

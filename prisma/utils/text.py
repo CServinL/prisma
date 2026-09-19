@@ -63,14 +63,21 @@ def stem_overlap(text_a: str, text_b: str) -> int:
 
 
 def make_citekey(authors: list[str], year: int | None, title: str | None = None) -> str:
-    """First author's last name + year (falls back to title's first word if no authors)."""
+    """First author's last name + year (falls back to title's first word if no authors).
+
+    year is appended via `is not None`, not truthiness -- year=0 is a real
+    (if unrealistic) value, same falsy-zero fix already applied on the
+    create/update sides of Source bibliographic fields; this function
+    feeds citekey generation for both Zotero import and the manual
+    POST /notes/sources route, so it needs to agree with them."""
+    year_str = str(year) if year is not None else ""
     names = [a for a in authors if a.strip()]
     if not names:
         first_word = ""
         title_words = title.split() if title else []
         if title_words:
             first_word = re.sub(r"[^a-z]", "", title_words[0].lower())
-        return f"{first_word or 'unknown'}{year or ''}"
+        return f"{first_word or 'unknown'}{year_str}"
     last = names[0].split()[-1].lower()
     last = re.sub(r"[^a-z]", "", last)
-    return f"{last}{year or ''}"
+    return f"{last}{year_str}"

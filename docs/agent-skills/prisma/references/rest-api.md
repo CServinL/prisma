@@ -63,6 +63,9 @@ every other route needs `Authorization: Bearer <token>` (from
 | GET | `/notes/{slug}/original` | Raw companion file bytes (any type in `COMPANION_EXTS`: pdf/html/htm/svg/epub/docx/tex/drawio/jpg/jpeg) |
 | POST | `/notes` | Create a note |
 | PUT | `/notes/{slug}` | Save a note's body |
+| POST | `/notes/sources` | Create a Source manually (no Zotero) — bibliographic fields, auto-generates a citekey via `make_citekey()` if none given, 409 on citekey collision |
+| PATCH | `/notes/{slug}/source` | Edit an existing Source's bibliographic fields (not `citekey` — see `vault-links.md`) |
+| POST | `/notes/{slug}/companion` | Attach/replace a Source's companion file (multipart upload) — the manual counterpart to Zotero import's automatic PDF fetch |
 
 ## `/streams` (research streams)
 

@@ -57,6 +57,15 @@ is a backlog, not a log.
 
 ## Vault
 
+- **Chat and Stream titles accept whitespace-only strings.** Note/Source
+  both reject a blank/whitespace-only title (`_reject_blank_title()` in
+  `notes_routes.py`), but `CreateChatRequest.title` (`app.py`, `req.title
+  or f"Chat — ..."`, a truthy check — whitespace is truthy, so it's kept
+  verbatim instead of falling back) and `StreamCreateRequest.title`/
+  `StreamPatchRequest.title` (`streams_routes.py`, no validation at all —
+  the UI's `submitStreamForm()` only trims client-side) both have the same
+  gap. Same fix pattern already written for Note/Source, just not applied
+  to these two.
 - **Vault file writes have no per-file locking, anywhere.** `save_note()`,
   `set_node_type()`, and now also `update_source_bibliographic_fields()`/
   `attach_source_companion()` are all a plain read-parse-write of a whole

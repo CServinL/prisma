@@ -200,6 +200,15 @@ def _echo_source_fields(rn: RenderedNode, source: Source) -> None:
     rn.item_type = source.item_type
 
 
+def _source_rel_path(vault: VaultService, source: Source) -> str:
+    """Shared by _render_source() and the three routes below that each need
+    the same value for their broadcast_fn call before _render_source() also
+    computes it internally -- kept as one function so a future path-
+    normalization change can't update one of the four copies and miss the
+    others, silently diverging the broadcast path from the response path."""
+    return str(source.path.relative_to(vault.root).as_posix())
+
+
 def _render_source(vault: VaultService, source: Source) -> RenderedNode:
     """Builds a full RenderedNode for a Source object already in hand --
     shared by the create/edit/companion-upload routes below, which all
@@ -218,7 +227,7 @@ def _render_source(vault: VaultService, source: Source) -> RenderedNode:
     overwrites its local state with that response, not this one's `html`.
     A caller that trusted this endpoint's `html` directly without
     re-fetching would not."""
-    rel = str(source.path.relative_to(vault.root).as_posix())
+    rel = _source_rel_path(vault, source)
     html, broken_links, broken_citations = vault_render(source.body, vault)
     rn = RenderedNode(
         slug=source.slug, path=rel, title=source.title, node_type=source.node_type,
@@ -299,7 +308,7 @@ def build_notes_router(
             raise HTTPException(status_code=409, detail=str(e))
         mark_stale_fn()
         _activity.info("action=create_source slug=%s title=%r citekey=%s", source.slug, source.title, citekey)
-        rel = str(source.path.relative_to(vault.root).as_posix())
+        rel = _source_rel_path(vault, source)
         broadcast_fn({"type": "vault_change", "action": "create", "path": rel})
         return _render_source(vault, source)
 
@@ -336,12 +345,22 @@ def build_notes_router(
             # citekey_if_free() already guard against elsewhere in this file).
             raise HTTPException(status_code=404, detail=f"source not found: {slug!r}")
         mark_stale_fn()
-        rel = str(source.path.relative_to(vault.root).as_posix())
+        rel = _source_rel_path(vault, source)
         broadcast_fn({"type": "vault_change", "action": "save", "path": rel})
         return _render_source(vault, source)
 
     @router.post("/{slug}/companion", response_model=RenderedNode)
-    async def upload_source_companion(slug: str, file: UploadFile = File(...)):
+    def upload_source_companion(slug: str, file: UploadFile = File(...)):
+        # Plain `def`, not `async def` -- FastAPI runs sync path operations
+        # in its threadpool automatically, the same established pattern
+        # zotero_import()/generate_md_format() already rely on for this
+        # exact reason: attach_source_companion() -> ensure_md_format() ->
+        # pdf_bytes_to_md() is real, seconds-long CPU-bound extraction work.
+        # An `async def` route calling that inline blocks the single shared
+        # event loop that also serves /ws for every connected client. Read
+        # via file.file (the underlying SpooledTemporaryFile), not
+        # `await file.read()` -- there is no event loop to await against
+        # once this function itself isn't a coroutine.
         vault = get_vault()
         try:
             node = vault.get_any(slug)
@@ -349,17 +368,17 @@ def build_notes_router(
             raise HTTPException(status_code=404, detail=f"source not found: {slug!r}")
         if not isinstance(node, Source):
             raise HTTPException(status_code=400, detail=f"{slug!r} is not a source")
-        data = await file.read()
+        data = file.file.read()
         try:
             source = vault.attach_source_companion(slug, file.filename or "", data)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
         except FileNotFoundError:
             # Same concurrent-delete window as edit_source above -- the
-            # await file.read() makes it wider here, not narrower.
+            # file read makes it wider here, not narrower.
             raise HTTPException(status_code=404, detail=f"source not found: {slug!r}")
         mark_stale_fn()
-        rel = str(source.path.relative_to(vault.root).as_posix())
+        rel = _source_rel_path(vault, source)
         broadcast_fn({"type": "vault_change", "action": "save", "path": rel})
         return _render_source(vault, source)
 

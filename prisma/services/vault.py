@@ -4,6 +4,7 @@ import json
 import logging
 import re
 import threading
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Iterator
@@ -903,9 +904,20 @@ class VaultService:
         # untouched. Path.replace() is atomic on the same filesystem, so
         # this either fully succeeds or leaves the original companion
         # exactly as it was.
-        tmp_path = companion_path.with_name(companion_path.name + ".upload.tmp")
-        tmp_path.write_bytes(data)
-        tmp_path.replace(companion_path)
+        # uuid4-suffixed, not just "<name>.upload.tmp" -- a fixed name would
+        # let two concurrent uploads to the same slug (double-submit, two
+        # tabs, a client retry racing the original) both write through the
+        # same tmp path with no lock serializing them, interleaving their
+        # writes into a corrupted file before either side's replace() runs.
+        # Path.replace() only makes the rename atomic, not the write before
+        # it.
+        tmp_path = companion_path.with_name(f"{companion_path.name}.{uuid.uuid4().hex}.upload.tmp")
+        try:
+            tmp_path.write_bytes(data)
+            tmp_path.replace(companion_path)
+        except BaseException:
+            tmp_path.unlink(missing_ok=True)
+            raise
         # Unlink the stale, different-extension companion only AFTER the new
         # one is safely on disk -- unlinking first meant a write failure in
         # between left the Source with no companion at all instead of the

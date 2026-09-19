@@ -526,6 +526,56 @@ class TestAttachSourceCompanion:
             "a failed re-upload must not destroy the existing companion"
         )
 
+    def test_failed_replace_leaves_no_tmp_file_behind(self, vault, monkeypatch):
+        # Regression: the temp-file-then-replace fix above never cleaned up
+        # tmp_path when the write itself succeeded but the atomic replace()
+        # failed (e.g. a permission error, or attempting a cross-device
+        # rename) -- the genuinely-written tmp file was left in the vault
+        # permanently, one per failed retry. A write_bytes-raises stub
+        # wouldn't prove this: it never lets the real tmp file get created
+        # in the first place, so it can't tell "cleaned up" apart from
+        # "never existed".
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "body", zotero_key="ABC123", authors=[], tags=[],
+        )
+
+        def boom(self, target):
+            raise OSError("rename failed")
+
+        monkeypatch.setattr(Path, "replace", boom)
+        with pytest.raises(OSError):
+            vault.attach_source_companion(source.slug, "paper.pdf", b"pdf bytes")
+        leftovers = list(vault.root.rglob("*.upload.tmp"))
+        assert leftovers == [], f"tmp file(s) leaked: {leftovers}"
+
+    def test_concurrent_uploads_do_not_share_a_tmp_filename(self, vault, monkeypatch):
+        # Regression: tmp_path was derived deterministically from the
+        # companion's own name alone (`<name>.upload.tmp`) -- two concurrent
+        # uploads to the same slug (double-submit, two tabs, a client retry
+        # racing the original) would both write through that same path,
+        # letting their writes interleave into a corrupted file before either
+        # side's atomic replace() ever runs. Path.replace() only makes the
+        # rename atomic, not the write before it. Proven here by capturing
+        # the tmp path used by two separate calls and asserting they differ,
+        # rather than trying to force an actual byte-level race
+        # deterministically.
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "body", zotero_key="ABC123", authors=[], tags=[],
+        )
+        seen: list[str] = []
+        real_write_bytes = Path.write_bytes
+
+        def recording_write_bytes(self, data):
+            if self.name.endswith(".upload.tmp"):
+                seen.append(self.name)
+            return real_write_bytes(self, data)
+
+        monkeypatch.setattr(Path, "write_bytes", recording_write_bytes)
+        vault.attach_source_companion(source.slug, "paper.pdf", b"v1")
+        vault.attach_source_companion(source.slug, "paper.pdf", b"v2")
+        assert len(seen) == 2
+        assert seen[0] != seen[1], "two uploads must not reuse the same tmp filename"
+
     def test_first_attach_does_not_clobber_a_hand_typed_body(self, vault, monkeypatch):
         # Regression: force=True was passed unconditionally, even on a
         # FIRST attachment (existing is None) -- overwriting the exact

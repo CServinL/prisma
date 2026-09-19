@@ -3471,7 +3471,7 @@
       {/if}
       <label class="setting-row">
         <span class="setting-label">Year</span>
-        <input bind:value={sourceForm.year} type="number" />
+        <input bind:value={sourceForm.year} type="number" min="0" />
       </label>
       <label class="setting-row">
         <span class="setting-label">DOI</span>

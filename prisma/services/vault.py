@@ -875,7 +875,12 @@ class VaultService:
         if ext not in COMPANION_EXTS:
             raise ValueError(f"unsupported companion extension: {ext!r}")
         existing = self.find_companion(slug)
-        if existing is not None and existing.suffix == ext and existing.read_bytes() == data:
+        if (
+            existing is not None
+            and existing.suffix == ext
+            and existing.stat().st_size == len(data)
+            and existing.read_bytes() == data
+        ):
             return self.get_source(slug)
         # force=True only when *replacing an extraction-relevant companion*
         # -- not just "any prior companion existed". A prior .jpg/.svg/etc.
@@ -888,10 +893,15 @@ class VaultService:
         # when no PDF was available) on what is actually its first real
         # extraction.
         is_replace = existing is not None and existing.suffix in (".pdf", ".html", ".htm")
-        if existing is not None and existing.suffix != ext:
-            existing.unlink()
         companion_path = path.with_suffix(ext)
         companion_path.write_bytes(data)
+        # Unlink the stale, different-extension companion only AFTER the new
+        # one is safely on disk -- unlinking first meant a write failure in
+        # between (disk full, permission error, killed mid-write) left the
+        # Source with no companion at all instead of the original, untouched
+        # one.
+        if existing is not None and existing.suffix != ext:
+            existing.unlink()
         if ext in (".pdf", ".html", ".htm"):
             self.ensure_md_format(companion_path, force=is_replace)
         return self.get_source(slug)

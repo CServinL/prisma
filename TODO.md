@@ -66,6 +66,22 @@ is a backlog, not a log.
   the UI's `submitStreamForm()` only trims client-side) both have the same
   gap. Same fix pattern already written for Note/Source, just not applied
   to these two.
+- **File upload routes buffer the whole body into memory before any
+  validation runs.** Both `upload_source_companion()` (`notes_routes.py`,
+  `data = await file.read()`) and the pre-existing `upload_chat_attachment()`
+  (`app.py`) read the entire `UploadFile` before checking extension or size,
+  so an oversized upload can pressure/OOM the process before the existing
+  extension allowlist ever gets a chance to reject it. Systemic — no upload
+  route in this codebase has a size cap or streams-then-validates — not
+  something to bolt onto just the new companion route in isolation.
+- **Form-dialog error messages can render a raw FastAPI validation-error
+  array instead of text.** `sourceFormError = err.detail ?? ...`
+  (`+page.svelte`) assumes `detail` is always a string, but a Pydantic 422
+  (e.g. a bad `year`) returns `detail` as a list of validator-error objects,
+  which renders unreadably. Pre-existing pattern, not introduced by the
+  Source dialog — `streamFormError` does the identical `err.detail ?? ...`
+  a few hundred lines up for the same reason. Needs a shared "stringify a
+  FastAPI error detail" helper used by both, not a Source-only fix.
 - **Vault file writes have no per-file locking, anywhere.** `save_note()`,
   `set_node_type()`, and now also `update_source_bibliographic_fields()`/
   `attach_source_companion()` are all a plain read-parse-write of a whole

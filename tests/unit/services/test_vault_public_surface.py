@@ -474,6 +474,26 @@ class TestAttachSourceCompanion:
         with pytest.raises(FileNotFoundError):
             vault.attach_source_companion("does-not-exist", "figure.svg", b"<svg></svg>")
 
+    def test_replacing_extension_preserves_old_companion_if_write_fails(self, vault, monkeypatch):
+        # Regression: the old companion was unlinked BEFORE the new bytes
+        # were written -- a write failure between the two (disk full,
+        # permission error, killed mid-write) left the Source with no
+        # companion at all instead of the original, untouched one.
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "body", zotero_key="ABC123", authors=[], tags=[],
+        )
+        vault.attach_source_companion(source.slug, "figure.svg", b"<svg></svg>")
+        old_companion = vault.find_companion(source.slug)
+        assert old_companion.suffix == ".svg"
+
+        def boom(self, data):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(Path, "write_bytes", boom)
+        with pytest.raises(OSError):
+            vault.attach_source_companion(source.slug, "figure.jpg", b"\xff\xd8\xff")
+        assert old_companion.exists(), "old companion must survive a failed replacement write"
+
     def test_first_attach_does_not_clobber_a_hand_typed_body(self, vault, monkeypatch):
         # Regression: force=True was passed unconditionally, even on a
         # FIRST attachment (existing is None) -- overwriting the exact
@@ -535,6 +555,22 @@ class TestAttachSourceCompanion:
         assert len(calls) == 1
         vault.attach_source_companion(source.slug, "paper.pdf", b"identical bytes")
         assert len(calls) == 1  # not called a second time -- byte-identical re-upload is a no-op
+
+    def test_differently_sized_reupload_skips_reading_the_old_companion(self, vault, monkeypatch):
+        # A differently-sized upload can never be byte-identical -- checking
+        # size first avoids reading the whole old companion into memory just
+        # to prove two objects of different length aren't equal, doubling
+        # peak memory on every meaningfully-changed large-file re-upload.
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "", zotero_key="ABC123", authors=[], tags=[],
+        )
+        vault.attach_source_companion(source.slug, "figure.jpg", b"\xff\xd8\xff old")
+
+        def boom(self):
+            raise AssertionError("must not read the old companion when sizes differ")
+
+        monkeypatch.setattr(Path, "read_bytes", boom)
+        vault.attach_source_companion(source.slug, "figure.jpg", b"\xff\xd8\xff a much longer new image")
 
 
 class TestEnsureMdFormatCleansUpOnFailure:

@@ -57,6 +57,19 @@ def _reject_blank_title(v: Optional[str]) -> Optional[str]:
     return v
 
 
+def _drop_blank_list_items(v: Optional[list[str]]) -> Optional[list[str]]:
+    """A whitespace-only entry in authors/tags (a stray double-comma, a
+    pasted trailing separator) isn't real data -- max_length alone lets it
+    through, and a blank author string reaches APA formatting as a visibly
+    malformed "  , & Smith, J." reference with no error anywhere upstream.
+    Unlike a blank title (which breaks the whole node and must be
+    rejected), one bad list entry among otherwise-good ones is just noise
+    worth dropping, not grounds to fail the entire request."""
+    if v is None:
+        return v
+    return [item for item in v if item.strip()]
+
+
 class NoteCreateRequest(BaseModel):
     title: str
     body: str = ""
@@ -95,6 +108,8 @@ class SourceCreateRequest(BaseModel):
     tags: list[Annotated[str, Field(max_length=_MAX_BIB_STR)]] = Field(
         default_factory=list, max_length=_MAX_BIB_LIST,
     )
+    _drop_blank_authors = field_validator("authors")(_drop_blank_list_items)
+    _drop_blank_tags = field_validator("tags")(_drop_blank_list_items)
     # ge=0: make_citekey()/create_source_from_citekey() both now honor
     # year=0 correctly (falsy-zero fix), but a negative year is just bad
     # data, not a value worth preserving. strict=True: Pydantic's default
@@ -124,8 +139,10 @@ class SourceEditRequest(BaseModel):
     tags: Optional[list[Annotated[str, Field(max_length=_MAX_BIB_STR)]]] = Field(
         None, max_length=_MAX_BIB_LIST,
     )
+    _drop_blank_authors = field_validator("authors")(_drop_blank_list_items)
+    _drop_blank_tags = field_validator("tags")(_drop_blank_list_items)
     # strict=True: see SourceCreateRequest.year's comment -- same bool-to-int
-    # coercion gap, missed here on the first pass of that fix.
+    # coercion gap.
     year: Optional[int] = Field(None, ge=0, strict=True)
     doi: Optional[str] = Field(None, max_length=_MAX_BIB_STR)
     source_kind: Optional[SourceKind] = None

@@ -140,23 +140,25 @@ def _render_frontmatter(fm: dict) -> str:
     return "---\n" + yaml.dump(fm, default_flow_style=False, allow_unicode=True) + "---\n\n"
 
 
-def _source_origin_from_frontmatter(fm: dict) -> SourceOrigin:
-    """Same defensive-fallback shape as VaultService.node_type_from_
-    frontmatter() -- an unrecognized/legacy/forward-incompatible `origin`
-    value (hand-edited file, or a newer app version's future enum member)
-    must not crash GET /notes/{slug} for that one node."""
+def _enum_from_frontmatter(fm: dict, key: str, enum_cls, default):
+    """Shared by _source_origin_from_frontmatter()/_source_kind_from_
+    frontmatter() below -- same defensive-fallback shape as VaultService.
+    node_type_from_frontmatter(): an unrecognized/legacy/forward-
+    incompatible enum value (hand-edited file, or a newer app version's
+    future enum member) must not crash GET /notes/{slug} for that one
+    node, it should just fall back to `default`."""
     try:
-        return SourceOrigin(fm.get("origin") or "zotero")
+        return enum_cls(fm.get(key) or default.value)
     except ValueError:
-        return SourceOrigin.zotero
+        return default
+
+
+def _source_origin_from_frontmatter(fm: dict) -> SourceOrigin:
+    return _enum_from_frontmatter(fm, "origin", SourceOrigin, SourceOrigin.zotero)
 
 
 def _source_kind_from_frontmatter(fm: dict) -> SourceKind:
-    """Same reasoning as _source_origin_from_frontmatter()."""
-    try:
-        return SourceKind(fm.get("source_kind") or "paper")
-    except ValueError:
-        return SourceKind.paper
+    return _enum_from_frontmatter(fm, "source_kind", SourceKind, SourceKind.paper)
 
 
 # ── Legacy chat .md format (ADR-019) ─────────────────────────────────────────

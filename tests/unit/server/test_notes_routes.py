@@ -442,6 +442,31 @@ def test_create_source_rejects_too_many_authors(client):
     assert r.status_code == 422
 
 
+def test_create_source_drops_blank_author_and_tag_entries(client):
+    # Regression: a whitespace-only entry (a stray double-comma, a pasted
+    # trailing separator) wasn't rejected or dropped -- it reached APA
+    # formatting as a visibly malformed "  , & Smith, J." reference with no
+    # error anywhere upstream. Dropped, not rejected, since one bad entry
+    # among otherwise-good ones is noise, not grounds to fail the request
+    # (unlike a blank title, which breaks the whole node).
+    r = client.post("/notes/sources", json={"title": "X", "authors": ["  ", "Jane Smith"], "tags": ["ml", "   "]})
+    assert r.status_code == 201
+    data = r.json()
+    assert data["authors"] == ["Jane Smith"]
+    assert data["tags"] == ["ml"]
+
+
+def test_edit_source_drops_blank_author_and_tag_entries(client, vault):
+    source = vault.create_source_from_citekey(
+        "smith2024", "A Great Paper", "body", zotero_key="ABC", authors=[], tags=[],
+    )
+    r = client.patch(f"/notes/{source.slug}/source", json={"authors": ["Jane Smith", "  "], "tags": ["   ", "nlp"]})
+    assert r.status_code == 200
+    data = r.json()
+    assert data["authors"] == ["Jane Smith"]
+    assert data["tags"] == ["nlp"]
+
+
 def test_create_source_rejects_an_absurdly_long_title(client):
     # Rejected by SourceCreateRequest.title's own max_length=512 during
     # request validation -- never reaches unique_slug()/_slugify() at all.

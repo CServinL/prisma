@@ -3515,7 +3515,7 @@
       </label>
       <label class="setting-row">
         <span class="setting-label">Tags</span>
-        <input bind:value={sourceForm.tagsText} placeholder="Comma-separated" />
+        <input bind:value={sourceForm.tagsText} placeholder="Comma-separated: nlp, transformers" />
       </label>
       {#if sourceFormMode === "create"}
         <label class="setting-row">

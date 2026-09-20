@@ -797,7 +797,21 @@ class VaultService:
             ]:
                 if value:
                     fm[key] = value
-            path.write_text(_render_frontmatter(fm) + content, encoding="utf-8")
+            # Atomic tmp-file+replace, not a direct write_text() -- the
+            # exact defect class fixed one method away in ensure_md_
+            # format() (a plain write_text() opens in "w", truncating
+            # immediately, so a failure partway through the write leaves
+            # the Source's entire frontmatter and body destroyed instead
+            # of untouched), missed here on that same pass despite this
+            # method doing the identical read-parse-merge-write shape on
+            # the identical file, under the identical lock.
+            tmp_path = path.with_name(f"{path.name}.{uuid.uuid4().hex}.update.tmp")
+            try:
+                tmp_path.write_text(_render_frontmatter(fm) + content, encoding="utf-8")
+                tmp_path.replace(path)
+            except BaseException:
+                tmp_path.unlink(missing_ok=True)
+                raise
             return self.get_source(slug)
 
     def citekey_exists(self, citekey: str) -> bool:

@@ -888,6 +888,35 @@ class TestUpdateSourceBibliographicFields:
         assert updated.year == 2024
         assert updated.body == "the body text"
 
+    def test_failed_write_preserves_the_existing_source(self, vault, monkeypatch):
+        # Regression: the exact defect class fixed in ensure_md_format()
+        # one round earlier (a plain write_text() opens in "w", truncating
+        # immediately, so a write failure partway through destroys the
+        # whole file instead of leaving it untouched), missed on this
+        # sibling despite doing the identical read-parse-merge-write shape
+        # on the identical file, under the identical lock.
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "original body",
+            zotero_key="ABC123", authors=["Jane Smith"], tags=["ml"], year=2024,
+        )
+
+        # A bare raise-only stub wouldn't reproduce the real bug -- real
+        # write_text() truncates the target before the write can fail.
+        original_write_text = Path.write_text
+
+        def boom(self, data, encoding=None):
+            original_write_text(self, "", encoding=encoding)
+            raise OSError("disk full")
+
+        monkeypatch.setattr(Path, "write_text", boom)
+        with pytest.raises(OSError):
+            vault.update_source_bibliographic_fields(source.slug, journal="New Journal")
+
+        preserved = vault.get_source(source.slug)
+        assert preserved.title == "A Great Paper"
+        assert preserved.authors == ["Jane Smith"]
+        assert preserved.body == "original body"
+
     def test_does_not_blank_out_fields_when_called_with_none(self, vault):
         source = vault.create_source_from_citekey(
             "smith2024", "A Great Paper", "body",

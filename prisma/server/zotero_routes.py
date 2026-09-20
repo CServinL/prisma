@@ -219,6 +219,16 @@ def build_zotero_router(
 
     @router.post("/import/{key}", response_model=RenderedNode, status_code=201)
     def zotero_import(key: str):
+        # Both RenderedNode(...) constructions below deliberately don't
+        # call notes_routes.py's _render_source() despite building the
+        # same shape -- that helper's html is intentionally always empty
+        # now (its own callers, the manual Source create/edit/companion
+        # routes, always re-fetch via GET right after and never look at
+        # it). importZoteroItem() (+page.svelte) has no such follow-up
+        # GET -- it sets activeNode straight from this response -- so a
+        # real, non-empty html here is load-bearing, not optional. Do
+        # share _echo_source_fields() (the Source-only field echo) though,
+        # same "one place populates these" reasoning as everywhere else.
         from prisma.utils.text import make_citekey
         vault = get_vault()
         zotero = get_zotero()
@@ -240,6 +250,7 @@ def build_zotero_router(
                     slug=source.slug, path=str(source.path.relative_to(vault.root).as_posix()),
                     title=source.title, node_type=source.node_type, tags=source.tags,
                     html=html, broken_links=broken_links, broken_citations=broken_citations,
+                    original_ext=source.original_ext,
                 )
                 _echo_source_fields(rn, source)
                 return rn
@@ -281,6 +292,7 @@ def build_zotero_router(
             slug=source.slug, path=str(source.path.relative_to(vault.root).as_posix()),
             title=source.title, node_type=source.node_type, tags=source.tags,
             html=html, broken_links=broken_links, broken_citations=broken_citations,
+            original_ext=source.original_ext,
         )
         _echo_source_fields(rn, source)
         return rn

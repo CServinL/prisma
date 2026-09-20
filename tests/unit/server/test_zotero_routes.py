@@ -230,6 +230,27 @@ def test_zotero_import_returns_existing_source_if_already_imported(isolated_clie
     zotero.get_pdf_bytes.assert_not_called()
 
 
+def test_zotero_import_existing_source_response_echoes_original_ext(isolated_client, vault, zotero):
+    # Regression: both RenderedNode(...) constructions in zotero_import()
+    # never set original_ext, unlike every other Source-returning route
+    # (render_note(), _render_source()). Unreachable for a fresh import
+    # (zotero_import() never writes a companion binary, only extracted
+    # text), but real for the "already imported" branch: a source
+    # previously zotero-imported with no PDF, then given a companion via
+    # the manual upload route, then re-imported (e.g. clicking Import
+    # again on the same Zotero item) -- the response silently hid that a
+    # companion now exists.
+    existing = vault.create_source_from_citekey(
+        "smith2024", "Already Here", "body text", zotero_key="K1", authors=[], tags=[],
+    )
+    vault.attach_source_companion(existing.slug, "figure.svg", b"<svg></svg>")
+    zotero.get_item.return_value = _zotero_item(key="K1")
+
+    r = isolated_client.post("/zotero/import/K1")
+    assert r.status_code == 201
+    assert r.json()["original_ext"] == ".svg"
+
+
 def test_zotero_import_creates_source_from_abstract_when_no_pdf(isolated_client, vault, zotero, indexer):
     zotero.get_item.return_value = _zotero_item(key="K2")
     zotero.get_pdf_bytes.return_value = None

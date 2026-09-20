@@ -286,25 +286,28 @@ def _render_source(vault: VaultService, source: Source) -> RenderedNode:
     shared by the create/edit/companion-upload routes below, which all
     need the same Source-echo fields render_note() populates for GET.
 
-    Deliberately simpler than render_note(): always renders `source.body`
-    as markdown, with none of render_note()'s original_ext-aware companion
-    branching (raw-HTML fragment/iframe fallback, get_md_body() lookup) --
-    that logic needs a Request (for asset_prefix) this helper doesn't have,
-    and more importantly needs to key off whatever the companion's current
-    state actually is post-write, which a follow-up GET /notes/{slug}
-    already does correctly. So the `html` field in this response can be
-    stale/wrong for a Source whose companion is `.html`/`.pdf` with a
-    still-empty or partial body -- every current caller (the UI) already
-    re-fetches via GET right after create/edit/companion-upload and
-    overwrites its local state with that response, not this one's `html`.
-    A caller that trusted this endpoint's `html` directly without
-    re-fetching would not."""
+    Deliberately simpler than render_note(): doesn't render `source.body`
+    as markdown at all, with none of render_note()'s original_ext-aware
+    companion branching (raw-HTML fragment/iframe fallback, get_md_body()
+    lookup) -- that logic needs a Request (for asset_prefix) this helper
+    doesn't have, and more importantly needs to key off whatever the
+    companion's current state actually is post-write, which a follow-up
+    GET /notes/{slug} already does correctly. So the `html` field in this
+    response is always empty -- not stale/wrong, just never computed --
+    since every current caller (the UI) already re-fetches via GET right
+    after create/edit/companion-upload and overwrites its local state with
+    that response, not this one's `html`. Skipping vault_render() here
+    isn't just laziness: it calls renderer.py's _build_citekey_index(),
+    which does a full-vault scan reading every .md file's frontmatter, on
+    every create/edit/companion-upload request -- real, unbounded-with-
+    vault-size work paid for a value every caller already throws away. A
+    caller that trusted this endpoint's `html` directly without
+    re-fetching would need to call render_note() themselves."""
     rel = _source_rel_path(vault, source)
-    html, broken_links, broken_citations = vault_render(source.body, vault)
     rn = RenderedNode(
         slug=source.slug, path=rel, title=source.title, node_type=source.node_type,
         tags=source.tags,
-        html=html, broken_links=broken_links, broken_citations=broken_citations,
+        html="", broken_links=[], broken_citations=[],
         original_ext=source.original_ext,
     )
     _echo_source_fields(rn, source)

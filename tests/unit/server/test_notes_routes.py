@@ -397,6 +397,25 @@ def test_create_source_no_metadata_still_works(client):
     assert r.json()["original_ext"] is None
 
 
+def test_create_source_does_not_pay_for_a_full_vault_citekey_scan(client, vault, monkeypatch):
+    # Regression: _render_source() used to call vault_render(), which
+    # rebuilds a full-vault citekey index (renderer.py's _build_citekey_
+    # index() reads every .md file's frontmatter) purely to produce an
+    # html/broken_links/broken_citations payload every current caller (the
+    # UI) discards, immediately re-fetching via GET instead. Real,
+    # unbounded-with-vault-size work paid on every create/edit/companion-
+    # upload request for a value nobody used.
+    calls = []
+    monkeypatch.setattr(
+        "prisma.services.renderer._build_citekey_index",
+        lambda v: calls.append(1) or {},
+    )
+    r = client.post("/notes/sources", json={"title": "X"})
+    assert r.status_code == 201
+    assert r.json()["html"] == ""
+    assert calls == []
+
+
 def test_create_source_rejects_whitespace_only_title(client):
     # Regression: min_length=1 counts raw characters, not stripped content
     # -- a single space passed it despite being just as blank as "".

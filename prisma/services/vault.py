@@ -379,20 +379,22 @@ class VaultService:
         # change. Chat writes are low-frequency; one process-wide lock is
         # simple and sufficient — no need for per-slug lock management.
         self._chat_write_lock = threading.Lock()
-        # Same rationale as _chat_write_lock, for /sync/file's writes.
-        self._path_write_lock = threading.Lock()
-        # Same rationale again, for any single-.md-file read-merge-write:
-        # originally added just for the manual-create route's citekey-
-        # uniqueness check-then-write (create_source_from_citekey_if_free),
-        # then grown to cover every other Source-mutating method that reads
-        # and rewrites the same file (update_source_bibliographic_fields,
-        # attach_source_companion, ensure_md_format, set_node_type) once
-        # each was found racing the others -- and now Note's save_note()
-        # too, since the underlying read-merge-write race isn't actually
-        # Source-specific, just first noticed there. One process-wide lock
-        # for every node type, not one lock per type, so it can never
-        # repeat write_by_path()'s mistake of being a second, uncoordinated
-        # lock over files the others already guard (see TODO.md).
+        # Same rationale again, for any single-vault-file read-merge-write
+        # (or, for write_by_path()/delete_by_path(), a blind create-or-
+        # overwrite): originally added just for the manual-create route's
+        # citekey-uniqueness check-then-write
+        # (create_source_from_citekey_if_free), then grown to cover every
+        # other Source-mutating method that reads and rewrites the same
+        # file (update_source_bibliographic_fields, attach_source_
+        # companion, ensure_md_format, set_node_type), Note's save_note(),
+        # move_node()/rename_node() -- and now /sync/file's write_by_path()/
+        # delete_by_path() too, which used to take a second, separate
+        # `_path_write_lock` that was never coordinated with this one, so a
+        # synced desktop edit landing on the same file at the same moment
+        # as a locked API-side edit could still race, just via two
+        # uncoordinated locks instead of no lock at all. One process-wide
+        # lock for every vault-file write, not one lock per code path, so
+        # that specific mistake can't happen again.
         self._vault_write_lock = threading.Lock()
 
     def ensure_dirs(self) -> None:
@@ -1775,16 +1777,31 @@ class VaultService:
         return path.read_text(encoding="utf-8"), path.stat().st_mtime
 
     def write_by_path(self, rel_path: str, body: str) -> float:
-        """Create-or-overwrite. Returns the new mtime."""
+        """Create-or-overwrite. Returns the new mtime.
+
+        Holds _vault_write_lock -- a synced desktop edit landing on the
+        same file as a locked API-side edit (e.g. PATCH /{slug}/source)
+        used to race via a second, uncoordinated lock (_path_write_lock,
+        now retired). Also writes atomically (tmp-file+replace): the old
+        plain write_text() truncated an existing file immediately, so a
+        write failure partway through (disk full, killed mid-write)
+        destroyed it instead of leaving it untouched, same defect class
+        fixed on every other vault write path."""
         path = self._safe_sync_path(rel_path)
-        with self._path_write_lock:
+        with self._vault_write_lock:
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(body, encoding="utf-8")
+            tmp_path = path.with_name(f"{path.name}.{uuid.uuid4().hex}.sync.tmp")
+            try:
+                tmp_path.write_text(body, encoding="utf-8")
+                tmp_path.replace(path)
+            except BaseException:
+                tmp_path.unlink(missing_ok=True)
+                raise
             return path.stat().st_mtime
 
     def delete_by_path(self, rel_path: str) -> None:
         path = self._safe_sync_path(rel_path)
-        with self._path_write_lock:
+        with self._vault_write_lock:
             path.unlink(missing_ok=True)
 
     def list_md_manifest(self) -> list[tuple[str, float, int]]:

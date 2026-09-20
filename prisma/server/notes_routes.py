@@ -13,7 +13,7 @@ because it closes over app.py-local WebSocket connection state
 from __future__ import annotations
 
 import logging
-from typing import Callable, Optional
+from typing import Annotated, Callable, Optional
 
 from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile
 from pydantic import BaseModel, Field, field_validator
@@ -27,6 +27,16 @@ from prisma.storage.models.vault_models import (
 )
 
 _activity = logging.getLogger("prisma.activity")
+
+# Same 512-char bound as title/citekey's own Field(max_length=...) below,
+# for every other free-text Source field -- without this, an oversized
+# doi/journal/author/etc. (no crash path like title's filename issue, just
+# unbounded YAML bloat persisted verbatim and re-echoed by every
+# Source-returning route) sails through validation with nothing to stop
+# it. _MAX_BIB_LIST applies to the authors/tags *lists themselves* (item
+# count), not each item's own length.
+_MAX_BIB_STR = 512
+_MAX_BIB_LIST = 200
 
 
 class GenerateMdResponse(BaseModel):
@@ -60,21 +70,31 @@ class NoteSaveRequest(BaseModel):
 
 
 class SourceCreateRequest(BaseModel):
-    # max_length matches the existing Query(..., max_length=512) convention
-    # for short human-typed strings elsewhere (graph_routes.py/kg_app.py) --
-    # without it, an absurdly long title (e.g. one 5000-char word with no
-    # whitespace) flows straight into unique_slug()'s filesystem filename,
-    # 500ing on OSError instead of failing request validation cleanly.
-    title: str = Field(min_length=1, max_length=512)
+    # _MAX_BIB_STR matches the existing Query(..., max_length=512)
+    # convention for short human-typed strings elsewhere (graph_routes.py/
+    # kg_app.py) -- without it, an absurdly long title (e.g. one 5000-char
+    # word with no whitespace) flows straight into unique_slug()'s
+    # filesystem filename, 500ing on OSError instead of failing request
+    # validation cleanly.
+    title: str = Field(min_length=1, max_length=_MAX_BIB_STR)
     body: str = ""
     # max_length: title's own cap above only bounds the *filename* derived
     # from it (via _slugify()'s independent 200-char cap) -- an explicit
     # citekey given here skips that path entirely and is written verbatim
     # into frontmatter and echoed by every Source-returning route, so it
     # needs its own bound.
-    citekey: Optional[str] = Field(None, max_length=512)
-    authors: list[str] = Field(default_factory=list)
-    tags: list[str] = Field(default_factory=list)
+    citekey: Optional[str] = Field(None, max_length=_MAX_BIB_STR)
+    # Bounding each author's length also transitively bounds an
+    # auto-generated citekey (make_citekey() derives it from the first
+    # author's last name, or falls back to title's first word -- both now
+    # bounded inputs) -- closing the same unbounded-citekey risk citekey's
+    # own max_length only covers for an *explicit* one.
+    authors: list[Annotated[str, Field(max_length=_MAX_BIB_STR)]] = Field(
+        default_factory=list, max_length=_MAX_BIB_LIST,
+    )
+    tags: list[Annotated[str, Field(max_length=_MAX_BIB_STR)]] = Field(
+        default_factory=list, max_length=_MAX_BIB_LIST,
+    )
     # ge=0: make_citekey()/create_source_from_citekey() both now honor
     # year=0 correctly (falsy-zero fix), but a negative year is just bad
     # data, not a value worth preserving. strict=True: Pydantic's default
@@ -83,35 +103,39 @@ class SourceCreateRequest(BaseModel):
     # to 1. strict mode still accepts a normal JSON number/null fine, it
     # only blocks cross-type coercion like this one.
     year: Optional[int] = Field(None, ge=0, strict=True)
-    doi: Optional[str] = None
-    url: Optional[str] = None
-    journal: Optional[str] = None
-    volume: Optional[str] = None
-    issue: Optional[str] = None
-    pages: Optional[str] = None
-    publisher: Optional[str] = None
-    item_type: Optional[str] = None
+    doi: Optional[str] = Field(None, max_length=_MAX_BIB_STR)
+    url: Optional[str] = Field(None, max_length=_MAX_BIB_STR)
+    journal: Optional[str] = Field(None, max_length=_MAX_BIB_STR)
+    volume: Optional[str] = Field(None, max_length=_MAX_BIB_STR)
+    issue: Optional[str] = Field(None, max_length=_MAX_BIB_STR)
+    pages: Optional[str] = Field(None, max_length=_MAX_BIB_STR)
+    publisher: Optional[str] = Field(None, max_length=_MAX_BIB_STR)
+    item_type: Optional[str] = Field(None, max_length=_MAX_BIB_STR)
     source_kind: SourceKind = SourceKind.paper
 
     _validate_title = field_validator("title")(_reject_blank_title)
 
 
 class SourceEditRequest(BaseModel):
-    title: Optional[str] = Field(None, min_length=1, max_length=512)
-    authors: Optional[list[str]] = None
-    tags: Optional[list[str]] = None
+    title: Optional[str] = Field(None, min_length=1, max_length=_MAX_BIB_STR)
+    authors: Optional[list[Annotated[str, Field(max_length=_MAX_BIB_STR)]]] = Field(
+        None, max_length=_MAX_BIB_LIST,
+    )
+    tags: Optional[list[Annotated[str, Field(max_length=_MAX_BIB_STR)]]] = Field(
+        None, max_length=_MAX_BIB_LIST,
+    )
     # strict=True: see SourceCreateRequest.year's comment -- same bool-to-int
     # coercion gap, missed here on the first pass of that fix.
     year: Optional[int] = Field(None, ge=0, strict=True)
-    doi: Optional[str] = None
+    doi: Optional[str] = Field(None, max_length=_MAX_BIB_STR)
     source_kind: Optional[SourceKind] = None
-    journal: Optional[str] = None
-    volume: Optional[str] = None
-    issue: Optional[str] = None
-    pages: Optional[str] = None
-    publisher: Optional[str] = None
-    url: Optional[str] = None
-    item_type: Optional[str] = None
+    journal: Optional[str] = Field(None, max_length=_MAX_BIB_STR)
+    volume: Optional[str] = Field(None, max_length=_MAX_BIB_STR)
+    issue: Optional[str] = Field(None, max_length=_MAX_BIB_STR)
+    pages: Optional[str] = Field(None, max_length=_MAX_BIB_STR)
+    publisher: Optional[str] = Field(None, max_length=_MAX_BIB_STR)
+    url: Optional[str] = Field(None, max_length=_MAX_BIB_STR)
+    item_type: Optional[str] = Field(None, max_length=_MAX_BIB_STR)
 
     _validate_title = field_validator("title")(_reject_blank_title)
 

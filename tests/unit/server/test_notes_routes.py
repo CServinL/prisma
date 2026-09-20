@@ -414,6 +414,34 @@ def test_create_source_rejects_an_absurdly_long_explicit_citekey(client):
     assert r.status_code == 422
 
 
+def test_create_source_rejects_an_absurdly_long_auto_generated_citekey(client):
+    # Regression: the previous fix only bounded an EXPLICIT citekey --
+    # make_citekey() derives an auto-generated one from the first author's
+    # last name (or title's first word), and neither authors nor title
+    # items had a per-item length bound, so an oversized author string
+    # produced an equally oversized citekey through a completely different
+    # path, reopening the exact same risk from a different angle.
+    r = client.post("/notes/sources", json={"title": "X", "authors": ["a" * 5000]})
+    assert r.status_code == 422
+
+
+def test_create_source_rejects_an_absurdly_long_bibliographic_field(client):
+    r = client.post("/notes/sources", json={"title": "X", "journal": "a" * 5000})
+    assert r.status_code == 422
+
+
+def test_edit_source_rejects_an_absurdly_long_bibliographic_field(client):
+    r = client.post("/notes/sources", json={"title": "X"})
+    slug = r.json()["slug"]
+    r = client.patch(f"/notes/{slug}/source", json={"doi": "a" * 5000})
+    assert r.status_code == 422
+
+
+def test_create_source_rejects_too_many_authors(client):
+    r = client.post("/notes/sources", json={"title": "X", "authors": ["Smith"] + [f"Coauthor{i}" for i in range(500)]})
+    assert r.status_code == 422
+
+
 def test_create_source_rejects_an_absurdly_long_title(client):
     # Rejected by SourceCreateRequest.title's own max_length=512 during
     # request validation -- never reaches unique_slug()/_slugify() at all.

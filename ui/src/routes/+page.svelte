@@ -3462,7 +3462,7 @@
       {/if}
       <label class="setting-row">
         <span class="setting-label">Authors</span>
-        <input bind:value={sourceForm.authorsText} placeholder="Comma-separated" />
+        <input bind:value={sourceForm.authorsText} placeholder="Full name per person, comma-separated: Jane Smith, John Doe" />
       </label>
       {#if sourceFormMode === "edit"}
         <span class="setting-hint">

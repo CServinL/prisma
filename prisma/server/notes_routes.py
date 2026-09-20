@@ -67,7 +67,12 @@ class SourceCreateRequest(BaseModel):
     # 500ing on OSError instead of failing request validation cleanly.
     title: str = Field(min_length=1, max_length=512)
     body: str = ""
-    citekey: Optional[str] = None
+    # max_length: title's own cap above only bounds the *filename* derived
+    # from it (via _slugify()'s independent 200-char cap) -- an explicit
+    # citekey given here skips that path entirely and is written verbatim
+    # into frontmatter and echoed by every Source-returning route, so it
+    # needs its own bound.
+    citekey: Optional[str] = Field(None, max_length=512)
     authors: list[str] = Field(default_factory=list)
     tags: list[str] = Field(default_factory=list)
     # ge=0: make_citekey()/create_source_from_citekey() both now honor

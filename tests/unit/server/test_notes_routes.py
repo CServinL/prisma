@@ -404,6 +404,16 @@ def test_create_source_rejects_whitespace_only_explicit_citekey(client):
     assert r.status_code == 400
 
 
+def test_create_source_rejects_an_absurdly_long_explicit_citekey(client):
+    # Regression: title's max_length=512 only bounds the *filename*
+    # derived from it (_slugify() has its own independent cap) -- an
+    # explicit citekey skips that path entirely, gets written verbatim
+    # into frontmatter, and is echoed by every Source-returning route, so
+    # it needs the same request-level bound title already got.
+    r = client.post("/notes/sources", json={"title": "X", "citekey": "a" * 5000})
+    assert r.status_code == 422
+
+
 def test_create_source_rejects_an_absurdly_long_title(client):
     # Rejected by SourceCreateRequest.title's own max_length=512 during
     # request validation -- never reaches unique_slug()/_slugify() at all.

@@ -916,6 +916,81 @@ class TestEnsureMdFormatCleansUpOnFailure:
         )
 
 
+class TestSetNodeTypeLocking:
+    def test_holds_source_write_lock_for_its_whole_duration(self, vault, monkeypatch):
+        # Regression: set_node_type() (PATCH /{slug}/type, the pre-existing
+        # type-toggle route, untouched by this diff) did an unlocked
+        # read-modify-write of a Source's .md frontmatter -- before this
+        # PR, a Source's .md file had no other locked writer to race
+        # against; update_source_bibliographic_fields()/attach_source_
+        # companion() are new concurrent writers of the identical file, so
+        # this pre-existing route needed the same _source_write_lock
+        # protection generate_md_format() got for the same reason.
+        #
+        # Tests lock ownership directly (does a concurrent non-blocking
+        # acquire attempt fail while set_node_type() is mid-flight) rather
+        # than trying to force an actual lost-update through sleep-timed
+        # thread interleaving -- set_node_type()'s body has no operation
+        # slow enough to reliably win a real race the way a multi-second
+        # PDF extraction does for the other locked methods, so a
+        # sleep-based version of this test was confirmed flaky (passed
+        # even against the unfixed, unlocked code, depending on scheduling
+        # order) where this direct approach is deterministic.
+        import threading
+
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "body", zotero_key="ABC123", authors=[], tags=[],
+        )
+
+        lock_held_during_call = threading.Event()
+        proceed = threading.Event()
+        real_find_file = VaultService.find_file
+
+        def blocking_find_file(self, slug):
+            result = real_find_file(self, slug)
+            lock_held_during_call.set()
+            proceed.wait(timeout=2)
+            return result
+
+        monkeypatch.setattr(VaultService, "find_file", blocking_find_file)
+
+        t = threading.Thread(target=lambda: vault.set_node_type(source.slug, NodeType.source))
+        t.start()
+        assert lock_held_during_call.wait(timeout=2), "set_node_type() never reached find_file()"
+
+        acquired = vault._source_write_lock.acquire(blocking=False)
+        proceed.set()
+        t.join()
+        if acquired:
+            vault._source_write_lock.release()
+        assert not acquired, "set_node_type() must hold _source_write_lock while it runs"
+
+    def test_failed_write_preserves_the_existing_source(self, vault, monkeypatch):
+        # Regression: the write was a plain write_text() (open-truncate-
+        # write, not atomic) -- same defect class fixed on every other
+        # Source-mutating write path this arc (update_source_
+        # bibliographic_fields, ensure_md_format, attach_source_companion).
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "original body",
+            zotero_key="ABC123", authors=["Jane Smith"], tags=[],
+        )
+
+        original_write_text = Path.write_text
+
+        def boom(self, data, encoding=None):
+            original_write_text(self, "", encoding=encoding)
+            raise OSError("disk full")
+
+        monkeypatch.setattr(Path, "write_text", boom)
+        with pytest.raises(OSError):
+            vault.set_node_type(source.slug, NodeType.source)
+
+        preserved = vault.get_source(source.slug)
+        assert preserved.title == "A Great Paper"
+        assert preserved.authors == ["Jane Smith"]
+        assert preserved.body == "original body"
+
+
 class TestUpdateSourceBibliographicFields:
     def test_merges_new_fields_leaving_existing_ones_untouched(self, vault):
         source = vault.create_source_from_citekey(

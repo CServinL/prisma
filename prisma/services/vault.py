@@ -1176,24 +1176,39 @@ class VaultService:
         return None
 
     def set_node_type(self, slug: str, node_type: NodeType) -> None:
-        """Update the type field for any node. For HTML files, creates/updates a companion .md."""
-        path = self.find_file(slug)
-        if path is None:
-            raise FileNotFoundError(f"node not found: {slug!r}")
-        if path.suffix == ".html":
-            companion_md = path.with_suffix(".md")
-            if companion_md.exists():
-                raw = companion_md.read_text(encoding="utf-8")
+        """Update the type field for any node. For HTML files, creates/updates a companion .md.
+
+        Holds _source_write_lock unconditionally (cheap when uncontended,
+        same call as every other Source-mutating method makes) even though
+        this method itself is generic across every node type. Reachable
+        against a Source via the pre-existing PATCH /{slug}/type route
+        (the type-toggle UI action) -- before this PR, a Source's .md file
+        had no other locked writer to race against; this PR's own
+        update_source_bibliographic_fields()/attach_source_companion() are
+        new concurrent writers of the identical file, so this method
+        needed the same protection as generate_md_format() got for the
+        same reason. Also switched both write paths to the same atomic
+        tmp-file+replace pattern its now-locked siblings already use --
+        the previous plain write_text() had the same truncate-before-fail
+        data-loss risk fixed there."""
+        with self._source_write_lock:
+            path = self.find_file(slug)
+            if path is None:
+                raise FileNotFoundError(f"node not found: {slug!r}")
+            target = path.with_suffix(".md") if path.suffix == ".html" else path
+            if target.exists():
+                raw = target.read_text(encoding="utf-8")
                 fm, body = _parse_frontmatter(raw)
             else:
                 fm, body = {"title": path.stem}, ""
             fm["type"] = node_type.value
-            companion_md.write_text(_render_frontmatter(fm) + body, encoding="utf-8")
-        else:
-            raw = path.read_text(encoding="utf-8")
-            fm, body = _parse_frontmatter(raw)
-            fm["type"] = node_type.value
-            path.write_text(_render_frontmatter(fm) + body, encoding="utf-8")
+            tmp_path = target.with_name(f"{target.name}.{uuid.uuid4().hex}.type.tmp")
+            try:
+                tmp_path.write_text(_render_frontmatter(fm) + body, encoding="utf-8")
+                tmp_path.replace(target)
+            except BaseException:
+                tmp_path.unlink(missing_ok=True)
+                raise
 
     # ── Format generation ─────────────────────────────────────────────────────
 

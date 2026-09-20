@@ -1009,7 +1009,10 @@ class VaultService:
             if existing is not None and existing.suffix != ext:
                 existing.unlink(missing_ok=True)
             if ext in (".pdf", ".html", ".htm"):
-                self.ensure_md_format(companion_path, force=is_replace)
+                # _ensure_md_format_locked(), not ensure_md_format() -- this
+                # method already holds _source_write_lock; re-acquiring the
+                # same non-reentrant Lock here would deadlock.
+                self._ensure_md_format_locked(companion_path, force=is_replace)
             return self.get_source(slug)
 
     def get_chat(self, slug: str) -> Chat:
@@ -1195,6 +1198,24 @@ class VaultService:
     # ── Format generation ─────────────────────────────────────────────────────
 
     def ensure_md_format(self, companion_path: Path, force: bool = False) -> bool:
+        """Public entry point -- acquires _source_write_lock, then delegates
+        to _ensure_md_format_locked() below. Needed because this method has
+        two callers with different locking needs: generate_md_format()
+        (the /{slug}/md route) calls this directly and holds no lock of
+        its own, so without this it would race unsynchronized against
+        edit_source()/upload_source_companion()'s own _source_write_lock-
+        guarded read-merge-write of the identical file -- the exact "lost
+        update" class this lock exists to prevent, just missed for this
+        pre-existing fourth call path when the other three got it.
+        attach_source_companion() is the other caller, and it already
+        holds this same lock for its own multi-step operation -- calling
+        this method (and re-acquiring the same non-reentrant Lock) from
+        inside that would deadlock, so it calls _ensure_md_format_locked()
+        directly instead, below."""
+        with self._source_write_lock:
+            return self._ensure_md_format_locked(companion_path, force=force)
+
+    def _ensure_md_format_locked(self, companion_path: Path, force: bool = False) -> bool:
         """Convert a companion file (.html or .pdf) to Markdown and store it
         in the sibling .md body. Returns True if the companion .md was
         created/updated, False if already present. .pdf uses pdf_bytes_to_md
@@ -1209,7 +1230,10 @@ class VaultService:
         `attach_source_companion()` passes force=True when *replacing* an
         existing companion -- the whole point of re-uploading is to
         refresh stale content, so the empty-body gate would otherwise
-        silently keep serving the old extraction forever."""
+        silently keep serving the old extraction forever.
+
+        Assumes the caller already holds _source_write_lock -- see
+        ensure_md_format() above for why this is split out."""
         companion = companion_path.with_suffix(".md")
         if companion.exists():
             raw = companion.read_text(encoding="utf-8")

@@ -867,6 +867,54 @@ class TestEnsureMdFormatCleansUpOnFailure:
             vault.ensure_md_format(companion_path, force=True)
         assert vault.get_source(source.slug).body == "original body"
 
+    def test_concurrent_metadata_edit_and_generate_md_format_do_not_lose_the_edit(self, vault, monkeypatch):
+        # Regression: ensure_md_format() has two callers -- attach_source_
+        # companion() (already _source_write_lock-guarded) and the
+        # pre-existing generate_md_format() route (POST /{slug}/md, no
+        # lock of its own), which this PR newly makes reachable against a
+        # LOCKED Source for the first time (Sources previously only ever
+        # got a companion via Zotero import, with no other Source-mutating
+        # route to race against). Without ensure_md_format() itself taking
+        # the lock, a concurrent update_source_bibliographic_fields() call
+        # -- an independent read-merge-write of the identical file, itself
+        # lock-guarded -- can still lose its edit the moment this method's
+        # own (possibly seconds-long) extraction finishes and blind-writes
+        # a frontmatter snapshot taken before the edit landed. Same defect
+        # class as test_concurrent_metadata_edit_and_companion_upload_
+        # does_not_lose_the_edit above, just for the fourth call path.
+        import threading
+        import time
+
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "", zotero_key="ABC123", authors=["Original Author"], tags=[],
+        )
+        companion_path = source.path.with_suffix(".pdf")
+        companion_path.write_bytes(b"pdf bytes")
+
+        def slow_pdf_bytes_to_md(data):
+            time.sleep(0.15)
+            return "extracted text"
+
+        monkeypatch.setattr("prisma.services.vault.pdf_bytes_to_md", slow_pdf_bytes_to_md)
+
+        def generate():
+            vault.ensure_md_format(companion_path)
+
+        def edit():
+            time.sleep(0.05)  # let generate() grab the lock and start its slow extraction first
+            vault.update_source_bibliographic_fields(source.slug, authors=["New Author"])
+
+        t1 = threading.Thread(target=generate)
+        t2 = threading.Thread(target=edit)
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
+
+        assert vault.get_source(source.slug).authors == ["New Author"], (
+            "a metadata edit racing generate_md_format()'s extraction must not be silently lost"
+        )
+
 
 class TestUpdateSourceBibliographicFields:
     def test_merges_new_fields_leaving_existing_ones_untouched(self, vault):

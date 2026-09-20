@@ -400,6 +400,54 @@ class TestCitekeyExists:
         assert frontmatter_end > 65536  # confirms this exceeds the old fixed bound too
         assert vault.citekey_exists("smith2024") is True
 
+    def test_scan_bound_is_measured_in_bytes_not_characters(self, vault, monkeypatch):
+        # Regression: opening in text mode made f.read(N) read N
+        # *characters*, not N bytes as _CITEKEY_SCAN_READ_BYTES/
+        # _CITEKEY_SCAN_MAX_BYTES's own names and comments claim -- for
+        # multi-byte UTF-8 content (e.g. non-Latin author names), the
+        # actual bytes consumed before the hard ceiling kicks in could run
+        # up to ~4x the documented bound. Reproduced with a malformed
+        # (never-closing) frontmatter block, on disk far larger than the
+        # ceiling, filled entirely with 4-byte-per-character content.
+        #
+        # Re-encodes each read() call's return value back to UTF-8 to get
+        # its true byte length regardless of whether the code under test
+        # opened in text mode (str, old/buggy) or binary mode (bytes,
+        # fixed) -- that distinction is exactly what's being tested, so
+        # the measurement can't rely on assuming one or the other.
+        from prisma.services.vault import _CITEKEY_SCAN_MAX_BYTES
+
+        path = vault.default_dirs[NodeType.source] / "malformed.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # 20MB on disk, no second "---" anywhere -- comfortably larger than
+        # the 4MB ceiling either way this gets measured.
+        with path.open("w", encoding="utf-8") as f:
+            f.write("---\ntitle: x\n")
+            for _ in range(5_000_000):
+                f.write("\U0001F600")  # 4 bytes/char in UTF-8
+
+        total_bytes = 0
+        real_open = Path.open
+
+        def counting_open(self, *args, **kwargs):
+            f = real_open(self, *args, **kwargs)
+            real_read = f.read
+
+            def counting_read(n=-1):
+                nonlocal total_bytes
+                data = real_read(n)
+                total_bytes += len(data) if isinstance(data, bytes) else len(data.encode("utf-8"))
+                return data
+
+            f.read = counting_read
+            return f
+
+        monkeypatch.setattr(Path, "open", counting_open)
+        vault.citekey_exists("nobody2099")
+        assert total_bytes < _CITEKEY_SCAN_MAX_BYTES * 1.5, (
+            f"read {total_bytes} real bytes, expected close to the {_CITEKEY_SCAN_MAX_BYTES}-byte ceiling"
+        )
+
 
 class TestCreateSourceFromCitekeyIfFree:
     def test_raises_on_collision(self, vault):

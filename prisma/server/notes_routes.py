@@ -57,17 +57,30 @@ def _reject_blank_title(v: Optional[str]) -> Optional[str]:
     return v
 
 
-def _drop_blank_list_items(v: Optional[list[str]]) -> Optional[list[str]]:
+def _drop_blank_list_items(v):
     """A whitespace-only entry in authors/tags (a stray double-comma, a
     pasted trailing separator) isn't real data -- max_length alone lets it
     through, and a blank author string reaches APA formatting as a visibly
     malformed "  , & Smith, J." reference with no error anywhere upstream.
     Unlike a blank title (which breaks the whole node and must be
     rejected), one bad list entry among otherwise-good ones is just noise
-    worth dropping, not grounds to fail the entire request."""
-    if v is None:
+    worth dropping, not grounds to fail the entire request.
+
+    mode="before": Pydantic's own max_length constraint on the list runs
+    BEFORE an "after"-mode validator ever sees the value, so a submission
+    with extra blank entries (e.g. 201 raw items, only 190 real) would
+    422 on raw length before this ever got a chance to drop them down to
+    a count well within the cap -- defeating this validator's whole point
+    for exactly the inputs it exists to handle. Runs on the raw,
+    not-yet-item-validated value, so anything not list-shaped (or with
+    non-string items) is passed through untouched here and left for
+    Pydantic's own subsequent type validation to reject normally, rather
+    than this raising an uncaught, non-ValueError exception (e.g.
+    AttributeError from calling .strip() on a non-string) that Pydantic
+    can't turn into a clean 422."""
+    if not isinstance(v, list):
         return v
-    return [item for item in v if item.strip()]
+    return [item for item in v if not isinstance(item, str) or item.strip()]
 
 
 class NoteCreateRequest(BaseModel):
@@ -76,7 +89,7 @@ class NoteCreateRequest(BaseModel):
     tags: Optional[list[str]] = None
 
     _validate_title = field_validator("title")(_reject_blank_title)
-    _drop_blank_tags = field_validator("tags")(_drop_blank_list_items)
+    _drop_blank_tags = field_validator("tags", mode="before")(_drop_blank_list_items)
 
 
 class NoteSaveRequest(BaseModel):
@@ -109,8 +122,8 @@ class SourceCreateRequest(BaseModel):
     tags: list[Annotated[str, Field(max_length=_MAX_BIB_STR)]] = Field(
         default_factory=list, max_length=_MAX_BIB_LIST,
     )
-    _drop_blank_authors = field_validator("authors")(_drop_blank_list_items)
-    _drop_blank_tags = field_validator("tags")(_drop_blank_list_items)
+    _drop_blank_authors = field_validator("authors", mode="before")(_drop_blank_list_items)
+    _drop_blank_tags = field_validator("tags", mode="before")(_drop_blank_list_items)
     # ge=0: make_citekey()/create_source_from_citekey() both now honor
     # year=0 correctly (falsy-zero fix), but a negative year is just bad
     # data, not a value worth preserving. strict=True: Pydantic's default
@@ -140,8 +153,8 @@ class SourceEditRequest(BaseModel):
     tags: Optional[list[Annotated[str, Field(max_length=_MAX_BIB_STR)]]] = Field(
         None, max_length=_MAX_BIB_LIST,
     )
-    _drop_blank_authors = field_validator("authors")(_drop_blank_list_items)
-    _drop_blank_tags = field_validator("tags")(_drop_blank_list_items)
+    _drop_blank_authors = field_validator("authors", mode="before")(_drop_blank_list_items)
+    _drop_blank_tags = field_validator("tags", mode="before")(_drop_blank_list_items)
     # strict=True: see SourceCreateRequest.year's comment -- same bool-to-int
     # coercion gap.
     year: Optional[int] = Field(None, ge=0, strict=True)

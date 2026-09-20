@@ -821,27 +821,35 @@ class VaultService:
         correct here. frontmatter_for_relpath()'s _FRONTMATTER_READ_BYTES
         is fine to silently degrade on overflow (a best-effort lookup);
         a truncated read here would falsely report an in-use citekey as
-        free, letting a real collision through despite the lock."""
+        free, letting a real collision through despite the lock.
+
+        Reads in binary mode, not text mode -- opening with encoding="utf-8"
+        would make f.read(N) read N *characters*, not N bytes, so
+        non-ASCII-heavy frontmatter (e.g. non-Latin author names) could
+        consume up to 4x the intended bytes per read, weakening
+        _CITEKEY_SCAN_MAX_BYTES's own hard-ceiling guarantee by the same
+        factor. Decoded once at the end, not per growth iteration, so the
+        loop itself stays cheap."""
         for path in self.iter_files():
             try:
-                with path.open("r", encoding="utf-8", errors="replace") as f:
-                    head = f.read(_CITEKEY_SCAN_READ_BYTES)
+                with path.open("rb") as f:
+                    head_bytes = f.read(_CITEKEY_SCAN_READ_BYTES)
                     while (
-                        head.startswith("---")
-                        and head.find("\n---", 3) == -1
-                        and len(head) < _CITEKEY_SCAN_MAX_BYTES
+                        head_bytes.startswith(b"---")
+                        and head_bytes.find(b"\n---", 3) == -1
+                        and len(head_bytes) < _CITEKEY_SCAN_MAX_BYTES
                     ):
                         more = f.read(_CITEKEY_SCAN_READ_BYTES)
                         if not more:
                             break
-                        head += more
+                        head_bytes += more
             except OSError:
                 # A file can vanish between iter_files()'s walk yielding it
                 # and this read (a concurrent delete/move) -- harmless to
                 # this existence check either way, so skip it rather than
                 # letting POST /notes/sources 500 on an unrelated race.
                 continue
-            fm, _ = _parse_frontmatter(head)
+            fm, _ = _parse_frontmatter(head_bytes.decode("utf-8", errors="replace"))
             if fm.get("citekey") == citekey:
                 return True
         return False

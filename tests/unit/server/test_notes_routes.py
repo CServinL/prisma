@@ -476,6 +476,22 @@ def test_edit_source_drops_blank_author_and_tag_entries(client, vault):
     assert data["tags"] == ["nlp"]
 
 
+def test_create_source_drops_blanks_before_enforcing_the_author_count_cap(client):
+    # Regression: field_validator defaults to mode="after", which runs
+    # AFTER Pydantic's own max_length constraint on the list -- so a raw
+    # submission over the cap 422'd on raw length before
+    # _drop_blank_list_items ever got a chance to drop enough blanks to
+    # bring it back under, defeating that validator's whole stated purpose
+    # for exactly the inputs (blanks pushing a list over some limit) it
+    # exists to handle. 201 raw entries, only 190 real -- comfortably under
+    # the 200 cap once blanks are dropped, but over it raw.
+    authors = ["Smith"] + [f"Coauthor{i}" for i in range(189)] + ["   "] * 11
+    assert len(authors) == 201
+    r = client.post("/notes/sources", json={"title": "X", "authors": authors})
+    assert r.status_code == 201
+    assert len(r.json()["authors"]) == 190
+
+
 def test_create_source_rejects_an_absurdly_long_title(client):
     # Rejected by SourceCreateRequest.title's own max_length=512 during
     # request validation -- never reaches unique_slug()/_slugify() at all.

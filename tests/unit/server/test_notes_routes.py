@@ -106,6 +106,20 @@ def test_create_note_drops_blank_tag_entries(client):
     assert r.json()["tags"] == ["real"]
 
 
+def test_create_note_rejects_an_absurdly_long_tag(client):
+    # Regression: Source's authors/tags got _MAX_BIB_STR/_MAX_BIB_LIST
+    # bounds for unbounded-YAML-bloat-persisted-and-echoed-forever reasons
+    # -- the sibling NoteCreateRequest.tags (this same diff already
+    # touches this exact field, just above) was left unbounded.
+    r = client.post("/notes", json={"title": "My Note", "tags": ["a" * 5000]})
+    assert r.status_code == 422
+
+
+def test_create_note_rejects_too_many_tags(client):
+    r = client.post("/notes", json={"title": "My Note", "tags": [f"tag{i}" for i in range(500)]})
+    assert r.status_code == 422
+
+
 def test_get_note_not_found(client):
     r = client.get("/notes/does-not-exist")
     assert r.status_code == 404

@@ -381,9 +381,19 @@ class VaultService:
         self._chat_write_lock = threading.Lock()
         # Same rationale as _chat_write_lock, for /sync/file's writes.
         self._path_write_lock = threading.Lock()
-        # Same rationale again, for the manual-create route's citekey-
-        # uniqueness check-then-write (see create_source_from_citekey_if_free).
-        self._source_write_lock = threading.Lock()
+        # Same rationale again, for any single-.md-file read-merge-write:
+        # originally added just for the manual-create route's citekey-
+        # uniqueness check-then-write (create_source_from_citekey_if_free),
+        # then grown to cover every other Source-mutating method that reads
+        # and rewrites the same file (update_source_bibliographic_fields,
+        # attach_source_companion, ensure_md_format, set_node_type) once
+        # each was found racing the others -- and now Note's save_note()
+        # too, since the underlying read-merge-write race isn't actually
+        # Source-specific, just first noticed there. One process-wide lock
+        # for every node type, not one lock per type, so it can never
+        # repeat write_by_path()'s mistake of being a second, uncoordinated
+        # lock over files the others already guard (see TODO.md).
+        self._vault_write_lock = threading.Lock()
 
     def ensure_dirs(self) -> None:
         for d in self.default_dirs.values():
@@ -773,14 +783,14 @@ class VaultService:
         changing it after creation would silently orphan or misdirect any
         citation already pointing at this source elsewhere in the vault.
 
-        Holds _source_write_lock across the whole read-merge-write, same as
+        Holds _vault_write_lock across the whole read-merge-write, same as
         attach_source_companion() below -- without it, a metadata edit
         racing a companion upload's own read-merge-write of the identical
         frontmatter (the two are read-merge-write on the same file, not
         independent) is a lost-update: whichever finishes last silently
         wins, discarding the other caller's already-200'd change with no
         error to either side."""
-        with self._source_write_lock:
+        with self._vault_write_lock:
             path = self._find_md(slug)
             if path is None:
                 raise FileNotFoundError(f"source not found: {slug!r}")
@@ -869,7 +879,7 @@ class VaultService:
         return False
 
     def create_source_from_citekey_if_free(self, citekey: str, title: str, body: str, **kwargs) -> Source:
-        """Atomic check-and-create: holds _source_write_lock across the
+        """Atomic check-and-create: holds _vault_write_lock across the
         citekey_exists() check and the actual write. Calling those two as
         separate steps from the route layer (check, then create) leaves a
         real TOCTOU window -- two concurrent manual-create requests (a
@@ -888,7 +898,7 @@ class VaultService:
         this same guard would change POST /zotero/import/{key}'s existing
         behavior, out of scope for the manual-create gap this exists to
         close."""
-        with self._source_write_lock:
+        with self._vault_write_lock:
             if self.citekey_exists(citekey):
                 raise ValueError(f"citekey already in use: {citekey!r}")
             return self.create_source_from_citekey(citekey, title, body, **kwargs)
@@ -924,7 +934,7 @@ class VaultService:
         way to tell it not to) -- a smaller, separate waste than the
         extraction this actually avoids, not chased further here.
 
-        Holds _source_write_lock across the entire method, including the
+        Holds _vault_write_lock across the entire method, including the
         (possibly seconds-long) ensure_md_format() extraction -- three
         separate races otherwise open up, none needing true byte-level bad
         luck to hit, just two requests landing close together (double-
@@ -947,13 +957,13 @@ class VaultService:
           the slow extraction finally finishes, discarding an edit that
           already returned 200 to its caller.
 
-        Trade-off worth naming: _source_write_lock is global, not per-slug,
+        Trade-off worth naming: _vault_write_lock is global, not per-slug,
         so this also blocks create_source_from_citekey_if_free() and
         update_source_bibliographic_fields() for *unrelated* sources for
         the full extraction duration, not just this one's. Correct beats
         fast here -- see TODO.md's Vault section for the per-slug-lock
         follow-up that would remove this cost."""
-        with self._source_write_lock:
+        with self._vault_write_lock:
             path = self._find_md(slug)
             if path is None:
                 raise FileNotFoundError(f"source not found: {slug!r}")
@@ -1010,7 +1020,7 @@ class VaultService:
                 existing.unlink(missing_ok=True)
             if ext in (".pdf", ".html", ".htm"):
                 # _ensure_md_format_locked(), not ensure_md_format() -- this
-                # method already holds _source_write_lock; re-acquiring the
+                # method already holds _vault_write_lock; re-acquiring the
                 # same non-reentrant Lock here would deadlock.
                 self._ensure_md_format_locked(companion_path, force=is_replace)
             return self.get_source(slug)
@@ -1178,7 +1188,7 @@ class VaultService:
     def set_node_type(self, slug: str, node_type: NodeType) -> None:
         """Update the type field for any node. For HTML files, creates/updates a companion .md.
 
-        Holds _source_write_lock unconditionally (cheap when uncontended,
+        Holds _vault_write_lock unconditionally (cheap when uncontended,
         same call as every other Source-mutating method makes) even though
         this method itself is generic across every node type. Reachable
         against a Source via the pre-existing PATCH /{slug}/type route
@@ -1191,7 +1201,7 @@ class VaultService:
         tmp-file+replace pattern its now-locked siblings already use --
         the previous plain write_text() had the same truncate-before-fail
         data-loss risk fixed there."""
-        with self._source_write_lock:
+        with self._vault_write_lock:
             path = self.find_file(slug)
             if path is None:
                 raise FileNotFoundError(f"node not found: {slug!r}")
@@ -1213,12 +1223,12 @@ class VaultService:
     # ── Format generation ─────────────────────────────────────────────────────
 
     def ensure_md_format(self, companion_path: Path, force: bool = False) -> bool:
-        """Public entry point -- acquires _source_write_lock, then delegates
+        """Public entry point -- acquires _vault_write_lock, then delegates
         to _ensure_md_format_locked() below. Needed because this method has
         two callers with different locking needs: generate_md_format()
         (the /{slug}/md route) calls this directly and holds no lock of
         its own, so without this it would race unsynchronized against
-        edit_source()/upload_source_companion()'s own _source_write_lock-
+        edit_source()/upload_source_companion()'s own _vault_write_lock-
         guarded read-merge-write of the identical file -- the exact "lost
         update" class this lock exists to prevent, just missed for this
         pre-existing fourth call path when the other three got it.
@@ -1227,7 +1237,7 @@ class VaultService:
         this method (and re-acquiring the same non-reentrant Lock) from
         inside that would deadlock, so it calls _ensure_md_format_locked()
         directly instead, below."""
-        with self._source_write_lock:
+        with self._vault_write_lock:
             return self._ensure_md_format_locked(companion_path, force=force)
 
     def _ensure_md_format_locked(self, companion_path: Path, force: bool = False) -> bool:
@@ -1247,7 +1257,7 @@ class VaultService:
         refresh stale content, so the empty-body gate would otherwise
         silently keep serving the old extraction forever.
 
-        Assumes the caller already holds _source_write_lock -- see
+        Assumes the caller already holds _vault_write_lock -- see
         ensure_md_format() above for why this is split out."""
         companion = companion_path.with_suffix(".md")
         if companion.exists():
@@ -1329,13 +1339,30 @@ class VaultService:
         return self.get_note(slug)
 
     def save_note(self, slug: str, body: str) -> Note:
-        path = self._find_md(slug)
-        if path is None:
-            raise FileNotFoundError(f"note not found: {slug!r}")
-        existing = path.read_text(encoding="utf-8")
-        fm, _ = _parse_frontmatter(existing)
-        path.write_text(_render_frontmatter(fm) + body, encoding="utf-8")
-        return self.get_note(slug)
+        """Holds _vault_write_lock and writes atomically (tmp-file+replace),
+        same as every Source-mutating method -- this was a plain, unlocked
+        write_text() until a TODO.md audit found the underlying read-
+        merge-write race isn't actually Source-specific, just first noticed
+        there: two requests saving the same note close together (two
+        browser tabs, a double-click, or a concurrent PATCH /{slug}/type)
+        could each read stale frontmatter and one write silently clobbers
+        the other's change, and a write failure partway through (disk
+        full, killed mid-write) destroyed the note instead of leaving it
+        untouched."""
+        with self._vault_write_lock:
+            path = self._find_md(slug)
+            if path is None:
+                raise FileNotFoundError(f"note not found: {slug!r}")
+            existing = path.read_text(encoding="utf-8")
+            fm, _ = _parse_frontmatter(existing)
+            tmp_path = path.with_name(f"{path.name}.{uuid.uuid4().hex}.save.tmp")
+            try:
+                tmp_path.write_text(_render_frontmatter(fm) + body, encoding="utf-8")
+                tmp_path.replace(path)
+            except BaseException:
+                tmp_path.unlink(missing_ok=True)
+                raise
+            return self.get_note(slug)
 
     def unique_slug(self, title: str) -> str:
         """Slugify *title* and disambiguate against existing .md/.sess files
@@ -1567,36 +1594,71 @@ class VaultService:
 
     # ── Node operations ───────────────────────────────────────────────────────
 
+    def _relocate_companion(self, old_path: Path, new_path: Path) -> None:
+        """Moves/renames whatever companion file belongs to `old_path`
+        alongside its own move/rename to `new_path`, so find_companion()
+        (stem-matching) still finds it under the new name/location
+        afterward. Two distinct pairings exist and neither implies the
+        other:
+        - a raw-HTML-primary node (node.path IS the .html, no separate .md
+          until one gets generated) pairs with a generated `.md` companion
+          -- the *reverse* of every other case.
+        - a Source's `.md` primary pairs with a `.pdf`/`.svg`/etc.
+          companion, COMPANION_EXTS' normal case.
+        Previously only the first case was handled (`if path.suffix ==
+        ".html"`), which is unconditionally False for a Source (always
+        `.md`) -- moving or renaming a Source with an attached companion
+        silently orphaned it: left behind at the old path/name, invisible
+        to find_companion()'s stem-matching under the new one, with a
+        subsequent companion upload then silently duplicating storage
+        instead of replacing it."""
+        if old_path.suffix == ".html":
+            old_companion, new_companion = old_path.with_suffix(".md"), new_path.with_suffix(".md")
+        elif old_path.suffix == ".md":
+            old_companion = next(
+                (c for ext in COMPANION_EXTS if (c := old_path.with_suffix(ext)).exists()), None,
+            )
+            new_companion = new_path.with_suffix(old_companion.suffix) if old_companion else None
+        else:
+            old_companion = new_companion = None
+        if old_companion is not None and old_companion.exists():
+            old_companion.rename(new_companion)
+
     def move_node(self, slug: str, dest_dir: str) -> tuple[str, str, str]:
         """Returns (new_slug, old_rel_path, new_rel_path). The two rel paths
         are for the caller (app.py's route) to broadcast a vault_change over
         WS -- without that, a connected desktop client's local sync mirror
         never learns the old path is gone, and can end up pushing its still-
-        present stale copy back up as a "new" file, duplicating the move."""
-        path = self.find_file(slug)
-        if path is None:
-            raise FileNotFoundError(f"node not found: {slug!r}")
-        old_rel = str(path.relative_to(self.root))
-        dest = self.resolve_within_root(dest_dir)
-        dest.mkdir(parents=True, exist_ok=True)
-        new_path = dest / path.name
-        if new_path.exists() and new_path != path:
-            raise FileExistsError(f"file already exists at destination: {new_path.name}")
-        path.rename(new_path)
-        # companion .md if moving an .html file
-        if path.suffix == ".html":
-            companion = path.with_suffix(".md")
-            if companion.exists():
-                companion.rename(dest / companion.name)
-        rel = new_path.relative_to(self.root)
-        new_slug = self.slug_for_relpath(rel)
-        return new_slug, old_rel, str(rel)
+        present stale copy back up as a "new" file, duplicating the move.
+
+        Holds _vault_write_lock -- moving a Source out from under a
+        concurrent update_source_bibliographic_fields()/attach_source_
+        companion() call (both locked, both assume the file stays where
+        they found it) would otherwise race the rename against their own
+        read-merge-write, the same class of problem closed for every other
+        Source-mutating method."""
+        with self._vault_write_lock:
+            path = self.find_file(slug)
+            if path is None:
+                raise FileNotFoundError(f"node not found: {slug!r}")
+            old_rel = str(path.relative_to(self.root))
+            dest = self.resolve_within_root(dest_dir)
+            dest.mkdir(parents=True, exist_ok=True)
+            new_path = dest / path.name
+            if new_path.exists() and new_path != path:
+                raise FileExistsError(f"file already exists at destination: {new_path.name}")
+            path.rename(new_path)
+            self._relocate_companion(path, new_path)
+            rel = new_path.relative_to(self.root)
+            new_slug = self.slug_for_relpath(rel)
+            return new_slug, old_rel, str(rel)
 
     def rename_node(self, slug: str, new_title: str) -> tuple[str, str | None, str | None]:
         """Returns (new_slug, old_rel_path, new_rel_path) -- the last two are
         None for a chat (.sess isn't part of the sync protocol at all, see
         _safe_sync_path, so there's nothing to broadcast); see move_node's
-        docstring for why the caller needs these for a .md rename."""
+        docstring for why the caller needs these for a .md rename, and for
+        why this holds _vault_write_lock too."""
         sess_path = self._find_sess(slug)
         if sess_path is not None:
             new_stem = _slugify(new_title)
@@ -1611,20 +1673,35 @@ class VaultService:
                 new_path,
             )
             return new_slug, None, None
-        path = self._find_md(slug)
-        if path is None:
-            raise FileNotFoundError(f"node not found: {slug!r}")
-        old_rel = str(path.relative_to(self.root))
-        new_stem = _slugify(new_title)
-        new_path = path.parent / f"{new_stem}.md"
-        if new_path.exists() and new_path != path:
-            raise FileExistsError(f"a file named {new_stem!r} already exists")
-        raw = path.read_text(encoding="utf-8")
-        fm, body = _parse_frontmatter(raw)
-        fm["title"] = new_title
-        path.rename(new_path)
-        new_path.write_text(_render_frontmatter(fm) + body, encoding="utf-8")
-        return _file_slug(new_stem), old_rel, str(new_path.relative_to(self.root))
+        with self._vault_write_lock:
+            path = self._find_md(slug)
+            if path is None:
+                raise FileNotFoundError(f"node not found: {slug!r}")
+            old_rel = str(path.relative_to(self.root))
+            new_stem = _slugify(new_title)
+            new_path = path.parent / f"{new_stem}.md"
+            if new_path.exists() and new_path != path:
+                raise FileExistsError(f"a file named {new_stem!r} already exists")
+            raw = path.read_text(encoding="utf-8")
+            fm, body = _parse_frontmatter(raw)
+            fm["title"] = new_title
+            path.rename(new_path)
+            self._relocate_companion(path, new_path)
+            # Atomic tmp-file+replace, not a direct new_path.write_text() --
+            # same reasoning as every other Source-mutating write: a
+            # failure partway through this step would otherwise leave the
+            # renamed file truncated, with the *old* path no longer
+            # existing at all to fall back to (strictly worse than the
+            # in-place truncation risk elsewhere, since a rename already
+            # happened first).
+            tmp_path = new_path.with_name(f"{new_path.name}.{uuid.uuid4().hex}.rename.tmp")
+            try:
+                tmp_path.write_text(_render_frontmatter(fm) + body, encoding="utf-8")
+                tmp_path.replace(new_path)
+            except BaseException:
+                tmp_path.unlink(missing_ok=True)
+                raise
+            return _file_slug(new_stem), old_rel, str(new_path.relative_to(self.root))
 
     def delete_node(self, slug: str) -> str | None:
         """Returns the deleted file's vault-relative path, or None for a

@@ -80,48 +80,31 @@ is a backlog, not a log.
   Source dialog — `streamFormError` does the identical `err.detail ?? ...`
   a few hundred lines up for the same reason. Needs a shared "stringify a
   FastAPI error detail" helper used by both, not a Source-only fix.
-- **Vault file writes have no per-file locking, anywhere, except Source.**
-  `save_note()` is still a plain read-parse-write of a whole `.md` file
-  with no lock — two requests touching the *same* note close together (two
-  browser tabs, a double-click) can each read stale frontmatter and one
-  write silently clobbers the other's change, no error to either caller.
-  Pre-existing, systemic, not Source-specific: `_chat_write_lock`/
-  `_path_write_lock` show the established one-lock-per-concern pattern for
-  exactly this class of race, but nothing plays that role for Note/Stream.
-  A real fix needs a per-slug (or global) write lock applied consistently
-  across every vault-file-mutating method, not a lock added piecemeal to
-  whichever route happens to get touched next — its own design pass.
-  `update_source_bibliographic_fields()`/`attach_source_companion()`/
-  `ensure_md_format()`/`set_node_type()` are now the exception: all four
-  hold `_source_write_lock` end-to-end (closing the same-slug
-  edit-vs-upload-vs-type-change-vs-md-generation lost-update race), but
-  that lock is global, not per-slug — a companion upload's multi-second
-  PDF/HTML extraction now also blocks metadata edits, type changes, *and*
-  creates for every unrelated source for that whole duration, a real
+- **`_vault_write_lock` (renamed from `_source_write_lock`) now covers
+  every in-vault `.md`-file mutator except `write_by_path()`.** Closing
+  the same read-merge-write lost-update race across
+  `update_source_bibliographic_fields()`, `attach_source_companion()`,
+  `ensure_md_format()`, `set_node_type()`, `save_note()`, `move_node()`,
+  and `rename_node()` (the last two also gained real companion-relocation
+  logic — previously only `if path.suffix == ".html"` was handled, which
+  is unconditionally False for a Source, silently orphaning its
+  `.pdf`/`.svg`/etc. companion on every move or rename) turned out to be
+  one lock, applied consistently, not one lock per route. It's global,
+  not per-slug — a companion upload's multi-second PDF/HTML extraction
+  now also blocks metadata edits, type changes, moves, renames, and
+  creates for every unrelated node for that whole duration, a real
   cross-slug contention cost traded for correctness rather than a free
-  fix. Worth revisiting as part of the same design pass above (a per-slug
-  lock would remove this cost entirely) rather than accepted as permanent.
-  Two more pre-existing, untouched-by-this-diff call paths write a
-  Source's `.md` file completely outside this locking, found auditing
-  every writer of that file but deliberately not folded into the four
-  above — each needs more than "just add a lock", not a mechanical fit
-  for this pass:
-  - `rename_node()` (`POST /nodes/{slug}/rename`) has the same unlocked
-    race *and* a second, independent bug: its companion-rename logic only
-    triggers for a `.html`-suffixed primary file, never for a Source
-    (always `.md`). Renaming a Source leaves its `.pdf`/`.html` companion
-    on disk under the *old* slug — `find_companion()` can no longer find
-    it under the new one, permanently orphaning it, and a subsequent
-    companion upload silently duplicates storage instead of replacing it.
-    Fixing this needs actual companion-rename logic added, not just a
-    lock.
+  fix. Worth a follow-up per-slug lock to remove that cost, but not
+  accepted as permanent.
+  One writer still sits outside this lock entirely, and needs more than
+  a mechanical "just add the lock" fit:
   - `write_by_path()` (`/sync/file`, the desktop-sync write path) uses a
     *different* lock (`_path_write_lock`) that was never made to exclude
-    `_source_write_lock` — a synced desktop edit landing on a Source's
-    `.md` file at the same moment as a locked API-side edit can still
-    race, just via two uncoordinated locks instead of no lock at all.
-    Needs an actual cross-lock design decision (one lock covering both
-    paths, or an explicit lock-ordering rule), not a mechanical fit either.
+    `_vault_write_lock` — a synced desktop edit landing on the same `.md`
+    file at the same moment as a locked API-side edit can still race, just
+    via two uncoordinated locks instead of no lock at all. Needs an actual
+    cross-lock design decision (one lock covering both paths, or an
+    explicit lock-ordering rule).
 - **No UI to view a companion file** — `COMPANION_EXTS` covers pdf/html/htm/
   svg/epub/docx/tex/drawio/jpg/jpeg, and the backend already serves any of
   them generically (`GET /notes/{slug}/original`, `FileResponse`), but the

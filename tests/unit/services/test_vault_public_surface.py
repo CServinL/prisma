@@ -461,7 +461,7 @@ class TestCreateSourceFromCitekeyIfFree:
 
     def test_concurrent_creates_with_the_same_citekey_lock_out_one_of_them(self, vault, monkeypatch):
         # A purely sequential duplicate-citekey test (test_raises_on_collision
-        # above) passes identically whether or not _source_write_lock exists
+        # above) passes identically whether or not _vault_write_lock exists
         # at all -- it never has two requests in flight together, so it can't
         # prove the TOCTOU race is actually closed. This widens the window
         # between the check and the write (real file I/O in both already
@@ -869,7 +869,7 @@ class TestEnsureMdFormatCleansUpOnFailure:
 
     def test_concurrent_metadata_edit_and_generate_md_format_do_not_lose_the_edit(self, vault, monkeypatch):
         # Regression: ensure_md_format() has two callers -- attach_source_
-        # companion() (already _source_write_lock-guarded) and the
+        # companion() (already _vault_write_lock-guarded) and the
         # pre-existing generate_md_format() route (POST /{slug}/md, no
         # lock of its own), which this PR newly makes reachable against a
         # LOCKED Source for the first time (Sources previously only ever
@@ -917,14 +917,14 @@ class TestEnsureMdFormatCleansUpOnFailure:
 
 
 class TestSetNodeTypeLocking:
-    def test_holds_source_write_lock_for_its_whole_duration(self, vault, monkeypatch):
+    def test_holds_vault_write_lock_for_its_whole_duration(self, vault, monkeypatch):
         # Regression: set_node_type() (PATCH /{slug}/type, the pre-existing
         # type-toggle route, untouched by this diff) did an unlocked
         # read-modify-write of a Source's .md frontmatter -- before this
         # PR, a Source's .md file had no other locked writer to race
         # against; update_source_bibliographic_fields()/attach_source_
         # companion() are new concurrent writers of the identical file, so
-        # this pre-existing route needed the same _source_write_lock
+        # this pre-existing route needed the same _vault_write_lock
         # protection generate_md_format() got for the same reason.
         #
         # Tests lock ownership directly (does a concurrent non-blocking
@@ -958,12 +958,12 @@ class TestSetNodeTypeLocking:
         t.start()
         assert lock_held_during_call.wait(timeout=2), "set_node_type() never reached find_file()"
 
-        acquired = vault._source_write_lock.acquire(blocking=False)
+        acquired = vault._vault_write_lock.acquire(blocking=False)
         proceed.set()
         t.join()
         if acquired:
-            vault._source_write_lock.release()
-        assert not acquired, "set_node_type() must hold _source_write_lock while it runs"
+            vault._vault_write_lock.release()
+        assert not acquired, "set_node_type() must hold _vault_write_lock while it runs"
 
     def test_failed_write_preserves_the_existing_source(self, vault, monkeypatch):
         # Regression: the write was a plain write_text() (open-truncate-
@@ -988,6 +988,62 @@ class TestSetNodeTypeLocking:
         preserved = vault.get_source(source.slug)
         assert preserved.title == "A Great Paper"
         assert preserved.authors == ["Jane Smith"]
+        assert preserved.body == "original body"
+
+
+class TestSaveNoteLocking:
+    def test_holds_vault_write_lock_for_its_whole_duration(self, vault, monkeypatch):
+        # Regression: save_note() (PUT /{slug}, untouched by the manual-
+        # Source-CRUD diff) did an unlocked read-modify-write of a note's
+        # .md frontmatter -- the same class of race already closed for
+        # every Source-mutating method, just never noticed here because it
+        # was thought Source-specific. Tests lock ownership directly, same
+        # reasoning as TestSetNodeTypeLocking above: no operation in this
+        # method is slow enough to reliably win a real race.
+        import threading
+
+        note = vault.create_note("My Note", "original body")
+
+        lock_held_during_call = threading.Event()
+        proceed = threading.Event()
+        real_find_md = VaultService._find_md
+
+        def blocking_find_md(self, slug):
+            result = real_find_md(self, slug)
+            lock_held_during_call.set()
+            proceed.wait(timeout=2)
+            return result
+
+        monkeypatch.setattr(VaultService, "_find_md", blocking_find_md)
+
+        t = threading.Thread(target=lambda: vault.save_note(note.slug, "updated body"))
+        t.start()
+        assert lock_held_during_call.wait(timeout=2), "save_note() never reached _find_md()"
+
+        acquired = vault._vault_write_lock.acquire(blocking=False)
+        proceed.set()
+        t.join()
+        if acquired:
+            vault._vault_write_lock.release()
+        assert not acquired, "save_note() must hold _vault_write_lock while it runs"
+
+    def test_failed_write_preserves_the_existing_note(self, vault, monkeypatch):
+        # Regression: the write was a plain write_text() (open-truncate-
+        # write, not atomic) -- same defect class fixed on every Source
+        # write path this arc.
+        note = vault.create_note("My Note", "original body")
+
+        original_write_text = Path.write_text
+
+        def boom(self, data, encoding=None):
+            original_write_text(self, "", encoding=encoding)
+            raise OSError("disk full")
+
+        monkeypatch.setattr(Path, "write_text", boom)
+        with pytest.raises(OSError):
+            vault.save_note(note.slug, "updated body")
+
+        preserved = vault.get_note(note.slug)
         assert preserved.body == "original body"
 
 
@@ -1166,6 +1222,137 @@ class TestMoveNodeRejectsPathTraversal:
 
         assert (vault.root / new_rel).exists()
         assert new_rel.startswith("sources/")
+
+
+class TestMoveAndRenameNodeCompanionHandling:
+    # Regression: move_node()/rename_node()'s companion-relocation logic
+    # only ever checked `if path.suffix == ".html"` -- unconditionally
+    # False for a Source (always `.md`), so moving or renaming a Source
+    # with an attached companion silently orphaned it: left behind at the
+    # old path/name, invisible to find_companion()'s stem-matching under
+    # the new one.
+    def test_move_node_relocates_a_source_companion(self, vault):
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "body", zotero_key="ABC123", authors=[], tags=[],
+        )
+        vault.attach_source_companion(source.slug, "figure.svg", b"<svg></svg>")
+
+        new_slug, _, _ = vault.move_node(source.slug, dest_dir="notes")
+
+        moved = vault.get_source(new_slug)
+        assert moved.original_ext == ".svg"
+        assert vault.find_companion(new_slug) is not None
+        assert vault.find_companion(new_slug).parent == vault.root / "notes"
+
+    def test_rename_node_relocates_a_source_companion(self, vault):
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "body", zotero_key="ABC123", authors=[], tags=[],
+        )
+        vault.attach_source_companion(source.slug, "figure.svg", b"<svg></svg>")
+
+        new_slug, _, _ = vault.rename_node(source.slug, "A Renamed Paper")
+
+        moved = vault.get_source(new_slug)
+        assert moved.original_ext == ".svg"
+        companion = vault.find_companion(new_slug)
+        assert companion is not None
+        assert companion.stem == new_slug
+
+    def test_move_node_still_relocates_an_html_primarys_md_companion(self, vault):
+        # The pre-existing case this logic originally handled -- confirms
+        # generalizing it didn't regress the reverse pairing.
+        html_dir = vault.default_dirs[NodeType.source]
+        html_dir.mkdir(parents=True, exist_ok=True)
+        html_path = html_dir / "paper.html"
+        html_path.write_text("<html><body>hi</body></html>", encoding="utf-8")
+        md_companion = html_dir / "paper.md"
+        md_companion.write_text("---\ntitle: paper\n---\nBody.", encoding="utf-8")
+
+        new_slug, _, new_rel = vault.move_node("paper", dest_dir="notes")
+
+        assert (vault.root / new_rel).exists()
+        assert (vault.root / "notes" / "paper.md").exists()
+        assert not md_companion.exists()
+
+
+class TestMoveAndRenameNodeLocking:
+    def test_move_node_holds_vault_write_lock_for_its_whole_duration(self, vault, monkeypatch):
+        import threading
+
+        note = vault.create_note("Note A")
+
+        lock_held_during_call = threading.Event()
+        proceed = threading.Event()
+        real_find_file = VaultService.find_file
+
+        def blocking_find_file(self, slug):
+            result = real_find_file(self, slug)
+            lock_held_during_call.set()
+            proceed.wait(timeout=2)
+            return result
+
+        monkeypatch.setattr(VaultService, "find_file", blocking_find_file)
+
+        t = threading.Thread(target=lambda: vault.move_node(note.slug, dest_dir="sources"))
+        t.start()
+        assert lock_held_during_call.wait(timeout=2), "move_node() never reached find_file()"
+
+        acquired = vault._vault_write_lock.acquire(blocking=False)
+        proceed.set()
+        t.join()
+        if acquired:
+            vault._vault_write_lock.release()
+        assert not acquired, "move_node() must hold _vault_write_lock while it runs"
+
+    def test_rename_node_holds_vault_write_lock_for_its_whole_duration(self, vault, monkeypatch):
+        import threading
+
+        note = vault.create_note("Note A")
+
+        lock_held_during_call = threading.Event()
+        proceed = threading.Event()
+        real_find_md = VaultService._find_md
+
+        def blocking_find_md(self, slug):
+            result = real_find_md(self, slug)
+            lock_held_during_call.set()
+            proceed.wait(timeout=2)
+            return result
+
+        monkeypatch.setattr(VaultService, "_find_md", blocking_find_md)
+
+        t = threading.Thread(target=lambda: vault.rename_node(note.slug, "New Title"))
+        t.start()
+        assert lock_held_during_call.wait(timeout=2), "rename_node() never reached _find_md()"
+
+        acquired = vault._vault_write_lock.acquire(blocking=False)
+        proceed.set()
+        t.join()
+        if acquired:
+            vault._vault_write_lock.release()
+        assert not acquired, "rename_node() must hold _vault_write_lock while it runs"
+
+    def test_rename_node_failed_write_does_not_leave_a_truncated_file(self, vault, monkeypatch):
+        note = vault.create_note("Note A", "original body")
+
+        original_write_text = Path.write_text
+
+        def boom(self, data, encoding=None):
+            original_write_text(self, "", encoding=encoding)
+            raise OSError("disk full")
+
+        monkeypatch.setattr(Path, "write_text", boom)
+        with pytest.raises(OSError):
+            vault.rename_node(note.slug, "New Title")
+
+        # The rename already happened before the write step -- what matters
+        # is that SOME file with the note's content survives, not the old
+        # path specifically (that part of the original bug -- destroying
+        # the old path is fine, that's the point of a rename -- was never
+        # the issue; leaving the new one empty was).
+        remaining = list(vault.root.rglob("*.md"))
+        assert len(remaining) == 1
+        assert "original body" in remaining[0].read_text(encoding="utf-8")
 
 
 class TestCreateDirRejectsPathTraversal:

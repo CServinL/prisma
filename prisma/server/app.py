@@ -47,6 +47,7 @@ from prisma.server.auth import (
     AuthMiddleware, LoginRequest, LoginResponse, classify_zone, issue_token, verify_password,
 )
 from prisma.server.cors import extra_origins
+from prisma.server.upload_utils import read_upload_bounded_async
 _t("fastapi ok")
 
 _t("importing coordinator")
@@ -1326,7 +1327,10 @@ async def upload_chat_attachment(slug: str, file: UploadFile = File(...), captio
         chat_node = _vault.get_chat(slug)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail=f"chat not found: {slug!r}")
-    data = await file.read()
+    # read_upload_bounded_async(), not a single await file.read() -- rejects
+    # an oversized upload as soon as it's read past MAX_UPLOAD_BYTES,
+    # rather than buffering the whole thing into memory first.
+    data = await read_upload_bounded_async(file)
     kind = _sniff_asset_kind(data, file.filename)
     if kind is None:
         raise HTTPException(

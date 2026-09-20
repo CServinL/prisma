@@ -691,6 +691,27 @@ def test_upload_companion_rejects_bad_extension(client, vault):
     assert r.status_code == 400
 
 
+def test_upload_companion_rejects_an_oversized_file(client, vault, monkeypatch):
+    # Regression: this route used to buffer the whole upload into memory
+    # (file.file.read()) before any check ran -- now goes through
+    # read_upload_bounded(), which rejects mid-stream. A real 50MB+ upload
+    # would make this test slow, so this confirms the route surfaces
+    # read_upload_bounded()'s 413 correctly rather than re-exercising the
+    # cap itself (already covered directly in test_upload_utils.py).
+    from fastapi import HTTPException
+
+    def fake_read_upload_bounded(file, max_bytes=None):
+        raise HTTPException(status_code=413, detail="file too large")
+
+    monkeypatch.setattr("prisma.server.notes_routes.read_upload_bounded", fake_read_upload_bounded)
+    source = vault.create_source_from_citekey(
+        "smith2024", "A Great Paper", "body", zotero_key="ABC", authors=[], tags=[],
+    )
+    r = client.post(f"/notes/{source.slug}/companion",
+                     files={"file": ("figure.svg", b"<svg></svg>", "image/svg+xml")})
+    assert r.status_code == 413
+
+
 def test_upload_companion_attaches_svg(client, vault):
     source = vault.create_source_from_citekey(
         "smith2024", "A Great Paper", "body", zotero_key="ABC", authors=[], tags=[],

@@ -18,6 +18,7 @@ from typing import Annotated, Callable, Optional
 from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile
 from pydantic import BaseModel, Field, field_validator
 
+from prisma.server.upload_utils import read_upload_bounded
 from prisma.services.asset_rewrite import asset_prefix, rewrite_html
 from prisma.services.renderer import render as vault_render
 from prisma.services.vault import VaultService
@@ -452,7 +453,12 @@ def build_notes_router(
             raise HTTPException(status_code=404, detail=f"source not found: {slug!r}")
         if not isinstance(node, Source):
             raise HTTPException(status_code=400, detail=f"{slug!r} is not a source")
-        data = file.file.read()
+        # read_upload_bounded(), not a single file.file.read() -- rejects
+        # an oversized upload as soon as it's read past MAX_UPLOAD_BYTES,
+        # rather than buffering the whole thing into memory first and only
+        # then finding out the extension is wrong or the caller doesn't
+        # want it. See upload_utils.py.
+        data = read_upload_bounded(file)
         try:
             source = vault.attach_source_companion(slug, file.filename or "", data)
         except ValueError as e:

@@ -57,21 +57,6 @@ is a backlog, not a log.
 
 ## Vault
 
-- **File upload routes buffer the whole body into memory before any
-  validation runs.** Both `upload_source_companion()` (`notes_routes.py`,
-  `data = file.file.read()` — a plain `def` reading the underlying
-  `SpooledTemporaryFile` synchronously, not `await file.read()`; this
-  route deliberately isn't `async def`, so it can run in FastAPI's
-  threadpool instead of blocking the shared event loop for its own
-  multi-second PDF/HTML extraction — don't reintroduce `await file.read()`
-  here when picking this up) and the pre-existing `upload_chat_attachment()`
-  (`app.py`, genuinely `async def`+`await file.read()`, since that route
-  does no CPU-bound extraction) read the entire `UploadFile` before
-  checking extension or size, so an oversized upload can pressure/OOM the
-  process before the existing extension allowlist ever gets a chance to
-  reject it. Systemic — no upload route in this codebase has a size cap or
-  streams-then-validates — not something to bolt onto just the new
-  companion route in isolation.
 - **Form-dialog error messages can render a raw FastAPI validation-error
   array instead of text.** `sourceFormError = err.detail ?? ...`
   (`+page.svelte`) assumes `detail` is always a string, but a Pydantic 422

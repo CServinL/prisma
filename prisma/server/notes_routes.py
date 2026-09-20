@@ -76,6 +76,7 @@ class NoteCreateRequest(BaseModel):
     tags: Optional[list[str]] = None
 
     _validate_title = field_validator("title")(_reject_blank_title)
+    _drop_blank_tags = field_validator("tags")(_drop_blank_list_items)
 
 
 class NoteSaveRequest(BaseModel):

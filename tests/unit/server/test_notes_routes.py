@@ -97,6 +97,15 @@ def test_create_note_rejects_whitespace_only_title(client):
     assert r.status_code == 422
 
 
+def test_create_note_drops_blank_tag_entries(client):
+    # Regression: _drop_blank_list_items() was added to Source's authors/
+    # tags but never applied to the sibling NoteCreateRequest.tags -- same
+    # class as the whitespace-only-title gap just above, just for tags.
+    r = client.post("/notes", json={"title": "My Note", "tags": ["real", "   "]})
+    assert r.status_code == 201
+    assert r.json()["tags"] == ["real"]
+
+
 def test_get_note_not_found(client):
     r = client.get("/notes/does-not-exist")
     assert r.status_code == 404

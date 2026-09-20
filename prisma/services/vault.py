@@ -81,17 +81,27 @@ def _file_slug(stem: str) -> str:
 # block larger than this is malformed, and its year lookup degrades to None.
 _FRONTMATTER_READ_BYTES = 8192
 
-# citekey_exists() needs a much larger bound than the one above: that one is
-# fine to silently degrade on overflow (a best-effort year lookup), but a
-# truncated read here means _parse_frontmatter can't find the closing '---'
-# at all and returns {} -- a false "citekey not in use" that lets
-# create_source_from_citekey_if_free() create a real collision despite its
-# own lock. A long author list plus an abstract/tags can realistically push
-# a Source's frontmatter past 8192 bytes; 65536 comfortably covers that
-# while still being negligible next to a full PDF-extracted body (the actual
-# cost this bound exists to avoid reading in full for every file, every
-# manual create).
+# citekey_exists() needs different handling than the fixed bound above:
+# that one is fine to silently degrade on overflow (a best-effort year
+# lookup), but a truncated read here means _parse_frontmatter can't find
+# the closing '---' at all and returns {} -- a false "citekey not in use"
+# that lets create_source_from_citekey_if_free() create a real collision
+# despite its own lock. A fixed bound here, however large, is only ever a
+# guess against how big a Source's frontmatter can get -- and this same
+# module's own SourceCreateRequest field caps (authors/tags list length x
+# per-item length) set that ceiling, not this constant. A prior fixed
+# 65536-byte bound was comfortably outgrown the moment those caps allowed
+# a large-enough author list (confirmed: ~100KB for 200 authors x 512
+# chars, both within the documented per-field caps), silently reopening
+# the exact collision this scan exists to prevent. So citekey_exists()
+# below reads incrementally instead, starting at this size and growing
+# only for the files that genuinely need it -- the normal case (frontmatter
+# fits in the first chunk) pays no extra cost. _CITEKEY_SCAN_MAX_BYTES is
+# a hard ceiling purely to stop an unbounded read against a malformed file
+# with no closing '---' at all, not a bound this scan is meant to rely on
+# for real Source files.
 _CITEKEY_SCAN_READ_BYTES = 65536
+_CITEKEY_SCAN_MAX_BYTES = 4 * 1024 * 1024
 
 
 def _parse_frontmatter(body: str) -> tuple[dict, str]:
@@ -800,20 +810,31 @@ class VaultService:
         (it builds a citekey->slug index for citation *resolution*; this is
         a plain existence check) just to avoid the duplication.
 
-        Reads only each file's head (_CITEKEY_SCAN_READ_BYTES), not the
-        whole file -- this runs inside create_source_from_citekey_if_free()'s
-        lock, so a full-body read per file (a Source's body can be a full
-        PDF-extracted paper, tens of KB+) would serialize every manual
-        create behind a scan whose cost scales with total vault content
-        size, not just file count. Uses a larger bound than frontmatter_
-        for_relpath()'s _FRONTMATTER_READ_BYTES -- that one is fine to
-        silently degrade on overflow (a best-effort lookup), but a
-        truncated read here would falsely report an in-use citekey as
+        Reads only each file's head, not the whole file -- this runs inside
+        create_source_from_citekey_if_free()'s lock, so a full-body read
+        per file (a Source's body can be a full PDF-extracted paper, tens
+        of KB+) would serialize every manual create behind a scan whose
+        cost scales with total vault content size, not just file count.
+        Starts at _CITEKEY_SCAN_READ_BYTES and grows only if that wasn't
+        enough to find the closing '---' -- see that constant's own
+        comment for why a single fixed bound, however large, can't stay
+        correct here. frontmatter_for_relpath()'s _FRONTMATTER_READ_BYTES
+        is fine to silently degrade on overflow (a best-effort lookup);
+        a truncated read here would falsely report an in-use citekey as
         free, letting a real collision through despite the lock."""
         for path in self.iter_files():
             try:
                 with path.open("r", encoding="utf-8", errors="replace") as f:
                     head = f.read(_CITEKEY_SCAN_READ_BYTES)
+                    while (
+                        head.startswith("---")
+                        and head.find("\n---", 3) == -1
+                        and len(head) < _CITEKEY_SCAN_MAX_BYTES
+                    ):
+                        more = f.read(_CITEKEY_SCAN_READ_BYTES)
+                        if not more:
+                            break
+                        head += more
             except OSError:
                 # A file can vanish between iter_files()'s walk yielding it
                 # and this read (a concurrent delete/move) -- harmless to

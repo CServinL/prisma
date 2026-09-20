@@ -379,6 +379,27 @@ class TestCitekeyExists:
         assert frontmatter_end > 8192  # confirms this actually exercises the old, too-small bound
         assert vault.citekey_exists("smith2024") is True
 
+    def test_finds_citekey_past_a_fixed_scan_bound_entirely(self, vault):
+        # Regression: _CITEKEY_SCAN_READ_BYTES (65536) was itself a fixed
+        # bound, no better than _FRONTMATTER_READ_BYTES was above -- just a
+        # bigger fixed number. notes_routes.py's own SourceCreateRequest
+        # caps (_MAX_BIB_LIST=200 authors x _MAX_BIB_STR=512 chars each)
+        # allow a frontmatter block comfortably past 65536 bytes too:
+        # yaml.dump()'s default sort_keys=True places `citekey:`
+        # alphabetically after `authors:`, so a maxed-out author list pushes
+        # `citekey:` itself out of any fixed-size scan window, no matter how
+        # generous, silently defeating create_source_from_citekey_if_free()
+        # via a non-concurrency path -- a duplicate citekey sails straight
+        # through the "already in use" check.
+        huge_authors = [f"Author Number {i} " + "x" * 490 for i in range(200)]
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "body", zotero_key="ABC123", authors=huge_authors, tags=[],
+        )
+        raw = source.path.read_text(encoding="utf-8")
+        frontmatter_end = raw.index("\n---", 3) + 4
+        assert frontmatter_end > 65536  # confirms this exceeds the old fixed bound too
+        assert vault.citekey_exists("smith2024") is True
+
 
 class TestCreateSourceFromCitekeyIfFree:
     def test_raises_on_collision(self, vault):

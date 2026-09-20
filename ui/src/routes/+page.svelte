@@ -2590,6 +2590,7 @@
             class="html-frame"
             src={htmlFrameSrc}
             title={activeNode.title}
+            sandbox="allow-scripts"
           ></iframe>
           {/if}
           {/key}

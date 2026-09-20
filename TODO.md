@@ -82,21 +82,27 @@ is a backlog, not a log.
   Source dialog — `streamFormError` does the identical `err.detail ?? ...`
   a few hundred lines up for the same reason. Needs a shared "stringify a
   FastAPI error detail" helper used by both, not a Source-only fix.
-- **Vault file writes have no per-file locking, anywhere.** `save_note()`,
-  `set_node_type()`, and now also `update_source_bibliographic_fields()`/
-  `attach_source_companion()` are all a plain read-parse-write of a whole
-  `.md` file with no lock — two requests touching the *same* node close
-  together (edit metadata + upload a companion at once, two browser tabs,
-  a double-click) can each read stale frontmatter and one write silently
-  clobbers the other's change, no error to either caller. Pre-existing
-  (found auditing the new Source routes, not introduced by them — `save_
-  note`/`set_node_type` already had this gap) and systemic, not
-  Source-specific: `_chat_write_lock`/`_path_write_lock` show the
-  established one-lock-per-concern pattern for exactly this class of race,
-  but nothing plays that role for the general note/source write path. A
-  real fix needs a per-slug (or global) write lock applied consistently
-  across every vault-file-mutating method, not a lock added piecemeal to
-  whichever route happens to get touched next — its own design pass.
+- **Vault file writes have no per-file locking, anywhere, except Source.**
+  `save_note()` and `set_node_type()` are still a plain read-parse-write of
+  a whole `.md` file with no lock — two requests touching the *same* note
+  close together (two browser tabs, a double-click) can each read stale
+  frontmatter and one write silently clobbers the other's change, no error
+  to either caller. Pre-existing, systemic, not Source-specific:
+  `_chat_write_lock`/`_path_write_lock` show the established
+  one-lock-per-concern pattern for exactly this class of race, but nothing
+  plays that role for Note/Stream. A real fix needs a per-slug (or global)
+  write lock applied consistently across every vault-file-mutating method,
+  not a lock added piecemeal to whichever route happens to get touched
+  next — its own design pass.
+  `update_source_bibliographic_fields()`/`attach_source_companion()` are
+  now the exception: both hold `_source_write_lock` end-to-end (closing
+  the same-slug edit-vs-upload lost-update race), but that lock is global,
+  not per-slug — a companion upload's multi-second PDF/HTML extraction now
+  also blocks metadata edits *and* creates for every unrelated source for
+  that whole duration, a real cross-slug contention cost traded for
+  correctness rather than a free fix. Worth revisiting as part of the same
+  design pass above (a per-slug lock would remove this cost entirely)
+  rather than accepted as permanent.
 - **No UI to view a companion file** — `COMPANION_EXTS` covers pdf/html/htm/
   svg/epub/docx/tex/drawio/jpg/jpeg, and the backend already serves any of
   them generically (`GET /notes/{slug}/original`, `FileResponse`), but the

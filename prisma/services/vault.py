@@ -900,7 +900,14 @@ class VaultService:
           lock) completing in between would otherwise get silently
           overwritten by ensure_md_format()'s stale-frontmatter write when
           the slow extraction finally finishes, discarding an edit that
-          already returned 200 to its caller."""
+          already returned 200 to its caller.
+
+        Trade-off worth naming: _source_write_lock is global, not per-slug,
+        so this also blocks create_source_from_citekey_if_free() and
+        update_source_bibliographic_fields() for *unrelated* sources for
+        the full extraction duration, not just this one's. Correct beats
+        fast here -- see TODO.md's Vault section for the per-slug-lock
+        follow-up that would remove this cost."""
         with self._source_write_lock:
             path = self._find_md(slug)
             if path is None:

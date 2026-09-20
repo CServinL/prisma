@@ -57,14 +57,6 @@ is a backlog, not a log.
 
 ## Vault
 
-- **Form-dialog error messages can render a raw FastAPI validation-error
-  array instead of text.** `sourceFormError = err.detail ?? ...`
-  (`+page.svelte`) assumes `detail` is always a string, but a Pydantic 422
-  (e.g. a bad `year`) returns `detail` as a list of validator-error objects,
-  which renders unreadably. Pre-existing pattern, not introduced by the
-  Source dialog — `streamFormError` does the identical `err.detail ?? ...`
-  a few hundred lines up for the same reason. Needs a shared "stringify a
-  FastAPI error detail" helper used by both, not a Source-only fix.
 - **`_vault_write_lock` (renamed from `_source_write_lock`) now covers
   every in-vault `.md`-file mutator except `write_by_path()`.** Closing
   the same read-merge-write lost-update race across

@@ -302,6 +302,25 @@
   // longer the same as the API's origin, even in browser/PWA mode.
   const webBase = typeof window !== "undefined" ? window.location.origin : "";
 
+  // FastAPI's own HTTPException(detail=str) responses give `detail` as a
+  // plain string, but its automatic 422 (Pydantic field validation, e.g.
+  // Source's year/max_length constraints) gives `detail` as an array of
+  // {loc, msg, type} objects instead. Every form-error handler in this
+  // file used to do `err.detail ?? fallback` and assign the result
+  // straight into a string-typed error state -- for the 422 shape, that
+  // stringifies the array (`[object Object]`), showing nothing useful.
+  function formatApiError(err: unknown, fallback: string): string {
+    const detail = (err as { detail?: unknown } | null)?.detail;
+    if (typeof detail === "string") return detail;
+    if (Array.isArray(detail)) {
+      const messages = detail
+        .map((d) => (d && typeof d === "object" && "msg" in d ? String((d as { msg: unknown }).msg) : null))
+        .filter((m): m is string => m !== null);
+      if (messages.length) return messages.join("; ");
+    }
+    return fallback;
+  }
+
   function formatTokenCount(n: number): string {
     if (n >= 1_000_000) return (n / 1_000_000).toFixed(n % 1_000_000 === 0 ? 0 : 1) + "M";
     if (n >= 1000) return (n / 1000).toFixed(n % 1000 === 0 ? 0 : 1) + "k";
@@ -1775,7 +1794,7 @@
       });
       if (!r.ok) {
         const err = await r.json().catch(() => ({}));
-        streamFormError = err.detail ?? `Error ${r.status}`;
+        streamFormError = formatApiError(err, `Error ${r.status}`);
         return;
       }
       showStreamForm = false;
@@ -1886,7 +1905,7 @@
       }
       if (!r.ok) {
         const err = await r.json().catch(() => ({}));
-        sourceFormError = err.detail ?? `Error ${r.status}`;
+        sourceFormError = formatApiError(err, `Error ${r.status}`);
         return;
       }
       const saved = await r.json();
@@ -1913,7 +1932,7 @@
           await openNode(targetSlug);
         } else {
           const err = await cr.json().catch(() => ({}));
-          alert(`Source saved, but the companion upload failed: ${err.detail ?? cr.status}. Use "Upload companion" to retry.`);
+          alert(`Source saved, but the companion upload failed: ${formatApiError(err, String(cr.status))}. Use "Upload companion" to retry.`);
         }
       }
     } catch (e) {
@@ -1938,7 +1957,7 @@
         await openNode(activeNode.slug);
       } else {
         const err = await r.json().catch(() => ({}));
-        alert(err.detail ?? "Couldn't upload companion file.");
+        alert(formatApiError(err, "Couldn't upload companion file."));
       }
     } finally {
       companionUploading = false;

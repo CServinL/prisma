@@ -57,15 +57,6 @@ is a backlog, not a log.
 
 ## Vault
 
-- **Chat and Stream titles accept whitespace-only strings.** Note/Source
-  both reject a blank/whitespace-only title (`_reject_blank_title()` in
-  `notes_routes.py`), but `CreateChatRequest.title` (`app.py`, `req.title
-  or f"Chat — ..."`, a truthy check — whitespace is truthy, so it's kept
-  verbatim instead of falling back) and `StreamCreateRequest.title`/
-  `StreamPatchRequest.title` (`streams_routes.py`, no validation at all —
-  the UI's `submitStreamForm()` only trims client-side) both have the same
-  gap. Same fix pattern already written for Note/Source, just not applied
-  to these two.
 - **File upload routes buffer the whole body into memory before any
   validation runs.** Both `upload_source_companion()` (`notes_routes.py`,
   `data = file.file.read()` — a plain `def` reading the underlying

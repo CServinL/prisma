@@ -21,11 +21,11 @@ import time
 from typing import Callable, Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from prisma.integrations.zotero import ZoteroClient
 from prisma.server import log_setup as _log_setup
-from prisma.server.notes_routes import render_note
+from prisma.server.notes_routes import _reject_blank_title, render_note
 from prisma.services.vault import VaultService
 from prisma.storage.models.vault_models import RenderedNode, StreamRunResult
 
@@ -53,6 +53,11 @@ class StreamCreateRequest(BaseModel):
     refresh_frequency: str = "weekly"
     tags: Optional[list[str]] = None
 
+    # Shared with Note/Source -- same whitespace-only-title gap (min_length
+    # alone counts raw characters, not stripped content), this route just
+    # had no length constraint at all to even partially catch it.
+    _validate_title = field_validator("title")(_reject_blank_title)
+
 
 class StreamPatchRequest(BaseModel):
     title: Optional[str] = None
@@ -61,6 +66,8 @@ class StreamPatchRequest(BaseModel):
     status: Optional[str] = None
     refresh_frequency: Optional[str] = None
     tags: Optional[list[str]] = None
+
+    _validate_title = field_validator("title")(_reject_blank_title)
 
 
 def _stream_meta(s) -> StreamMeta:

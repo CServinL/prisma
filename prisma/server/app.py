@@ -1176,7 +1176,12 @@ def render_markdown(req: RenderRequest):
 @app.post("/chats", response_model=Chat, status_code=201)
 def create_chat(req: CreateChatRequest):
     from datetime import datetime
-    title = req.title or f"Chat — {datetime.now():%Y-%m-%d %H:%M}"
+    # (req.title or "").strip() or ... -- a plain `req.title or ...` treats
+    # whitespace as truthy, so a blank/whitespace-only title (e.g. a
+    # double-click on an empty field) was kept verbatim instead of falling
+    # back to the auto-generated timestamp title. Same class of bug
+    # Note/Source's _reject_blank_title() closes for those models.
+    title = (req.title or "").strip() or f"Chat — {datetime.now():%Y-%m-%d %H:%M}"
     chat_node = _vault.create_chat(title=title, model=_chat_agent.model)
     _activity.info("action=create_chat slug=%s", chat_node.slug)
     return _with_context_usage(chat_node)

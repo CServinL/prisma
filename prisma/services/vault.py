@@ -1231,7 +1231,23 @@ class VaultService:
                 _log.warning("docu_craft render failed for %s, no .md companion generated: %s", companion_path, exc)
                 return False
         fm.setdefault("type", "note")
-        companion.write_text(_render_frontmatter(fm) + md_content, encoding="utf-8")
+        # Atomic tmp-file+replace, not a direct write_text() -- same
+        # reasoning attach_source_companion() already applies to the
+        # companion *binary*: a plain write_text() opens in "w" (truncating
+        # immediately), so a failure partway through (disk full, killed
+        # mid-write) would destroy whatever body this Source already had
+        # instead of leaving it untouched. This path runs right after this
+        # same method's own (possibly seconds-long) extraction above, and
+        # attach_source_companion()'s force=True re-upload flow now drives
+        # it far more often than before this PR -- worth the same
+        # protection its sibling write already has, not just the binary.
+        tmp_path = companion.with_name(f"{companion.name}.{uuid.uuid4().hex}.mdformat.tmp")
+        try:
+            tmp_path.write_text(_render_frontmatter(fm) + md_content, encoding="utf-8")
+            tmp_path.replace(companion)
+        except BaseException:
+            tmp_path.unlink(missing_ok=True)
+            raise
         return True
 
     def get_md_body(self, html_path: Path) -> str | None:

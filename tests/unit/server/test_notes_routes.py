@@ -411,6 +411,11 @@ def test_create_source_rejects_when_no_citekey_can_be_generated(client):
 def test_create_source_rejects_whitespace_only_explicit_citekey(client):
     r = client.post("/notes/sources", json={"title": "X", "citekey": "   "})
     assert r.status_code == 400
+    # Regression: this used to say "could not generate a citekey from the
+    # given title/authors" -- misleading for a caller who DID supply one,
+    # steering them toward retyping title/authors instead of their actual
+    # blank citekey.
+    assert "provide one explicitly" not in r.json()["detail"]
 
 
 def test_create_source_rejects_an_absurdly_long_explicit_citekey(client):
@@ -565,6 +570,23 @@ def test_edit_source_rejects_boolean_year(client, vault):
         "smith2024", "A Great Paper", "body", zotero_key="ABC", authors=[], tags=[],
     )
     r = client.patch(f"/notes/{source.slug}/source", json={"year": True})
+    assert r.status_code == 422
+
+
+def test_create_source_rejects_an_absurdly_large_year(client):
+    # Regression: ge=0 alone has no upper bound -- Python ints are
+    # arbitrary precision, so year=10**2000 sailed through and
+    # make_citekey() appended str(year) verbatim, producing a citekey
+    # thousands of characters long despite authors/title's own caps.
+    r = client.post("/notes/sources", json={"title": "X", "year": 10**2000})
+    assert r.status_code == 422
+
+
+def test_edit_source_rejects_an_absurdly_large_year(client, vault):
+    source = vault.create_source_from_citekey(
+        "smith2024", "A Great Paper", "body", zotero_key="ABC", authors=[], tags=[],
+    )
+    r = client.patch(f"/notes/{source.slug}/source", json={"year": 10**2000})
     assert r.status_code == 422
 
 

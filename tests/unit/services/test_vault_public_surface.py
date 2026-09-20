@@ -837,6 +837,36 @@ class TestEnsureMdFormatCleansUpOnFailure:
         assert len(created) == 1
         assert not created[0].exists()
 
+    def test_failed_final_write_preserves_the_existing_md_body(self, vault, monkeypatch):
+        # Regression: the final write was a plain companion.write_text()
+        # (open-truncate-write, not atomic) -- unlike attach_source_
+        # companion()'s own tmp-file+replace pattern for the companion
+        # binary, a write failure here (disk full, killed mid-write)
+        # destroyed whatever body this Source already had instead of
+        # leaving it untouched, right after this same method's own
+        # (possibly seconds-long) extraction.
+        monkeypatch.setattr("prisma.services.vault.pdf_bytes_to_md", lambda data: "extracted text")
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "original body", zotero_key="ABC123", authors=[], tags=[],
+        )
+        companion_path = source.path.with_suffix(".pdf")
+        companion_path.write_bytes(b"pdf bytes")
+
+        # A bare raise-only stub wouldn't reproduce the real bug: real
+        # write_text() opens the target in "w" (truncating immediately)
+        # before the write can fail, so the fake must truncate too, or
+        # this test would pass even against the unfixed code (confirmed).
+        original_write_text = Path.write_text
+
+        def boom(self, data, encoding=None):
+            original_write_text(self, "", encoding=encoding)
+            raise OSError("disk full")
+
+        monkeypatch.setattr(Path, "write_text", boom)
+        with pytest.raises(OSError):
+            vault.ensure_md_format(companion_path, force=True)
+        assert vault.get_source(source.slug).body == "original body"
+
 
 class TestUpdateSourceBibliographicFields:
     def test_merges_new_fields_leaving_existing_ones_untouched(self, vault):

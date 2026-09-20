@@ -126,12 +126,18 @@ class SourceCreateRequest(BaseModel):
     _drop_blank_tags = field_validator("tags", mode="before")(_drop_blank_list_items)
     # ge=0: make_citekey()/create_source_from_citekey() both now honor
     # year=0 correctly (falsy-zero fix), but a negative year is just bad
-    # data, not a value worth preserving. strict=True: Pydantic's default
-    # (lax) mode coerces a JSON bool to int for an int field -- ge=0 alone
-    # doesn't reject `year: true`, since True satisfies >=0 once coerced
-    # to 1. strict mode still accepts a normal JSON number/null fine, it
-    # only blocks cross-type coercion like this one.
-    year: Optional[int] = Field(None, ge=0, strict=True)
+    # data, not a value worth preserving. le=9999: same unbounded-citekey
+    # risk every other bibliographic field got a max_length for -- Python
+    # ints are arbitrary precision, so an unbounded year (e.g. 10**2000)
+    # sails through and make_citekey() appends str(year) verbatim,
+    # producing a citekey thousands of characters long despite authors/
+    # title's own caps. 9999 is a real four-digit-year ceiling, not an
+    # arbitrary round number. strict=True: Pydantic's default (lax) mode
+    # coerces a JSON bool to int for an int field -- ge=0 alone doesn't
+    # reject `year: true`, since True satisfies >=0 once coerced to 1.
+    # strict mode still accepts a normal JSON number/null fine, it only
+    # blocks cross-type coercion like this one.
+    year: Optional[int] = Field(None, ge=0, le=9999, strict=True)
     doi: Optional[str] = Field(None, max_length=_MAX_BIB_STR)
     url: Optional[str] = Field(None, max_length=_MAX_BIB_STR)
     journal: Optional[str] = Field(None, max_length=_MAX_BIB_STR)
@@ -155,9 +161,8 @@ class SourceEditRequest(BaseModel):
     )
     _drop_blank_authors = field_validator("authors", mode="before")(_drop_blank_list_items)
     _drop_blank_tags = field_validator("tags", mode="before")(_drop_blank_list_items)
-    # strict=True: see SourceCreateRequest.year's comment -- same bool-to-int
-    # coercion gap.
-    year: Optional[int] = Field(None, ge=0, strict=True)
+    # le=9999/strict=True: see SourceCreateRequest.year's comment.
+    year: Optional[int] = Field(None, ge=0, le=9999, strict=True)
     doi: Optional[str] = Field(None, max_length=_MAX_BIB_STR)
     source_kind: Optional[SourceKind] = None
     journal: Optional[str] = Field(None, max_length=_MAX_BIB_STR)
@@ -352,6 +357,15 @@ def build_notes_router(
             # the same fate on citekey_exists()'s collision check, rather
             # than surfacing the real problem: this source needs an
             # explicit citekey, auto-generation couldn't produce one.
+            #
+            # Distinguish the two ways to land here -- an explicit but
+            # whitespace-only citekey (SourceCreateRequest.citekey has no
+            # _reject_blank_title-style validator) is a different problem
+            # than auto-generation failing, and telling a caller who DID
+            # supply one to "provide one explicitly" only steers them
+            # toward retyping title/authors instead of their actual typo.
+            if req.citekey is not None:
+                raise HTTPException(status_code=400, detail="citekey cannot be blank")
             raise HTTPException(
                 status_code=400,
                 detail="could not generate a citekey from the given title/authors — provide one explicitly",

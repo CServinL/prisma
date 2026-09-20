@@ -759,25 +759,34 @@ class VaultService:
         Deliberately excludes `citekey`: renderer.py's citation index
         resolves [[@citekey]] against current frontmatter values, so
         changing it after creation would silently orphan or misdirect any
-        citation already pointing at this source elsewhere in the vault."""
-        path = self._find_md(slug)
-        if path is None:
-            raise FileNotFoundError(f"source not found: {slug!r}")
-        raw = path.read_text(encoding="utf-8")
-        fm, content = _parse_frontmatter(raw)
-        for key, value in [("title", title), ("authors", authors), ("year", year), ("doi", doi), ("tags", tags)]:
-            if value is not None:
-                fm[key] = value
-        if source_kind is not None:
-            fm["source_kind"] = source_kind.value
-        for key, value in [
-            ("journal", journal), ("volume", volume), ("issue", issue),
-            ("pages", pages), ("publisher", publisher), ("url", url), ("item_type", item_type),
-        ]:
-            if value:
-                fm[key] = value
-        path.write_text(_render_frontmatter(fm) + content, encoding="utf-8")
-        return self.get_source(slug)
+        citation already pointing at this source elsewhere in the vault.
+
+        Holds _source_write_lock across the whole read-merge-write, same as
+        attach_source_companion() below -- without it, a metadata edit
+        racing a companion upload's own read-merge-write of the identical
+        frontmatter (the two are read-merge-write on the same file, not
+        independent) is a lost-update: whichever finishes last silently
+        wins, discarding the other caller's already-200'd change with no
+        error to either side."""
+        with self._source_write_lock:
+            path = self._find_md(slug)
+            if path is None:
+                raise FileNotFoundError(f"source not found: {slug!r}")
+            raw = path.read_text(encoding="utf-8")
+            fm, content = _parse_frontmatter(raw)
+            for key, value in [("title", title), ("authors", authors), ("year", year), ("doi", doi), ("tags", tags)]:
+                if value is not None:
+                    fm[key] = value
+            if source_kind is not None:
+                fm["source_kind"] = source_kind.value
+            for key, value in [
+                ("journal", journal), ("volume", volume), ("issue", issue),
+                ("pages", pages), ("publisher", publisher), ("url", url), ("item_type", item_type),
+            ]:
+                if value:
+                    fm[key] = value
+            path.write_text(_render_frontmatter(fm) + content, encoding="utf-8")
+            return self.get_source(slug)
 
     def citekey_exists(self, citekey: str) -> bool:
         """Scans current vault files' frontmatter for a matching citekey --
@@ -868,65 +877,88 @@ class VaultService:
         didn't actually happen. The calling route still marks the vault
         stale and broadcasts a vault_change regardless (this method has no
         way to tell it not to) -- a smaller, separate waste than the
-        extraction this actually avoids, not chased further here."""
-        path = self._find_md(slug)
-        if path is None:
-            raise FileNotFoundError(f"source not found: {slug!r}")
-        ext = Path(filename).suffix.lower()
-        if ext not in COMPANION_EXTS:
-            raise ValueError(f"unsupported companion extension: {ext!r}")
-        existing = self.find_companion(slug)
-        if (
-            existing is not None
-            and existing.suffix == ext
-            and existing.stat().st_size == len(data)
-            and existing.read_bytes() == data
-        ):
+        extraction this actually avoids, not chased further here.
+
+        Holds _source_write_lock across the entire method, including the
+        (possibly seconds-long) ensure_md_format() extraction -- three
+        separate races otherwise open up, none needing true byte-level bad
+        luck to hit, just two requests landing close together (double-
+        submit, two tabs, a client retry racing the original):
+        - find_companion() read + the later write are two separate steps;
+          two concurrent first-time uploads (no existing companion) can
+          both see existing=None and both persist a companion, permanently
+          orphaning whichever one COMPANION_EXTS's fixed scan order doesn't
+          resolve to first.
+        - the same TOCTOU lets two concurrent *replacing* uploads both
+          capture the same stale `existing` and both call existing.unlink()
+          on it -- the second raises FileNotFoundError, which the calling
+          route mislabels as 404 "source not found" for an upload that
+          actually succeeded.
+        - ensure_md_format() reads this exact file's frontmatter into its
+          own `fm` before extraction starts; a concurrent metadata PATCH
+          (update_source_bibliographic_fields(), which takes this same
+          lock) completing in between would otherwise get silently
+          overwritten by ensure_md_format()'s stale-frontmatter write when
+          the slow extraction finally finishes, discarding an edit that
+          already returned 200 to its caller."""
+        with self._source_write_lock:
+            path = self._find_md(slug)
+            if path is None:
+                raise FileNotFoundError(f"source not found: {slug!r}")
+            ext = Path(filename).suffix.lower()
+            if ext not in COMPANION_EXTS:
+                raise ValueError(f"unsupported companion extension: {ext!r}")
+            existing = self.find_companion(slug)
+            if (
+                existing is not None
+                and existing.suffix == ext
+                and existing.stat().st_size == len(data)
+                and existing.read_bytes() == data
+            ):
+                return self.get_source(slug)
+            # force=True only when *replacing an extraction-relevant
+            # companion* -- not just "any prior companion existed". A prior
+            # .jpg/.svg/etc. never ran extraction at all, so a first-ever
+            # .pdf/.html attach after one of those is still a first
+            # extraction, not a refresh: checking existing is not None
+            # alone would call this a "replace" and force through the
+            # empty-body-only gate, clobbering a genuinely hand-typed body
+            # (a manually created Source's own prose, or a Zotero-import
+            # body synthesized from the abstract when no PDF was available)
+            # on what is actually its first real extraction.
+            is_replace = existing is not None and existing.suffix in (".pdf", ".html", ".htm")
+            companion_path = path.with_suffix(ext)
+            # Write to a temp file and atomically replace, rather than
+            # writing companion_path directly -- when ext matches the
+            # existing companion's extension, companion_path IS that
+            # existing file, and opening it "wb" truncates it immediately,
+            # before the write can even fail. A write failure partway
+            # through (disk full, permission error, killed mid-write) then
+            # left the original destroyed, not untouched. Path.replace() is
+            # atomic on the same filesystem, so this either fully succeeds
+            # or leaves the original companion exactly as it was.
+            # uuid4-suffixed, not just "<name>.upload.tmp" -- belt-and-
+            # suspenders alongside the lock above: two tmp writes still
+            # can't collide even if this method is ever called without it.
+            tmp_path = companion_path.with_name(f"{companion_path.name}.{uuid.uuid4().hex}.upload.tmp")
+            try:
+                tmp_path.write_bytes(data)
+                tmp_path.replace(companion_path)
+            except BaseException:
+                tmp_path.unlink(missing_ok=True)
+                raise
+            # Unlink the stale, different-extension companion only AFTER
+            # the new one is safely on disk -- unlinking first meant a
+            # write failure in between left the Source with no companion at
+            # all instead of the original, untouched one. missing_ok=True
+            # as the same belt-and-suspenders: harmless if the lock above
+            # already makes this impossible, cheap insurance if it's ever
+            # removed.
+            if existing is not None and existing.suffix != ext:
+                existing.unlink(missing_ok=True)
+            if ext in (".pdf", ".html", ".htm"):
+                self.ensure_md_format(companion_path, force=is_replace)
             return self.get_source(slug)
-        # force=True only when *replacing an extraction-relevant companion*
-        # -- not just "any prior companion existed". A prior .jpg/.svg/etc.
-        # never ran extraction at all, so a first-ever .pdf/.html attach
-        # after one of those is still a first extraction, not a refresh:
-        # checking existing is not None alone would call this a "replace"
-        # and force through the empty-body-only gate, clobbering a
-        # genuinely hand-typed body (a manually created Source's own
-        # prose, or a Zotero-import body synthesized from the abstract
-        # when no PDF was available) on what is actually its first real
-        # extraction.
-        is_replace = existing is not None and existing.suffix in (".pdf", ".html", ".htm")
-        companion_path = path.with_suffix(ext)
-        # Write to a temp file and atomically replace, rather than writing
-        # companion_path directly -- when ext matches the existing
-        # companion's extension, companion_path IS that existing file, and
-        # opening it "wb" truncates it immediately, before the write can
-        # even fail. A write failure partway through (disk full, permission
-        # error, killed mid-write) then left the original destroyed, not
-        # untouched. Path.replace() is atomic on the same filesystem, so
-        # this either fully succeeds or leaves the original companion
-        # exactly as it was.
-        # uuid4-suffixed, not just "<name>.upload.tmp" -- a fixed name would
-        # let two concurrent uploads to the same slug (double-submit, two
-        # tabs, a client retry racing the original) both write through the
-        # same tmp path with no lock serializing them, interleaving their
-        # writes into a corrupted file before either side's replace() runs.
-        # Path.replace() only makes the rename atomic, not the write before
-        # it.
-        tmp_path = companion_path.with_name(f"{companion_path.name}.{uuid.uuid4().hex}.upload.tmp")
-        try:
-            tmp_path.write_bytes(data)
-            tmp_path.replace(companion_path)
-        except BaseException:
-            tmp_path.unlink(missing_ok=True)
-            raise
-        # Unlink the stale, different-extension companion only AFTER the new
-        # one is safely on disk -- unlinking first meant a write failure in
-        # between left the Source with no companion at all instead of the
-        # original, untouched one.
-        if existing is not None and existing.suffix != ext:
-            existing.unlink()
-        if ext in (".pdf", ".html", ".htm"):
-            self.ensure_md_format(companion_path, force=is_replace)
-        return self.get_source(slug)
 
     def get_chat(self, slug: str) -> Chat:
         path = self._find_sess(slug)

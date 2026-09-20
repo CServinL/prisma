@@ -576,6 +576,88 @@ class TestAttachSourceCompanion:
         assert len(seen) == 2
         assert seen[0] != seen[1], "two uploads must not reuse the same tmp filename"
 
+    def test_concurrent_metadata_edit_and_companion_upload_do_not_lose_the_edit(self, vault, monkeypatch):
+        # Regression: ensure_md_format() reads this Source's frontmatter
+        # into its own `fm` BEFORE the (possibly seconds-long) extraction
+        # runs, then blind-writes that same, now-stale `fm` back once
+        # extraction finishes. A metadata PATCH racing in between --
+        # update_source_bibliographic_fields() does its own independent
+        # read-merge-write of the identical file -- already returned 200 to
+        # its caller by the time the upload's write lands, and gets
+        # silently discarded with no error to either side. Widened here by
+        # a monkeypatched pdf_bytes_to_md() that sleeps, standing in for
+        # real extraction's genuine multi-second cost (the actual reason
+        # this route is a sync def run in the threadpool at all).
+        import threading
+        import time
+
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "", zotero_key="ABC123", authors=["Original Author"], tags=[],
+        )
+
+        def slow_pdf_bytes_to_md(data):
+            time.sleep(0.15)
+            return "extracted text"
+
+        monkeypatch.setattr("prisma.services.vault.pdf_bytes_to_md", slow_pdf_bytes_to_md)
+
+        def upload():
+            vault.attach_source_companion(source.slug, "paper.pdf", b"pdf bytes")
+
+        def edit():
+            time.sleep(0.05)  # let upload grab the lock and start its slow extraction first
+            vault.update_source_bibliographic_fields(source.slug, authors=["New Author"])
+
+        t1 = threading.Thread(target=upload)
+        t2 = threading.Thread(target=edit)
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
+
+        assert vault.get_source(source.slug).authors == ["New Author"], (
+            "a metadata edit racing a companion upload's extraction must not be silently lost"
+        )
+
+    def test_concurrent_first_uploads_of_different_extensions_do_not_both_persist(self, vault, monkeypatch):
+        # Regression: find_companion() was read once with no lock; two
+        # concurrent first-time uploads to a companion-less source could
+        # both see existing=None and both persist a companion, permanently
+        # orphaning whichever one COMPANION_EXTS's fixed scan order doesn't
+        # resolve to first. Widened by monkeypatching find_companion() to
+        # sleep between its read and return, standing in for genuine OS-
+        # thread interleaving between the check and the later write.
+        import threading
+        import time
+
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "body", zotero_key="ABC123", authors=[], tags=[],
+        )
+        real_find_companion = VaultService.find_companion
+
+        def slow_find_companion(self, slug):
+            result = real_find_companion(self, slug)
+            time.sleep(0.05)
+            return result
+
+        monkeypatch.setattr(VaultService, "find_companion", slow_find_companion)
+
+        def upload_svg():
+            vault.attach_source_companion(source.slug, "figure.svg", b"<svg></svg>")
+
+        def upload_docx():
+            vault.attach_source_companion(source.slug, "paper.docx", b"docx bytes")
+
+        t1 = threading.Thread(target=upload_svg)
+        t2 = threading.Thread(target=upload_docx)
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
+
+        existing = [ext for ext in (".svg", ".docx") if source.path.with_suffix(ext).exists()]
+        assert len(existing) == 1, f"exactly one companion should survive, found: {existing}"
+
     def test_first_attach_does_not_clobber_a_hand_typed_body(self, vault, monkeypatch):
         # Regression: force=True was passed unconditionally, even on a
         # FIRST attachment (existing is None) -- overwriting the exact

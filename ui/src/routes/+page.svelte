@@ -607,6 +607,7 @@
   // 401 — loaded as a blob URL via apiFetch instead. See the vault-sync
   // plan's note on this being the one real gap authFetch alone can't close.
   let htmlFrameSrc = $state<string | null>(null);
+  let htmlFrameEl = $state<HTMLIFrameElement | null>(null);
   $effect(() => {
     const node = activeNode;
     if (!node || node.original_ext !== ".html") {
@@ -1835,8 +1836,14 @@
     sourceForm = {
       slug: activeNode.slug, title: activeNode.title, body: "",
       citekey: activeNode.citekey ?? "",
-      authorsText: (activeNode.authors ?? []).join(", "),
-      tagsText: (activeNode.tags ?? []).join(", "),
+      // One value per line, not comma-joined -- a real author or tag
+      // containing a comma (e.g. "Smith, Jane" or "Research, Inc.") isn't
+      // round-trip safe through a comma-joined/split text field: it
+      // silently splits into multiple values the moment the user saves
+      // without even touching this field. A literal newline inside a
+      // single author/tag is far less plausible than a literal comma.
+      authorsText: (activeNode.authors ?? []).join("\n"),
+      tagsText: (activeNode.tags ?? []).join("\n"),
       year: activeNode.year != null ? String(activeNode.year) : "",
       doi: activeNode.doi ?? "", url: activeNode.url ?? "",
       journal: activeNode.journal ?? "", volume: activeNode.volume ?? "", issue: activeNode.issue ?? "",
@@ -1855,8 +1862,10 @@
     }
     sourceFormSaving = true;
     sourceFormError = "";
-    const authors = sourceForm.authorsText.split(",").map((s) => s.trim()).filter(Boolean);
-    const tags = sourceForm.tagsText.split(",").map((s) => s.trim()).filter(Boolean);
+    // split("\n"), not split(",") -- see openEditSourceForm()'s comment on
+    // authorsText/tagsText for why a comma isn't a safe separator here.
+    const authors = sourceForm.authorsText.split("\n").map((s) => s.trim()).filter(Boolean);
+    const tags = sourceForm.tagsText.split("\n").map((s) => s.trim()).filter(Boolean);
     const payload: Record<string, unknown> = {
       title: sourceForm.title,
       authors,
@@ -1910,6 +1919,14 @@
       }
       const saved = await r.json();
       const targetSlug = sourceFormMode === "create" ? saved.slug : sourceForm.slug;
+      // Snapshotted before the dialog closes and the awaits below run --
+      // showSourceForm=false lets the user immediately reopen this same
+      // dialog for a different Source (create or edit), which would
+      // reassign sourceFormFile out from under this still-in-flight
+      // submission otherwise: this upload could then skip its own file
+      // entirely, or upload the NEW form's file to the source that was
+      // just saved here.
+      const fileToUpload = sourceFormFile;
       // Close and refresh as soon as the metadata save succeeds, before
       // attempting the companion upload -- the metadata IS saved at this
       // point regardless of what happens next. Leaving the dialog open on
@@ -1921,18 +1938,28 @@
       showSourceForm = false;
       await loadTree();
       await openNode(targetSlug);
-      if (sourceFormFile) {
-        const form = new FormData();
-        form.append("file", sourceFormFile);
-        const cr = await apiFetch(`${apiBase}/notes/${encodeURIComponent(targetSlug)}/companion`, {
-          method: "POST",
-          body: form,
-        });
-        if (cr.ok) {
-          await openNode(targetSlug);
-        } else {
-          const err = await cr.json().catch(() => ({}));
-          alert(`Source saved, but the companion upload failed: ${formatApiError(err, String(cr.status))}. Use "Upload companion" to retry.`);
+      if (fileToUpload) {
+        // Own try/catch, not the outer one below -- the dialog is already
+        // closed (showSourceForm = false, above) by the time this runs, so
+        // a network failure here falling through to the outer catch would
+        // silently set sourceFormError on a hidden dialog the user can no
+        // longer see, instead of the same visible alert() the sibling
+        // non-ok-response branch already uses.
+        try {
+          const form = new FormData();
+          form.append("file", fileToUpload);
+          const cr = await apiFetch(`${apiBase}/notes/${encodeURIComponent(targetSlug)}/companion`, {
+            method: "POST",
+            body: form,
+          });
+          if (cr.ok) {
+            await openNode(targetSlug);
+          } else {
+            const err = await cr.json().catch(() => ({}));
+            alert(`Source saved, but the companion upload failed: ${formatApiError(err, String(cr.status))}. Use "Upload companion" to retry.`);
+          }
+        } catch (e) {
+          alert(`Source saved, but the companion upload failed: ${e}. Use "Upload companion" to retry.`);
         }
       }
     } catch (e) {
@@ -1944,21 +1971,36 @@
 
   async function uploadSourceCompanion(file: File) {
     if (!activeNode || activeNode.node_type !== "source" || companionUploading) return;
+    // Snapshotted before the awaits below -- activeNode can change (the
+    // user navigates away) while this upload is in flight, and reading
+    // activeNode.slug again afterward would either refresh whatever node
+    // is now active instead of the one this upload was actually for, or
+    // throw if the user navigated to a view with no activeNode at all.
+    const targetSlug = activeNode.slug;
     companionUploading = true;
     try {
       const form = new FormData();
       form.append("file", file);
-      const r = await apiFetch(`${apiBase}/notes/${encodeURIComponent(activeNode.slug)}/companion`, {
+      const r = await apiFetch(`${apiBase}/notes/${encodeURIComponent(targetSlug)}/companion`, {
         method: "POST",
         body: form,
       });
       if (r.ok) {
-        await loadTree();
-        await openNode(activeNode.slug);
+        // Only refresh if the same source is still the one being viewed.
+        if (activeNode?.slug === targetSlug) {
+          await loadTree();
+          await openNode(targetSlug);
+        }
       } else {
         const err = await r.json().catch(() => ({}));
         alert(formatApiError(err, "Couldn't upload companion file."));
       }
+    } catch (e) {
+      // The toolbar's file-input onchange handler calls this fire-and-
+      // forget (no .catch of its own) -- apiFetch() rejecting outright
+      // (network failure, no Response at all) would otherwise be an
+      // unhandled promise rejection with no feedback to the user.
+      alert(`Couldn't upload companion file: ${e}`);
     } finally {
       companionUploading = false;
     }
@@ -2550,8 +2592,21 @@
           {/if}
           {#if activeNode.original_ext === ".html"}
             <button class="open-original" onclick={async () => {
+              // requestFullscreen() on the existing sandboxed iframe, NOT
+              // shellOpen(rawApiUrl) -- that opened the same arbitrary
+              // companion as a brand-new, completely unsandboxed top-level
+              // document. A <iframe sandbox> attribute only exists on
+              // iframes; there's no way to give a freshly-opened tab/
+              // window the same opaque-origin isolation, so the fix is to
+              // never leave the sandboxed context at all, just make it
+              // fill the screen. Since this PR adds a manual HTML upload
+              // path, a crafted companion opened the old way could
+              // execute with the API origin's own ambient privileges
+              // (most severe when server.auth.mode is "none", a supported
+              // no-password LAN deployment -- full unauthenticated API
+              // access from any uploaded HTML file's script).
               try {
-                await shellOpen(`${apiBase}/notes/${activeNode!.slug}/view`);
+                await htmlFrameEl?.requestFullscreen();
               } catch(e) {
                 alert("Open failed: " + e);
               }
@@ -2587,6 +2642,7 @@
           {#key activeNode.slug}
           {#if htmlFrameSrc}
           <iframe
+            bind:this={htmlFrameEl}
             class="html-frame"
             src={htmlFrameSrc}
             title={activeNode.title}
@@ -3482,7 +3538,11 @@
       {/if}
       <label class="setting-row">
         <span class="setting-label">Authors</span>
-        <input bind:value={sourceForm.authorsText} placeholder="Full name per person, comma-separated: Jane Smith, John Doe" />
+        <textarea
+          bind:value={sourceForm.authorsText}
+          placeholder={"One full name per line:\nJane Smith\nJohn Doe"}
+          rows="3"
+        ></textarea>
       </label>
       {#if sourceFormMode === "edit"}
         <span class="setting-hint">
@@ -3535,7 +3595,11 @@
       </label>
       <label class="setting-row">
         <span class="setting-label">Tags</span>
-        <input bind:value={sourceForm.tagsText} placeholder="Comma-separated: nlp, transformers" />
+        <textarea
+          bind:value={sourceForm.tagsText}
+          placeholder={"One tag per line:\nnlp\ntransformers"}
+          rows="3"
+        ></textarea>
       </label>
       {#if sourceFormMode === "create"}
         <label class="setting-row">
@@ -5626,7 +5690,8 @@
   }
 
   .setting-row select,
-  .setting-row input {
+  .setting-row input,
+  .setting-row textarea {
     width: 100%;
     padding: 7px 10px;
     background: #0d1320;
@@ -5636,6 +5701,9 @@
     font-size: 12px;
     font-family: inherit;
     outline: none;
+  }
+  .setting-row textarea {
+    resize: vertical;
   }
   .setting-row select {
     appearance: none;
@@ -5651,7 +5719,8 @@
     color: #e8edf8;
   }
   .setting-row select:focus,
-  .setting-row input:focus { border-color: #4a9eff; }
+  .setting-row input:focus,
+  .setting-row textarea:focus { border-color: #4a9eff; }
 
   .server-switcher {
     display: flex;

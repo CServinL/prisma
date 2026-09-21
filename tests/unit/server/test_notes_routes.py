@@ -390,6 +390,32 @@ def test_edit_source_updates_tags_and_source_kind(client, vault):
     assert data["source_kind"] == "web"
 
 
+def test_edit_source_response_echoes_the_request_slug_not_the_bare_stem(client, vault):
+    # Regression: _render_source() used source.slug (get_source()'s bare
+    # file stem, always losing directory nesting) instead of the slug this
+    # route already received and resolved. Harmless when the bare stem is
+    # unique vault-wide, but genuinely ambiguous once a moved source's
+    # bare stem collides with an unrelated file elsewhere -- _find_md()'s
+    # bare-stem-first lookup then resolves that bare slug to an arbitrary
+    # one of the two on any subsequent request.
+    source = vault.create_source_from_citekey(
+        "smith2024", "A Great Paper", "body", zotero_key="ABC", authors=[], tags=[],
+    )
+    new_slug, _, _ = vault.move_node(source.slug, dest_dir="notes")
+    assert new_slug != "smith2024"  # confirms this really is a compound slug
+
+    colliding_dir = vault.default_dirs[NodeType.source]
+    colliding_dir.mkdir(parents=True, exist_ok=True)
+    (colliding_dir / "smith2024.md").write_text(
+        "---\ntype: source\ntitle: Unrelated\ncitekey: unrelated2099\n---\nUnrelated body.",
+        encoding="utf-8",
+    )
+
+    r = client.patch(f"/notes/{new_slug}/source", json={"journal": "New Journal"})
+    assert r.status_code == 200
+    assert r.json()["slug"] == new_slug
+
+
 def test_create_source_no_metadata_still_works(client):
     # Metadata-only Source, no companion at all -- e.g. a physical book.
     r = client.post("/notes/sources", json={"title": "A Physical Book"})
@@ -720,6 +746,20 @@ def test_upload_companion_attaches_svg(client, vault):
                      files={"file": ("figure.svg", b"<svg></svg>", "image/svg+xml")})
     assert r.status_code == 200
     assert r.json()["original_ext"] == ".svg"
+
+
+def test_upload_companion_response_echoes_the_request_slug_not_the_bare_stem(client, vault):
+    # Same regression as edit_source's version above, for the companion
+    # upload route.
+    source = vault.create_source_from_citekey(
+        "smith2024", "A Great Paper", "body", zotero_key="ABC", authors=[], tags=[],
+    )
+    new_slug, _, _ = vault.move_node(source.slug, dest_dir="notes")
+
+    r = client.post(f"/notes/{new_slug}/companion",
+                     files={"file": ("figure.svg", b"<svg></svg>", "image/svg+xml")})
+    assert r.status_code == 200
+    assert r.json()["slug"] == new_slug
 
 
 def test_upload_companion_not_found(client):

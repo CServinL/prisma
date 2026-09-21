@@ -282,10 +282,21 @@ def _source_rel_path(vault: VaultService, source: Source) -> str:
     return str(source.path.relative_to(vault.root).as_posix())
 
 
-def _render_source(vault: VaultService, source: Source) -> RenderedNode:
+def _render_source(vault: VaultService, source: Source, slug: str | None = None) -> RenderedNode:
     """Builds a full RenderedNode for a Source object already in hand --
     shared by the create/edit/companion-upload routes below, which all
     need the same Source-echo fields render_note() populates for GET.
+
+    `slug`: the identifier to echo back in the response, defaulting to
+    `source.slug` (get_source()'s bare file stem) when omitted -- correct
+    for create_source(), which always writes a fresh, never-yet-nested
+    file. edit_source()/upload_source_companion() instead pass back the
+    exact slug their own route already received and successfully resolved
+    -- source.slug loses any directory nesting a prior move/rename put the
+    file in (it's always just the bare stem), so a same-stem Source living
+    in a different directory would make the bare form genuinely ambiguous;
+    echoing the request's own already-valid identifier avoids needing to
+    reconstruct or guess a fully-qualified one at all.
 
     Deliberately simpler than render_note(): doesn't render `source.body`
     as markdown at all, with none of render_note()'s original_ext-aware
@@ -306,7 +317,7 @@ def _render_source(vault: VaultService, source: Source) -> RenderedNode:
     re-fetching would need to call render_note() themselves."""
     rel = _source_rel_path(vault, source)
     rn = RenderedNode(
-        slug=source.slug, path=rel, title=source.title, node_type=source.node_type,
+        slug=slug if slug is not None else source.slug, path=rel, title=source.title, node_type=source.node_type,
         tags=source.tags,
         html="", broken_links=[], broken_citations=[],
         original_ext=source.original_ext,
@@ -432,7 +443,11 @@ def build_notes_router(
         mark_stale_fn()
         rel = _source_rel_path(vault, source)
         broadcast_fn({"type": "vault_change", "action": "save", "path": rel})
-        return _render_source(vault, source)
+        # slug=slug -- the identifier this route already received and
+        # resolved, not source.slug's bare file stem, which loses any
+        # directory nesting a prior move/rename put this file in. See
+        # _render_source()'s docstring.
+        return _render_source(vault, source, slug=slug)
 
     @router.post("/{slug}/companion", response_model=RenderedNode)
     def upload_source_companion(slug: str, file: UploadFile = File(...)):
@@ -470,7 +485,7 @@ def build_notes_router(
         mark_stale_fn()
         rel = _source_rel_path(vault, source)
         broadcast_fn({"type": "vault_change", "action": "save", "path": rel})
-        return _render_source(vault, source)
+        return _render_source(vault, source, slug=slug)
 
     @router.get("/{slug}", response_model=RenderedNode)
     def get_note(slug: str, request: Request, format: str = "html"):

@@ -1412,6 +1412,13 @@ class VaultService:
                 raise FileNotFoundError(f"note not found: {slug!r}")
             existing = path.read_text(encoding="utf-8")
             fm, _ = _parse_frontmatter(existing)
+            # This body is no longer extraction-derived once something else
+            # overwrites it wholesale -- a later companion replace on a
+            # Source (_find_md() resolves to any .md node, not just Notes)
+            # must not force-reextract over a body a hand edit just set,
+            # the same protection attach_source_companion() already gives a
+            # first-ever attachment.
+            fm.pop("body_extracted", None)
             tmp_path = path.with_name(f"{path.name}.{uuid.uuid4().hex}.save.tmp")
             try:
                 tmp_path.write_text(_render_frontmatter(fm) + body, encoding="utf-8")

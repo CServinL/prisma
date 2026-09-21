@@ -798,6 +798,21 @@ class TestAttachSourceCompanion:
         vault.attach_source_companion(source.slug, "paper.pdf", b"pdf bytes B")
         assert vault.get_source(source.slug).body == "second extracted text"
 
+    def test_manual_body_edit_survives_a_later_companion_replace(self, vault, monkeypatch):
+        # save_note() is generic across every .md node, Source included --
+        # after a hand edit, body_extracted must no longer read as True, or
+        # the next companion replace force-reextracts and discards the edit.
+        calls = iter(["first extracted text", "second extracted text"])
+        monkeypatch.setattr("prisma.services.vault.pdf_bytes_to_md", lambda data: next(calls))
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "", zotero_key="ABC123", authors=[], tags=[],
+        )
+        vault.attach_source_companion(source.slug, "paper.pdf", b"pdf bytes A")
+        assert vault.get_source(source.slug).body == "first extracted text"
+        vault.save_note(source.slug, "manually corrected body")
+        vault.attach_source_companion(source.slug, "paper.pdf", b"pdf bytes B")
+        assert vault.get_source(source.slug).body == "manually corrected body"
+
     def test_reuploading_identical_bytes_does_not_reextract(self, vault, monkeypatch):
         calls = []
         monkeypatch.setattr("prisma.services.vault.pdf_bytes_to_md", lambda data: calls.append(data) or "extracted once")

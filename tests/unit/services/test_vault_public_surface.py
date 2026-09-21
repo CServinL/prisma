@@ -234,6 +234,34 @@ class TestCreateSourceFromCitekey:
         # assertion is the regression test for that fix.
         assert source.url == "https://example.com/paper"
 
+    def test_failed_write_does_not_leave_an_undetectable_garbage_file(self, vault, monkeypatch):
+        # Regression: the write was a plain write_text() -- a failure
+        # partway through (disk full, killed mid-write) left a truncated,
+        # unparseable .md file on disk under this slug. citekey_exists()
+        # can't detect a citekey inside malformed frontmatter, so a retry
+        # with the same citekey would sail past the uniqueness check and
+        # land on a DIFFERENT slug (unique_slug() sees the garbage file
+        # already occupying this one) -- two files, same citekey, exactly
+        # the collision create_source_from_citekey_if_free()'s lock exists
+        # to prevent.
+        # A bare raise-only stub wouldn't reproduce the real bug: real
+        # write_text() actually writes bytes before a failure could occur
+        # partway through, so the fake must too, or this test would pass
+        # even against the unfixed code (confirmed).
+        original_write_text = Path.write_text
+
+        def boom(self, data, encoding=None):
+            original_write_text(self, "---\ntitle: x\nno closing delimiter", encoding=encoding)
+            raise OSError("disk full")
+
+        monkeypatch.setattr(Path, "write_text", boom)
+        with pytest.raises(OSError):
+            vault.create_source_from_citekey(
+                "smith2024", "A Great Paper", "body", zotero_key="ABC123", authors=[], tags=[],
+            )
+        assert not (vault.default_dirs[NodeType.source] / "smith2024.md").exists()
+        assert vault.citekey_exists("smith2024") is False
+
     def test_omits_optional_fields_when_not_given(self, vault):
         source = vault.create_source_from_citekey(
             "smith2024", "A Great Paper", "body",
@@ -874,6 +902,31 @@ class TestEnsureMdFormatCleansUpOnFailure:
         assert result is False
         assert len(created) == 1
         assert not created[0].exists()
+
+    def test_preserves_the_body_when_html_conversion_produces_empty_output(self, vault, monkeypatch):
+        # Regression: the .pdf branch above has an empty-output guard
+        # (`if not md_content: return False`), but the html/htm branch fell
+        # through with no equivalent check -- a forced (force=True,
+        # replacing an existing companion) conversion that succeeds
+        # without raising but produces only whitespace overwrote a
+        # genuinely existing body with empty content, contradicting this
+        # method's own promise that a failed extraction leaves the old
+        # body untouched "either way".
+        def fake_dc_render(source, format, output):
+            Path(output).write_text("   \n", encoding="utf-8")
+
+        monkeypatch.setattr("docu_craft.render", fake_dc_render)
+
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "hand-typed body", zotero_key="ABC123", authors=[], tags=[],
+        )
+        companion = source.path.with_suffix(".html")
+        companion.write_text("<html><body>hi</body></html>", encoding="utf-8")
+
+        result = vault.ensure_md_format(companion, force=True)
+
+        assert result is False
+        assert vault.get_source(source.slug).body == "hand-typed body"
 
     def test_failed_final_write_preserves_the_existing_md_body(self, vault, monkeypatch):
         # Regression: the final write was a plain companion.write_text()

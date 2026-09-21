@@ -736,7 +736,24 @@ class VaultService:
         if item_type:
             fm["item_type"] = item_type
         path = self.default_dirs[NodeType.source] / f"{slug}.md"
-        path.write_text(_render_frontmatter(fm) + body, encoding="utf-8")
+        # Atomic tmp-file+replace, not a direct write_text() -- this is a
+        # brand-new file, so there's no *existing* content at risk the way
+        # there is for every other Source write path, but a write failure
+        # partway through (disk full, killed mid-write) would still leave
+        # a truncated, unparseable file on disk under this slug.
+        # citekey_exists() can't detect a citekey inside malformed
+        # frontmatter, so a retry with the same citekey would sail past
+        # the uniqueness check and land on a *different* slug (unique_slug()
+        # sees the garbage file already occupying this one) -- two files,
+        # same citekey, exactly the collision create_source_from_citekey_
+        # if_free()'s lock exists to prevent.
+        tmp_path = path.with_name(f"{path.name}.{uuid.uuid4().hex}.create.tmp")
+        try:
+            tmp_path.write_text(_render_frontmatter(fm) + body, encoding="utf-8")
+            tmp_path.replace(path)
+        except BaseException:
+            tmp_path.unlink(missing_ok=True)
+            raise
         return self.get_source(slug)
 
     def update_source_bibliographic_fields(
@@ -1301,6 +1318,15 @@ class VaultService:
                     tmp.unlink(missing_ok=True)
             except Exception as exc:
                 _log.warning("docu_craft render failed for %s, no .md companion generated: %s", companion_path, exc)
+                return False
+            # Same empty-output guard the .pdf branch above already has --
+            # a forced (force=True, replacing an existing companion)
+            # HTML/HTM conversion that succeeds (no exception) but produces
+            # only whitespace fell through to the write below with no
+            # check, overwriting a genuinely existing body with empty
+            # content and contradicting this method's own promise that a
+            # failed extraction leaves the old body untouched "either way".
+            if not md_content.strip():
                 return False
         fm.setdefault("type", "note")
         # Atomic tmp-file+replace, not a direct write_text() -- same

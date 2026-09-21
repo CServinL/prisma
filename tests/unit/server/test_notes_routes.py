@@ -685,6 +685,44 @@ def test_upload_companion_returns_404_not_500_on_concurrent_delete(client, vault
     assert r.status_code == 404
 
 
+def test_edit_source_returns_400_when_type_changes_out_from_under_it(client, vault, monkeypatch):
+    # Regression: the isinstance(node, Source) check runs BEFORE
+    # update_source_bibliographic_fields()'s own lock is acquired -- a
+    # concurrent PATCH /{slug}/type converting this node to a Note in that
+    # window used to let the edit proceed anyway, silently writing
+    # Source-only fields into what is now a Note.
+    source = vault.create_source_from_citekey(
+        "smith2024", "A Great Paper", "body", zotero_key="ABC", authors=[], tags=[],
+    )
+    real_get_any = VaultService.get_any
+
+    def get_any_then_convert(self, slug):
+        node = real_get_any(self, slug)
+        self.set_node_type(slug, NodeType.note)
+        return node
+
+    monkeypatch.setattr(VaultService, "get_any", get_any_then_convert)
+    r = client.patch(f"/notes/{source.slug}/source", json={"doi": "10.1/x"})
+    assert r.status_code == 400
+
+
+def test_upload_companion_returns_400_when_type_changes_out_from_under_it(client, vault, monkeypatch):
+    source = vault.create_source_from_citekey(
+        "smith2024", "A Great Paper", "body", zotero_key="ABC", authors=[], tags=[],
+    )
+    real_get_any = VaultService.get_any
+
+    def get_any_then_convert(self, slug):
+        node = real_get_any(self, slug)
+        self.set_node_type(slug, NodeType.note)
+        return node
+
+    monkeypatch.setattr(VaultService, "get_any", get_any_then_convert)
+    r = client.post(f"/notes/{source.slug}/companion",
+                     files={"file": ("figure.svg", b"<svg></svg>", "image/svg+xml")})
+    assert r.status_code == 400
+
+
 def test_edit_source_merges_only_given_fields(client, vault):
     source = vault.create_source_from_citekey(
         "smith2024", "A Great Paper", "body",

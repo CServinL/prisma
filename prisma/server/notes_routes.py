@@ -440,6 +440,15 @@ def build_notes_router(
             # the same class of race citekey_exists()/create_source_from_
             # citekey_if_free() already guard against elsewhere in this file).
             raise HTTPException(status_code=404, detail=f"source not found: {slug!r}")
+        except ValueError as e:
+            # Same idea, for a concurrent set_node_type() converting this
+            # node away from Source between the isinstance() check above
+            # (unlocked) and the service call actually running (locked) --
+            # update_source_bibliographic_fields() re-validates type inside
+            # its own lock and raises ValueError, not FileNotFoundError,
+            # since the file itself is still there, just no longer a
+            # Source.
+            raise HTTPException(status_code=400, detail=str(e))
         mark_stale_fn()
         rel = _source_rel_path(vault, source)
         broadcast_fn({"type": "vault_change", "action": "save", "path": rel})

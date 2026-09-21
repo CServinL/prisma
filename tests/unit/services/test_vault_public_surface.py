@@ -575,6 +575,17 @@ class TestAttachSourceCompanion:
         assert updated.original_ext == ".svg"
         assert updated.body == "original body"
 
+    def test_rejects_a_node_converted_away_from_source_out_from_under_it(self, vault):
+        # Same regression as TestUpdateSourceBibliographicFields's version
+        # above, for the companion-upload path.
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "body", zotero_key="ABC123", authors=[], tags=[],
+        )
+        vault.set_node_type(source.slug, NodeType.note)
+
+        with pytest.raises(ValueError):
+            vault.attach_source_companion(source.slug, "figure.svg", b"<svg></svg>")
+
     def test_attaches_html_and_reaches_ensure_md_format(self, vault):
         # Real docu_craft HTML->MD conversion, same non-committal assertion
         # style as test_notes_routes.py's test_generate_md_format_creates_
@@ -1179,6 +1190,23 @@ class TestUpdateSourceBibliographicFields:
         assert updated.authors == ["Jane Smith"]
         assert updated.year == 2024
         assert updated.body == "the body text"
+
+    def test_rejects_a_node_converted_away_from_source_out_from_under_it(self, vault):
+        # Regression: the route layer's isinstance(node, Source) check runs
+        # BEFORE this method's own lock is acquired -- a concurrent
+        # set_node_type() call (also lock-guarded) converting this node to
+        # a Note in that window would otherwise let this method proceed
+        # anyway, silently writing Source-only bibliographic fields into
+        # what is now a Note. Simulated directly here (rather than via
+        # real thread timing) since the actual race window is in
+        # route-layer code this service-level test can't reach.
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "body", zotero_key="ABC123", authors=[], tags=[],
+        )
+        vault.set_node_type(source.slug, NodeType.note)
+
+        with pytest.raises(ValueError):
+            vault.update_source_bibliographic_fields(source.slug, journal="New Journal")
 
     def test_failed_write_preserves_the_existing_source(self, vault, monkeypatch):
         # Regression: the exact defect class fixed in ensure_md_format()

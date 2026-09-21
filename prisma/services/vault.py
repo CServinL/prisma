@@ -808,13 +808,23 @@ class VaultService:
         frontmatter (the two are read-merge-write on the same file, not
         independent) is a lost-update: whichever finishes last silently
         wins, discarding the other caller's already-200'd change with no
-        error to either side."""
+        error to either side.
+
+        Re-validates type == source here, inside the lock, rather than
+        trusting the route layer's own isinstance(node, Source) check
+        alone -- that check runs BEFORE this lock is acquired, so a
+        concurrent set_node_type() call (also lock-guarded) converting
+        this node away from Source in between would otherwise let this
+        method proceed anyway, silently writing Source-only bibliographic
+        fields into what is now a Note."""
         with self._vault_write_lock:
             path = self._find_md(slug)
             if path is None:
                 raise FileNotFoundError(f"source not found: {slug!r}")
             raw = path.read_text(encoding="utf-8")
             fm, content = _parse_frontmatter(raw)
+            if fm.get("type") != NodeType.source.value:
+                raise ValueError(f"{slug!r} is not a source")
             for key, value in [("title", title), ("authors", authors), ("year", year), ("doi", doi), ("tags", tags)]:
                 if value is not None:
                     fm[key] = value
@@ -993,6 +1003,18 @@ class VaultService:
             path = self._find_md(slug)
             if path is None:
                 raise FileNotFoundError(f"source not found: {slug!r}")
+            # Re-read and validate type here, inside the lock, rather than
+            # trusting the route layer's own isinstance(node, Source) check
+            # alone -- that check runs BEFORE this lock is acquired (and
+            # before read_upload_bounded() reads the whole upload, widening
+            # the window further), so a concurrent set_node_type() call
+            # (also lock-guarded) converting this node away from Source in
+            # between would otherwise let this method proceed anyway,
+            # silently writing Source-only companion data into what is now
+            # a Note.
+            current_fm, _ = _parse_frontmatter(path.read_text(encoding="utf-8"))
+            if current_fm.get("type") != NodeType.source.value:
+                raise ValueError(f"{slug!r} is not a source")
             ext = Path(filename).suffix.lower()
             if ext not in COMPANION_EXTS:
                 raise ValueError(f"unsupported companion extension: {ext!r}")
@@ -1023,8 +1045,9 @@ class VaultService:
             # genuinely first extraction) still correctly gets force=False,
             # protecting a hand-typed body (a manually created Source's own
             # prose, or a Zotero-import body synthesized from the abstract
-            # when no PDF was available) from being clobbered.
-            current_fm, _ = _parse_frontmatter(path.read_text(encoding="utf-8"))
+            # when no PDF was available) from being clobbered. Reuses
+            # current_fm from the type check above -- same read, same
+            # frontmatter, no reason to read the file twice.
             is_replace = bool(current_fm.get("body_extracted"))
             companion_path = path.with_suffix(ext)
             # Write to a temp file and atomically replace, rather than

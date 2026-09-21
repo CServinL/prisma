@@ -844,6 +844,28 @@ class TestAttachSourceCompanion:
         vault.attach_source_companion(source.slug, "paper.pdf", b"pdf bytes v2")
         assert vault.get_source(source.slug).body == "second extracted text"
 
+    def test_pdf_then_jpg_then_pdf_reextracts_the_second_pdf(self, vault, monkeypatch):
+        # Regression: is_replace inferred "was the body ever really
+        # extracted" from the IMMEDIATELY PRIOR companion's extension --
+        # wrong across exactly this chain. PDF A extracts (body_extracted
+        # becomes True), swapping to a JPG cover doesn't touch the body
+        # (no extraction attempted for jpg) but the JPG's extension isn't
+        # itself extraction-relevant, so the old logic saw the JPG and
+        # called the next PDF attach a "first extraction" (force=False) --
+        # the non-empty-body gate then skipped extracting PDF B entirely,
+        # leaving text from a PDF that's since been deleted.
+        calls = iter(["first extracted text", "second extracted text"])
+        monkeypatch.setattr("prisma.services.vault.pdf_bytes_to_md", lambda data: next(calls))
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "", zotero_key="ABC123", authors=[], tags=[],
+        )
+        vault.attach_source_companion(source.slug, "paper.pdf", b"pdf bytes A")
+        assert vault.get_source(source.slug).body == "first extracted text"
+        vault.attach_source_companion(source.slug, "cover.jpg", b"\xff\xd8\xff")
+        assert vault.get_source(source.slug).body == "first extracted text"  # untouched by the jpg swap
+        vault.attach_source_companion(source.slug, "paper.pdf", b"pdf bytes B")
+        assert vault.get_source(source.slug).body == "second extracted text"
+
     def test_reuploading_identical_bytes_does_not_reextract(self, vault, monkeypatch):
         calls = []
         monkeypatch.setattr("prisma.services.vault.pdf_bytes_to_md", lambda data: calls.append(data) or "extracted once")

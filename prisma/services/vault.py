@@ -1004,17 +1004,28 @@ class VaultService:
                 and existing.read_bytes() == data
             ):
                 return self.get_source(slug)
-            # force=True only when *replacing an extraction-relevant
-            # companion* -- not just "any prior companion existed". A prior
-            # .jpg/.svg/etc. never ran extraction at all, so a first-ever
-            # .pdf/.html attach after one of those is still a first
-            # extraction, not a refresh: checking existing is not None
-            # alone would call this a "replace" and force through the
-            # empty-body-only gate, clobbering a genuinely hand-typed body
-            # (a manually created Source's own prose, or a Zotero-import
-            # body synthesized from the abstract when no PDF was available)
-            # on what is actually its first real extraction.
-            is_replace = existing is not None and existing.suffix in (".pdf", ".html", ".htm")
+            # force=True only when the CURRENT body already came from real
+            # extraction (fm["body_extracted"], set by
+            # _ensure_md_format_locked() the last time it actually
+            # populated the body) -- not "any prior companion existed", and
+            # not "the immediately-prior companion's extension happens to
+            # be extraction-relevant" either. Both of those get this wrong
+            # across a PDF -> non-extractable -> PDF chain: attach PDF A
+            # (extracts, body_extracted=True), swap to a JPG (no
+            # extraction attempted, body_extracted stays True, body still
+            # holds PDF A's text), then attach PDF B -- checking the
+            # existing companion's extension alone sees the JPG and calls
+            # this a first extraction (force=False), so the non-empty-body
+            # gate skips extracting PDF B entirely, leaving text from a
+            # PDF that's since been deleted. Reading body_extracted from
+            # frontmatter instead survives the JPG detour correctly. A
+            # prior .jpg/.svg/etc. with body_extracted still False (a
+            # genuinely first extraction) still correctly gets force=False,
+            # protecting a hand-typed body (a manually created Source's own
+            # prose, or a Zotero-import body synthesized from the abstract
+            # when no PDF was available) from being clobbered.
+            current_fm, _ = _parse_frontmatter(path.read_text(encoding="utf-8"))
+            is_replace = bool(current_fm.get("body_extracted"))
             companion_path = path.with_suffix(ext)
             # Write to a temp file and atomically replace, rather than
             # writing companion_path directly -- when ext matches the
@@ -1329,6 +1340,16 @@ class VaultService:
             if not md_content.strip():
                 return False
         fm.setdefault("type", "note")
+        # Marks that this body came from real extraction, not hand-typed
+        # prose or a Zotero-import abstract synthesis -- attach_source_
+        # companion() reads this back to decide whether a *later* companion
+        # swap is a genuine "replace stale extracted text" (force=True)
+        # rather than a first extraction, without having to infer it from
+        # whatever companion extension happens to be attached right now
+        # (see attach_source_companion()'s is_replace comment for why that
+        # inference goes wrong across a PDF -> non-extractable -> PDF
+        # chain).
+        fm["body_extracted"] = True
         # Atomic tmp-file+replace, not a direct write_text() -- same
         # reasoning attach_source_companion() already applies to the
         # companion *binary*: a plain write_text() opens in "w" (truncating

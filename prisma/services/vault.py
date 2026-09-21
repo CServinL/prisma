@@ -869,12 +869,19 @@ class VaultService:
                         if not more:
                             break
                         head_bytes += more
-            except OSError:
+            except FileNotFoundError:
                 # A file can vanish between iter_files()'s walk yielding it
                 # and this read (a concurrent delete/move) -- harmless to
                 # this existence check either way, so skip it rather than
                 # letting POST /notes/sources 500 on an unrelated race.
                 continue
+            # Deliberately NOT a bare `except OSError` -- that would also
+            # swallow PermissionError (and other real I/O failures) on a
+            # file that still exists, silently treating "can't read this"
+            # the same as "doesn't count towards the uniqueness check" and
+            # letting a real collision through. Only a genuine disappearance
+            # is harmless here; anything else should abort loudly rather
+            # than return a false "citekey free".
             fm, _ = _parse_frontmatter(head_bytes.decode("utf-8", errors="replace"))
             if fm.get("citekey") == citekey:
                 return True
@@ -1596,35 +1603,51 @@ class VaultService:
 
     # ── Node operations ───────────────────────────────────────────────────────
 
-    def _relocate_companion(self, old_path: Path, new_path: Path) -> None:
-        """Moves/renames whatever companion file belongs to `old_path`
-        alongside its own move/rename to `new_path`, so find_companion()
-        (stem-matching) still finds it under the new name/location
-        afterward. Two distinct pairings exist and neither implies the
-        other:
+    def _paired_companion(self, path: Path) -> Path | None:
+        """Returns the existing companion file paired with `path` (a node's
+        primary file), or None if it has none. Two distinct pairings exist
+        and neither implies the other:
         - a raw-HTML-primary node (node.path IS the .html, no separate .md
           until one gets generated) pairs with a generated `.md` companion
           -- the *reverse* of every other case.
         - a Source's `.md` primary pairs with a `.pdf`/`.svg`/etc.
           companion, COMPANION_EXTS' normal case.
-        Previously only the first case was handled (`if path.suffix ==
-        ".html"`), which is unconditionally False for a Source (always
-        `.md`) -- moving or renaming a Source with an attached companion
-        silently orphaned it: left behind at the old path/name, invisible
-        to find_companion()'s stem-matching under the new one, with a
-        subsequent companion upload then silently duplicating storage
-        instead of replacing it."""
-        if old_path.suffix == ".html":
-            old_companion, new_companion = old_path.with_suffix(".md"), new_path.with_suffix(".md")
-        elif old_path.suffix == ".md":
-            old_companion = next(
-                (c for ext in COMPANION_EXTS if (c := old_path.with_suffix(ext)).exists()), None,
-            )
-            new_companion = new_path.with_suffix(old_companion.suffix) if old_companion else None
-        else:
-            old_companion = new_companion = None
-        if old_companion is not None and old_companion.exists():
-            old_companion.rename(new_companion)
+        Shared by move_node()/rename_node() (relocate the companion
+        alongside its primary) and delete_node() (remove it alongside)."""
+        if path.suffix == ".html":
+            companion = path.with_suffix(".md")
+            return companion if companion.exists() else None
+        if path.suffix == ".md":
+            return next((c for ext in COMPANION_EXTS if (c := path.with_suffix(ext)).exists()), None)
+        return None
+
+    def _companion_target(self, old_path: Path, new_path: Path, old_companion: Path) -> Path:
+        """Where `old_companion` should land after its primary moves/renames
+        from `old_path` to `new_path` -- the companion's own extension is
+        preserved except for the html-primary/.md-companion pairing, which
+        is fixed at `.md` regardless of the primary's (here, always
+        `.html`) extension."""
+        new_suffix = ".md" if old_path.suffix == ".html" else old_companion.suffix
+        return new_path.with_suffix(new_suffix)
+
+    def _relocate_companion(self, old_path: Path, new_path: Path, old_companion: Path | None) -> None:
+        """Moves/renames `old_companion` (already resolved and collision-
+        checked by the caller -- see move_node()/rename_node(), which
+        compute the same target via _companion_target() *before* touching
+        the filesystem, so a predictable destination collision is rejected
+        without moving anything, primary included) alongside its primary
+        file's own move/rename to `new_path`, so find_companion() (stem-
+        matching) still finds it under the new name/location afterward.
+        Previously only the html-primary/.md-companion pairing was handled
+        (`if path.suffix == ".html"`), which is unconditionally False for a
+        Source (always `.md`) -- moving or renaming a Source with an
+        attached companion silently orphaned it: left behind at the old
+        path/name, invisible to find_companion()'s stem-matching under the
+        new one, with a subsequent companion upload then silently
+        duplicating storage instead of replacing it."""
+        if old_companion is None:
+            return
+        old_companion.rename(self._companion_target(old_path, new_path, old_companion))
 
     def move_node(self, slug: str, dest_dir: str) -> tuple[str, str, str]:
         """Returns (new_slug, old_rel_path, new_rel_path). The two rel paths
@@ -1638,7 +1661,15 @@ class VaultService:
         companion() call (both locked, both assume the file stays where
         they found it) would otherwise race the rename against their own
         read-merge-write, the same class of problem closed for every other
-        Source-mutating method."""
+        Source-mutating method.
+
+        Checks the companion's own destination for a collision *before*
+        renaming the primary -- checking only the primary's destination
+        (as before) let a same-stem companion already at the destination
+        get silently overwritten by Path.rename() on POSIX, or left the
+        primary already moved with no companion move to follow if the
+        rename raised instead (platform-dependent partial-move either
+        way)."""
         with self._vault_write_lock:
             path = self.find_file(slug)
             if path is None:
@@ -1649,8 +1680,12 @@ class VaultService:
             new_path = dest / path.name
             if new_path.exists() and new_path != path:
                 raise FileExistsError(f"file already exists at destination: {new_path.name}")
+            old_companion = self._paired_companion(path)
+            new_companion = self._companion_target(path, new_path, old_companion) if old_companion else None
+            if new_companion is not None and new_companion.exists() and new_companion != old_companion:
+                raise FileExistsError(f"a file named {new_companion.name!r} already exists")
             path.rename(new_path)
-            self._relocate_companion(path, new_path)
+            self._relocate_companion(path, new_path, old_companion)
             rel = new_path.relative_to(self.root)
             new_slug = self.slug_for_relpath(rel)
             return new_slug, old_rel, str(rel)
@@ -1687,8 +1722,12 @@ class VaultService:
             raw = path.read_text(encoding="utf-8")
             fm, body = _parse_frontmatter(raw)
             fm["title"] = new_title
+            old_companion = self._paired_companion(path)
+            new_companion = self._companion_target(path, new_path, old_companion) if old_companion else None
+            if new_companion is not None and new_companion.exists() and new_companion != old_companion:
+                raise FileExistsError(f"a file named {new_companion.name!r} already exists")
             path.rename(new_path)
-            self._relocate_companion(path, new_path)
+            self._relocate_companion(path, new_path, old_companion)
             # Atomic tmp-file+replace, not a direct new_path.write_text() --
             # same reasoning as every other Source-mutating write: a
             # failure partway through this step would otherwise leave the
@@ -1708,17 +1747,30 @@ class VaultService:
     def delete_node(self, slug: str) -> str | None:
         """Returns the deleted file's vault-relative path, or None for a
         chat (.sess isn't part of the sync protocol, see move_node's
-        docstring for why the caller needs this for a synced file)."""
-        path = self.find_file(slug) or self._find_sess(slug)
-        if path is None:
-            raise FileNotFoundError(f"node not found: {slug!r}")
-        is_synced = path.suffix != ".sess"
-        rel = str(path.relative_to(self.root)) if is_synced else None
-        path.unlink()
-        companion = path.with_suffix(".md") if path.suffix == ".html" else None
-        if companion and companion.exists():
-            companion.unlink()
-        return rel
+        docstring for why the caller needs this for a synced file).
+
+        Holds _vault_write_lock -- same reasoning as move_node()/
+        rename_node(): without it, a concurrent locked mutation
+        (update_source_bibliographic_fields()/attach_source_companion())
+        can read this file, or even recreate it via its own tmp-file+
+        replace, in the same window as this delete, leaving the vault in
+        an inconsistent state with no error to either caller. Also used
+        _paired_companion() (previously only `if path.suffix == ".html"`,
+        unconditionally False for a Source) to find and remove a Source's
+        `.pdf`/`.svg`/etc. companion too -- deleting a Source left its
+        companion orphaned on disk otherwise, permanently invisible to
+        find_companion() once the primary .md is gone."""
+        with self._vault_write_lock:
+            path = self.find_file(slug) or self._find_sess(slug)
+            if path is None:
+                raise FileNotFoundError(f"node not found: {slug!r}")
+            is_synced = path.suffix != ".sess"
+            rel = str(path.relative_to(self.root)) if is_synced else None
+            companion = self._paired_companion(path)
+            path.unlink()
+            if companion is not None and companion.exists():
+                companion.unlink()
+            return rel
 
     def create_dir(self, rel_path: str) -> None:
         self.resolve_within_root(rel_path).mkdir(parents=True, exist_ok=True)

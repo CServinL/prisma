@@ -448,6 +448,44 @@ class TestCitekeyExists:
             f"read {total_bytes} real bytes, expected close to the {_CITEKEY_SCAN_MAX_BYTES}-byte ceiling"
         )
 
+    def test_skips_a_file_that_vanishes_mid_scan(self, vault, monkeypatch):
+        # A concurrent delete/move between iter_files()'s walk yielding a
+        # path and this scan's own read is harmless to an existence check
+        # -- that file is gone either way -- so it must not abort the scan
+        # of every other file.
+        vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "body", zotero_key="ABC123", authors=[], tags=[],
+        )
+        real_open = Path.open
+
+        def vanishing_open(self, *args, **kwargs):
+            if self.name == "smith2024.md":
+                raise FileNotFoundError(self)
+            return real_open(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "open", vanishing_open)
+        assert vault.citekey_exists("smith2024") is False
+
+    def test_does_not_silently_swallow_a_permission_error(self, vault, monkeypatch):
+        # Regression: `except OSError: continue` also caught PermissionError
+        # (and any other real I/O failure) on a file that still exists --
+        # silently treating "can't read this" the same as "doesn't count",
+        # letting a real citekey collision through despite the lock this
+        # check is supposed to protect.
+        vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "body", zotero_key="ABC123", authors=[], tags=[],
+        )
+        real_open = Path.open
+
+        def unreadable_open(self, *args, **kwargs):
+            if self.name == "smith2024.md":
+                raise PermissionError(13, "Permission denied", str(self))
+            return real_open(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "open", unreadable_open)
+        with pytest.raises(PermissionError):
+            vault.citekey_exists("smith2024")
+
 
 class TestCreateSourceFromCitekeyIfFree:
     def test_raises_on_collision(self, vault):
@@ -1273,6 +1311,91 @@ class TestMoveAndRenameNodeCompanionHandling:
         assert (vault.root / new_rel).exists()
         assert (vault.root / "notes" / "paper.md").exists()
         assert not md_companion.exists()
+
+    def test_move_node_rejects_a_companion_destination_collision(self, vault):
+        # Regression: only the primary's own destination was checked for a
+        # collision -- a pre-existing, unrelated file at the companion's
+        # target name got silently overwritten by Path.rename() on POSIX
+        # (or left the primary already moved with no companion move to
+        # follow, on a platform where rename() raises instead).
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "body", zotero_key="ABC123", authors=[], tags=[],
+        )
+        vault.attach_source_companion(source.slug, "figure.svg", b"<svg></svg>")
+        dest_dir = vault.root / "notes"
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        colliding = dest_dir / "smith2024.svg"
+        colliding.write_bytes(b"unrelated content")
+
+        with pytest.raises(FileExistsError):
+            vault.move_node(source.slug, dest_dir="notes")
+
+        # Nothing moved -- rejected before either file was touched.
+        assert vault.find_file(source.slug) is not None
+        assert vault.find_file(source.slug).parent != dest_dir
+        assert colliding.read_bytes() == b"unrelated content"
+
+    def test_rename_node_rejects_a_companion_destination_collision(self, vault):
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "body", zotero_key="ABC123", authors=[], tags=[],
+        )
+        vault.attach_source_companion(source.slug, "figure.svg", b"<svg></svg>")
+        colliding = source.path.parent / "a-renamed-paper.svg"
+        colliding.write_bytes(b"unrelated content")
+
+        with pytest.raises(FileExistsError):
+            vault.rename_node(source.slug, "A Renamed Paper")
+
+        assert vault.find_file(source.slug) is not None
+        assert vault.find_file(source.slug).stem == "smith2024"
+        assert colliding.read_bytes() == b"unrelated content"
+
+
+class TestDeleteNode:
+    def test_deletes_a_source_companion_too(self, vault):
+        # Regression: delete_node() only ever checked
+        # `if path.suffix == ".html"` for a companion to remove alongside
+        # the primary -- unconditionally False for a Source, permanently
+        # orphaning its .pdf/.svg/etc. companion the moment the primary
+        # .md was gone.
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "body", zotero_key="ABC123", authors=[], tags=[],
+        )
+        vault.attach_source_companion(source.slug, "figure.svg", b"<svg></svg>")
+        companion = vault.find_companion(source.slug)
+        assert companion is not None
+
+        vault.delete_node(source.slug)
+
+        assert not companion.exists()
+
+    def test_holds_vault_write_lock_for_its_whole_duration(self, vault, monkeypatch):
+        import threading
+
+        note = vault.create_note("Note A")
+
+        lock_held_during_call = threading.Event()
+        proceed = threading.Event()
+        real_find_file = VaultService.find_file
+
+        def blocking_find_file(self, slug):
+            result = real_find_file(self, slug)
+            lock_held_during_call.set()
+            proceed.wait(timeout=2)
+            return result
+
+        monkeypatch.setattr(VaultService, "find_file", blocking_find_file)
+
+        t = threading.Thread(target=lambda: vault.delete_node(note.slug))
+        t.start()
+        assert lock_held_during_call.wait(timeout=2), "delete_node() never reached find_file()"
+
+        acquired = vault._vault_write_lock.acquire(blocking=False)
+        proceed.set()
+        t.join()
+        if acquired:
+            vault._vault_write_lock.release()
+        assert not acquired, "delete_node() must hold _vault_write_lock while it runs"
 
 
 class TestMoveAndRenameNodeLocking:

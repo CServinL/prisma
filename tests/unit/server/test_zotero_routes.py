@@ -231,15 +231,8 @@ def test_zotero_import_returns_existing_source_if_already_imported(isolated_clie
 
 
 def test_zotero_import_existing_source_response_echoes_original_ext(isolated_client, vault, zotero):
-    # Regression: both RenderedNode(...) constructions in zotero_import()
-    # never set original_ext, unlike every other Source-returning route
-    # (render_note(), _render_source()). Unreachable for a fresh import
-    # (zotero_import() never writes a companion binary, only extracted
-    # text), but real for the "already imported" branch: a source
-    # previously zotero-imported with no PDF, then given a companion via
-    # the manual upload route, then re-imported (e.g. clicking Import
-    # again on the same Zotero item) -- the response silently hid that a
-    # companion now exists.
+    # A source previously imported, given a companion via manual upload,
+    # then re-imported must echo original_ext in the response too.
     existing = vault.create_source_from_citekey(
         "smith2024", "Already Here", "body text", zotero_key="K1", authors=[], tags=[],
     )
@@ -272,13 +265,8 @@ def test_zotero_import_creates_source_from_abstract_when_no_pdf(isolated_client,
     assert source.item_type == "journalArticle"
     assert source.url == "https://example.com/paper"
 
-    # Regression: the response itself (not just the persisted file) must
-    # echo the Source-only fields via _echo_source_fields() -- the UI sets
-    # activeNode straight from this response with no follow-up GET
-    # (importZoteroItem(), +page.svelte), so a bare RenderedNode missing
-    # authors/tags/doi/citekey meant "Edit metadata" right after an import
-    # would silently send authors: []/tags: []/doi: "" and wipe them, since
-    # update_source_bibliographic_fields() treats those as explicit clears.
+    # The response itself, not just the persisted file, must echo these --
+    # the UI sets activeNode straight from it with no follow-up GET.
     assert data["citekey"] == "smith2024"
     assert data["authors"] == ["Jane Smith"]
     assert data["tags"] == ["ml"]

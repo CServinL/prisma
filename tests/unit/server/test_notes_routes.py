@@ -81,36 +81,22 @@ def test_create_note_then_list(client, vault, recorder):
 
 
 def test_create_note_response_echoes_tags(client):
-    # Regression: this route's own literal RenderedNode(...) omitted
-    # tags=, unlike render_note() (GET) and every Source-related
-    # RenderedNode constructor -- the response reported tags: [] even
-    # though the note was saved with real tags.
     r = client.post("/notes", json={"title": "My Note", "tags": ["ml"]})
     assert r.json()["tags"] == ["ml"]
 
 
 def test_create_note_rejects_whitespace_only_title(client):
-    # Regression: _reject_blank_title() was written for Source but never
-    # applied to the sibling NoteCreateRequest.title sitting right above
-    # it in this same file.
     r = client.post("/notes", json={"title": "   "})
     assert r.status_code == 422
 
 
 def test_create_note_drops_blank_tag_entries(client):
-    # Regression: _drop_blank_list_items() was added to Source's authors/
-    # tags but never applied to the sibling NoteCreateRequest.tags -- same
-    # class as the whitespace-only-title gap just above, just for tags.
     r = client.post("/notes", json={"title": "My Note", "tags": ["real", "   "]})
     assert r.status_code == 201
     assert r.json()["tags"] == ["real"]
 
 
 def test_create_note_rejects_an_absurdly_long_tag(client):
-    # Regression: Source's authors/tags got _MAX_BIB_STR/_MAX_BIB_LIST
-    # bounds for unbounded-YAML-bloat-persisted-and-echoed-forever reasons
-    # -- the sibling NoteCreateRequest.tags (this same diff already
-    # touches this exact field, just above) was left unbounded.
     r = client.post("/notes", json={"title": "My Note", "tags": ["a" * 5000]})
     assert r.status_code == 422
 
@@ -166,12 +152,8 @@ def test_set_note_type_not_found(client):
 
 
 def test_set_note_type_not_shadowed_by_a_node_literally_named_sources(client, vault):
-    # Regression: PATCH /notes/sources/{slug} (the source-edit route's
-    # original shape) collided with this route whenever a node's slug is
-    # literally "sources" -- PATCH /notes/sources/type matched the edit
-    # route with slug="type" instead of this one with slug="sources".
-    # Fixed by moving those routes to /{slug}/source and /{slug}/companion,
-    # matching every other action route's segment order in this file.
+    # A node whose slug is literally "sources" must not collide with the
+    # source-edit route's own path segment.
     vault.create_note("Sources", "body")
     r = client.patch("/notes/sources/type", json={"node_type": "source"})
     assert r.status_code == 200
@@ -345,10 +327,6 @@ def test_create_source_with_auto_citekey(client, recorder):
 
 
 def test_create_source_auto_citekey_does_not_drop_year_zero(client):
-    # Regression: make_citekey()'s own `year or ''` dropped year=0 even
-    # after create_source_from_citekey()/update_source_bibliographic_
-    # fields() were both fixed to honor it -- this route calls
-    # make_citekey() directly for auto-generated citekeys.
     r = client.post("/notes/sources", json={"title": "A Great Paper", "authors": ["Jane Smith"], "year": 0})
     assert r.status_code == 201
     assert r.json()["citekey"] == "smith0"
@@ -367,11 +345,6 @@ def test_create_source_rejects_duplicate_citekey(client):
 
 
 def test_get_note_echoes_tags_for_prefilling_the_edit_dialog(client, vault):
-    # Regression: RenderedNode never echoed `tags` at all (any node type,
-    # not just Source) -- the edit-metadata dialog would always show an
-    # empty Tags field regardless of what was actually set, and saving
-    # would silently wipe real tags via update_source_bibliographic_
-    # fields()'s `is not None` check treating that empty field as "clear".
     source = vault.create_source_from_citekey(
         "smith2024", "A Great Paper", "body", zotero_key="ABC", authors=[], tags=["ml", "nlp"],
     )
@@ -391,13 +364,9 @@ def test_edit_source_updates_tags_and_source_kind(client, vault):
 
 
 def test_edit_source_response_echoes_the_request_slug_not_the_bare_stem(client, vault):
-    # Regression: _render_source() used source.slug (get_source()'s bare
-    # file stem, always losing directory nesting) instead of the slug this
-    # route already received and resolved. Harmless when the bare stem is
-    # unique vault-wide, but genuinely ambiguous once a moved source's
-    # bare stem collides with an unrelated file elsewhere -- _find_md()'s
-    # bare-stem-first lookup then resolves that bare slug to an arbitrary
-    # one of the two on any subsequent request.
+    # A moved source's bare stem can collide with an unrelated file
+    # elsewhere -- the response must echo the slug this route actually
+    # resolved, not source.slug's bare file stem.
     source = vault.create_source_from_citekey(
         "smith2024", "A Great Paper", "body", zotero_key="ABC", authors=[], tags=[],
     )
@@ -424,13 +393,8 @@ def test_create_source_no_metadata_still_works(client):
 
 
 def test_create_source_does_not_pay_for_a_full_vault_citekey_scan(client, vault, monkeypatch):
-    # Regression: _render_source() used to call vault_render(), which
-    # rebuilds a full-vault citekey index (renderer.py's _build_citekey_
-    # index() reads every .md file's frontmatter) purely to produce an
-    # html/broken_links/broken_citations payload every current caller (the
-    # UI) discards, immediately re-fetching via GET instead. Real,
-    # unbounded-with-vault-size work paid on every create/edit/companion-
-    # upload request for a value nobody used.
+    # A create/edit/companion-upload response must not trigger a
+    # full-vault citekey-index rebuild to populate a value no caller uses.
     calls = []
     monkeypatch.setattr(
         "prisma.services.renderer._build_citekey_index",
@@ -443,8 +407,6 @@ def test_create_source_does_not_pay_for_a_full_vault_citekey_scan(client, vault,
 
 
 def test_create_source_rejects_whitespace_only_title(client):
-    # Regression: min_length=1 counts raw characters, not stripped content
-    # -- a single space passed it despite being just as blank as "".
     r = client.post("/notes/sources", json={"title": "   "})
     assert r.status_code == 422
 
@@ -470,30 +432,19 @@ def test_create_source_rejects_when_no_citekey_can_be_generated(client):
 def test_create_source_rejects_whitespace_only_explicit_citekey(client):
     r = client.post("/notes/sources", json={"title": "X", "citekey": "   "})
     assert r.status_code == 400
-    # Regression: this used to say "could not generate a citekey from the
-    # given title/authors" -- misleading for a caller who DID supply one,
-    # steering them toward retyping title/authors instead of their actual
-    # blank citekey.
+    # A caller who supplied a (blank) citekey must not be told to retype
+    # title/authors instead.
     assert "provide one explicitly" not in r.json()["detail"]
 
 
 def test_create_source_rejects_an_absurdly_long_explicit_citekey(client):
-    # Regression: title's max_length=512 only bounds the *filename*
-    # derived from it (_slugify() has its own independent cap) -- an
-    # explicit citekey skips that path entirely, gets written verbatim
-    # into frontmatter, and is echoed by every Source-returning route, so
-    # it needs the same request-level bound title already got.
     r = client.post("/notes/sources", json={"title": "X", "citekey": "a" * 5000})
     assert r.status_code == 422
 
 
 def test_create_source_rejects_an_absurdly_long_auto_generated_citekey(client):
-    # Regression: the previous fix only bounded an EXPLICIT citekey --
-    # make_citekey() derives an auto-generated one from the first author's
-    # last name (or title's first word), and neither authors nor title
-    # items had a per-item length bound, so an oversized author string
-    # produced an equally oversized citekey through a completely different
-    # path, reopening the exact same risk from a different angle.
+    # An auto-generated citekey (derived from the first author's last
+    # name) must be bounded too, not just an explicit one.
     r = client.post("/notes/sources", json={"title": "X", "authors": ["a" * 5000]})
     assert r.status_code == 422
 
@@ -516,12 +467,8 @@ def test_create_source_rejects_too_many_authors(client):
 
 
 def test_create_source_drops_blank_author_and_tag_entries(client):
-    # Regression: a whitespace-only entry (a stray double-comma, a pasted
-    # trailing separator) wasn't rejected or dropped -- it reached APA
-    # formatting as a visibly malformed "  , & Smith, J." reference with no
-    # error anywhere upstream. Dropped, not rejected, since one bad entry
-    # among otherwise-good ones is noise, not grounds to fail the request
-    # (unlike a blank title, which breaks the whole node).
+    # A whitespace-only entry must be dropped, not rejected -- one bad
+    # entry among otherwise-good ones shouldn't fail the whole request.
     r = client.post("/notes/sources", json={"title": "X", "authors": ["  ", "Jane Smith"], "tags": ["ml", "   "]})
     assert r.status_code == 201
     data = r.json()
@@ -541,14 +488,8 @@ def test_edit_source_drops_blank_author_and_tag_entries(client, vault):
 
 
 def test_create_source_drops_blanks_before_enforcing_the_author_count_cap(client):
-    # Regression: field_validator defaults to mode="after", which runs
-    # AFTER Pydantic's own max_length constraint on the list -- so a raw
-    # submission over the cap 422'd on raw length before
-    # _drop_blank_list_items ever got a chance to drop enough blanks to
-    # bring it back under, defeating that validator's whole stated purpose
-    # for exactly the inputs (blanks pushing a list over some limit) it
-    # exists to handle. 201 raw entries, only 190 real -- comfortably under
-    # the 200 cap once blanks are dropped, but over it raw.
+    # Blanks must be dropped before the count cap is enforced -- 201 raw
+    # entries, only 190 real, must pass since 190 is under the cap.
     authors = ["Smith"] + [f"Coauthor{i}" for i in range(189)] + ["   "] * 11
     assert len(authors) == 201
     r = client.post("/notes/sources", json={"title": "X", "authors": authors})
@@ -557,41 +498,25 @@ def test_create_source_drops_blanks_before_enforcing_the_author_count_cap(client
 
 
 def test_create_source_rejects_an_absurdly_long_title(client):
-    # Rejected by SourceCreateRequest.title's own max_length=512 during
-    # request validation -- never reaches unique_slug()/_slugify() at all.
-    # The real regression test for _slugify()'s own length cap (a title
-    # under 512 but still long enough to have crashed before that fix) is
-    # test_create_source_accepts_a_long_but_not_absurd_title, below.
     r = client.post("/notes/sources", json={"title": "a" * 5000})
     assert r.status_code == 422
 
 
 def test_create_source_accepts_a_long_but_not_absurd_title(client):
-    # Regression: the request-level max_length=512 check alone did NOT
-    # fix the underlying bug -- a single-word, all-ASCII title as short
-    # as ~300 characters still exceeded ext4's 255-byte-per-component
-    # filename limit and 500'd. The real fix is _slugify()'s own length
-    # cap; this confirms a title comfortably under max_length=512 but
-    # over the old (unfixed) crash threshold now succeeds instead of
-    # 500ing.
+    # A title under max_length=512 but over ext4's 255-byte-per-component
+    # filename limit must still succeed -- _slugify() truncates it.
     r = client.post("/notes/sources", json={"title": "a" * 400})
     assert r.status_code == 201
 
 
 def test_create_note_accepts_a_long_but_not_absurd_title(client):
-    # Same underlying bug, pre-existing in create_note() (no request-level
-    # length constraint on NoteCreateRequest.title at all) -- fixed by the
-    # same _slugify() change, not by anything specific to Source.
     r = client.post("/notes", json={"title": "a" * 400})
     assert r.status_code == 201
 
 
 def test_two_long_titles_sharing_a_slugified_prefix_dont_collide(client):
-    # _slugify()'s 200-char truncation cap means two different long titles
-    # that agree on their first 200 alphanumeric characters now produce the
-    # same base slug -- unique_slug()'s existing "-1"/"-2" disambiguation
-    # already handles this (same mechanism as any other title collision),
-    # confirming no data loss: both notes exist, distinctly, under it.
+    # Two titles sharing the same 200-char truncated prefix must still
+    # get distinct slugs.
     long_prefix = "a" * 250
     r1 = client.post("/notes", json={"title": long_prefix + "-ending-one"})
     r2 = client.post("/notes", json={"title": long_prefix + "-ending-two"})
@@ -605,10 +530,8 @@ def test_create_source_rejects_negative_year(client):
 
 
 def test_create_source_rejects_boolean_year(client):
-    # Regression: Pydantic's default (lax) mode coerces a JSON bool to int
-    # for an int field, so ge=0 alone doesn't reject `year: true` (True
-    # satisfies >=0 once coerced to 1) -- needs strict=True to actually
-    # block the cross-type coercion.
+    # `year: true` coerces to 1 under Pydantic's lax mode, satisfying
+    # ge=0 -- must be rejected on type, not just range.
     r = client.post("/notes/sources", json={"title": "X", "year": True})
     assert r.status_code == 422
 
@@ -622,9 +545,6 @@ def test_edit_source_rejects_negative_year(client, vault):
 
 
 def test_edit_source_rejects_boolean_year(client, vault):
-    # Regression: SourceCreateRequest.year got strict=True to block the
-    # bool-to-int coercion (year: true -> 1, satisfying ge=0), but
-    # SourceEditRequest.year was missed on that same pass.
     source = vault.create_source_from_citekey(
         "smith2024", "A Great Paper", "body", zotero_key="ABC", authors=[], tags=[],
     )
@@ -633,10 +553,6 @@ def test_edit_source_rejects_boolean_year(client, vault):
 
 
 def test_create_source_rejects_an_absurdly_large_year(client):
-    # Regression: ge=0 alone has no upper bound -- Python ints are
-    # arbitrary precision, so year=10**2000 sailed through and
-    # make_citekey() appended str(year) verbatim, producing a citekey
-    # thousands of characters long despite authors/title's own caps.
     r = client.post("/notes/sources", json={"title": "X", "year": 10**2000})
     assert r.status_code == 422
 
@@ -650,9 +566,8 @@ def test_edit_source_rejects_an_absurdly_large_year(client, vault):
 
 
 def test_edit_source_returns_404_not_500_on_concurrent_delete(client, vault, monkeypatch):
-    # edit_source's try/except around get_any() didn't cover the actual
-    # write call -- a delete landing in that window surfaced as an
-    # unhandled 500 instead of the 404 both the check and the write intend.
+    # A delete landing between the isinstance check and the write must
+    # surface as 404, not an unhandled 500.
     source = vault.create_source_from_citekey(
         "smith2024", "A Great Paper", "body", zotero_key="ABC", authors=[], tags=[],
     )
@@ -686,11 +601,9 @@ def test_upload_companion_returns_404_not_500_on_concurrent_delete(client, vault
 
 
 def test_edit_source_returns_400_when_type_changes_out_from_under_it(client, vault, monkeypatch):
-    # Regression: the isinstance(node, Source) check runs BEFORE
-    # update_source_bibliographic_fields()'s own lock is acquired -- a
-    # concurrent PATCH /{slug}/type converting this node to a Note in that
-    # window used to let the edit proceed anyway, silently writing
-    # Source-only fields into what is now a Note.
+    # A concurrent type change landing between the isinstance check and
+    # the locked write must reject the edit, not let it write Source-only
+    # fields into what is now a Note.
     source = vault.create_source_from_citekey(
         "smith2024", "A Great Paper", "body", zotero_key="ABC", authors=[], tags=[],
     )
@@ -756,12 +669,8 @@ def test_upload_companion_rejects_bad_extension(client, vault):
 
 
 def test_upload_companion_rejects_an_oversized_file(client, vault, monkeypatch):
-    # Regression: this route used to buffer the whole upload into memory
-    # (file.file.read()) before any check ran -- now goes through
-    # read_upload_bounded(), which rejects mid-stream. A real 50MB+ upload
-    # would make this test slow, so this confirms the route surfaces
-    # read_upload_bounded()'s 413 correctly rather than re-exercising the
-    # cap itself (already covered directly in test_upload_utils.py).
+    # Confirms the route surfaces read_upload_bounded()'s 413 correctly --
+    # the cap itself is covered directly in test_upload_utils.py.
     from fastapi import HTTPException
 
     def fake_read_upload_bounded(file, max_bytes=None):

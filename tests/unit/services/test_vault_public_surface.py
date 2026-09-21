@@ -235,19 +235,12 @@ class TestCreateSourceFromCitekey:
         assert source.url == "https://example.com/paper"
 
     def test_failed_write_does_not_leave_an_undetectable_garbage_file(self, vault, monkeypatch):
-        # Regression: the write was a plain write_text() -- a failure
-        # partway through (disk full, killed mid-write) left a truncated,
-        # unparseable .md file on disk under this slug. citekey_exists()
-        # can't detect a citekey inside malformed frontmatter, so a retry
-        # with the same citekey would sail past the uniqueness check and
-        # land on a DIFFERENT slug (unique_slug() sees the garbage file
-        # already occupying this one) -- two files, same citekey, exactly
-        # the collision create_source_from_citekey_if_free()'s lock exists
-        # to prevent.
-        # A bare raise-only stub wouldn't reproduce the real bug: real
-        # write_text() actually writes bytes before a failure could occur
-        # partway through, so the fake must too, or this test would pass
-        # even against the unfixed code (confirmed).
+        # A failed write must not leave a truncated, unparseable file
+        # under this slug -- citekey_exists() can't detect a citekey
+        # inside malformed frontmatter, so a retry would land on a
+        # different slug instead of reusing this one.
+        # write_text() must actually write bytes before raising, or the
+        # stub doesn't exercise a real partial write.
         original_write_text = Path.write_text
 
         def boom(self, data, encoding=None):
@@ -390,14 +383,9 @@ class TestCitekeyExists:
         assert vault.citekey_exists("smith2024") is True
 
     def test_finds_citekey_even_with_a_huge_frontmatter_block(self, vault):
-        # Regression: the bound used to be _FRONTMATTER_READ_BYTES (8192),
-        # copied from frontmatter_for_relpath()'s best-effort use case where
-        # silently degrading on overflow is fine. Here it isn't -- a long
-        # author list can push the frontmatter block itself (not just the
-        # body) past that, truncating mid-YAML so _parse_frontmatter can't
-        # find the closing '---' and returns {}, silently reporting an
-        # in-use citekey as free and letting a real collision through
-        # despite create_source_from_citekey_if_free()'s lock.
+        # A frontmatter block larger than _FRONTMATTER_READ_BYTES must
+        # still be scanned in full -- a long author list can push it well
+        # past that.
         huge_authors = [f"Author Number {i}" for i in range(500)]
         source = vault.create_source_from_citekey(
             "smith2024", "A Great Paper", "body", zotero_key="ABC123", authors=huge_authors, tags=[],
@@ -408,17 +396,10 @@ class TestCitekeyExists:
         assert vault.citekey_exists("smith2024") is True
 
     def test_finds_citekey_past_a_fixed_scan_bound_entirely(self, vault):
-        # Regression: _CITEKEY_SCAN_READ_BYTES (65536) was itself a fixed
-        # bound, no better than _FRONTMATTER_READ_BYTES was above -- just a
-        # bigger fixed number. notes_routes.py's own SourceCreateRequest
-        # caps (_MAX_BIB_LIST=200 authors x _MAX_BIB_STR=512 chars each)
-        # allow a frontmatter block comfortably past 65536 bytes too:
-        # yaml.dump()'s default sort_keys=True places `citekey:`
-        # alphabetically after `authors:`, so a maxed-out author list pushes
-        # `citekey:` itself out of any fixed-size scan window, no matter how
-        # generous, silently defeating create_source_from_citekey_if_free()
-        # via a non-concurrency path -- a duplicate citekey sails straight
-        # through the "already in use" check.
+        # A frontmatter block can exceed even a generous fixed scan bound:
+        # yaml.dump()'s sort_keys=True places `citekey:` after `authors:`,
+        # so a maxed-out author list (within SourceCreateRequest's own
+        # caps) pushes `citekey:` itself past any fixed-size window.
         huge_authors = [f"Author Number {i} " + "x" * 490 for i in range(200)]
         source = vault.create_source_from_citekey(
             "smith2024", "A Great Paper", "body", zotero_key="ABC123", authors=huge_authors, tags=[],
@@ -429,20 +410,10 @@ class TestCitekeyExists:
         assert vault.citekey_exists("smith2024") is True
 
     def test_scan_bound_is_measured_in_bytes_not_characters(self, vault, monkeypatch):
-        # Regression: opening in text mode made f.read(N) read N
-        # *characters*, not N bytes as _CITEKEY_SCAN_READ_BYTES/
-        # _CITEKEY_SCAN_MAX_BYTES's own names and comments claim -- for
-        # multi-byte UTF-8 content (e.g. non-Latin author names), the
-        # actual bytes consumed before the hard ceiling kicks in could run
-        # up to ~4x the documented bound. Reproduced with a malformed
-        # (never-closing) frontmatter block, on disk far larger than the
-        # ceiling, filled entirely with 4-byte-per-character content.
-        #
-        # Re-encodes each read() call's return value back to UTF-8 to get
-        # its true byte length regardless of whether the code under test
-        # opened in text mode (str, old/buggy) or binary mode (bytes,
-        # fixed) -- that distinction is exactly what's being tested, so
-        # the measurement can't rely on assuming one or the other.
+        # _CITEKEY_SCAN_MAX_BYTES must bound real bytes, not characters --
+        # multi-byte UTF-8 content could otherwise consume up to 4x the
+        # ceiling. Re-encodes each read() call's return value back to
+        # UTF-8 so the measurement doesn't assume text vs binary mode.
         from prisma.services.vault import _CITEKEY_SCAN_MAX_BYTES
 
         path = vault.default_dirs[NodeType.source] / "malformed.md"
@@ -495,11 +466,8 @@ class TestCitekeyExists:
         assert vault.citekey_exists("smith2024") is False
 
     def test_does_not_silently_swallow_a_permission_error(self, vault, monkeypatch):
-        # Regression: `except OSError: continue` also caught PermissionError
-        # (and any other real I/O failure) on a file that still exists --
-        # silently treating "can't read this" the same as "doesn't count",
-        # letting a real citekey collision through despite the lock this
-        # check is supposed to protect.
+        # An unreadable file must abort the check, not be treated as if
+        # it didn't count towards the uniqueness scan.
         vault.create_source_from_citekey(
             "smith2024", "A Great Paper", "body", zotero_key="ABC123", authors=[], tags=[],
         )
@@ -621,10 +589,8 @@ class TestAttachSourceCompanion:
             vault.attach_source_companion("does-not-exist", "figure.svg", b"<svg></svg>")
 
     def test_replacing_extension_preserves_old_companion_if_write_fails(self, vault, monkeypatch):
-        # Regression: the old companion was unlinked BEFORE the new bytes
-        # were written -- a write failure between the two (disk full,
-        # permission error, killed mid-write) left the Source with no
-        # companion at all instead of the original, untouched one.
+        # A write failure while replacing a companion with a different
+        # extension must not leave the Source with no companion at all.
         source = vault.create_source_from_citekey(
             "smith2024", "A Great Paper", "body", zotero_key="ABC123", authors=[], tags=[],
         )
@@ -641,13 +607,8 @@ class TestAttachSourceCompanion:
         assert old_companion.exists(), "old companion must survive a failed replacement write"
 
     def test_same_extension_reupload_preserves_old_companion_if_write_fails(self, vault, monkeypatch):
-        # Regression: the cross-extension fix above only reordered unlink
-        # vs. write -- it did nothing for the (more common) same-extension
-        # case, e.g. re-uploading a corrected paper.pdf over an existing
-        # paper.pdf. There, companion_path IS the existing file, so writing
-        # straight to it truncates it immediately; a failure mid-write left
-        # the original destroyed (empty/corrupt), not "untouched" as the
-        # adjacent comment claimed.
+        # Same-extension case: companion_path IS the existing file, so a
+        # failed write there must not destroy the original.
         source = vault.create_source_from_citekey(
             "smith2024", "A Great Paper", "body", zotero_key="ABC123", authors=[], tags=[],
         )
@@ -673,14 +634,10 @@ class TestAttachSourceCompanion:
         )
 
     def test_failed_replace_leaves_no_tmp_file_behind(self, vault, monkeypatch):
-        # Regression: the temp-file-then-replace fix above never cleaned up
-        # tmp_path when the write itself succeeded but the atomic replace()
-        # failed (e.g. a permission error, or attempting a cross-device
-        # rename) -- the genuinely-written tmp file was left in the vault
-        # permanently, one per failed retry. A write_bytes-raises stub
-        # wouldn't prove this: it never lets the real tmp file get created
-        # in the first place, so it can't tell "cleaned up" apart from
-        # "never existed".
+        # tmp_path must be cleaned up even when the write itself succeeds
+        # but the atomic replace() fails -- a write_bytes-raises stub
+        # wouldn't prove this, since it never lets the real tmp file get
+        # created in the first place.
         source = vault.create_source_from_citekey(
             "smith2024", "A Great Paper", "body", zotero_key="ABC123", authors=[], tags=[],
         )
@@ -695,16 +652,9 @@ class TestAttachSourceCompanion:
         assert leftovers == [], f"tmp file(s) leaked: {leftovers}"
 
     def test_concurrent_uploads_do_not_share_a_tmp_filename(self, vault, monkeypatch):
-        # Regression: tmp_path was derived deterministically from the
-        # companion's own name alone (`<name>.upload.tmp`) -- two concurrent
-        # uploads to the same slug (double-submit, two tabs, a client retry
-        # racing the original) would both write through that same path,
-        # letting their writes interleave into a corrupted file before either
-        # side's atomic replace() ever runs. Path.replace() only makes the
-        # rename atomic, not the write before it. Proven here by capturing
-        # the tmp path used by two separate calls and asserting they differ,
-        # rather than trying to force an actual byte-level race
-        # deterministically.
+        # Two concurrent uploads to the same slug must not write through
+        # the same tmp path -- proven by capturing the tmp path used by
+        # two separate calls and asserting they differ.
         source = vault.create_source_from_citekey(
             "smith2024", "A Great Paper", "body", zotero_key="ABC123", authors=[], tags=[],
         )
@@ -723,17 +673,9 @@ class TestAttachSourceCompanion:
         assert seen[0] != seen[1], "two uploads must not reuse the same tmp filename"
 
     def test_concurrent_metadata_edit_and_companion_upload_do_not_lose_the_edit(self, vault, monkeypatch):
-        # Regression: ensure_md_format() reads this Source's frontmatter
-        # into its own `fm` BEFORE the (possibly seconds-long) extraction
-        # runs, then blind-writes that same, now-stale `fm` back once
-        # extraction finishes. A metadata PATCH racing in between --
-        # update_source_bibliographic_fields() does its own independent
-        # read-merge-write of the identical file -- already returned 200 to
-        # its caller by the time the upload's write lands, and gets
-        # silently discarded with no error to either side. Widened here by
-        # a monkeypatched pdf_bytes_to_md() that sleeps, standing in for
-        # real extraction's genuine multi-second cost (the actual reason
-        # this route is a sync def run in the threadpool at all).
+        # A metadata edit racing a companion upload's extraction must not
+        # be silently discarded. pdf_bytes_to_md() is monkeypatched to
+        # sleep, standing in for real extraction's multi-second cost.
         import threading
         import time
 
@@ -766,13 +708,10 @@ class TestAttachSourceCompanion:
         )
 
     def test_concurrent_first_uploads_of_different_extensions_do_not_both_persist(self, vault, monkeypatch):
-        # Regression: find_companion() was read once with no lock; two
-        # concurrent first-time uploads to a companion-less source could
-        # both see existing=None and both persist a companion, permanently
-        # orphaning whichever one COMPANION_EXTS's fixed scan order doesn't
-        # resolve to first. Widened by monkeypatching find_companion() to
-        # sleep between its read and return, standing in for genuine OS-
-        # thread interleaving between the check and the later write.
+        # Two concurrent first-time uploads to a companion-less source
+        # must not both persist a companion. find_companion() is
+        # monkeypatched to sleep between its read and return, widening the
+        # window for real thread interleaving.
         import threading
         import time
 
@@ -805,12 +744,8 @@ class TestAttachSourceCompanion:
         assert len(existing) == 1, f"exactly one companion should survive, found: {existing}"
 
     def test_first_attach_does_not_clobber_a_hand_typed_body(self, vault, monkeypatch):
-        # Regression: force=True was passed unconditionally, even on a
-        # FIRST attachment (existing is None) -- overwriting the exact
-        # kind of genuinely hand-typed body (a manually created Source's
-        # own prose, or one synthesized at Zotero-import time from the
-        # abstract when no PDF was available) that ensure_md_format()'s
-        # empty-body-only gate exists to protect everywhere else it's used.
+        # A first attachment must not force through the empty-body-only
+        # gate -- a genuinely hand-typed body must survive it.
         monkeypatch.setattr("prisma.services.vault.pdf_bytes_to_md", lambda data: "extracted text")
         source = vault.create_source_from_citekey(
             "smith2024", "A Great Paper", "hand-typed body, no companion yet",
@@ -820,12 +755,9 @@ class TestAttachSourceCompanion:
         assert updated.body == "hand-typed body, no companion yet"
 
     def test_first_pdf_attach_after_a_non_extraction_companion_does_not_clobber(self, vault, monkeypatch):
-        # Regression: is_replace was set whenever ANY prior companion
-        # existed, not only when the prior one was itself extraction-
-        # relevant (.pdf/.html/.htm) -- a .jpg cover attached first never
-        # ran extraction, so the following .pdf attach is still a FIRST
-        # real extraction, not a refresh; treating it as a "replace" forced
-        # through the empty-body-only gate and clobbered the hand-typed body.
+        # A .jpg cover attached first never runs extraction, so a
+        # following .pdf attach is still a first real extraction, not a
+        # replace -- it must not force through the empty-body-only gate.
         monkeypatch.setattr("prisma.services.vault.pdf_bytes_to_md", lambda data: "extracted text")
         source = vault.create_source_from_citekey(
             "smith2024", "A Great Paper", "My own hand-typed summary.",
@@ -836,15 +768,10 @@ class TestAttachSourceCompanion:
         assert updated.body == "My own hand-typed summary."
 
     def test_replacing_a_pdf_companion_reextracts_the_body(self, vault, monkeypatch):
-        # Regression: attach_source_companion() originally called
-        # ensure_md_format() without force=True, which only fills an EMPTY
-        # body -- so re-uploading a corrected PDF after the first extraction
-        # already populated the body silently kept serving the stale first
-        # extraction forever. docu_craft's real pdf/html conversion isn't
-        # installed in this dev venv (confirmed: both raise ModuleNotFound
-        # for fitz/beautifulsoup4 and degrade to "", which would mask this
-        # entirely), so pdf_bytes_to_md is monkeypatched here to control its
-        # return value directly and actually exercise the force-vs-not gate.
+        # Re-uploading a corrected PDF must re-extract the body, not keep
+        # serving the first extraction. docu_craft's real pdf/html
+        # conversion isn't installed in this dev venv (degrades to ""),
+        # so pdf_bytes_to_md is monkeypatched to exercise the force gate.
         calls = iter(["first extracted text", "second extracted text"])
         monkeypatch.setattr("prisma.services.vault.pdf_bytes_to_md", lambda data: next(calls))
         source = vault.create_source_from_citekey(
@@ -856,15 +783,9 @@ class TestAttachSourceCompanion:
         assert vault.get_source(source.slug).body == "second extracted text"
 
     def test_pdf_then_jpg_then_pdf_reextracts_the_second_pdf(self, vault, monkeypatch):
-        # Regression: is_replace inferred "was the body ever really
-        # extracted" from the IMMEDIATELY PRIOR companion's extension --
-        # wrong across exactly this chain. PDF A extracts (body_extracted
-        # becomes True), swapping to a JPG cover doesn't touch the body
-        # (no extraction attempted for jpg) but the JPG's extension isn't
-        # itself extraction-relevant, so the old logic saw the JPG and
-        # called the next PDF attach a "first extraction" (force=False) --
-        # the non-empty-body gate then skipped extracting PDF B entirely,
-        # leaving text from a PDF that's since been deleted.
+        # A PDF -> JPG -> PDF chain must still re-extract the second PDF --
+        # the JPG swap in between must not make it look like a first
+        # extraction.
         calls = iter(["first extracted text", "second extracted text"])
         monkeypatch.setattr("prisma.services.vault.pdf_bytes_to_md", lambda data: next(calls))
         source = vault.create_source_from_citekey(
@@ -907,12 +828,8 @@ class TestAttachSourceCompanion:
 
 class TestEnsureMdFormatCleansUpOnFailure:
     def test_temp_file_is_removed_when_docu_craft_render_raises(self, vault, monkeypatch, tmp_path):
-        # Regression: NamedTemporaryFile(delete=False) creates the temp
-        # file before _dc_render() runs; the old code only unlinked it on
-        # the success path, so a render failure leaked it. Made worse by
-        # attach_source_companion()'s force=True: a user retrying a
-        # failing companion upload now leaked one temp file per retry, not
-        # just once.
+        # A render failure must not leak the temp file NamedTemporaryFile
+        # creates before _dc_render() runs.
         import tempfile as tempfile_module
 
         created: list[Path] = []
@@ -937,14 +854,8 @@ class TestEnsureMdFormatCleansUpOnFailure:
         assert not created[0].exists()
 
     def test_preserves_the_body_when_html_conversion_produces_empty_output(self, vault, monkeypatch):
-        # Regression: the .pdf branch above has an empty-output guard
-        # (`if not md_content: return False`), but the html/htm branch fell
-        # through with no equivalent check -- a forced (force=True,
-        # replacing an existing companion) conversion that succeeds
-        # without raising but produces only whitespace overwrote a
-        # genuinely existing body with empty content, contradicting this
-        # method's own promise that a failed extraction leaves the old
-        # body untouched "either way".
+        # A forced HTML conversion producing only whitespace must not
+        # overwrite an existing body with empty content.
         def fake_dc_render(source, format, output):
             Path(output).write_text("   \n", encoding="utf-8")
 
@@ -962,13 +873,8 @@ class TestEnsureMdFormatCleansUpOnFailure:
         assert vault.get_source(source.slug).body == "hand-typed body"
 
     def test_failed_final_write_preserves_the_existing_md_body(self, vault, monkeypatch):
-        # Regression: the final write was a plain companion.write_text()
-        # (open-truncate-write, not atomic) -- unlike attach_source_
-        # companion()'s own tmp-file+replace pattern for the companion
-        # binary, a write failure here (disk full, killed mid-write)
-        # destroyed whatever body this Source already had instead of
-        # leaving it untouched, right after this same method's own
-        # (possibly seconds-long) extraction.
+        # A failed final write must not destroy the body this Source
+        # already had.
         monkeypatch.setattr("prisma.services.vault.pdf_bytes_to_md", lambda data: "extracted text")
         source = vault.create_source_from_citekey(
             "smith2024", "A Great Paper", "original body", zotero_key="ABC123", authors=[], tags=[],
@@ -976,10 +882,8 @@ class TestEnsureMdFormatCleansUpOnFailure:
         companion_path = source.path.with_suffix(".pdf")
         companion_path.write_bytes(b"pdf bytes")
 
-        # A bare raise-only stub wouldn't reproduce the real bug: real
-        # write_text() opens the target in "w" (truncating immediately)
-        # before the write can fail, so the fake must truncate too, or
-        # this test would pass even against the unfixed code (confirmed).
+        # write_text() must actually truncate before raising, or the
+        # stub doesn't exercise a real partial write.
         original_write_text = Path.write_text
 
         def boom(self, data, encoding=None):
@@ -992,20 +896,9 @@ class TestEnsureMdFormatCleansUpOnFailure:
         assert vault.get_source(source.slug).body == "original body"
 
     def test_concurrent_metadata_edit_and_generate_md_format_do_not_lose_the_edit(self, vault, monkeypatch):
-        # Regression: ensure_md_format() has two callers -- attach_source_
-        # companion() (already _vault_write_lock-guarded) and the
-        # pre-existing generate_md_format() route (POST /{slug}/md, no
-        # lock of its own), which this PR newly makes reachable against a
-        # LOCKED Source for the first time (Sources previously only ever
-        # got a companion via Zotero import, with no other Source-mutating
-        # route to race against). Without ensure_md_format() itself taking
-        # the lock, a concurrent update_source_bibliographic_fields() call
-        # -- an independent read-merge-write of the identical file, itself
-        # lock-guarded -- can still lose its edit the moment this method's
-        # own (possibly seconds-long) extraction finishes and blind-writes
-        # a frontmatter snapshot taken before the edit landed. Same defect
-        # class as test_concurrent_metadata_edit_and_companion_upload_
-        # does_not_lose_the_edit above, just for the fourth call path.
+        # A metadata edit racing generate_md_format()'s own extraction
+        # (the /{slug}/md route's caller) must not be silently discarded,
+        # same as the companion-upload case above.
         import threading
         import time
 
@@ -1042,24 +935,11 @@ class TestEnsureMdFormatCleansUpOnFailure:
 
 class TestSetNodeTypeLocking:
     def test_holds_vault_write_lock_for_its_whole_duration(self, vault, monkeypatch):
-        # Regression: set_node_type() (PATCH /{slug}/type, the pre-existing
-        # type-toggle route, untouched by this diff) did an unlocked
-        # read-modify-write of a Source's .md frontmatter -- before this
-        # PR, a Source's .md file had no other locked writer to race
-        # against; update_source_bibliographic_fields()/attach_source_
-        # companion() are new concurrent writers of the identical file, so
-        # this pre-existing route needed the same _vault_write_lock
-        # protection generate_md_format() got for the same reason.
-        #
-        # Tests lock ownership directly (does a concurrent non-blocking
-        # acquire attempt fail while set_node_type() is mid-flight) rather
-        # than trying to force an actual lost-update through sleep-timed
-        # thread interleaving -- set_node_type()'s body has no operation
-        # slow enough to reliably win a real race the way a multi-second
-        # PDF extraction does for the other locked methods, so a
-        # sleep-based version of this test was confirmed flaky (passed
-        # even against the unfixed, unlocked code, depending on scheduling
-        # order) where this direct approach is deterministic.
+        # Tests lock ownership directly (a concurrent non-blocking acquire
+        # attempt must fail while set_node_type() is mid-flight) rather
+        # than a sleep-timed race -- this method has no operation slow
+        # enough to reliably win a real race, so a sleep-based version was
+        # flaky.
         import threading
 
         source = vault.create_source_from_citekey(
@@ -1090,10 +970,7 @@ class TestSetNodeTypeLocking:
         assert not acquired, "set_node_type() must hold _vault_write_lock while it runs"
 
     def test_failed_write_preserves_the_existing_source(self, vault, monkeypatch):
-        # Regression: the write was a plain write_text() (open-truncate-
-        # write, not atomic) -- same defect class fixed on every other
-        # Source-mutating write path this arc (update_source_
-        # bibliographic_fields, ensure_md_format, attach_source_companion).
+        # A failed write must not destroy the Source's existing content.
         source = vault.create_source_from_citekey(
             "smith2024", "A Great Paper", "original body",
             zotero_key="ABC123", authors=["Jane Smith"], tags=[],
@@ -1117,13 +994,8 @@ class TestSetNodeTypeLocking:
 
 class TestSaveNoteLocking:
     def test_holds_vault_write_lock_for_its_whole_duration(self, vault, monkeypatch):
-        # Regression: save_note() (PUT /{slug}, untouched by the manual-
-        # Source-CRUD diff) did an unlocked read-modify-write of a note's
-        # .md frontmatter -- the same class of race already closed for
-        # every Source-mutating method, just never noticed here because it
-        # was thought Source-specific. Tests lock ownership directly, same
-        # reasoning as TestSetNodeTypeLocking above: no operation in this
-        # method is slow enough to reliably win a real race.
+        # Tests lock ownership directly, same reasoning as
+        # TestSetNodeTypeLocking above.
         import threading
 
         note = vault.create_note("My Note", "original body")
@@ -1152,9 +1024,7 @@ class TestSaveNoteLocking:
         assert not acquired, "save_note() must hold _vault_write_lock while it runs"
 
     def test_failed_write_preserves_the_existing_note(self, vault, monkeypatch):
-        # Regression: the write was a plain write_text() (open-truncate-
-        # write, not atomic) -- same defect class fixed on every Source
-        # write path this arc.
+        # A failed write must not destroy the note's existing content.
         note = vault.create_note("My Note", "original body")
 
         original_write_text = Path.write_text
@@ -1192,14 +1062,9 @@ class TestUpdateSourceBibliographicFields:
         assert updated.body == "the body text"
 
     def test_rejects_a_node_converted_away_from_source_out_from_under_it(self, vault):
-        # Regression: the route layer's isinstance(node, Source) check runs
-        # BEFORE this method's own lock is acquired -- a concurrent
-        # set_node_type() call (also lock-guarded) converting this node to
-        # a Note in that window would otherwise let this method proceed
-        # anyway, silently writing Source-only bibliographic fields into
-        # what is now a Note. Simulated directly here (rather than via
-        # real thread timing) since the actual race window is in
-        # route-layer code this service-level test can't reach.
+        # A node converted to a Note must reject a Source-only mutation,
+        # even called directly (the real race is in route-layer code this
+        # service-level test can't reach).
         source = vault.create_source_from_citekey(
             "smith2024", "A Great Paper", "body", zotero_key="ABC123", authors=[], tags=[],
         )
@@ -1209,19 +1074,15 @@ class TestUpdateSourceBibliographicFields:
             vault.update_source_bibliographic_fields(source.slug, journal="New Journal")
 
     def test_failed_write_preserves_the_existing_source(self, vault, monkeypatch):
-        # Regression: the exact defect class fixed in ensure_md_format()
-        # one round earlier (a plain write_text() opens in "w", truncating
-        # immediately, so a write failure partway through destroys the
-        # whole file instead of leaving it untouched), missed on this
-        # sibling despite doing the identical read-parse-merge-write shape
-        # on the identical file, under the identical lock.
+        # A failed write must not destroy the whole file instead of
+        # leaving it untouched.
         source = vault.create_source_from_citekey(
             "smith2024", "A Great Paper", "original body",
             zotero_key="ABC123", authors=["Jane Smith"], tags=["ml"], year=2024,
         )
 
-        # A bare raise-only stub wouldn't reproduce the real bug -- real
-        # write_text() truncates the target before the write can fail.
+        # write_text() must actually truncate before raising, or the
+        # stub doesn't exercise a real partial write.
         original_write_text = Path.write_text
 
         def boom(self, data, encoding=None):
@@ -1366,12 +1227,6 @@ class TestMoveNodeRejectsPathTraversal:
 
 
 class TestMoveAndRenameNodeCompanionHandling:
-    # Regression: move_node()/rename_node()'s companion-relocation logic
-    # only ever checked `if path.suffix == ".html"` -- unconditionally
-    # False for a Source (always `.md`), so moving or renaming a Source
-    # with an attached companion silently orphaned it: left behind at the
-    # old path/name, invisible to find_companion()'s stem-matching under
-    # the new one.
     def test_move_node_relocates_a_source_companion(self, vault):
         source = vault.create_source_from_citekey(
             "smith2024", "A Great Paper", "body", zotero_key="ABC123", authors=[], tags=[],
@@ -1416,11 +1271,8 @@ class TestMoveAndRenameNodeCompanionHandling:
         assert not md_companion.exists()
 
     def test_move_node_rejects_a_companion_destination_collision(self, vault):
-        # Regression: only the primary's own destination was checked for a
-        # collision -- a pre-existing, unrelated file at the companion's
-        # target name got silently overwritten by Path.rename() on POSIX
-        # (or left the primary already moved with no companion move to
-        # follow, on a platform where rename() raises instead).
+        # A pre-existing file at the companion's own target name must
+        # reject the move, not get silently overwritten.
         source = vault.create_source_from_citekey(
             "smith2024", "A Great Paper", "body", zotero_key="ABC123", authors=[], tags=[],
         )
@@ -1456,11 +1308,7 @@ class TestMoveAndRenameNodeCompanionHandling:
 
 class TestDeleteNode:
     def test_deletes_a_source_companion_too(self, vault):
-        # Regression: delete_node() only ever checked
-        # `if path.suffix == ".html"` for a companion to remove alongside
-        # the primary -- unconditionally False for a Source, permanently
-        # orphaning its .pdf/.svg/etc. companion the moment the primary
-        # .md was gone.
+        # Deleting a Source must also remove its companion, not orphan it.
         source = vault.create_source_from_citekey(
             "smith2024", "A Great Paper", "body", zotero_key="ABC123", authors=[], tags=[],
         )

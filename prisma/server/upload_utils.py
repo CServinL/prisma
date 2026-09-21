@@ -1,13 +1,9 @@
 """Shared file-upload guard.
 
-Every upload route in this codebase used to read an `UploadFile`'s entire
-body in one call (`file.file.read()` / `await file.read()`) before any
-extension or size check ran -- an oversized upload could pressure/OOM the
-process before the existing extension allowlist ever got a chance to
-reject it (see TODO.md). `Content-Length` alone isn't trusted as the
-guard: it can be missing or wrong under chunked transfer encoding, so
-this counts real bytes read instead, rejecting mid-stream the moment the
-cap is exceeded rather than after the whole body is already in memory.
+Reads an `UploadFile`'s body in bounded chunks and rejects mid-stream the
+moment a size cap is exceeded, instead of buffering the whole body first.
+`Content-Length` alone isn't trusted as the guard: it can be missing or
+wrong under chunked transfer encoding, so this counts real bytes read.
 """
 from __future__ import annotations
 

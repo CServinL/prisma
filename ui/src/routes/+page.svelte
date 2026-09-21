@@ -305,10 +305,8 @@
   // FastAPI's own HTTPException(detail=str) responses give `detail` as a
   // plain string, but its automatic 422 (Pydantic field validation, e.g.
   // Source's year/max_length constraints) gives `detail` as an array of
-  // {loc, msg, type} objects instead. Every form-error handler in this
-  // file used to do `err.detail ?? fallback` and assign the result
-  // straight into a string-typed error state -- for the 422 shape, that
-  // stringifies the array (`[object Object]`), showing nothing useful.
+  // {loc, msg, type} objects instead; stringifying that array directly
+  // shows nothing useful (`[object Object]`).
   function formatApiError(err: unknown, fallback: string): string {
     const detail = (err as { detail?: unknown } | null)?.detail;
     if (typeof detail === "string") return detail;
@@ -1871,14 +1869,8 @@
       authors,
       tags,
       source_kind: sourceForm.source_kind,
-      // Not a truthy check -- Svelte's bind:value on a type="number" input
-      // coerces to a real JS number once touched (not the string the
-      // EMPTY_SOURCE_FORM default holds), so `sourceForm.year ? ... : null`
-      // would treat an explicitly typed 0 as "not entered" and silently
-      // send null instead -- the exact falsy-zero bug already fixed on the
-      // backend (create_source_from_citekey()/update_source_bibliographic_
-      // fields() both use `is not None`), reintroduced here if this used
-      // truthiness instead.
+      // Not a truthy check: an explicitly typed 0 must survive, matching
+      // the backend's `is not None` handling of this field.
       year: sourceForm.year === "" || sourceForm.year == null ? null : Number(sourceForm.year),
       // doi isn't converted to null on blank like the others below -- the
       // backend checks it with `is not None` (so it can be cleared), unlike
@@ -1927,14 +1919,13 @@
       // entirely, or upload the NEW form's file to the source that was
       // just saved here.
       const fileToUpload = sourceFormFile;
-      // Close and refresh as soon as the metadata save succeeds, before
-      // attempting the companion upload -- the metadata IS saved at this
-      // point regardless of what happens next. Leaving the dialog open on
-      // a companion-upload failure used to mean retrying re-submitted the
-      // same create call, which then 409'd on the citekey the first,
-      // already-successful attempt had claimed. A failed companion upload
-      // is now a separate, best-effort step reported via alert(), with the
-      // toolbar's own "Upload companion" action as the natural retry path.
+      // Close and refresh as soon as the metadata save succeeds -- it is
+      // saved at this point regardless of what the companion upload does
+      // next. A failed companion upload is a separate, best-effort step
+      // reported via alert(), with the toolbar's "Upload companion" action
+      // as the retry path; the dialog must not stay open for a retry, or
+      // resubmitting it would re-issue the create call and 409 on the
+      // citekey the first attempt already claimed.
       showSourceForm = false;
       await loadTree();
       await openNode(targetSlug);
@@ -2592,19 +2583,9 @@
           {/if}
           {#if activeNode.original_ext === ".html"}
             <button class="open-original" onclick={async () => {
-              // requestFullscreen() on the existing sandboxed iframe, NOT
-              // shellOpen(rawApiUrl) -- that opened the same arbitrary
-              // companion as a brand-new, completely unsandboxed top-level
-              // document. A <iframe sandbox> attribute only exists on
-              // iframes; there's no way to give a freshly-opened tab/
-              // window the same opaque-origin isolation, so the fix is to
-              // never leave the sandboxed context at all, just make it
-              // fill the screen. Since this PR adds a manual HTML upload
-              // path, a crafted companion opened the old way could
-              // execute with the API origin's own ambient privileges
-              // (most severe when server.auth.mode is "none", a supported
-              // no-password LAN deployment -- full unauthenticated API
-              // access from any uploaded HTML file's script).
+              // sandbox="allow-scripts" only applies to iframes, not a new
+              // tab/window, so this fullscreens the existing sandboxed
+              // iframe rather than opening the companion at top level.
               try {
                 await htmlFrameEl?.requestFullscreen();
               } catch(e) {

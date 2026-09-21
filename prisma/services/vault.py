@@ -381,20 +381,14 @@ class VaultService:
         self._chat_write_lock = threading.Lock()
         # Same rationale again, for any single-vault-file read-merge-write
         # (or, for write_by_path()/delete_by_path(), a blind create-or-
-        # overwrite): originally added just for the manual-create route's
-        # citekey-uniqueness check-then-write
-        # (create_source_from_citekey_if_free), then grown to cover every
-        # other Source-mutating method that reads and rewrites the same
-        # file (update_source_bibliographic_fields, attach_source_
-        # companion, ensure_md_format, set_node_type), Note's save_note(),
-        # move_node()/rename_node() -- and now /sync/file's write_by_path()/
-        # delete_by_path() too, which used to take a second, separate
-        # `_path_write_lock` that was never coordinated with this one, so a
-        # synced desktop edit landing on the same file at the same moment
-        # as a locked API-side edit could still race, just via two
-        # uncoordinated locks instead of no lock at all. One process-wide
-        # lock for every vault-file write, not one lock per code path, so
-        # that specific mistake can't happen again.
+        # overwrite): guards every Source-mutating method that reads and
+        # rewrites the same file (update_source_bibliographic_fields,
+        # attach_source_companion, ensure_md_format, set_node_type),
+        # Note's save_note(), move_node()/rename_node(), and /sync/file's
+        # write_by_path()/delete_by_path(). One process-wide lock for
+        # every vault-file write, not one lock per code path, so a synced
+        # desktop edit and a locked API-side edit can never race each
+        # other on the same file.
         self._vault_write_lock = threading.Lock()
 
     def ensure_dirs(self) -> None:
@@ -1885,14 +1879,11 @@ class VaultService:
     def write_by_path(self, rel_path: str, body: str) -> float:
         """Create-or-overwrite. Returns the new mtime.
 
-        Holds _vault_write_lock -- a synced desktop edit landing on the
-        same file as a locked API-side edit (e.g. PATCH /{slug}/source)
-        used to race via a second, uncoordinated lock (_path_write_lock,
-        now retired). Also writes atomically (tmp-file+replace): the old
-        plain write_text() truncated an existing file immediately, so a
-        write failure partway through (disk full, killed mid-write)
-        destroyed it instead of leaving it untouched, same defect class
-        fixed on every other vault write path."""
+        Holds _vault_write_lock, so a synced desktop edit can't race a
+        locked API-side edit (e.g. PATCH /{slug}/source) on the same file.
+        Writes atomically (tmp-file+replace) so a write failure partway
+        through (disk full, killed mid-write) leaves the existing file
+        untouched instead of truncated."""
         path = self._safe_sync_path(rel_path)
         with self._vault_write_lock:
             path.parent.mkdir(parents=True, exist_ok=True)

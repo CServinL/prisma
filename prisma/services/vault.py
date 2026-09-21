@@ -836,14 +836,10 @@ class VaultService:
             ]:
                 if value:
                     fm[key] = value
-            # Atomic tmp-file+replace, not a direct write_text() -- the
-            # exact defect class fixed one method away in ensure_md_
-            # format() (a plain write_text() opens in "w", truncating
-            # immediately, so a failure partway through the write leaves
-            # the Source's entire frontmatter and body destroyed instead
-            # of untouched), missed here on that same pass despite this
-            # method doing the identical read-parse-merge-write shape on
-            # the identical file, under the identical lock.
+            # Atomic tmp-file+replace, not a direct write_text() -- a plain
+            # write_text() opens in "w", truncating immediately, so a
+            # failure partway through would destroy the Source's entire
+            # frontmatter and body instead of leaving them untouched.
             tmp_path = path.with_name(f"{path.name}.{uuid.uuid4().hex}.update.tmp")
             try:
                 tmp_path.write_text(_render_frontmatter(fm) + content, encoding="utf-8")
@@ -1248,19 +1244,12 @@ class VaultService:
     def set_node_type(self, slug: str, node_type: NodeType) -> None:
         """Update the type field for any node. For HTML files, creates/updates a companion .md.
 
-        Holds _vault_write_lock unconditionally (cheap when uncontended,
-        same call as every other Source-mutating method makes) even though
-        this method itself is generic across every node type. Reachable
-        against a Source via the pre-existing PATCH /{slug}/type route
-        (the type-toggle UI action) -- before this PR, a Source's .md file
-        had no other locked writer to race against; this PR's own
-        update_source_bibliographic_fields()/attach_source_companion() are
-        new concurrent writers of the identical file, so this method
-        needed the same protection as generate_md_format() got for the
-        same reason. Also switched both write paths to the same atomic
-        tmp-file+replace pattern its now-locked siblings already use --
-        the previous plain write_text() had the same truncate-before-fail
-        data-loss risk fixed there."""
+        Holds _vault_write_lock unconditionally (cheap when uncontended)
+        even though this method is generic across every node type --
+        reachable against a Source via PATCH /{slug}/type, which can race
+        update_source_bibliographic_fields()/attach_source_companion() on
+        the same file otherwise. Writes atomically (tmp-file+replace), same
+        as its locked siblings."""
         with self._vault_write_lock:
             path = self.find_file(slug)
             if path is None:
@@ -1373,16 +1362,11 @@ class VaultService:
         # inference goes wrong across a PDF -> non-extractable -> PDF
         # chain).
         fm["body_extracted"] = True
-        # Atomic tmp-file+replace, not a direct write_text() -- same
-        # reasoning attach_source_companion() already applies to the
-        # companion *binary*: a plain write_text() opens in "w" (truncating
-        # immediately), so a failure partway through (disk full, killed
-        # mid-write) would destroy whatever body this Source already had
-        # instead of leaving it untouched. This path runs right after this
-        # same method's own (possibly seconds-long) extraction above, and
-        # attach_source_companion()'s force=True re-upload flow now drives
-        # it far more often than before this PR -- worth the same
-        # protection its sibling write already has, not just the binary.
+        # Atomic tmp-file+replace, not a direct write_text() -- a plain
+        # write_text() opens in "w" (truncating immediately), so a write
+        # failure would destroy whatever body this Source already had
+        # instead of leaving it untouched, same reasoning as
+        # attach_source_companion()'s companion-binary write.
         tmp_path = companion.with_name(f"{companion.name}.{uuid.uuid4().hex}.mdformat.tmp")
         try:
             tmp_path.write_text(_render_frontmatter(fm) + md_content, encoding="utf-8")

@@ -87,11 +87,9 @@ def _drop_blank_list_items(v):
 class NoteCreateRequest(BaseModel):
     title: str
     body: str = ""
-    # Same _MAX_BIB_STR/_MAX_BIB_LIST bounds Source's authors/tags got for
-    # the identical reason: unbounded YAML bloat persisted verbatim and
-    # re-echoed by every note-returning route forever. Sibling-drift gap --
-    # this same diff already touches this exact field to add the
-    # blank-drop validator below, just missed the length bound.
+    # Same _MAX_BIB_STR/_MAX_BIB_LIST bounds Source's authors/tags use --
+    # an unbounded value would persist verbatim into YAML and be re-echoed
+    # by every note-returning route forever.
     tags: Optional[list[Annotated[str, Field(max_length=_MAX_BIB_STR)]]] = Field(
         None, max_length=_MAX_BIB_LIST,
     )

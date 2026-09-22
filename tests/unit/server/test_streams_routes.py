@@ -68,6 +68,19 @@ def test_create_stream_then_list(client, vault):
     assert len(r2.json()) == 1
 
 
+def test_create_stream_rejects_whitespace_only_title(client, vault):
+    # Regression: no title validation at all on this route -- same gap
+    # Note/Source's _reject_blank_title() closes for those models.
+    r = client.post("/streams", json={"title": "   ", "query": "deep learning"})
+    assert r.status_code == 422
+
+
+def test_patch_stream_rejects_whitespace_only_title(client, vault):
+    vault.create_stream(title="My Stream", query="q")
+    r = client.patch("/streams/my-stream", json={"title": "   "})
+    assert r.status_code == 422
+
+
 def test_get_stream(client, vault):
     vault.create_stream(title="My Stream", query="q")
     r = client.get("/streams/my-stream")

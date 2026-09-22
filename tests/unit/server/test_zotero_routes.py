@@ -230,6 +230,20 @@ def test_zotero_import_returns_existing_source_if_already_imported(isolated_clie
     zotero.get_pdf_bytes.assert_not_called()
 
 
+def test_zotero_import_existing_source_response_echoes_original_ext(isolated_client, vault, zotero):
+    # A source previously imported, given a companion via manual upload,
+    # then re-imported must echo original_ext in the response too.
+    existing = vault.create_source_from_citekey(
+        "smith2024", "Already Here", "body text", zotero_key="K1", authors=[], tags=[],
+    )
+    vault.attach_source_companion(existing.slug, "figure.svg", b"<svg></svg>")
+    zotero.get_item.return_value = _zotero_item(key="K1")
+
+    r = isolated_client.post("/zotero/import/K1")
+    assert r.status_code == 201
+    assert r.json()["original_ext"] == ".svg"
+
+
 def test_zotero_import_creates_source_from_abstract_when_no_pdf(isolated_client, vault, zotero, indexer):
     zotero.get_item.return_value = _zotero_item(key="K2")
     zotero.get_pdf_bytes.return_value = None
@@ -250,6 +264,28 @@ def test_zotero_import_creates_source_from_abstract_when_no_pdf(isolated_client,
     assert source.journal == "Journal of Things"
     assert source.item_type == "journalArticle"
     assert source.url == "https://example.com/paper"
+
+    # The response itself, not just the persisted file, must echo these --
+    # the UI sets activeNode straight from it with no follow-up GET.
+    assert data["citekey"] == "smith2024"
+    assert data["authors"] == ["Jane Smith"]
+    assert data["tags"] == ["ml"]
+    assert data["doi"] == "10.1/xyz"
+
+
+def test_zotero_import_existing_source_response_also_echoes_fields(isolated_client, vault, zotero):
+    vault.create_source_from_citekey(
+        "smith2024", "Already Here", "body text",
+        zotero_key="K1", authors=["Jane Smith"], tags=["ml"],
+    )
+    zotero.get_item.return_value = _zotero_item(key="K1")
+
+    r = isolated_client.post("/zotero/import/K1")
+    assert r.status_code == 201
+    data = r.json()
+    assert data["citekey"] == "smith2024"
+    assert data["authors"] == ["Jane Smith"]
+    assert data["tags"] == ["ml"]
 
 
 # ── /zotero/items/relevance (lightweight stream-triage-by-graph-relevance) ────

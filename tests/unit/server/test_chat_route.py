@@ -171,6 +171,28 @@ def test_get_chat_route_populates_html_on_historical_assistant_messages(monkeypa
     assert '<span class="footnote-marker" data-footnote-index="1">1</span>' in messages[1]["content"]["rendered_html"]
 
 
+def test_create_chat_falls_back_to_auto_title_for_whitespace_only_title(monkeypatch, tmp_path):
+    # Regression: `req.title or f"Chat — ..."` treats whitespace as
+    # truthy, so a blank/whitespace-only title was kept verbatim instead
+    # of falling back to the auto-generated timestamp title -- same class
+    # of bug Note/Source's _reject_blank_title() closes for those models.
+    from prisma.server import app as app_module
+
+    real_vault = VaultService(vault_root=tmp_path / "vault")
+    real_vault.ensure_dirs()
+    monkeypatch.setattr(app_module, "_vault", real_vault)
+    chat_agent = MagicMock()
+    chat_agent.model = "test-model"
+    chat_agent.context_usage.return_value = (0, 4096)
+    monkeypatch.setattr(app_module, "_chat_agent", chat_agent)
+
+    r = client.post("/chats", json={"title": "   "})
+
+    assert r.status_code == 201
+    assert r.json()["title"] != "   "
+    assert r.json()["title"].startswith("Chat —")
+
+
 def test_chat_route_404_when_chat_not_found(monkeypatch):
     from prisma.server import app as app_module
 

@@ -3,10 +3,12 @@ find_file, node_type_from_frontmatter, unique_slug, find_stream_path,
 create_source_from_citekey — previously reached externally (renderer.py,
 app.py, chroma_service.py, knowledge_graph_service.py) only through their
 underscore-prefixed private equivalents."""
+from pathlib import Path
+
 import pytest
 
 from prisma.services.vault import VaultService
-from prisma.storage.models.vault_models import NodeType
+from prisma.storage.models.vault_models import NodeType, SourceKind, SourceOrigin
 
 
 @pytest.fixture
@@ -232,6 +234,27 @@ class TestCreateSourceFromCitekey:
         # assertion is the regression test for that fix.
         assert source.url == "https://example.com/paper"
 
+    def test_failed_write_does_not_leave_an_undetectable_garbage_file(self, vault, monkeypatch):
+        # A failed write must not leave a truncated, unparseable file
+        # under this slug -- citekey_exists() can't detect a citekey
+        # inside malformed frontmatter, so a retry would land on a
+        # different slug instead of reusing this one.
+        # write_text() must actually write bytes before raising, or the
+        # stub doesn't exercise a real partial write.
+        original_write_text = Path.write_text
+
+        def boom(self, data, encoding=None):
+            original_write_text(self, "---\ntitle: x\nno closing delimiter", encoding=encoding)
+            raise OSError("disk full")
+
+        monkeypatch.setattr(Path, "write_text", boom)
+        with pytest.raises(OSError):
+            vault.create_source_from_citekey(
+                "smith2024", "A Great Paper", "body", zotero_key="ABC123", authors=[], tags=[],
+            )
+        assert not (vault.default_dirs[NodeType.source] / "smith2024.md").exists()
+        assert vault.citekey_exists("smith2024") is False
+
     def test_omits_optional_fields_when_not_given(self, vault):
         source = vault.create_source_from_citekey(
             "smith2024", "A Great Paper", "body",
@@ -257,6 +280,16 @@ class TestCreateSourceFromCitekey:
         assert source.publisher == "Example Press"
         assert source.item_type == "journalArticle"
 
+    def test_year_zero_is_not_silently_dropped_at_creation(self, vault):
+        # Same falsy-zero bug class fixed on the update side
+        # (test_year_zero_is_not_silently_dropped below) -- must agree, or
+        # POST /notes/sources and PATCH /{slug}/source disagree on whether
+        # year=0 sticks for the identical field.
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "body", zotero_key="ABC123", authors=[], tags=[], year=0,
+        )
+        assert source.year == 0
+
     def test_slug_disambiguated_on_citekey_collision(self, vault):
         vault.create_source_from_citekey(
             "smith2024", "First", "body1", zotero_key="A", authors=[], tags=[],
@@ -265,6 +298,762 @@ class TestCreateSourceFromCitekey:
             "smith2024", "Second", "body2", zotero_key="B", authors=[], tags=[],
         )
         assert second.slug == "smith2024-1"
+
+    def test_origin_defaults_to_zotero_when_zotero_key_given(self, vault):
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "body", zotero_key="ABC123", authors=[], tags=[],
+        )
+        assert source.origin == SourceOrigin.zotero
+
+    def test_creates_upload_source_with_no_zotero_key(self, vault):
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "body",
+            zotero_key=None, origin=SourceOrigin.upload, authors=[], tags=[],
+        )
+        assert source.zotero_key is None
+        assert source.origin == SourceOrigin.upload
+        # Not just None after parsing -- the key must be absent from the
+        # raw frontmatter entirely, not written as `zotero_key: null`.
+        raw = source.path.read_text(encoding="utf-8")
+        assert "zotero_key" not in raw
+
+    def test_source_kind_round_trips(self, vault):
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "body",
+            zotero_key="ABC123", authors=[], tags=[], source_kind=SourceKind.web,
+        )
+        assert vault.get_source(source.slug).source_kind == SourceKind.web
+
+    def test_source_kind_defaults_to_paper_when_absent_from_frontmatter(self, vault):
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "body", zotero_key="ABC123", authors=[], tags=[],
+        )
+        # Not written to frontmatter at all for the default -- only a
+        # non-default source_kind gets persisted (see create_source_from_
+        # citekey). Confirms get_source() still falls back correctly.
+        raw = source.path.read_text(encoding="utf-8")
+        assert "source_kind" not in raw
+        assert vault.get_source(source.slug).source_kind == SourceKind.paper
+
+    def test_unrecognized_origin_falls_back_instead_of_raising(self, vault):
+        # Same defensive-fallback contract as VaultService.node_type_from_
+        # frontmatter() (an unrecognized `type:` value degrades to `note`
+        # rather than crashing the read) -- origin/source_kind must do the
+        # same for a hand-edited or forward-incompatible frontmatter value,
+        # or GET /notes/{slug} 500s for that one node instead of degrading.
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "body", zotero_key="ABC123", authors=[], tags=[],
+        )
+        raw = source.path.read_text(encoding="utf-8")
+        source.path.write_text(raw.replace("origin: zotero", "origin: some-future-value"), encoding="utf-8")
+        assert vault.get_source(source.slug).origin == SourceOrigin.zotero
+
+    def test_unrecognized_source_kind_falls_back_instead_of_raising(self, vault):
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "body",
+            zotero_key="ABC123", authors=[], tags=[], source_kind=SourceKind.web,
+        )
+        raw = source.path.read_text(encoding="utf-8")
+        source.path.write_text(raw.replace("source_kind: web", "source_kind: some-future-value"), encoding="utf-8")
+        assert vault.get_source(source.slug).source_kind == SourceKind.paper
+
+
+class TestCitekeyExists:
+    def test_true_for_an_existing_citekey(self, vault):
+        vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "body", zotero_key="ABC123", authors=[], tags=[],
+        )
+        assert vault.citekey_exists("smith2024") is True
+
+    def test_false_for_an_unused_citekey(self, vault):
+        assert vault.citekey_exists("nobody2099") is False
+
+    def test_finds_citekey_even_with_a_large_body(self, vault):
+        # citekey_exists() reads only each file's head (_CITEKEY_SCAN_READ_
+        # BYTES), not the whole file -- it runs inside create_source_from_
+        # citekey_if_free()'s lock, so a full-body read per file would
+        # serialize every manual create behind a scan whose cost scales
+        # with total vault content, not just file count. This confirms the
+        # bound doesn't break detection: frontmatter is always at the start
+        # of the file, so a body far larger than the bound (e.g. a full
+        # PDF-extracted paper) doesn't hide the citekey.
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "x" * 50_000, zotero_key="ABC123", authors=[], tags=[],
+        )
+        assert vault.citekey_exists("smith2024") is True
+
+    def test_finds_citekey_even_with_a_huge_frontmatter_block(self, vault):
+        # A frontmatter block larger than _FRONTMATTER_READ_BYTES must
+        # still be scanned in full -- a long author list can push it well
+        # past that.
+        huge_authors = [f"Author Number {i}" for i in range(500)]
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "body", zotero_key="ABC123", authors=huge_authors, tags=[],
+        )
+        raw = source.path.read_text(encoding="utf-8")
+        frontmatter_end = raw.index("\n---", 3) + 4
+        assert frontmatter_end > 8192  # confirms this actually exercises the old, too-small bound
+        assert vault.citekey_exists("smith2024") is True
+
+    def test_finds_citekey_past_a_fixed_scan_bound_entirely(self, vault):
+        # A frontmatter block can exceed even a generous fixed scan bound:
+        # yaml.dump()'s sort_keys=True places `citekey:` after `authors:`,
+        # so a maxed-out author list (within SourceCreateRequest's own
+        # caps) pushes `citekey:` itself past any fixed-size window.
+        huge_authors = [f"Author Number {i} " + "x" * 490 for i in range(200)]
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "body", zotero_key="ABC123", authors=huge_authors, tags=[],
+        )
+        raw = source.path.read_text(encoding="utf-8")
+        frontmatter_end = raw.index("\n---", 3) + 4
+        assert frontmatter_end > 65536  # confirms this exceeds the old fixed bound too
+        assert vault.citekey_exists("smith2024") is True
+
+    def test_scan_bound_is_measured_in_bytes_not_characters(self, vault, monkeypatch):
+        # _CITEKEY_SCAN_MAX_BYTES must bound real bytes, not characters --
+        # multi-byte UTF-8 content could otherwise consume up to 4x the
+        # ceiling. Re-encodes each read() call's return value back to
+        # UTF-8 so the measurement doesn't assume text vs binary mode.
+        from prisma.services.vault import _CITEKEY_SCAN_MAX_BYTES
+
+        path = vault.default_dirs[NodeType.source] / "malformed.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # 20MB on disk, no second "---" anywhere -- comfortably larger than
+        # the 4MB ceiling either way this gets measured.
+        with path.open("w", encoding="utf-8") as f:
+            f.write("---\ntitle: x\n")
+            for _ in range(5_000_000):
+                f.write("\U0001F600")  # 4 bytes/char in UTF-8
+
+        total_bytes = 0
+        real_open = Path.open
+
+        def counting_open(self, *args, **kwargs):
+            f = real_open(self, *args, **kwargs)
+            real_read = f.read
+
+            def counting_read(n=-1):
+                nonlocal total_bytes
+                data = real_read(n)
+                total_bytes += len(data) if isinstance(data, bytes) else len(data.encode("utf-8"))
+                return data
+
+            f.read = counting_read
+            return f
+
+        monkeypatch.setattr(Path, "open", counting_open)
+        vault.citekey_exists("nobody2099")
+        assert total_bytes < _CITEKEY_SCAN_MAX_BYTES * 1.5, (
+            f"read {total_bytes} real bytes, expected close to the {_CITEKEY_SCAN_MAX_BYTES}-byte ceiling"
+        )
+
+    def test_skips_a_file_that_vanishes_mid_scan(self, vault, monkeypatch):
+        # A concurrent delete/move between iter_files()'s walk yielding a
+        # path and this scan's own read is harmless to an existence check
+        # -- that file is gone either way -- so it must not abort the scan
+        # of every other file.
+        vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "body", zotero_key="ABC123", authors=[], tags=[],
+        )
+        real_open = Path.open
+
+        def vanishing_open(self, *args, **kwargs):
+            if self.name == "smith2024.md":
+                raise FileNotFoundError(self)
+            return real_open(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "open", vanishing_open)
+        assert vault.citekey_exists("smith2024") is False
+
+    def test_does_not_silently_swallow_a_permission_error(self, vault, monkeypatch):
+        # An unreadable file must abort the check, not be treated as if
+        # it didn't count towards the uniqueness scan.
+        vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "body", zotero_key="ABC123", authors=[], tags=[],
+        )
+        real_open = Path.open
+
+        def unreadable_open(self, *args, **kwargs):
+            if self.name == "smith2024.md":
+                raise PermissionError(13, "Permission denied", str(self))
+            return real_open(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "open", unreadable_open)
+        with pytest.raises(PermissionError):
+            vault.citekey_exists("smith2024")
+
+
+class TestCreateSourceFromCitekeyIfFree:
+    def test_raises_on_collision(self, vault):
+        vault.create_source_from_citekey_if_free(
+            "smith2024", "First", "body1", zotero_key="A", authors=[], tags=[],
+        )
+        with pytest.raises(ValueError):
+            vault.create_source_from_citekey_if_free(
+                "smith2024", "Second", "body2", zotero_key="B", authors=[], tags=[],
+            )
+
+    def test_concurrent_creates_with_the_same_citekey_lock_out_one_of_them(self, vault, monkeypatch):
+        # A purely sequential duplicate-citekey test (test_raises_on_collision
+        # above) passes identically whether or not _vault_write_lock exists
+        # at all -- it never has two requests in flight together, so it can't
+        # prove the TOCTOU race is actually closed. This widens the window
+        # between the check and the write (real file I/O in both already
+        # releases the GIL, so genuine OS-thread interleaving is possible
+        # even without this, just not reliably reproducible on demand) and
+        # asserts exactly one of two truly concurrent callers wins.
+        import threading
+        import time
+
+        real_citekey_exists = VaultService.citekey_exists
+
+        def slow_citekey_exists(self, citekey):
+            result = real_citekey_exists(self, citekey)
+            time.sleep(0.05)
+            return result
+
+        monkeypatch.setattr(VaultService, "citekey_exists", slow_citekey_exists)
+
+        results: list[str] = []
+
+        def worker():
+            try:
+                vault.create_source_from_citekey_if_free(
+                    "smith2024", "A Great Paper", "body", zotero_key="X", authors=[], tags=[],
+                )
+                results.append("created")
+            except ValueError:
+                results.append("rejected")
+
+        threads = [threading.Thread(target=worker) for _ in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert sorted(results) == ["created", "rejected"]
+
+
+class TestAttachSourceCompanion:
+    def test_attaches_svg_without_touching_body(self, vault):
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "original body", zotero_key="ABC123", authors=[], tags=[],
+        )
+        updated = vault.attach_source_companion(source.slug, "figure.svg", b"<svg></svg>")
+        assert updated.original_ext == ".svg"
+        assert updated.body == "original body"
+
+    def test_rejects_a_node_converted_away_from_source_out_from_under_it(self, vault):
+        # Same regression as TestUpdateSourceBibliographicFields's version
+        # above, for the companion-upload path.
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "body", zotero_key="ABC123", authors=[], tags=[],
+        )
+        vault.set_node_type(source.slug, NodeType.note)
+
+        with pytest.raises(ValueError):
+            vault.attach_source_companion(source.slug, "figure.svg", b"<svg></svg>")
+
+    def test_attaches_html_and_reaches_ensure_md_format(self, vault):
+        # Real docu_craft HTML->MD conversion, same non-committal assertion
+        # style as test_notes_routes.py's test_generate_md_format_creates_
+        # companion -- whether the body actually gets populated depends on
+        # docu_craft's own conversion succeeding for this snippet, not this
+        # method's concern to assert on. What matters: the companion file
+        # exists, original_ext updates, and the call doesn't raise.
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "", zotero_key="ABC123", authors=[], tags=[],
+        )
+        updated = vault.attach_source_companion(source.slug, "paper.html", b"<html><body>hi</body></html>")
+        assert updated.original_ext == ".html"
+
+    def test_rejects_unsupported_extension(self, vault):
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "body", zotero_key="ABC123", authors=[], tags=[],
+        )
+        with pytest.raises(ValueError):
+            vault.attach_source_companion(source.slug, "archive.zip", b"data")
+
+    def test_replacing_extension_removes_stale_companion(self, vault):
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "body", zotero_key="ABC123", authors=[], tags=[],
+        )
+        vault.attach_source_companion(source.slug, "figure.svg", b"<svg></svg>")
+        vault.attach_source_companion(source.slug, "figure.jpg", b"\xff\xd8\xff")
+        updated = vault.get_source(source.slug)
+        assert updated.original_ext == ".jpg"
+        assert vault.find_companion(source.slug).suffix == ".jpg"
+
+    def test_raises_file_not_found_for_missing_slug(self, vault):
+        with pytest.raises(FileNotFoundError):
+            vault.attach_source_companion("does-not-exist", "figure.svg", b"<svg></svg>")
+
+    def test_replacing_extension_preserves_old_companion_if_write_fails(self, vault, monkeypatch):
+        # A write failure while replacing a companion with a different
+        # extension must not leave the Source with no companion at all.
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "body", zotero_key="ABC123", authors=[], tags=[],
+        )
+        vault.attach_source_companion(source.slug, "figure.svg", b"<svg></svg>")
+        old_companion = vault.find_companion(source.slug)
+        assert old_companion.suffix == ".svg"
+
+        def boom(self, data):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(Path, "write_bytes", boom)
+        with pytest.raises(OSError):
+            vault.attach_source_companion(source.slug, "figure.jpg", b"\xff\xd8\xff")
+        assert old_companion.exists(), "old companion must survive a failed replacement write"
+
+    def test_same_extension_reupload_preserves_old_companion_if_write_fails(self, vault, monkeypatch):
+        # Same-extension case: companion_path IS the existing file, so a
+        # failed write there must not destroy the original.
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "body", zotero_key="ABC123", authors=[], tags=[],
+        )
+        vault.attach_source_companion(source.slug, "paper.pdf", b"original pdf bytes v1")
+        companion = vault.find_companion(source.slug)
+        assert companion.suffix == ".pdf"
+
+        # A bare raise-only stub wouldn't reproduce the real bug: real
+        # write_bytes() opens the target in "wb" (truncating immediately)
+        # before the write can fail, so the fake must truncate too, or this
+        # test would pass even against the unfixed code.
+        original_write_bytes = Path.write_bytes
+
+        def boom(self, data):
+            original_write_bytes(self, b"")
+            raise OSError("disk full")
+
+        monkeypatch.setattr(Path, "write_bytes", boom)
+        with pytest.raises(OSError):
+            vault.attach_source_companion(source.slug, "paper.pdf", b"corrected pdf bytes v2")
+        assert companion.read_bytes() == b"original pdf bytes v1", (
+            "a failed re-upload must not destroy the existing companion"
+        )
+
+    def test_failed_replace_leaves_no_tmp_file_behind(self, vault, monkeypatch):
+        # tmp_path must be cleaned up even when the write itself succeeds
+        # but the atomic replace() fails -- a write_bytes-raises stub
+        # wouldn't prove this, since it never lets the real tmp file get
+        # created in the first place.
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "body", zotero_key="ABC123", authors=[], tags=[],
+        )
+
+        def boom(self, target):
+            raise OSError("rename failed")
+
+        monkeypatch.setattr(Path, "replace", boom)
+        with pytest.raises(OSError):
+            vault.attach_source_companion(source.slug, "paper.pdf", b"pdf bytes")
+        leftovers = list(vault.root.rglob("*.upload.tmp"))
+        assert leftovers == [], f"tmp file(s) leaked: {leftovers}"
+
+    def test_concurrent_uploads_do_not_share_a_tmp_filename(self, vault, monkeypatch):
+        # Two concurrent uploads to the same slug must not write through
+        # the same tmp path -- proven by capturing the tmp path used by
+        # two separate calls and asserting they differ.
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "body", zotero_key="ABC123", authors=[], tags=[],
+        )
+        seen: list[str] = []
+        real_write_bytes = Path.write_bytes
+
+        def recording_write_bytes(self, data):
+            if self.name.endswith(".upload.tmp"):
+                seen.append(self.name)
+            return real_write_bytes(self, data)
+
+        monkeypatch.setattr(Path, "write_bytes", recording_write_bytes)
+        vault.attach_source_companion(source.slug, "paper.pdf", b"v1")
+        vault.attach_source_companion(source.slug, "paper.pdf", b"v2")
+        assert len(seen) == 2
+        assert seen[0] != seen[1], "two uploads must not reuse the same tmp filename"
+
+    def test_concurrent_metadata_edit_and_companion_upload_do_not_lose_the_edit(self, vault, monkeypatch):
+        # A metadata edit racing a companion upload's extraction must not
+        # be silently discarded. pdf_bytes_to_md() is monkeypatched to
+        # sleep, standing in for real extraction's multi-second cost.
+        import threading
+        import time
+
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "", zotero_key="ABC123", authors=["Original Author"], tags=[],
+        )
+
+        def slow_pdf_bytes_to_md(data):
+            time.sleep(0.15)
+            return "extracted text"
+
+        monkeypatch.setattr("prisma.services.vault.pdf_bytes_to_md", slow_pdf_bytes_to_md)
+
+        def upload():
+            vault.attach_source_companion(source.slug, "paper.pdf", b"pdf bytes")
+
+        def edit():
+            time.sleep(0.05)  # let upload grab the lock and start its slow extraction first
+            vault.update_source_bibliographic_fields(source.slug, authors=["New Author"])
+
+        t1 = threading.Thread(target=upload)
+        t2 = threading.Thread(target=edit)
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
+
+        assert vault.get_source(source.slug).authors == ["New Author"], (
+            "a metadata edit racing a companion upload's extraction must not be silently lost"
+        )
+
+    def test_concurrent_first_uploads_of_different_extensions_do_not_both_persist(self, vault, monkeypatch):
+        # Two concurrent first-time uploads to a companion-less source
+        # must not both persist a companion. find_companion() is
+        # monkeypatched to sleep between its read and return, widening the
+        # window for real thread interleaving.
+        import threading
+        import time
+
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "body", zotero_key="ABC123", authors=[], tags=[],
+        )
+        real_find_companion = VaultService.find_companion
+
+        def slow_find_companion(self, slug):
+            result = real_find_companion(self, slug)
+            time.sleep(0.05)
+            return result
+
+        monkeypatch.setattr(VaultService, "find_companion", slow_find_companion)
+
+        def upload_svg():
+            vault.attach_source_companion(source.slug, "figure.svg", b"<svg></svg>")
+
+        def upload_docx():
+            vault.attach_source_companion(source.slug, "paper.docx", b"docx bytes")
+
+        t1 = threading.Thread(target=upload_svg)
+        t2 = threading.Thread(target=upload_docx)
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
+
+        existing = [ext for ext in (".svg", ".docx") if source.path.with_suffix(ext).exists()]
+        assert len(existing) == 1, f"exactly one companion should survive, found: {existing}"
+
+    def test_first_attach_does_not_clobber_a_hand_typed_body(self, vault, monkeypatch):
+        # A first attachment must not force through the empty-body-only
+        # gate -- a genuinely hand-typed body must survive it.
+        monkeypatch.setattr("prisma.services.vault.pdf_bytes_to_md", lambda data: "extracted text")
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "hand-typed body, no companion yet",
+            zotero_key="ABC123", authors=[], tags=[],
+        )
+        updated = vault.attach_source_companion(source.slug, "paper.pdf", b"pdf bytes")
+        assert updated.body == "hand-typed body, no companion yet"
+
+    def test_first_pdf_attach_after_a_non_extraction_companion_does_not_clobber(self, vault, monkeypatch):
+        # A .jpg cover attached first never runs extraction, so a
+        # following .pdf attach is still a first real extraction, not a
+        # replace -- it must not force through the empty-body-only gate.
+        monkeypatch.setattr("prisma.services.vault.pdf_bytes_to_md", lambda data: "extracted text")
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "My own hand-typed summary.",
+            zotero_key="ABC123", authors=[], tags=[],
+        )
+        vault.attach_source_companion(source.slug, "cover.jpg", b"\xff\xd8\xff")
+        updated = vault.attach_source_companion(source.slug, "paper.pdf", b"pdf bytes")
+        assert updated.body == "My own hand-typed summary."
+
+    def test_replacing_a_pdf_companion_reextracts_the_body(self, vault, monkeypatch):
+        # Re-uploading a corrected PDF must re-extract the body, not keep
+        # serving the first extraction. docu_craft's real pdf/html
+        # conversion isn't installed in this dev venv (degrades to ""),
+        # so pdf_bytes_to_md is monkeypatched to exercise the force gate.
+        calls = iter(["first extracted text", "second extracted text"])
+        monkeypatch.setattr("prisma.services.vault.pdf_bytes_to_md", lambda data: next(calls))
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "", zotero_key="ABC123", authors=[], tags=[],
+        )
+        vault.attach_source_companion(source.slug, "paper.pdf", b"pdf bytes v1")
+        assert vault.get_source(source.slug).body == "first extracted text"
+        vault.attach_source_companion(source.slug, "paper.pdf", b"pdf bytes v2")
+        assert vault.get_source(source.slug).body == "second extracted text"
+
+    def test_pdf_then_jpg_then_pdf_reextracts_the_second_pdf(self, vault, monkeypatch):
+        # A PDF -> JPG -> PDF chain must still re-extract the second PDF --
+        # the JPG swap in between must not make it look like a first
+        # extraction.
+        calls = iter(["first extracted text", "second extracted text"])
+        monkeypatch.setattr("prisma.services.vault.pdf_bytes_to_md", lambda data: next(calls))
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "", zotero_key="ABC123", authors=[], tags=[],
+        )
+        vault.attach_source_companion(source.slug, "paper.pdf", b"pdf bytes A")
+        assert vault.get_source(source.slug).body == "first extracted text"
+        vault.attach_source_companion(source.slug, "cover.jpg", b"\xff\xd8\xff")
+        assert vault.get_source(source.slug).body == "first extracted text"  # untouched by the jpg swap
+        vault.attach_source_companion(source.slug, "paper.pdf", b"pdf bytes B")
+        assert vault.get_source(source.slug).body == "second extracted text"
+
+    def test_manual_body_edit_survives_a_later_companion_replace(self, vault, monkeypatch):
+        # save_note() is generic across every .md node, Source included --
+        # after a hand edit, body_extracted must no longer read as True, or
+        # the next companion replace force-reextracts and discards the edit.
+        calls = iter(["first extracted text", "second extracted text"])
+        monkeypatch.setattr("prisma.services.vault.pdf_bytes_to_md", lambda data: next(calls))
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "", zotero_key="ABC123", authors=[], tags=[],
+        )
+        vault.attach_source_companion(source.slug, "paper.pdf", b"pdf bytes A")
+        assert vault.get_source(source.slug).body == "first extracted text"
+        vault.save_note(source.slug, "manually corrected body")
+        vault.attach_source_companion(source.slug, "paper.pdf", b"pdf bytes B")
+        assert vault.get_source(source.slug).body == "manually corrected body"
+
+    def test_reuploading_identical_bytes_does_not_reextract(self, vault, monkeypatch):
+        calls = []
+        monkeypatch.setattr("prisma.services.vault.pdf_bytes_to_md", lambda data: calls.append(data) or "extracted once")
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "", zotero_key="ABC123", authors=[], tags=[],
+        )
+        vault.attach_source_companion(source.slug, "paper.pdf", b"identical bytes")
+        assert len(calls) == 1
+        vault.attach_source_companion(source.slug, "paper.pdf", b"identical bytes")
+        assert len(calls) == 1  # not called a second time -- byte-identical re-upload is a no-op
+
+    def test_differently_sized_reupload_skips_reading_the_old_companion(self, vault, monkeypatch):
+        # A differently-sized upload can never be byte-identical -- checking
+        # size first avoids reading the whole old companion into memory just
+        # to prove two objects of different length aren't equal, doubling
+        # peak memory on every meaningfully-changed large-file re-upload.
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "", zotero_key="ABC123", authors=[], tags=[],
+        )
+        vault.attach_source_companion(source.slug, "figure.jpg", b"\xff\xd8\xff old")
+
+        def boom(self):
+            raise AssertionError("must not read the old companion when sizes differ")
+
+        monkeypatch.setattr(Path, "read_bytes", boom)
+        vault.attach_source_companion(source.slug, "figure.jpg", b"\xff\xd8\xff a much longer new image")
+
+
+class TestEnsureMdFormatCleansUpOnFailure:
+    def test_temp_file_is_removed_when_docu_craft_render_raises(self, vault, monkeypatch, tmp_path):
+        # A render failure must not leak the temp file NamedTemporaryFile
+        # creates before _dc_render() runs.
+        import tempfile as tempfile_module
+
+        created: list[Path] = []
+        real_ntf = tempfile_module.NamedTemporaryFile
+
+        def recording_ntf(*args, **kwargs):
+            tf = real_ntf(*args, **kwargs)
+            created.append(Path(tf.name))
+            return tf
+
+        monkeypatch.setattr(tempfile_module, "NamedTemporaryFile", recording_ntf)
+        monkeypatch.setattr("docu_craft.render", lambda **kwargs: (_ for _ in ()).throw(RuntimeError("boom")))
+
+        companion = vault.default_dirs[NodeType.source] / "paper.html"
+        companion.parent.mkdir(parents=True, exist_ok=True)
+        companion.write_text("<html><body>hi</body></html>", encoding="utf-8")
+
+        result = vault.ensure_md_format(companion)
+
+        assert result is False
+        assert len(created) == 1
+        assert not created[0].exists()
+
+    def test_preserves_the_body_when_html_conversion_produces_empty_output(self, vault, monkeypatch):
+        # A forced HTML conversion producing only whitespace must not
+        # overwrite an existing body with empty content.
+        def fake_dc_render(source, format, output):
+            Path(output).write_text("   \n", encoding="utf-8")
+
+        monkeypatch.setattr("docu_craft.render", fake_dc_render)
+
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "hand-typed body", zotero_key="ABC123", authors=[], tags=[],
+        )
+        companion = source.path.with_suffix(".html")
+        companion.write_text("<html><body>hi</body></html>", encoding="utf-8")
+
+        result = vault.ensure_md_format(companion, force=True)
+
+        assert result is False
+        assert vault.get_source(source.slug).body == "hand-typed body"
+
+    def test_failed_final_write_preserves_the_existing_md_body(self, vault, monkeypatch):
+        # A failed final write must not destroy the body this Source
+        # already had.
+        monkeypatch.setattr("prisma.services.vault.pdf_bytes_to_md", lambda data: "extracted text")
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "original body", zotero_key="ABC123", authors=[], tags=[],
+        )
+        companion_path = source.path.with_suffix(".pdf")
+        companion_path.write_bytes(b"pdf bytes")
+
+        # write_text() must actually truncate before raising, or the
+        # stub doesn't exercise a real partial write.
+        original_write_text = Path.write_text
+
+        def boom(self, data, encoding=None):
+            original_write_text(self, "", encoding=encoding)
+            raise OSError("disk full")
+
+        monkeypatch.setattr(Path, "write_text", boom)
+        with pytest.raises(OSError):
+            vault.ensure_md_format(companion_path, force=True)
+        assert vault.get_source(source.slug).body == "original body"
+
+    def test_concurrent_metadata_edit_and_generate_md_format_do_not_lose_the_edit(self, vault, monkeypatch):
+        # A metadata edit racing generate_md_format()'s own extraction
+        # (the /{slug}/md route's caller) must not be silently discarded,
+        # same as the companion-upload case above.
+        import threading
+        import time
+
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "", zotero_key="ABC123", authors=["Original Author"], tags=[],
+        )
+        companion_path = source.path.with_suffix(".pdf")
+        companion_path.write_bytes(b"pdf bytes")
+
+        def slow_pdf_bytes_to_md(data):
+            time.sleep(0.15)
+            return "extracted text"
+
+        monkeypatch.setattr("prisma.services.vault.pdf_bytes_to_md", slow_pdf_bytes_to_md)
+
+        def generate():
+            vault.ensure_md_format(companion_path)
+
+        def edit():
+            time.sleep(0.05)  # let generate() grab the lock and start its slow extraction first
+            vault.update_source_bibliographic_fields(source.slug, authors=["New Author"])
+
+        t1 = threading.Thread(target=generate)
+        t2 = threading.Thread(target=edit)
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
+
+        assert vault.get_source(source.slug).authors == ["New Author"], (
+            "a metadata edit racing generate_md_format()'s extraction must not be silently lost"
+        )
+
+
+class TestSetNodeTypeLocking:
+    def test_holds_vault_write_lock_for_its_whole_duration(self, vault, monkeypatch):
+        # Tests lock ownership directly (a concurrent non-blocking acquire
+        # attempt must fail while set_node_type() is mid-flight) rather
+        # than a sleep-timed race -- this method has no operation slow
+        # enough to reliably win a real race, so a sleep-based version was
+        # flaky.
+        import threading
+
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "body", zotero_key="ABC123", authors=[], tags=[],
+        )
+
+        lock_held_during_call = threading.Event()
+        proceed = threading.Event()
+        real_find_file = VaultService.find_file
+
+        def blocking_find_file(self, slug):
+            result = real_find_file(self, slug)
+            lock_held_during_call.set()
+            proceed.wait(timeout=2)
+            return result
+
+        monkeypatch.setattr(VaultService, "find_file", blocking_find_file)
+
+        t = threading.Thread(target=lambda: vault.set_node_type(source.slug, NodeType.source))
+        t.start()
+        assert lock_held_during_call.wait(timeout=2), "set_node_type() never reached find_file()"
+
+        acquired = vault._vault_write_lock.acquire(blocking=False)
+        proceed.set()
+        t.join()
+        if acquired:
+            vault._vault_write_lock.release()
+        assert not acquired, "set_node_type() must hold _vault_write_lock while it runs"
+
+    def test_failed_write_preserves_the_existing_source(self, vault, monkeypatch):
+        # A failed write must not destroy the Source's existing content.
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "original body",
+            zotero_key="ABC123", authors=["Jane Smith"], tags=[],
+        )
+
+        original_write_text = Path.write_text
+
+        def boom(self, data, encoding=None):
+            original_write_text(self, "", encoding=encoding)
+            raise OSError("disk full")
+
+        monkeypatch.setattr(Path, "write_text", boom)
+        with pytest.raises(OSError):
+            vault.set_node_type(source.slug, NodeType.source)
+
+        preserved = vault.get_source(source.slug)
+        assert preserved.title == "A Great Paper"
+        assert preserved.authors == ["Jane Smith"]
+        assert preserved.body == "original body"
+
+
+class TestSaveNoteLocking:
+    def test_holds_vault_write_lock_for_its_whole_duration(self, vault, monkeypatch):
+        # Tests lock ownership directly, same reasoning as
+        # TestSetNodeTypeLocking above.
+        import threading
+
+        note = vault.create_note("My Note", "original body")
+
+        lock_held_during_call = threading.Event()
+        proceed = threading.Event()
+        real_find_md = VaultService._find_md
+
+        def blocking_find_md(self, slug):
+            result = real_find_md(self, slug)
+            lock_held_during_call.set()
+            proceed.wait(timeout=2)
+            return result
+
+        monkeypatch.setattr(VaultService, "_find_md", blocking_find_md)
+
+        t = threading.Thread(target=lambda: vault.save_note(note.slug, "updated body"))
+        t.start()
+        assert lock_held_during_call.wait(timeout=2), "save_note() never reached _find_md()"
+
+        acquired = vault._vault_write_lock.acquire(blocking=False)
+        proceed.set()
+        t.join()
+        if acquired:
+            vault._vault_write_lock.release()
+        assert not acquired, "save_note() must hold _vault_write_lock while it runs"
+
+    def test_failed_write_preserves_the_existing_note(self, vault, monkeypatch):
+        # A failed write must not destroy the note's existing content.
+        note = vault.create_note("My Note", "original body")
+
+        original_write_text = Path.write_text
+
+        def boom(self, data, encoding=None):
+            original_write_text(self, "", encoding=encoding)
+            raise OSError("disk full")
+
+        monkeypatch.setattr(Path, "write_text", boom)
+        with pytest.raises(OSError):
+            vault.save_note(note.slug, "updated body")
+
+        preserved = vault.get_note(note.slug)
+        assert preserved.body == "original body"
 
 
 class TestUpdateSourceBibliographicFields:
@@ -287,6 +1076,43 @@ class TestUpdateSourceBibliographicFields:
         assert updated.year == 2024
         assert updated.body == "the body text"
 
+    def test_rejects_a_node_converted_away_from_source_out_from_under_it(self, vault):
+        # A node converted to a Note must reject a Source-only mutation,
+        # even called directly (the real race is in route-layer code this
+        # service-level test can't reach).
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "body", zotero_key="ABC123", authors=[], tags=[],
+        )
+        vault.set_node_type(source.slug, NodeType.note)
+
+        with pytest.raises(ValueError):
+            vault.update_source_bibliographic_fields(source.slug, journal="New Journal")
+
+    def test_failed_write_preserves_the_existing_source(self, vault, monkeypatch):
+        # A failed write must not destroy the whole file instead of
+        # leaving it untouched.
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "original body",
+            zotero_key="ABC123", authors=["Jane Smith"], tags=["ml"], year=2024,
+        )
+
+        # write_text() must actually truncate before raising, or the
+        # stub doesn't exercise a real partial write.
+        original_write_text = Path.write_text
+
+        def boom(self, data, encoding=None):
+            original_write_text(self, "", encoding=encoding)
+            raise OSError("disk full")
+
+        monkeypatch.setattr(Path, "write_text", boom)
+        with pytest.raises(OSError):
+            vault.update_source_bibliographic_fields(source.slug, journal="New Journal")
+
+        preserved = vault.get_source(source.slug)
+        assert preserved.title == "A Great Paper"
+        assert preserved.authors == ["Jane Smith"]
+        assert preserved.body == "original body"
+
     def test_does_not_blank_out_fields_when_called_with_none(self, vault):
         source = vault.create_source_from_citekey(
             "smith2024", "A Great Paper", "body",
@@ -301,6 +1127,86 @@ class TestUpdateSourceBibliographicFields:
     def test_raises_file_not_found_for_missing_slug(self, vault):
         with pytest.raises(FileNotFoundError):
             vault.update_source_bibliographic_fields("does-not-exist", journal="X")
+
+    def test_merges_title_authors_year_doi_tags(self, vault):
+        source = vault.create_source_from_citekey(
+            "smith2024", "Original Title", "body",
+            zotero_key="ABC123", authors=["Jane Smith"], tags=["ml"],
+            year=2020, journal="Original Journal",
+        )
+
+        updated = vault.update_source_bibliographic_fields(
+            source.slug, title="New Title", authors=["Jane Smith", "Bob Jones"],
+            year=2024, doi="10.1/new", tags=["ml", "nlp"],
+        )
+
+        assert updated.title == "New Title"
+        assert updated.authors == ["Jane Smith", "Bob Jones"]
+        assert updated.year == 2024
+        assert updated.doi == "10.1/new"
+        assert updated.tags == ["ml", "nlp"]
+        # journal was set at creation and not passed to this update call --
+        # must stay untouched, same merge-only-given-fields guarantee the
+        # original 7-field version already had.
+        assert updated.journal == "Original Journal"
+
+    def test_source_kind_is_editable_after_creation(self, vault):
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "body", zotero_key="ABC123", authors=[], tags=[],
+        )
+        assert source.source_kind == SourceKind.paper
+        updated = vault.update_source_bibliographic_fields(source.slug, source_kind=SourceKind.web)
+        assert updated.source_kind == SourceKind.web
+
+    def test_explicit_empty_string_clears_doi(self, vault):
+        # doi uses `is not None` too (it's in the same new-field group as
+        # authors/tags/title/year) -- an explicit "" must actually clear it,
+        # matching the UI's edit-metadata dialog, which relies on this to
+        # let a user blank out a wrong DOI (see +page.svelte's
+        # submitSourceForm() comment on why doi isn't converted to null on
+        # blank the way url/journal/etc. are).
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "body", zotero_key="ABC123", authors=[], tags=[], doi="10.1/wrong",
+        )
+        updated = vault.update_source_bibliographic_fields(source.slug, doi="")
+        assert updated.doi == ""
+
+    def test_citekey_is_not_an_accepted_parameter(self, vault):
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "body", zotero_key="ABC123", authors=[], tags=[],
+        )
+        with pytest.raises(TypeError):
+            vault.update_source_bibliographic_fields(source.slug, citekey="hijacked2024")
+
+    def test_explicit_empty_authors_and_tags_actually_clear_them(self, vault):
+        # authors/tags use `is not None`, not the original 7 fields' truthy
+        # check -- an explicit [] from the edit route means "clear it," a
+        # real edit action, not "field wasn't given."
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "body",
+            zotero_key="ABC123", authors=["Jane Smith"], tags=["ml"],
+        )
+        updated = vault.update_source_bibliographic_fields(source.slug, authors=[], tags=[])
+        assert updated.authors == []
+        assert updated.tags == []
+
+    def test_omitting_authors_leaves_it_untouched(self, vault):
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "body",
+            zotero_key="ABC123", authors=["Jane Smith"], tags=[],
+        )
+        updated = vault.update_source_bibliographic_fields(source.slug, doi="10.1/x")
+        assert updated.authors == ["Jane Smith"]
+
+    def test_year_zero_is_not_silently_dropped(self, vault):
+        # year uses `is not None` too, unlike the original 7 fields' `if
+        # value:` -- a falsy-but-meaningful value must actually take effect,
+        # not silently no-op.
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "body", zotero_key="ABC123", authors=[], tags=[], year=2020,
+        )
+        updated = vault.update_source_bibliographic_fields(source.slug, year=0)
+        assert updated.year == 0
 
 
 class TestMoveNodeRejectsPathTraversal:
@@ -333,6 +1239,209 @@ class TestMoveNodeRejectsPathTraversal:
 
         assert (vault.root / new_rel).exists()
         assert new_rel.startswith("sources/")
+
+
+class TestMoveAndRenameNodeCompanionHandling:
+    def test_move_node_relocates_a_source_companion(self, vault):
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "body", zotero_key="ABC123", authors=[], tags=[],
+        )
+        vault.attach_source_companion(source.slug, "figure.svg", b"<svg></svg>")
+
+        new_slug, _, _ = vault.move_node(source.slug, dest_dir="notes")
+
+        moved = vault.get_source(new_slug)
+        assert moved.original_ext == ".svg"
+        assert vault.find_companion(new_slug) is not None
+        assert vault.find_companion(new_slug).parent == vault.root / "notes"
+
+    def test_rename_node_relocates_a_source_companion(self, vault):
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "body", zotero_key="ABC123", authors=[], tags=[],
+        )
+        vault.attach_source_companion(source.slug, "figure.svg", b"<svg></svg>")
+
+        new_slug, _, _ = vault.rename_node(source.slug, "A Renamed Paper")
+
+        moved = vault.get_source(new_slug)
+        assert moved.original_ext == ".svg"
+        companion = vault.find_companion(new_slug)
+        assert companion is not None
+        assert companion.stem == new_slug
+
+    def test_move_node_still_relocates_an_html_primarys_md_companion(self, vault):
+        # The pre-existing case this logic originally handled -- confirms
+        # generalizing it didn't regress the reverse pairing.
+        html_dir = vault.default_dirs[NodeType.source]
+        html_dir.mkdir(parents=True, exist_ok=True)
+        html_path = html_dir / "paper.html"
+        html_path.write_text("<html><body>hi</body></html>", encoding="utf-8")
+        md_companion = html_dir / "paper.md"
+        md_companion.write_text("---\ntitle: paper\n---\nBody.", encoding="utf-8")
+
+        new_slug, _, new_rel = vault.move_node("paper", dest_dir="notes")
+
+        assert (vault.root / new_rel).exists()
+        assert (vault.root / "notes" / "paper.md").exists()
+        assert not md_companion.exists()
+
+    def test_move_node_rejects_a_companion_destination_collision(self, vault):
+        # A pre-existing file at the companion's own target name must
+        # reject the move, not get silently overwritten.
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "body", zotero_key="ABC123", authors=[], tags=[],
+        )
+        vault.attach_source_companion(source.slug, "figure.svg", b"<svg></svg>")
+        dest_dir = vault.root / "notes"
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        colliding = dest_dir / "smith2024.svg"
+        colliding.write_bytes(b"unrelated content")
+
+        with pytest.raises(FileExistsError):
+            vault.move_node(source.slug, dest_dir="notes")
+
+        # Nothing moved -- rejected before either file was touched.
+        assert vault.find_file(source.slug) is not None
+        assert vault.find_file(source.slug).parent != dest_dir
+        assert colliding.read_bytes() == b"unrelated content"
+
+    def test_rename_node_rejects_a_companion_destination_collision(self, vault):
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "body", zotero_key="ABC123", authors=[], tags=[],
+        )
+        vault.attach_source_companion(source.slug, "figure.svg", b"<svg></svg>")
+        colliding = source.path.parent / "a-renamed-paper.svg"
+        colliding.write_bytes(b"unrelated content")
+
+        with pytest.raises(FileExistsError):
+            vault.rename_node(source.slug, "A Renamed Paper")
+
+        assert vault.find_file(source.slug) is not None
+        assert vault.find_file(source.slug).stem == "smith2024"
+        assert colliding.read_bytes() == b"unrelated content"
+
+
+class TestDeleteNode:
+    def test_deletes_a_source_companion_too(self, vault):
+        # Deleting a Source must also remove its companion, not orphan it.
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "body", zotero_key="ABC123", authors=[], tags=[],
+        )
+        vault.attach_source_companion(source.slug, "figure.svg", b"<svg></svg>")
+        companion = vault.find_companion(source.slug)
+        assert companion is not None
+
+        vault.delete_node(source.slug)
+
+        assert not companion.exists()
+
+    def test_holds_vault_write_lock_for_its_whole_duration(self, vault, monkeypatch):
+        import threading
+
+        note = vault.create_note("Note A")
+
+        lock_held_during_call = threading.Event()
+        proceed = threading.Event()
+        real_find_file = VaultService.find_file
+
+        def blocking_find_file(self, slug):
+            result = real_find_file(self, slug)
+            lock_held_during_call.set()
+            proceed.wait(timeout=2)
+            return result
+
+        monkeypatch.setattr(VaultService, "find_file", blocking_find_file)
+
+        t = threading.Thread(target=lambda: vault.delete_node(note.slug))
+        t.start()
+        assert lock_held_during_call.wait(timeout=2), "delete_node() never reached find_file()"
+
+        acquired = vault._vault_write_lock.acquire(blocking=False)
+        proceed.set()
+        t.join()
+        if acquired:
+            vault._vault_write_lock.release()
+        assert not acquired, "delete_node() must hold _vault_write_lock while it runs"
+
+
+class TestMoveAndRenameNodeLocking:
+    def test_move_node_holds_vault_write_lock_for_its_whole_duration(self, vault, monkeypatch):
+        import threading
+
+        note = vault.create_note("Note A")
+
+        lock_held_during_call = threading.Event()
+        proceed = threading.Event()
+        real_find_file = VaultService.find_file
+
+        def blocking_find_file(self, slug):
+            result = real_find_file(self, slug)
+            lock_held_during_call.set()
+            proceed.wait(timeout=2)
+            return result
+
+        monkeypatch.setattr(VaultService, "find_file", blocking_find_file)
+
+        t = threading.Thread(target=lambda: vault.move_node(note.slug, dest_dir="sources"))
+        t.start()
+        assert lock_held_during_call.wait(timeout=2), "move_node() never reached find_file()"
+
+        acquired = vault._vault_write_lock.acquire(blocking=False)
+        proceed.set()
+        t.join()
+        if acquired:
+            vault._vault_write_lock.release()
+        assert not acquired, "move_node() must hold _vault_write_lock while it runs"
+
+    def test_rename_node_holds_vault_write_lock_for_its_whole_duration(self, vault, monkeypatch):
+        import threading
+
+        note = vault.create_note("Note A")
+
+        lock_held_during_call = threading.Event()
+        proceed = threading.Event()
+        real_find_md = VaultService._find_md
+
+        def blocking_find_md(self, slug):
+            result = real_find_md(self, slug)
+            lock_held_during_call.set()
+            proceed.wait(timeout=2)
+            return result
+
+        monkeypatch.setattr(VaultService, "_find_md", blocking_find_md)
+
+        t = threading.Thread(target=lambda: vault.rename_node(note.slug, "New Title"))
+        t.start()
+        assert lock_held_during_call.wait(timeout=2), "rename_node() never reached _find_md()"
+
+        acquired = vault._vault_write_lock.acquire(blocking=False)
+        proceed.set()
+        t.join()
+        if acquired:
+            vault._vault_write_lock.release()
+        assert not acquired, "rename_node() must hold _vault_write_lock while it runs"
+
+    def test_rename_node_failed_write_does_not_leave_a_truncated_file(self, vault, monkeypatch):
+        note = vault.create_note("Note A", "original body")
+
+        original_write_text = Path.write_text
+
+        def boom(self, data, encoding=None):
+            original_write_text(self, "", encoding=encoding)
+            raise OSError("disk full")
+
+        monkeypatch.setattr(Path, "write_text", boom)
+        with pytest.raises(OSError):
+            vault.rename_node(note.slug, "New Title")
+
+        # The rename already happened before the write step -- what matters
+        # is that SOME file with the note's content survives, not the old
+        # path specifically (that part of the original bug -- destroying
+        # the old path is fine, that's the point of a rename -- was never
+        # the issue; leaving the new one empty was).
+        remaining = list(vault.root.rglob("*.md"))
+        assert len(remaining) == 1
+        assert "original body" in remaining[0].read_text(encoding="utf-8")
 
 
 class TestCreateDirRejectsPathTraversal:

@@ -57,6 +57,24 @@ is a backlog, not a log.
 
 ## Vault
 
+- **`_vault_write_lock` (renamed from `_source_write_lock`) now covers
+  every in-vault file mutator.** Closing the same read-merge-write
+  lost-update race across `update_source_bibliographic_fields()`,
+  `attach_source_companion()`, `ensure_md_format()`, `set_node_type()`,
+  `save_note()`, `move_node()`, `rename_node()`, and `write_by_path()`/
+  `delete_by_path()` (the `/sync/file` desktop-sync path, which used to
+  take a second, uncoordinated `_path_write_lock`, now retired) turned out
+  to be one lock, applied consistently, not one lock per route. `move_node()`/
+  `rename_node()` also gained real companion-relocation logic — previously
+  only `if path.suffix == ".html"` was handled, which is unconditionally
+  False for a Source, silently orphaning its `.pdf`/`.svg`/etc. companion
+  on every move or rename. The lock is global, not per-slug — a companion
+  upload's multi-second PDF/HTML extraction now also blocks metadata
+  edits, type changes, moves, renames, creates, and synced desktop writes
+  for every unrelated node for that whole duration, a real cross-slug
+  contention cost traded for correctness rather than a free fix. Worth a
+  follow-up per-slug lock to remove that cost, but not accepted as
+  permanent.
 - **No UI to view a companion file** — `COMPANION_EXTS` covers pdf/html/htm/
   svg/epub/docx/tex/drawio/jpg/jpeg, and the backend already serves any of
   them generically (`GET /notes/{slug}/original`, `FileResponse`), but the
@@ -85,67 +103,26 @@ is a backlog, not a log.
     item above) — plain `<img>`, no isolation concern, it's raster data.
   - **docx/epub/drawio/tex** — no reasonable inline browser renderer either
     way; download-link fallback, not an embed decision.
-  Separately, a real gap in the *existing* html iframe: `<iframe
-  class="html-frame">` sets no `sandbox` attribute today, so the isolation
-  it's supposed to provide is only partial (a bare `<iframe src>` does put
-  the content in its own document, but without `sandbox` it still gets full
-  script execution, top-level navigation, form submission, etc.). Worth
-  fixing regardless of the broader per-format work — needs
-  `sandbox="allow-scripts"` at minimum to keep the existing `postMessage`
-  external-link-click interceptor working, tightened further if nothing
-  else in that script needs more than that. Deliberately **not**
-  `allow-same-origin` alongside `allow-scripts` — that combo is a known
-  sandbox-escape antipattern when the framed document shares an origin with
-  the embedding app (a real possibility here, API and web app both being
-  localhost), since it lets the framed script reach back into the parent
-  page's own DOM, defeating the isolation entirely. The consequence: without
-  `allow-same-origin` the framed document's origin is opaque (`Origin:
-  null`), and `app.py`'s CORS middleware (`allow_origin_regex=
-  r"^http://(localhost|127\.0\.0\.1)(:\d+)?$"`) correctly does *not* match
-  `null` — so any script inside an arbitrary imported HTML companion that
-  tries a same-origin-relative `fetch()`/XHR back to the API will be
-  silently blocked. That's the right default (fail closed on arbitrary
-  imported content, not fail open), not a bug to "fix" by special-casing
-  `null` in the CORS allow-list later — a `null`-origin CORS allowance isn't
-  scoped to *this* iframe, it would apply to any sandboxed frame from
-  anywhere. Our own self-contained content (e.g. the `docs/diagrams/*.html`
-  atlas) doesn't hit this at all — checked, none of them do a live `fetch()`,
-  data is embedded inline — so this only matters for arbitrary imported HTML
-  companions, and only if one ever legitimately needs to call back to the
-  API from inside the frame (none currently do).
-  Not scoped in detail — needs its own small design pass on the toolbar/tab
-  UI, not just wiring up `/original`.
-- **No real Source CRUD outside Zotero — next up.** `create_source_from_
-  citekey()` is only ever called from `/zotero/import/{key}`; nothing else
-  creates a genuine Source (real bibliographic fields — author/year/
-  citekey/etc. — plus a companion file). The type-toggle
-  (`PATCH /notes/{slug}/type`, `VaultService.set_node_type()`) has zero
-  validation — it just rewrites the frontmatter `type:` string on whatever
-  `.md` already exists, so "create a plain note locally, sync it up, flip
-  the type badge" produces something that's a `Source` in the type system
-  with no citekey, no bibliographic fields, and no companion at all (`GET
-  /notes/apa` would have nothing real to format). `PUT /notes/{slug}` only
-  ever saves `body` too — no endpoint edits bibliographic fields after
-  creation, Zotero-imported or not. By contrast Note/Chat/Stream all have
-  genuinely complete CRUD already (Stream in particular: `PATCH
-  /streams/{slug}` covers title/query/description/status/
-  refresh_frequency/tags, `DELETE /streams/{slug}` exists) — this is
-  specifically a Source gap, not a general pattern. Needs a real
-  `POST /notes` equivalent for Source (bibliographic fields + optional
-  companion upload — ties into the upload-path gap below) and a PATCH for
-  editing them after the fact. Not scoped — needs its own design pass on
-  what fields are required vs. optional without a citekey to anchor them.
-- **No upload path for a new companion file outside chat.** The only file-
-  upload endpoint anywhere in the server is `POST /chats/{slug}/attachments/
-  upload`, scoped to chat attachments; `/chats/{slug}/attachments/promote`
-  can turn one into a real vault Note afterward, but that's a side door
-  through the chat feature, not a first-class "add a Source from a local
-  file" action. The vault sidebar's drag-and-drop only reorganizes existing
-  vault nodes between folders, not external OS files. For anything not
-  already in Zotero, routing a file through a chat attachment first is
-  currently the only generic way to get it into the vault at all. Belongs
-  together with the Source-CRUD item above — a real "create Source" flow
-  needs this upload path as part of it, not as a separate feature.
+  ~~Separately, a real gap in the *existing* html iframe: `<iframe
+  class="html-frame">` set no `sandbox` attribute~~ — fixed:
+  `sandbox="allow-scripts"`, deliberately without `allow-same-origin`
+  (that combo is a known sandbox-escape antipattern when the framed
+  document shares an origin with the embedding app, letting the framed
+  script reach back into the parent page's own DOM). `allow-scripts`
+  alone keeps the existing `postMessage` external-link-click interceptor
+  working — `postMessage` doesn't need `allow-same-origin`, that's the
+  whole point of it. The remaining consequence, not a regression: the
+  framed document's origin is now opaque (`Origin: null`), so any script
+  inside an arbitrary imported HTML companion that tries a same-origin-
+  relative `fetch()`/XHR back to the API is silently blocked by `app.py`'s
+  CORS middleware — the right default (fail closed on arbitrary imported
+  content), not something to special-case `null` into the CORS allow-list
+  for later. Our own self-contained content (e.g. the `docs/diagrams/*.html`
+  atlas) doesn't hit this — none of them do a live `fetch()`, data is
+  embedded inline.
+  The broader per-format viewer above is still not scoped in detail —
+  needs its own small design pass on the toolbar/tab UI, not just wiring
+  up `/original`.
 
 ## Knowledge graph
 

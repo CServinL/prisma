@@ -20,6 +20,7 @@ from prisma.integrations.zotero.client import ZoteroStatus
 from prisma.integrations.zotero import ZoteroClient
 from prisma.services import kg_queries
 from prisma.services.knowledge_graph_client import KnowledgeGraphClient
+from prisma.server.notes_routes import _echo_source_fields
 from prisma.services.renderer import render as vault_render
 from prisma.services.vault import VaultService, pdf_bytes_to_md
 from prisma.storage.models.vault_models import RenderedNode
@@ -218,6 +219,16 @@ def build_zotero_router(
 
     @router.post("/import/{key}", response_model=RenderedNode, status_code=201)
     def zotero_import(key: str):
+        # Both RenderedNode(...) constructions below deliberately don't
+        # call notes_routes.py's _render_source() despite building the
+        # same shape -- that helper's html is intentionally always empty
+        # now (its own callers, the manual Source create/edit/companion
+        # routes, always re-fetch via GET right after and never look at
+        # it). importZoteroItem() (+page.svelte) has no such follow-up
+        # GET -- it sets activeNode straight from this response -- so a
+        # real, non-empty html here is load-bearing, not optional. Do
+        # share _echo_source_fields() (the Source-only field echo) though,
+        # same "one place populates these" reasoning as everywhere else.
         from prisma.utils.text import make_citekey
         vault = get_vault()
         zotero = get_zotero()
@@ -235,11 +246,14 @@ def build_zotero_router(
                 slug = _file_slug(path.stem)
                 source = vault.get_source(slug)
                 html, broken_links, broken_citations = vault_render(source.body, vault)
-                return RenderedNode(
+                rn = RenderedNode(
                     slug=source.slug, path=str(source.path.relative_to(vault.root).as_posix()),
-                    title=source.title, node_type=source.node_type,
+                    title=source.title, node_type=source.node_type, tags=source.tags,
                     html=html, broken_links=broken_links, broken_citations=broken_citations,
+                    original_ext=source.original_ext,
                 )
+                _echo_source_fields(rn, source)
+                return rn
 
         pdf_bytes = zotero.get_pdf_bytes(key)
         if pdf_bytes is None:
@@ -274,10 +288,13 @@ def build_zotero_router(
         get_indexer().mark_stale()
         _activity.info("action=import_zotero key=%s slug=%s title=%r", key, source.slug, source.title)
         html, broken_links, broken_citations = vault_render(source.body, vault)
-        return RenderedNode(
+        rn = RenderedNode(
             slug=source.slug, path=str(source.path.relative_to(vault.root).as_posix()),
-            title=source.title, node_type=source.node_type,
+            title=source.title, node_type=source.node_type, tags=source.tags,
             html=html, broken_links=broken_links, broken_citations=broken_citations,
+            original_ext=source.original_ext,
         )
+        _echo_source_fields(rn, source)
+        return rn
 
     return router

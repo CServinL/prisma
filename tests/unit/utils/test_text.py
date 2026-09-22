@@ -31,6 +31,15 @@ def test_make_citekey_uses_first_author_last_name():
     assert make_citekey(["Jane Doe"], 2024) == "doe2024"
 
 
+def test_make_citekey_does_not_drop_year_zero():
+    # Regression: `year or ''` silently dropped a genuine year=0 (falsy-zero),
+    # the same bug class already fixed on the create/update sides of Source
+    # bibliographic fields -- this function feeds citekey generation for
+    # both Zotero import and POST /notes/sources, so it must agree with them.
+    assert make_citekey(["Jane Doe"], 0) == "doe0"
+    assert make_citekey([], 0, title="Untitled Work") == "untitled0"
+
+
 def test_make_citekey_falls_back_to_title_first_word_when_no_authors():
     assert make_citekey([], 2024, title="Attention Is All You Need") == "attention2024"
 

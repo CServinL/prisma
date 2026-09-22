@@ -80,6 +80,32 @@ def test_create_note_then_list(client, vault, recorder):
     assert len(r2.json()["notes"]) == 1
 
 
+def test_create_note_response_echoes_tags(client):
+    r = client.post("/notes", json={"title": "My Note", "tags": ["ml"]})
+    assert r.json()["tags"] == ["ml"]
+
+
+def test_create_note_rejects_whitespace_only_title(client):
+    r = client.post("/notes", json={"title": "   "})
+    assert r.status_code == 422
+
+
+def test_create_note_drops_blank_tag_entries(client):
+    r = client.post("/notes", json={"title": "My Note", "tags": ["real", "   "]})
+    assert r.status_code == 201
+    assert r.json()["tags"] == ["real"]
+
+
+def test_create_note_rejects_an_absurdly_long_tag(client):
+    r = client.post("/notes", json={"title": "My Note", "tags": ["a" * 5000]})
+    assert r.status_code == 422
+
+
+def test_create_note_rejects_too_many_tags(client):
+    r = client.post("/notes", json={"title": "My Note", "tags": [f"tag{i}" for i in range(500)]})
+    assert r.status_code == 422
+
+
 def test_get_note_not_found(client):
     r = client.get("/notes/does-not-exist")
     assert r.status_code == 404
@@ -102,6 +128,12 @@ def test_save_note_updates_body(client, vault, recorder):
     assert recorder.broadcasts[-1][0]["action"] == "save"
 
 
+def test_save_note_response_echoes_tags(client, vault):
+    vault.create_note("My Note", "body", tags=["ml"])
+    r = client.put("/notes/my-note", json={"body": "updated body"})
+    assert r.json()["tags"] == ["ml"]
+
+
 def test_save_note_not_found(client):
     r = client.put("/notes/does-not-exist", json={"body": "x"})
     assert r.status_code == 404
@@ -117,6 +149,15 @@ def test_set_note_type(client, vault):
 def test_set_note_type_not_found(client):
     r = client.patch("/notes/does-not-exist/type", json={"node_type": "source"})
     assert r.status_code == 404
+
+
+def test_set_note_type_not_shadowed_by_a_node_literally_named_sources(client, vault):
+    # A node whose slug is literally "sources" must not collide with the
+    # source-edit route's own path segment.
+    vault.create_note("Sources", "body")
+    r = client.patch("/notes/sources/type", json={"node_type": "source"})
+    assert r.status_code == 200
+    assert r.json()["node_type"] == "source"
 
 
 def test_get_original_returns_companion_file(client, vault):
@@ -270,3 +311,412 @@ def test_read_rejects_path_traversal_slug(client, vault, tmp_path):
     r = client.get("/notes/..--secret/read")
     assert r.status_code == 404
     assert "leaked" not in r.text
+
+
+def test_create_source_with_auto_citekey(client, recorder):
+    r = client.post("/notes/sources", json={
+        "title": "A Great Paper", "authors": ["Jane Smith"], "year": 2024,
+    })
+    assert r.status_code == 201
+    data = r.json()
+    assert data["citekey"] == "smith2024"
+    assert data["authors"] == ["Jane Smith"]
+    assert data["year"] == 2024
+    assert recorder.mark_stale_calls == 1
+    assert recorder.broadcasts[0][0]["action"] == "create"
+
+
+def test_create_source_auto_citekey_does_not_drop_year_zero(client):
+    r = client.post("/notes/sources", json={"title": "A Great Paper", "authors": ["Jane Smith"], "year": 0})
+    assert r.status_code == 201
+    assert r.json()["citekey"] == "smith0"
+
+
+def test_create_source_with_explicit_citekey(client):
+    r = client.post("/notes/sources", json={"title": "A Great Paper", "citekey": "custom2024"})
+    assert r.status_code == 201
+    assert r.json()["citekey"] == "custom2024"
+
+
+def test_create_source_rejects_duplicate_citekey(client):
+    client.post("/notes/sources", json={"title": "First", "citekey": "dup2024"})
+    r = client.post("/notes/sources", json={"title": "Second", "citekey": "dup2024"})
+    assert r.status_code == 409
+
+
+def test_get_note_echoes_tags_for_prefilling_the_edit_dialog(client, vault):
+    source = vault.create_source_from_citekey(
+        "smith2024", "A Great Paper", "body", zotero_key="ABC", authors=[], tags=["ml", "nlp"],
+    )
+    r = client.get(f"/notes/{source.slug}")
+    assert r.json()["tags"] == ["ml", "nlp"]
+
+
+def test_edit_source_updates_tags_and_source_kind(client, vault):
+    source = vault.create_source_from_citekey(
+        "smith2024", "A Great Paper", "body", zotero_key="ABC", authors=[], tags=["ml"],
+    )
+    r = client.patch(f"/notes/{source.slug}/source", json={"tags": ["ml", "nlp"], "source_kind": "web"})
+    assert r.status_code == 200
+    data = r.json()
+    assert data["tags"] == ["ml", "nlp"]
+    assert data["source_kind"] == "web"
+
+
+def test_edit_source_response_echoes_the_request_slug_not_the_bare_stem(client, vault):
+    # A moved source's bare stem can collide with an unrelated file
+    # elsewhere -- the response must echo the slug this route actually
+    # resolved, not source.slug's bare file stem.
+    source = vault.create_source_from_citekey(
+        "smith2024", "A Great Paper", "body", zotero_key="ABC", authors=[], tags=[],
+    )
+    new_slug, _, _ = vault.move_node(source.slug, dest_dir="notes")
+    assert new_slug != "smith2024"  # confirms this really is a compound slug
+
+    colliding_dir = vault.default_dirs[NodeType.source]
+    colliding_dir.mkdir(parents=True, exist_ok=True)
+    (colliding_dir / "smith2024.md").write_text(
+        "---\ntype: source\ntitle: Unrelated\ncitekey: unrelated2099\n---\nUnrelated body.",
+        encoding="utf-8",
+    )
+
+    r = client.patch(f"/notes/{new_slug}/source", json={"journal": "New Journal"})
+    assert r.status_code == 200
+    assert r.json()["slug"] == new_slug
+
+
+def test_create_source_no_metadata_still_works(client):
+    # Metadata-only Source, no companion at all -- e.g. a physical book.
+    r = client.post("/notes/sources", json={"title": "A Physical Book"})
+    assert r.status_code == 201
+    assert r.json()["original_ext"] is None
+
+
+def test_create_source_does_not_pay_for_a_full_vault_citekey_scan(client, vault, monkeypatch):
+    # A create/edit/companion-upload response must not trigger a
+    # full-vault citekey-index rebuild to populate a value no caller uses.
+    calls = []
+    monkeypatch.setattr(
+        "prisma.services.renderer._build_citekey_index",
+        lambda v: calls.append(1) or {},
+    )
+    r = client.post("/notes/sources", json={"title": "X"})
+    assert r.status_code == 201
+    assert r.json()["html"] == ""
+    assert calls == []
+
+
+def test_create_source_rejects_whitespace_only_title(client):
+    r = client.post("/notes/sources", json={"title": "   "})
+    assert r.status_code == 422
+
+
+def test_edit_source_rejects_whitespace_only_title(client, vault):
+    source = vault.create_source_from_citekey(
+        "smith2024", "A Great Paper", "body", zotero_key="ABC", authors=[], tags=[],
+    )
+    r = client.patch(f"/notes/{source.slug}/source", json={"title": "   "})
+    assert r.status_code == 422
+
+
+def test_create_source_rejects_when_no_citekey_can_be_generated(client):
+    # make_citekey() legitimately returns "" for an author name with no
+    # ASCII letters (e.g. non-Latin script) and no year/usable title word --
+    # letting an empty citekey through would silently store citekey: "" and
+    # 409 every subsequent unrelated source with the same fate, instead of
+    # surfacing that this one genuinely needs an explicit citekey.
+    r = client.post("/notes/sources", json={"title": "!!!", "authors": ["田中太郎"]})
+    assert r.status_code == 400
+
+
+def test_create_source_rejects_whitespace_only_explicit_citekey(client):
+    r = client.post("/notes/sources", json={"title": "X", "citekey": "   "})
+    assert r.status_code == 400
+    # A caller who supplied a (blank) citekey must not be told to retype
+    # title/authors instead.
+    assert "provide one explicitly" not in r.json()["detail"]
+
+
+def test_create_source_rejects_an_absurdly_long_explicit_citekey(client):
+    r = client.post("/notes/sources", json={"title": "X", "citekey": "a" * 5000})
+    assert r.status_code == 422
+
+
+def test_create_source_rejects_an_absurdly_long_auto_generated_citekey(client):
+    # An auto-generated citekey (derived from the first author's last
+    # name) must be bounded too, not just an explicit one.
+    r = client.post("/notes/sources", json={"title": "X", "authors": ["a" * 5000]})
+    assert r.status_code == 422
+
+
+def test_create_source_rejects_an_absurdly_long_bibliographic_field(client):
+    r = client.post("/notes/sources", json={"title": "X", "journal": "a" * 5000})
+    assert r.status_code == 422
+
+
+def test_edit_source_rejects_an_absurdly_long_bibliographic_field(client):
+    r = client.post("/notes/sources", json={"title": "X"})
+    slug = r.json()["slug"]
+    r = client.patch(f"/notes/{slug}/source", json={"doi": "a" * 5000})
+    assert r.status_code == 422
+
+
+def test_create_source_rejects_too_many_authors(client):
+    r = client.post("/notes/sources", json={"title": "X", "authors": ["Smith"] + [f"Coauthor{i}" for i in range(500)]})
+    assert r.status_code == 422
+
+
+def test_create_source_drops_blank_author_and_tag_entries(client):
+    # A whitespace-only entry must be dropped, not rejected -- one bad
+    # entry among otherwise-good ones shouldn't fail the whole request.
+    r = client.post("/notes/sources", json={"title": "X", "authors": ["  ", "Jane Smith"], "tags": ["ml", "   "]})
+    assert r.status_code == 201
+    data = r.json()
+    assert data["authors"] == ["Jane Smith"]
+    assert data["tags"] == ["ml"]
+
+
+def test_edit_source_drops_blank_author_and_tag_entries(client, vault):
+    source = vault.create_source_from_citekey(
+        "smith2024", "A Great Paper", "body", zotero_key="ABC", authors=[], tags=[],
+    )
+    r = client.patch(f"/notes/{source.slug}/source", json={"authors": ["Jane Smith", "  "], "tags": ["   ", "nlp"]})
+    assert r.status_code == 200
+    data = r.json()
+    assert data["authors"] == ["Jane Smith"]
+    assert data["tags"] == ["nlp"]
+
+
+def test_create_source_drops_blanks_before_enforcing_the_author_count_cap(client):
+    # Blanks must be dropped before the count cap is enforced -- 201 raw
+    # entries, only 190 real, must pass since 190 is under the cap.
+    authors = ["Smith"] + [f"Coauthor{i}" for i in range(189)] + ["   "] * 11
+    assert len(authors) == 201
+    r = client.post("/notes/sources", json={"title": "X", "authors": authors})
+    assert r.status_code == 201
+    assert len(r.json()["authors"]) == 190
+
+
+def test_create_source_rejects_an_absurdly_long_title(client):
+    r = client.post("/notes/sources", json={"title": "a" * 5000})
+    assert r.status_code == 422
+
+
+def test_create_source_accepts_a_long_but_not_absurd_title(client):
+    # A title under max_length=512 but over ext4's 255-byte-per-component
+    # filename limit must still succeed -- _slugify() truncates it.
+    r = client.post("/notes/sources", json={"title": "a" * 400})
+    assert r.status_code == 201
+
+
+def test_create_note_accepts_a_long_but_not_absurd_title(client):
+    r = client.post("/notes", json={"title": "a" * 400})
+    assert r.status_code == 201
+
+
+def test_two_long_titles_sharing_a_slugified_prefix_dont_collide(client):
+    # Two titles sharing the same 200-char truncated prefix must still
+    # get distinct slugs.
+    long_prefix = "a" * 250
+    r1 = client.post("/notes", json={"title": long_prefix + "-ending-one"})
+    r2 = client.post("/notes", json={"title": long_prefix + "-ending-two"})
+    assert r1.status_code == 201 and r2.status_code == 201
+    assert r1.json()["slug"] != r2.json()["slug"]
+
+
+def test_create_source_rejects_negative_year(client):
+    r = client.post("/notes/sources", json={"title": "X", "year": -100})
+    assert r.status_code == 422
+
+
+def test_create_source_rejects_boolean_year(client):
+    # `year: true` coerces to 1 under Pydantic's lax mode, satisfying
+    # ge=0 -- must be rejected on type, not just range.
+    r = client.post("/notes/sources", json={"title": "X", "year": True})
+    assert r.status_code == 422
+
+
+def test_edit_source_rejects_negative_year(client, vault):
+    source = vault.create_source_from_citekey(
+        "smith2024", "A Great Paper", "body", zotero_key="ABC", authors=[], tags=[],
+    )
+    r = client.patch(f"/notes/{source.slug}/source", json={"year": -100})
+    assert r.status_code == 422
+
+
+def test_edit_source_rejects_boolean_year(client, vault):
+    source = vault.create_source_from_citekey(
+        "smith2024", "A Great Paper", "body", zotero_key="ABC", authors=[], tags=[],
+    )
+    r = client.patch(f"/notes/{source.slug}/source", json={"year": True})
+    assert r.status_code == 422
+
+
+def test_create_source_rejects_an_absurdly_large_year(client):
+    r = client.post("/notes/sources", json={"title": "X", "year": 10**2000})
+    assert r.status_code == 422
+
+
+def test_edit_source_rejects_an_absurdly_large_year(client, vault):
+    source = vault.create_source_from_citekey(
+        "smith2024", "A Great Paper", "body", zotero_key="ABC", authors=[], tags=[],
+    )
+    r = client.patch(f"/notes/{source.slug}/source", json={"year": 10**2000})
+    assert r.status_code == 422
+
+
+def test_edit_source_returns_404_not_500_on_concurrent_delete(client, vault, monkeypatch):
+    # A delete landing between the isinstance check and the write must
+    # surface as 404, not an unhandled 500.
+    source = vault.create_source_from_citekey(
+        "smith2024", "A Great Paper", "body", zotero_key="ABC", authors=[], tags=[],
+    )
+    real_get_any = VaultService.get_any
+
+    def get_any_then_delete(self, slug):
+        node = real_get_any(self, slug)
+        self._find_md(slug).unlink()
+        return node
+
+    monkeypatch.setattr(VaultService, "get_any", get_any_then_delete)
+    r = client.patch(f"/notes/{source.slug}/source", json={"doi": "10.1/x"})
+    assert r.status_code == 404
+
+
+def test_upload_companion_returns_404_not_500_on_concurrent_delete(client, vault, monkeypatch):
+    source = vault.create_source_from_citekey(
+        "smith2024", "A Great Paper", "body", zotero_key="ABC", authors=[], tags=[],
+    )
+    real_get_any = VaultService.get_any
+
+    def get_any_then_delete(self, slug):
+        node = real_get_any(self, slug)
+        self._find_md(slug).unlink()
+        return node
+
+    monkeypatch.setattr(VaultService, "get_any", get_any_then_delete)
+    r = client.post(f"/notes/{source.slug}/companion",
+                     files={"file": ("figure.svg", b"<svg></svg>", "image/svg+xml")})
+    assert r.status_code == 404
+
+
+def test_edit_source_returns_400_when_type_changes_out_from_under_it(client, vault, monkeypatch):
+    # A concurrent type change landing between the isinstance check and
+    # the locked write must reject the edit, not let it write Source-only
+    # fields into what is now a Note.
+    source = vault.create_source_from_citekey(
+        "smith2024", "A Great Paper", "body", zotero_key="ABC", authors=[], tags=[],
+    )
+    real_get_any = VaultService.get_any
+
+    def get_any_then_convert(self, slug):
+        node = real_get_any(self, slug)
+        self.set_node_type(slug, NodeType.note)
+        return node
+
+    monkeypatch.setattr(VaultService, "get_any", get_any_then_convert)
+    r = client.patch(f"/notes/{source.slug}/source", json={"doi": "10.1/x"})
+    assert r.status_code == 400
+
+
+def test_upload_companion_returns_400_when_type_changes_out_from_under_it(client, vault, monkeypatch):
+    source = vault.create_source_from_citekey(
+        "smith2024", "A Great Paper", "body", zotero_key="ABC", authors=[], tags=[],
+    )
+    real_get_any = VaultService.get_any
+
+    def get_any_then_convert(self, slug):
+        node = real_get_any(self, slug)
+        self.set_node_type(slug, NodeType.note)
+        return node
+
+    monkeypatch.setattr(VaultService, "get_any", get_any_then_convert)
+    r = client.post(f"/notes/{source.slug}/companion",
+                     files={"file": ("figure.svg", b"<svg></svg>", "image/svg+xml")})
+    assert r.status_code == 400
+
+
+def test_edit_source_merges_only_given_fields(client, vault):
+    source = vault.create_source_from_citekey(
+        "smith2024", "A Great Paper", "body",
+        zotero_key="ABC", authors=["Jane Smith"], tags=[], journal="Original Journal",
+    )
+    r = client.patch(f"/notes/{source.slug}/source", json={"doi": "10.1/new"})
+    assert r.status_code == 200
+    data = r.json()
+    assert data["doi"] == "10.1/new"
+    assert data["journal"] == "Original Journal"
+
+
+def test_edit_source_not_found(client):
+    r = client.patch("/notes/does-not-exist/source", json={"doi": "10.1/x"})
+    assert r.status_code == 404
+
+
+def test_edit_source_rejects_non_source_slug(client, vault):
+    note = vault.create_note("My Note", "body")
+    r = client.patch(f"/notes/{note.slug}/source", json={"doi": "10.1/x"})
+    assert r.status_code == 400
+
+
+def test_upload_companion_rejects_bad_extension(client, vault):
+    source = vault.create_source_from_citekey(
+        "smith2024", "A Great Paper", "body", zotero_key="ABC", authors=[], tags=[],
+    )
+    r = client.post(f"/notes/{source.slug}/companion",
+                     files={"file": ("archive.zip", b"data", "application/zip")})
+    assert r.status_code == 400
+
+
+def test_upload_companion_rejects_an_oversized_file(client, vault, monkeypatch):
+    # Confirms the route surfaces read_upload_bounded()'s 413 correctly --
+    # the cap itself is covered directly in test_upload_utils.py.
+    from fastapi import HTTPException
+
+    def fake_read_upload_bounded(file, max_bytes=None):
+        raise HTTPException(status_code=413, detail="file too large")
+
+    monkeypatch.setattr("prisma.server.notes_routes.read_upload_bounded", fake_read_upload_bounded)
+    source = vault.create_source_from_citekey(
+        "smith2024", "A Great Paper", "body", zotero_key="ABC", authors=[], tags=[],
+    )
+    r = client.post(f"/notes/{source.slug}/companion",
+                     files={"file": ("figure.svg", b"<svg></svg>", "image/svg+xml")})
+    assert r.status_code == 413
+
+
+def test_upload_companion_attaches_svg(client, vault):
+    source = vault.create_source_from_citekey(
+        "smith2024", "A Great Paper", "body", zotero_key="ABC", authors=[], tags=[],
+    )
+    r = client.post(f"/notes/{source.slug}/companion",
+                     files={"file": ("figure.svg", b"<svg></svg>", "image/svg+xml")})
+    assert r.status_code == 200
+    assert r.json()["original_ext"] == ".svg"
+
+
+def test_upload_companion_response_echoes_the_request_slug_not_the_bare_stem(client, vault):
+    # Same regression as edit_source's version above, for the companion
+    # upload route.
+    source = vault.create_source_from_citekey(
+        "smith2024", "A Great Paper", "body", zotero_key="ABC", authors=[], tags=[],
+    )
+    new_slug, _, _ = vault.move_node(source.slug, dest_dir="notes")
+
+    r = client.post(f"/notes/{new_slug}/companion",
+                     files={"file": ("figure.svg", b"<svg></svg>", "image/svg+xml")})
+    assert r.status_code == 200
+    assert r.json()["slug"] == new_slug
+
+
+def test_upload_companion_not_found(client):
+    r = client.post("/notes/does-not-exist/companion",
+                     files={"file": ("figure.svg", b"<svg></svg>", "image/svg+xml")})
+    assert r.status_code == 404
+
+
+def test_upload_companion_rejects_non_source_slug(client, vault):
+    note = vault.create_note("My Note", "body")
+    r = client.post(f"/notes/{note.slug}/companion",
+                     files={"file": ("figure.svg", b"<svg></svg>", "image/svg+xml")})
+    assert r.status_code == 400

@@ -219,6 +219,7 @@
     path: string;
     title: string;
     node_type: NodeType;
+    tags?: string[];
     html: string;
     broken_links: string[];
     broken_citations: string[];
@@ -231,6 +232,19 @@
     next_update?: string;
     query?: string;
     collection_key?: string;
+    // Source-only — see notes_routes.py's render_note()/_render_source()
+    citekey?: string;
+    source_kind?: string;
+    authors?: string[];
+    year?: number;
+    doi?: string;
+    journal?: string;
+    volume?: string;
+    issue?: string;
+    pages?: string;
+    publisher?: string;
+    url?: string;
+    item_type?: string;
   }
 
   interface SearchResult {
@@ -287,6 +301,23 @@
   // independent processes/ports (see ADR-012) — the page's own origin is no
   // longer the same as the API's origin, even in browser/PWA mode.
   const webBase = typeof window !== "undefined" ? window.location.origin : "";
+
+  // FastAPI's own HTTPException(detail=str) responses give `detail` as a
+  // plain string, but its automatic 422 (Pydantic field validation, e.g.
+  // Source's year/max_length constraints) gives `detail` as an array of
+  // {loc, msg, type} objects instead; stringifying that array directly
+  // shows nothing useful (`[object Object]`).
+  function formatApiError(err: unknown, fallback: string): string {
+    const detail = (err as { detail?: unknown } | null)?.detail;
+    if (typeof detail === "string") return detail;
+    if (Array.isArray(detail)) {
+      const messages = detail
+        .map((d) => (d && typeof d === "object" && "msg" in d ? String((d as { msg: unknown }).msg) : null))
+        .filter((m): m is string => m !== null);
+      if (messages.length) return messages.join("; ");
+    }
+    return fallback;
+  }
 
   function formatTokenCount(n: number): string {
     if (n >= 1_000_000) return (n / 1_000_000).toFixed(n % 1_000_000 === 0 ? 0 : 1) + "M";
@@ -574,6 +605,7 @@
   // 401 — loaded as a blob URL via apiFetch instead. See the vault-sync
   // plan's note on this being the one real gap authFetch alone can't close.
   let htmlFrameSrc = $state<string | null>(null);
+  let htmlFrameEl = $state<HTMLIFrameElement | null>(null);
   $effect(() => {
     const node = activeNode;
     if (!node || node.original_ext !== ".html") {
@@ -1761,7 +1793,7 @@
       });
       if (!r.ok) {
         const err = await r.json().catch(() => ({}));
-        streamFormError = err.detail ?? `Error ${r.status}`;
+        streamFormError = formatApiError(err, `Error ${r.status}`);
         return;
       }
       showStreamForm = false;
@@ -1770,6 +1802,198 @@
       streamFormError = String(e);
     } finally {
       streamFormSaving = false;
+    }
+  }
+
+  // ── Source form (manual create/edit, no Zotero involved) ─────────────────────
+
+  let showSourceForm = $state(false);
+  let sourceFormMode: "create" | "edit" = $state("create");
+  const EMPTY_SOURCE_FORM = {
+    slug: "", title: "", body: "", citekey: "", authorsText: "", tagsText: "",
+    year: "", doi: "", url: "", journal: "", volume: "", issue: "", pages: "",
+    publisher: "", item_type: "", source_kind: "paper",
+  };
+  let sourceForm = $state({ ...EMPTY_SOURCE_FORM });
+  let sourceFormFile: File | null = $state(null);
+  let sourceFormSaving = $state(false);
+  let sourceFormError = $state("");
+  let companionUploading = $state(false);
+
+  function openNewSourceForm() {
+    sourceFormMode = "create";
+    sourceForm = { ...EMPTY_SOURCE_FORM };
+    sourceFormFile = null;
+    sourceFormError = "";
+    showSourceForm = true;
+  }
+
+  function openEditSourceForm() {
+    if (!activeNode || activeNode.node_type !== "source") return;
+    sourceFormMode = "edit";
+    sourceForm = {
+      slug: activeNode.slug, title: activeNode.title, body: "",
+      citekey: activeNode.citekey ?? "",
+      // One value per line, not comma-joined -- a real author or tag
+      // containing a comma (e.g. "Smith, Jane" or "Research, Inc.") isn't
+      // round-trip safe through a comma-joined/split text field: it
+      // silently splits into multiple values the moment the user saves
+      // without even touching this field. A literal newline inside a
+      // single author/tag is far less plausible than a literal comma.
+      authorsText: (activeNode.authors ?? []).join("\n"),
+      tagsText: (activeNode.tags ?? []).join("\n"),
+      year: activeNode.year != null ? String(activeNode.year) : "",
+      doi: activeNode.doi ?? "", url: activeNode.url ?? "",
+      journal: activeNode.journal ?? "", volume: activeNode.volume ?? "", issue: activeNode.issue ?? "",
+      pages: activeNode.pages ?? "", publisher: activeNode.publisher ?? "", item_type: activeNode.item_type ?? "",
+      source_kind: activeNode.source_kind ?? "paper",
+    };
+    sourceFormFile = null;
+    sourceFormError = "";
+    showSourceForm = true;
+  }
+
+  async function submitSourceForm() {
+    if (!sourceForm.title.trim()) {
+      sourceFormError = "Title is required.";
+      return;
+    }
+    sourceFormSaving = true;
+    sourceFormError = "";
+    // split("\n"), not split(",") -- see openEditSourceForm()'s comment on
+    // authorsText/tagsText for why a comma isn't a safe separator here.
+    const authors = sourceForm.authorsText.split("\n").map((s) => s.trim()).filter(Boolean);
+    const tags = sourceForm.tagsText.split("\n").map((s) => s.trim()).filter(Boolean);
+    const payload: Record<string, unknown> = {
+      title: sourceForm.title,
+      authors,
+      tags,
+      source_kind: sourceForm.source_kind,
+      // Not a truthy check: an explicitly typed 0 must survive, matching
+      // the backend's `is not None` handling of this field.
+      year: sourceForm.year === "" || sourceForm.year == null ? null : Number(sourceForm.year),
+      // doi isn't converted to null on blank like the others below -- the
+      // backend checks it with `is not None` (so it can be cleared), unlike
+      // url/journal/volume/issue/pages/publisher/item_type, which check
+      // truthiness and can only ever be set, never cleared, by design (see
+      // update_source_bibliographic_fields()'s docstring). Sending null
+      // here for a blanked field would silently leave the stale value.
+      doi: sourceForm.doi,
+      url: sourceForm.url || null,
+      journal: sourceForm.journal || null,
+      volume: sourceForm.volume || null,
+      issue: sourceForm.issue || null,
+      pages: sourceForm.pages || null,
+      publisher: sourceForm.publisher || null,
+      item_type: sourceForm.item_type || null,
+    };
+    try {
+      let r: Response;
+      if (sourceFormMode === "create") {
+        payload.body = sourceForm.body;
+        payload.citekey = sourceForm.citekey || null;
+        r = await apiFetch(`${apiBase}/notes/sources`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+      } else {
+        r = await apiFetch(`${apiBase}/notes/${encodeURIComponent(sourceForm.slug)}/source`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+      }
+      if (!r.ok) {
+        const err = await r.json().catch(() => ({}));
+        sourceFormError = formatApiError(err, `Error ${r.status}`);
+        return;
+      }
+      const saved = await r.json();
+      const targetSlug = sourceFormMode === "create" ? saved.slug : sourceForm.slug;
+      // Snapshotted before the dialog closes and the awaits below run --
+      // showSourceForm=false lets the user immediately reopen this same
+      // dialog for a different Source (create or edit), which would
+      // reassign sourceFormFile out from under this still-in-flight
+      // submission otherwise: this upload could then skip its own file
+      // entirely, or upload the NEW form's file to the source that was
+      // just saved here.
+      const fileToUpload = sourceFormFile;
+      // Close and refresh as soon as the metadata save succeeds -- it is
+      // saved at this point regardless of what the companion upload does
+      // next. A failed companion upload is a separate, best-effort step
+      // reported via alert(), with the toolbar's "Upload companion" action
+      // as the retry path; the dialog must not stay open for a retry, or
+      // resubmitting it would re-issue the create call and 409 on the
+      // citekey the first attempt already claimed.
+      showSourceForm = false;
+      await loadTree();
+      await openNode(targetSlug);
+      if (fileToUpload) {
+        // Own try/catch, not the outer one below -- the dialog is already
+        // closed (showSourceForm = false, above) by the time this runs, so
+        // a network failure here falling through to the outer catch would
+        // silently set sourceFormError on a hidden dialog the user can no
+        // longer see, instead of the same visible alert() the sibling
+        // non-ok-response branch already uses.
+        try {
+          const form = new FormData();
+          form.append("file", fileToUpload);
+          const cr = await apiFetch(`${apiBase}/notes/${encodeURIComponent(targetSlug)}/companion`, {
+            method: "POST",
+            body: form,
+          });
+          if (cr.ok) {
+            await openNode(targetSlug);
+          } else {
+            const err = await cr.json().catch(() => ({}));
+            alert(`Source saved, but the companion upload failed: ${formatApiError(err, String(cr.status))}. Use "Upload companion" to retry.`);
+          }
+        } catch (e) {
+          alert(`Source saved, but the companion upload failed: ${e}. Use "Upload companion" to retry.`);
+        }
+      }
+    } catch (e) {
+      sourceFormError = String(e);
+    } finally {
+      sourceFormSaving = false;
+    }
+  }
+
+  async function uploadSourceCompanion(file: File) {
+    if (!activeNode || activeNode.node_type !== "source" || companionUploading) return;
+    // Snapshotted before the awaits below -- activeNode can change (the
+    // user navigates away) while this upload is in flight, and reading
+    // activeNode.slug again afterward would either refresh whatever node
+    // is now active instead of the one this upload was actually for, or
+    // throw if the user navigated to a view with no activeNode at all.
+    const targetSlug = activeNode.slug;
+    companionUploading = true;
+    try {
+      const form = new FormData();
+      form.append("file", file);
+      const r = await apiFetch(`${apiBase}/notes/${encodeURIComponent(targetSlug)}/companion`, {
+        method: "POST",
+        body: form,
+      });
+      if (r.ok) {
+        // Only refresh if the same source is still the one being viewed.
+        if (activeNode?.slug === targetSlug) {
+          await loadTree();
+          await openNode(targetSlug);
+        }
+      } else {
+        const err = await r.json().catch(() => ({}));
+        alert(formatApiError(err, "Couldn't upload companion file."));
+      }
+    } catch (e) {
+      // The toolbar's file-input onchange handler calls this fire-and-
+      // forget (no .catch of its own) -- apiFetch() rejecting outright
+      // (network failure, no Response at all) would otherwise be an
+      // unhandled promise rejection with no feedback to the user.
+      alert(`Couldn't upload companion file: ${e}`);
+    } finally {
+      companionUploading = false;
     }
   }
 
@@ -1910,6 +2134,7 @@
             <span class="section-chevron" class:open={sectionOpen.vault}>{sectionOpen.vault ? "▾" : "▸"}</span>
             <span class="section-label">Notes and Sources</span>
           </button>
+          <button class="section-action" title="Add source" onclick={() => openNewSourceForm()}>+</button>
         </div>
         {#if sectionOpen.vault}
           <div class="section-body" role="list" bind:this={sidebarEl} ondragover={onSidebarDragOver}>
@@ -2321,6 +2546,20 @@
           <button class="toolbar-btn" title="Copy this item's vault slug (includes its folder, to disambiguate)" onclick={copyActiveNodeSlug}>
             {slugCopied ? "Copied" : "Copy slug"}
           </button>
+          {#if activeNode.node_type === "source"}
+            <button class="toolbar-btn" title="Edit this source's bibliographic metadata" onclick={openEditSourceForm}>
+              Edit metadata
+            </button>
+            <label class="toolbar-btn" title="Attach or replace this source's companion file">
+              {companionUploading ? "Uploading…" : "Upload companion"}
+              <input type="file" hidden disabled={companionUploading}
+                accept=".pdf,.html,.htm,.svg,.epub,.docx,.tex,.drawio,.jpg,.jpeg" onchange={(e) => {
+                const f = (e.currentTarget as HTMLInputElement).files?.[0];
+                if (f) uploadSourceCompanion(f);
+                e.currentTarget.value = "";
+              }} />
+            </label>
+          {/if}
           {#if activeNode.node_type === "stream"}
             <span class="stream-dot sdot-{activeNode.stream_status}" title={activeNode.stream_status}></span>
             <span class="stream-stat">{activeNode.total_papers ?? 0} papers</span>
@@ -2344,8 +2583,11 @@
           {/if}
           {#if activeNode.original_ext === ".html"}
             <button class="open-original" onclick={async () => {
+              // sandbox="allow-scripts" only applies to iframes, not a new
+              // tab/window, so this fullscreens the existing sandboxed
+              // iframe rather than opening the companion at top level.
               try {
-                await shellOpen(`${apiBase}/notes/${activeNode!.slug}/view`);
+                await htmlFrameEl?.requestFullscreen();
               } catch(e) {
                 alert("Open failed: " + e);
               }
@@ -2381,9 +2623,11 @@
           {#key activeNode.slug}
           {#if htmlFrameSrc}
           <iframe
+            bind:this={htmlFrameEl}
             class="html-frame"
             src={htmlFrameSrc}
             title={activeNode.title}
+            sandbox="allow-scripts"
           ></iframe>
           {/if}
           {/key}
@@ -3251,6 +3495,109 @@
         {streamFormSaving ? "Creating…" : "Create stream"}
       </button>
       <button class="btn-secondary" onclick={() => showStreamForm = false}>Cancel</button>
+    </div>
+  </div>
+  {/if}
+
+  {#if showSourceForm}
+  <button class="settings-backdrop" aria-label="Close" onclick={() => showSourceForm = false}></button>
+  <div class="settings-panel">
+    <div class="settings-header">
+      <span>{sourceFormMode === "create" ? "Add source" : "Edit source metadata"}</span>
+      <button class="icon-btn" onclick={() => showSourceForm = false}>✕</button>
+    </div>
+    <div class="settings-body">
+      <label class="setting-row">
+        <span class="setting-label">Title</span>
+        <input bind:value={sourceForm.title} placeholder="e.g. Attention Is All You Need" />
+      </label>
+      {#if sourceFormMode === "create"}
+        <label class="setting-row">
+          <span class="setting-label">Citekey</span>
+          <input bind:value={sourceForm.citekey} placeholder="Optional — auto-generated if blank" />
+        </label>
+      {/if}
+      <label class="setting-row">
+        <span class="setting-label">Authors</span>
+        <textarea
+          bind:value={sourceForm.authorsText}
+          placeholder={"One full name per line:\nJane Smith\nJohn Doe"}
+          rows="3"
+        ></textarea>
+      </label>
+      {#if sourceFormMode === "edit"}
+        <span class="setting-hint">
+          Year, and URL/Journal/Volume/Issue/Pages/Publisher/Item type below, can be set or changed, but not cleared back to blank once saved — leaving one of these empty here won't remove an existing value.
+        </span>
+      {/if}
+      <label class="setting-row">
+        <span class="setting-label">Year</span>
+        <input bind:value={sourceForm.year} type="number" min="0" />
+      </label>
+      <label class="setting-row">
+        <span class="setting-label">DOI</span>
+        <input bind:value={sourceForm.doi} />
+      </label>
+      <label class="setting-row">
+        <span class="setting-label">URL</span>
+        <input bind:value={sourceForm.url} />
+      </label>
+      <label class="setting-row">
+        <span class="setting-label">Journal</span>
+        <input bind:value={sourceForm.journal} />
+      </label>
+      <label class="setting-row">
+        <span class="setting-label">Volume</span>
+        <input bind:value={sourceForm.volume} />
+      </label>
+      <label class="setting-row">
+        <span class="setting-label">Issue</span>
+        <input bind:value={sourceForm.issue} />
+      </label>
+      <label class="setting-row">
+        <span class="setting-label">Pages</span>
+        <input bind:value={sourceForm.pages} />
+      </label>
+      <label class="setting-row">
+        <span class="setting-label">Publisher</span>
+        <input bind:value={sourceForm.publisher} />
+      </label>
+      <label class="setting-row">
+        <span class="setting-label">Item type</span>
+        <input bind:value={sourceForm.item_type} placeholder="e.g. journalArticle, book" />
+      </label>
+      <label class="setting-row">
+        <span class="setting-label">Kind</span>
+        <select bind:value={sourceForm.source_kind}>
+          {#each ["paper", "document", "web", "media"] as k}
+            <option value={k}>{k.charAt(0).toUpperCase() + k.slice(1)}</option>
+          {/each}
+        </select>
+      </label>
+      <label class="setting-row">
+        <span class="setting-label">Tags</span>
+        <textarea
+          bind:value={sourceForm.tagsText}
+          placeholder={"One tag per line:\nnlp\ntransformers"}
+          rows="3"
+        ></textarea>
+      </label>
+      {#if sourceFormMode === "create"}
+        <label class="setting-row">
+          <span class="setting-label">Companion file</span>
+          <input type="file" accept=".pdf,.html,.htm,.svg,.epub,.docx,.tex,.drawio,.jpg,.jpeg" onchange={(e) => sourceFormFile = (e.currentTarget as HTMLInputElement).files?.[0] ?? null} />
+          <span class="setting-hint">Optional — PDF/HTML/etc. Uploaded after the source is created.</span>
+        </label>
+      {/if}
+      {#if sourceFormError}
+        <div class="form-error">{sourceFormError}</div>
+      {/if}
+    </div>
+    <div class="settings-footer">
+      <button class="btn-primary" onclick={submitSourceForm} disabled={sourceFormSaving}>
+        {sourceFormSaving ? "Saving…" : sourceFormMode === "create" ? "Create source" : "Save changes"}
+      </button>
+      <button class="btn-secondary" onclick={() => showSourceForm = false}>Cancel</button>
     </div>
   </div>
   {/if}
@@ -5324,7 +5671,8 @@
   }
 
   .setting-row select,
-  .setting-row input {
+  .setting-row input,
+  .setting-row textarea {
     width: 100%;
     padding: 7px 10px;
     background: #0d1320;
@@ -5334,6 +5682,9 @@
     font-size: 12px;
     font-family: inherit;
     outline: none;
+  }
+  .setting-row textarea {
+    resize: vertical;
   }
   .setting-row select {
     appearance: none;
@@ -5349,7 +5700,8 @@
     color: #e8edf8;
   }
   .setting-row select:focus,
-  .setting-row input:focus { border-color: #4a9eff; }
+  .setting-row input:focus,
+  .setting-row textarea:focus { border-color: #4a9eff; }
 
   .server-switcher {
     display: flex;

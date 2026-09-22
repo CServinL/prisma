@@ -40,6 +40,60 @@ def test_read_by_path_missing_file_returns_none(vault):
     assert vault.read_by_path("notes/does-not-exist.md") is None
 
 
+def test_write_by_path_holds_vault_write_lock_for_its_whole_duration(vault, monkeypatch):
+    # Regression: write_by_path()/delete_by_path() used to take a second,
+    # separate _path_write_lock that was never coordinated with
+    # _vault_write_lock -- a synced desktop edit landing on the same file
+    # as a locked API-side edit (e.g. PATCH /{slug}/source) could still
+    # race, just via two uncoordinated locks instead of no lock at all.
+    import threading
+
+    lock_held_during_call = threading.Event()
+    proceed = threading.Event()
+    real_write_text = Path.write_text
+
+    # _safe_sync_path() runs BEFORE _vault_write_lock is acquired (same as
+    # every other locked method resolves its path first) -- the write
+    # itself, inside the lock, is the correct hook point.
+    def blocking_write_text(self, data, encoding=None):
+        lock_held_during_call.set()
+        proceed.wait(timeout=2)
+        return real_write_text(self, data, encoding=encoding)
+
+    monkeypatch.setattr(Path, "write_text", blocking_write_text)
+
+    t = threading.Thread(target=lambda: vault.write_by_path("notes/foo.md", "content"))
+    t.start()
+    assert lock_held_during_call.wait(timeout=2), "write_by_path() never reached write_text()"
+
+    acquired = vault._vault_write_lock.acquire(blocking=False)
+    proceed.set()
+    t.join()
+    if acquired:
+        vault._vault_write_lock.release()
+    assert not acquired, "write_by_path() must hold _vault_write_lock while it runs"
+
+
+def test_write_by_path_failed_write_preserves_the_existing_file(vault, monkeypatch):
+    # Regression: the write was a plain write_text() (open-truncate-write,
+    # not atomic) -- same defect class fixed on every other vault write
+    # path.
+    vault.write_by_path("notes/foo.md", "original content")
+
+    original_write_text = Path.write_text
+
+    def boom(self, data, encoding=None):
+        original_write_text(self, "", encoding=encoding)
+        raise OSError("disk full")
+
+    monkeypatch.setattr(Path, "write_text", boom)
+    with pytest.raises(OSError):
+        vault.write_by_path("notes/foo.md", "updated content")
+
+    body, _ = vault.read_by_path("notes/foo.md")
+    assert body == "original content"
+
+
 def test_delete_by_path_removes_file(vault):
     vault.write_by_path("notes/foo.md", "content")
     vault.delete_by_path("notes/foo.md")

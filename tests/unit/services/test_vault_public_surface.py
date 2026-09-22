@@ -1516,6 +1516,48 @@ class TestPerFileLockIsolation:
         assert not t_a.is_alive(), "source A's extraction thread never finished"
         assert vault.get_source(source_a.slug).body == "extracted text"
 
+    def test_a_failed_multi_key_acquisition_releases_locks_already_acquired(self, vault, monkeypatch):
+        # delete_node() on a Source with a companion needs two keys
+        # (primary + companion). If acquiring the second one ever raised,
+        # the first must not stay held forever.
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "body", zotero_key="ABC123", authors=[], tags=[],
+        )
+        vault.attach_source_companion(source.slug, "figure.svg", b"<svg></svg>")
+
+        real_get_lock = VaultService._get_lock
+        call_count = {"n": 0}
+
+        class _FlakyLock:
+            def __init__(self, real_lock):
+                self._real = real_lock
+
+            def acquire(self, blocking=True):
+                call_count["n"] += 1
+                if call_count["n"] == 2:
+                    raise RuntimeError("simulated acquire failure")
+                return self._real.acquire(blocking=blocking)
+
+            def release(self):
+                return self._real.release()
+
+        def patched_get_lock(self, key):
+            return _FlakyLock(real_get_lock(self, key))
+
+        monkeypatch.setattr(VaultService, "_get_lock", patched_get_lock)
+
+        with pytest.raises(RuntimeError, match="simulated acquire failure"):
+            vault.delete_node(source.slug)
+
+        # The first lock acquired before the second one raised must have
+        # been released -- a fresh (still-patched) acquire of it, this
+        # time as the 3rd call overall, must not artificially fail and
+        # must succeed non-blocking if the real lock underneath is free.
+        primary_key = vault._key_for(source.path)
+        acquired = patched_get_lock(vault, primary_key).acquire(blocking=False)
+        assert acquired, "the first lock must be released, not left held, after the second acquire failed"
+        real_get_lock(vault, primary_key).release()
+
 
 class TestCreateDirRejectsPathTraversal:
     def test_absolute_path_is_rejected(self, vault, tmp_path):

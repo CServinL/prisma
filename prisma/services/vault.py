@@ -477,8 +477,23 @@ class VaultService:
             result = compute()
             keys = sorted({self._key_for(p) for p in result if p is not None})
             locks = [self._get_lock(k) for k in keys]
-            for lk in locks:
-                lk.acquire()
+            # This loop itself must be exception-safe, not just the `with`
+            # body below: if acquiring the Nth lock ever raised (an
+            # async exception like KeyboardInterrupt landing between two
+            # acquire() calls, however unlikely with a plain Lock), every
+            # lock already acquired before it would otherwise stay held
+            # forever -- a permanent per-file deadlock outliving this
+            # call, worse than any lost-update bug this scheme exists to
+            # prevent.
+            acquired: list[threading.Lock] = []
+            try:
+                for lk in locks:
+                    lk.acquire()
+                    acquired.append(lk)
+            except BaseException:
+                for lk in reversed(acquired):
+                    lk.release()
+                raise
             try:
                 confirm = compute()
                 confirm_keys = sorted({self._key_for(p) for p in confirm if p is not None})

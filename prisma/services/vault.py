@@ -421,7 +421,17 @@ class VaultService:
         self._citekey_create_lock = threading.Lock()
 
     def _key_for(self, path: Path) -> str:
-        return str(path.relative_to(self.root))
+        """The file's canonical identity for locking, not whatever literal
+        components a caller's path happened to be built from --
+        _resolve_compound_slug() deliberately returns an *unresolved*
+        candidate (see its own docstring), so a `dir--..--dir--name`
+        compound slug that round-trips through a `..` resolves to the
+        same on-disk file as the bare slug but, without resolving here
+        too, produces a different string -- two different Lock objects
+        for one physical file, silently defeating this whole scheme's
+        mutual exclusion for a slug spelling a client can send directly
+        on any PATCH/POST route."""
+        return str(path.resolve().relative_to(self.root))
 
     def _get_lock(self, key: str) -> threading.Lock:
         """Get-or-create is done under a short-lived meta-lock, not a bare
@@ -478,13 +488,23 @@ class VaultService:
             keys = sorted({self._key_for(p) for p in result if p is not None})
             locks = [self._get_lock(k) for k in keys]
             # This loop itself must be exception-safe, not just the `with`
-            # body below: if acquiring the Nth lock ever raised (an
-            # async exception like KeyboardInterrupt landing between two
-            # acquire() calls, however unlikely with a plain Lock), every
-            # lock already acquired before it would otherwise stay held
-            # forever -- a permanent per-file deadlock outliving this
-            # call, worse than any lost-update bug this scheme exists to
-            # prevent.
+            # body below: without the try/except here, an exception while
+            # acquiring the Nth lock (e.g. a real bug in some future
+            # change to this loop, or an async exception like
+            # KeyboardInterrupt landing between two acquire() calls) would
+            # leave every lock already acquired before it held forever --
+            # a permanent per-file deadlock outliving this call, worse
+            # than any lost-update bug this scheme exists to prevent.
+            # Not airtight against every possible async-exception timing:
+            # one landing between `lk.acquire()` succeeding and
+            # `acquired.append(lk)` recording it would still leak that one
+            # lock, same residual gap `contextlib.ExitStack` has for the
+            # identical reason -- there is always a bytecode boundary
+            # between "acquired" and "recorded as acquired" that a signal
+            # can land on in pure Python. Closes the much more likely
+            # case (an exception raised *from* acquire() itself, or from
+            # anything else synchronous in this loop), not a fully
+            # airtight guarantee against CPython signal delivery.
             acquired: list[threading.Lock] = []
             try:
                 for lk in locks:
@@ -1012,9 +1032,13 @@ class VaultService:
                         head_bytes += more
             except FileNotFoundError:
                 # A file can vanish between iter_files()'s walk yielding it
-                # and this read (a concurrent delete/move) -- harmless to
-                # this existence check either way, so skip it rather than
-                # letting POST /notes/sources 500 on an unrelated race.
+                # and this read -- a concurrent delete_node() (not
+                # move_node()/rename_node()/write_by_path(), which all
+                # hold this same _citekey_create_lock and so can't run
+                # concurrently with this scan at all). A citekey going
+                # missing because its file was genuinely deleted is
+                # harmless to this existence check either way, so skip it
+                # rather than letting POST /notes/sources 500 on it.
                 continue
             # Deliberately NOT a bare `except OSError` -- that would also
             # swallow PermissionError (and other real I/O failures) on a
@@ -1052,8 +1076,14 @@ class VaultService:
         unrelated per-file operations (a metadata edit, a companion
         upload) elsewhere in the vault for the duration of this check.
         citekey is immutable post-creation (see update_source_
-        bibliographic_fields()'s docstring), so no locked mutator of an
-        *existing* file can invalidate an in-flight scan here either.
+        bibliographic_fields()'s docstring), so an in-place metadata edit
+        can't invalidate an in-flight scan -- but *relocating* a file
+        (move_node()/rename_node()) or blindly overwriting one
+        (write_by_path()) can, by moving it out of citekey_exists()'s
+        os.walk-based scan before the scan reaches it (see that method's
+        own comment on this). Those three also hold this same lock for
+        their whole duration to close that window, not just the ones
+        that edit a file in place.
 
         Not used by Zotero import -- that path has its own, separate
         citekey-collision behavior via unique_slug() on the *file slug*
@@ -1877,7 +1907,18 @@ class VaultService:
         get silently overwritten by Path.rename() on POSIX, or left the
         primary already moved with no companion move to follow if the
         rename raised instead (platform-dependent partial-move either
-        way)."""
+        way).
+
+        Also holds _citekey_create_lock for the whole call, outside (and
+        acquired before) the per-file lock(s) above -- create_source_
+        from_citekey_if_free()'s citekey_exists() scan walks the vault
+        once, and a file relocating out of a directory the walk hasn't
+        reached yet into one it already has becomes permanently invisible
+        to that scan (the walk never revisits a directory once yielded),
+        letting a concurrent create claim a citekey that in fact still
+        exists elsewhere in the vault. _citekey_create_lock, not a
+        per-file lock, because the scan this must exclude against is
+        vault-wide, not scoped to any single file this method touches."""
 
         def compute():
             path = _or_raise(self.find_file(slug), FileNotFoundError(f"node not found: {slug!r}"))
@@ -1887,7 +1928,7 @@ class VaultService:
             new_companion = self._companion_target(path, new_path, old_companion) if old_companion else None
             return path, new_path, old_companion, new_companion
 
-        with self._locked_paths(compute) as (path, new_path, old_companion, new_companion):
+        with self._citekey_create_lock, self._locked_paths(compute) as (path, new_path, old_companion, new_companion):
             old_rel = str(path.relative_to(self.root))
             new_path.parent.mkdir(parents=True, exist_ok=True)
             if new_path.exists() and new_path != path:
@@ -1929,7 +1970,15 @@ class VaultService:
             new_companion = self._companion_target(path, new_path, old_companion) if old_companion else None
             return path, new_path, old_companion, new_companion
 
-        with self._locked_paths(compute) as (path, new_path, old_companion, new_companion):
+        # Also holds _citekey_create_lock, outside the per-file lock(s) --
+        # a related but distinct version of move_node()'s own reasoning:
+        # os.walk() hands each directory's filenames as a fixed snapshot
+        # the moment it's yielded, never refreshed for that directory
+        # again. A rename swaps the old filename out of that already-
+        # captured list -- citekey_exists()'s scan misses the new name
+        # even though it never left the same directory, letting a
+        # concurrent create claim a citekey that still exists.
+        with self._citekey_create_lock, self._locked_paths(compute) as (path, new_path, old_companion, new_companion):
             old_rel = str(path.relative_to(self.root))
             new_stem = new_path.stem
             if new_path.exists() and new_path != path:
@@ -1968,11 +2017,16 @@ class VaultService:
         attach_source_companion()) can read this file, or even recreate it
         via its own tmp-file+replace, in the same window as this delete,
         leaving the vault in an inconsistent state with no error to either
-        caller. This locks a chat's .sess path too, via the same registry
-        _chat_write_lock's own callers don't participate in -- nothing
-        else ever holds both at once, so no coordination is needed beyond
-        giving delete_node() itself a real per-file lock instead of none.
-        Also uses _paired_companion() (previously only
+        caller. This locks a chat's .sess path too, through the same
+        per-file registry -- but that registry is a *different* lock
+        from _chat_write_lock, which save_chat()/append_messages()/
+        set_pinned_turns() hold instead for that identical file. The two
+        don't exclude each other: a concurrent append_messages() can
+        still recreate a chat this call already deleted. Real, tracked in
+        TODO.md, not fixed here -- resolving it needs a decision on
+        whether chat writes fold into this registry or every chat-
+        mutating method takes _chat_write_lock, not a change to this one
+        method alone. Also uses _paired_companion() (previously only
         `if path.suffix == ".html"`, unconditionally False for a Source)
         to find and remove a Source's `.pdf`/`.svg`/etc. companion too --
         deleting a Source left its companion orphaned on disk otherwise,
@@ -2062,9 +2116,18 @@ class VaultService:
         stale between resolving and locking. Writes atomically (tmp-file+
         replace) so a write failure partway through (disk full, killed
         mid-write) leaves the existing file untouched instead of
-        truncated."""
+        truncated.
+
+        Also holds _citekey_create_lock -- a blind create-or-overwrite
+        from a desktop sync push can add, change, or remove a citekey at
+        this path with no route-level validation at all, and (same
+        os.walk-snapshot reasoning as move_node()/rename_node()) can make
+        an existing citekey briefly invisible to create_source_from_
+        citekey_if_free()'s scan, letting a concurrent create claim a
+        citekey this write is simultaneously putting somewhere the scan
+        won't see."""
         path = self._safe_sync_path(rel_path)
-        with self._get_lock(self._key_for(path)):
+        with self._citekey_create_lock, self._get_lock(self._key_for(path)):
             path.parent.mkdir(parents=True, exist_ok=True)
             tmp_path = path.with_name(f"{path.name}.{uuid.uuid4().hex}.sync.tmp")
             try:

@@ -88,6 +88,20 @@ is a backlog, not a log.
   mid-operation, disk error). Noted, not fixed — a real fix needs either
   a rollback (rename the primary back) or reordering to rename the
   companion first.
+- **The per-file lock's resolve-then-lock-then-reconfirm protocol doubles
+  the vault scan cost of every slug-based mutation.** `_locked_path()`/
+  `_locked_paths()` call `compute()` (which resolves via `find_file()`/
+  `_find_md()`, each an `iter_files()` walk of the whole vault) twice —
+  once to pick a lock key, once to confirm nothing changed after
+  acquiring it — where the single global lock only ever needed one.
+  Measured: `move_node()`/`delete_node()` go from 1 walk to 2,
+  `update_source_bibliographic_fields()`/`save_note()` from 2 to 3. This
+  PR's whole point was reducing lock *contention*; it quietly traded that
+  for more `iter_files()` work per call, worst-case scaling with total
+  file count same as the scan itself. Not fixed here — closing it for
+  real needs `find_file()`/`_find_md()` to stop being an O(vault) walk in
+  the first place (an in-memory slug→path index, invalidated on writes),
+  which is a bigger, separate change than this lock refactor.
 - **No UI to view a companion file** — `COMPANION_EXTS` covers pdf/html/htm/
   svg/epub/docx/tex/drawio/jpg/jpeg, and the backend already serves any of
   them generically (`GET /notes/{slug}/original`, `FileResponse`), but the

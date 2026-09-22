@@ -533,6 +533,82 @@ class TestCreateSourceFromCitekeyIfFree:
 
         assert sorted(results) == ["created", "rejected"]
 
+    def test_a_concurrent_move_of_the_colliding_file_does_not_let_a_duplicate_citekey_through(
+        self, vault, monkeypatch
+    ):
+        # citekey_exists() walks the vault via iter_files() (os.walk
+        # underneath) -- a directory's file list is a fixed snapshot the
+        # moment os.walk yields it, never refreshed. A concurrent
+        # move_node()/rename_node() relocating the one file that actually
+        # holds this citekey, mid-scan, can make it permanently invisible
+        # to that scan: the old (dirpath, filename) pair the snapshot
+        # already captured now 404s (caught, skipped as a harmless
+        # "vanished" case), and the new location was never in any
+        # snapshot to begin with. Without _citekey_create_lock also
+        # excluding move_node()/rename_node()/write_by_path(), this lets
+        # a concurrent create claim a citekey that in fact still exists.
+        #
+        # Hooks citekey_exists() directly, not iter_files() -- iter_files()
+        # is also used by find_file()/_find_md(), so a global slowdown
+        # there would slow move_node()'s own path resolution too and
+        # muddy the timing this test depends on.
+        import threading
+        import time
+
+        existing = vault.create_source_from_citekey(
+            "smith2024", "Existing Paper", "body", zotero_key="ABC123", authors=[], tags=[],
+        )
+
+        def slow_citekey_exists(self, citekey):
+            # Simulates a scan that already passed some other directory
+            # (the sleep) before reaching existing's file at the path it
+            # had at scan start -- the same path a real os.walk-based
+            # scan would still use even if the file had since moved.
+            time.sleep(0.2)
+            try:
+                content = existing.path.read_text(encoding="utf-8")
+            except FileNotFoundError:
+                return False
+            return f"citekey: {citekey}" in content
+
+        monkeypatch.setattr(VaultService, "citekey_exists", slow_citekey_exists)
+
+        results: dict[str, object] = {}
+
+        def create_duplicate():
+            try:
+                vault.create_source_from_citekey_if_free(
+                    "smith2024", "Duplicate Paper", "body", zotero_key="XYZ789", authors=[], tags=[],
+                )
+                results["create"] = "created"
+            except ValueError:
+                results["create"] = "rejected"
+
+        def move_existing():
+            time.sleep(0.05)  # let the create call grab the lock and start its scan first
+            try:
+                vault.move_node(existing.slug, dest_dir="notes")
+                results["move"] = "moved"
+            except Exception as e:  # noqa: BLE001 -- captured for the assertion message below, not swallowed
+                results["move"] = f"raised {e!r}"
+
+        t1 = threading.Thread(target=create_duplicate)
+        t2 = threading.Thread(target=move_existing)
+        t1.start()
+        t2.start()
+        t1.join(timeout=2)
+        t2.join(timeout=2)
+
+        monkeypatch.undo()
+        matching = [
+            p for p in vault.iter_files()
+            if p.is_file() and "citekey: smith2024" in p.read_text(encoding="utf-8")
+        ]
+        assert len(matching) == 1, (
+            f"exactly one file must carry citekey 'smith2024' after a create races a move of the "
+            f"file that already has it -- found {len(matching)}; results={results}"
+        )
+
 
 class TestAttachSourceCompanion:
     def test_attaches_svg_without_touching_body(self, vault):
@@ -1407,6 +1483,38 @@ class TestMoveAndRenameNodeLocking:
             vault._get_lock(key).release()
         assert not acquired, "move_node() must hold this file's lock while it runs"
 
+    def test_move_node_also_holds_the_destination_paths_lock(self, vault, monkeypatch):
+        # The sibling test above only checks the *source* key -- this
+        # proves the destination is locked too, not just asserted about
+        # in a docstring. Same Path.rename hook point/reasoning.
+        import threading
+
+        note = vault.create_note("Note A")
+        dest_path = vault.resolve_within_root("sources") / f"{note.slug}.md"
+
+        lock_held_during_call = threading.Event()
+        proceed = threading.Event()
+        real_rename = Path.rename
+
+        def blocking_rename(self, target):
+            lock_held_during_call.set()
+            proceed.wait(timeout=2)
+            return real_rename(self, target)
+
+        monkeypatch.setattr(Path, "rename", blocking_rename)
+
+        t = threading.Thread(target=lambda: vault.move_node(note.slug, dest_dir="sources"))
+        t.start()
+        assert lock_held_during_call.wait(timeout=2), "move_node() never reached its rename"
+
+        key = vault._key_for(dest_path)
+        acquired = vault._get_lock(key).acquire(blocking=False)
+        proceed.set()
+        t.join()
+        if acquired:
+            vault._get_lock(key).release()
+        assert not acquired, "move_node() must hold the destination path's lock too, not just the source's"
+
     def test_rename_node_holds_its_file_lock_for_its_whole_duration(self, vault, monkeypatch):
         # Same Path.rename hook point and reasoning as move_node's version
         # above.
@@ -1467,10 +1575,9 @@ class TestPerFileLockIsolation:
         # The actual point of per-file locking, not just same-file
         # serialization (already covered elsewhere): source A's multi-
         # second extraction must not stall an unrelated edit to source B.
-        # Under the old single global lock this would deadlock the test
-        # itself (edit_started never fires until extraction_may_finish is
-        # set, but nothing sets it until edit_started fires) -- so on
-        # pre-per-file-locking code this test hangs, not just fails.
+        # Every wait below is timeout-bounded, so this fails cleanly
+        # against the old single global lock rather than hanging --
+        # t_b.join(timeout=2) returns with is_alive() still True.
         import threading
 
         source_a = vault.create_source_from_citekey(
@@ -1557,6 +1664,76 @@ class TestPerFileLockIsolation:
         acquired = patched_get_lock(vault, primary_key).acquire(blocking=False)
         assert acquired, "the first lock must be released, not left held, after the second acquire failed"
         real_get_lock(vault, primary_key).release()
+
+    def test_a_compound_slug_that_decodes_through_dotdot_gets_the_same_key_as_the_bare_slug(self, vault):
+        # _resolve_compound_slug() deliberately returns the *unresolved*
+        # candidate Path (see its own docstring) -- a slug like
+        # "notes--..--notes--foo" decodes to "notes/../notes/foo.md",
+        # the identical on-disk file as the bare slug "foo" but a
+        # different string unless _key_for() resolves it first. Two
+        # different lock keys for one physical file means the lock is
+        # bypassable: a client can send either slug spelling on a
+        # PATCH/POST route, and neither request excludes the other.
+        note = vault.create_note("Foo")
+        path_plain = vault._find_md(note.slug)
+        compound_slug = f"notes--..--notes--{note.slug}"
+        path_compound = vault._find_md(compound_slug)
+        assert path_compound is not None, "test setup: compound slug must resolve to the same file"
+        assert vault._key_for(path_plain) == vault._key_for(path_compound), (
+            "two slug spellings for the identical physical file must produce the same lock key"
+        )
+
+    def test_a_concurrent_move_between_resolve_and_lock_is_picked_up_by_the_retry(self, vault, monkeypatch):
+        # _locked_path()/_locked_paths() resolve a slug's path *before*
+        # acquiring its lock (there's no key to lock without it), then
+        # re-resolve once locked to confirm nothing changed in between --
+        # retrying against the fresh result otherwise. This forces that
+        # exact window open: update_source_bibliographic_fields()'s first,
+        # unlocked resolve returns the pre-move path, a real move_node()
+        # actually runs and completes before the lock is even acquired,
+        # and the edit must still land on the file at its new location,
+        # not silently no-op against a path that no longer exists.
+        import threading
+
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "body", zotero_key="ABC123", authors=[], tags=[],
+        )
+        original_path = source.path
+
+        real_find_md = VaultService._find_md
+        call_count = {"n": 0}
+        move_done = threading.Event()
+
+        def hooked_find_md(self, slug):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                # The first call is update_source_bibliographic_fields()'s
+                # own unlocked resolve -- return the stale, pre-move path
+                # directly (not a real lookup) so this doesn't race the
+                # move below, then let the move actually complete before
+                # returning it, so every later call in this test sees a
+                # vault that has already moved.
+                mover.start()
+                assert move_done.wait(timeout=2), "move_node() never finished"
+                return original_path
+            return real_find_md(self, slug)
+
+        monkeypatch.setattr(VaultService, "_find_md", hooked_find_md)
+
+        def do_move():
+            vault.move_node(source.slug, dest_dir="notes")
+            move_done.set()
+
+        mover = threading.Thread(target=do_move)
+
+        updated = vault.update_source_bibliographic_fields(source.slug, journal="New Journal")
+        mover.join(timeout=2)
+
+        assert updated.journal == "New Journal"
+        assert updated.path != original_path, "test setup: the source should have actually moved"
+        assert not original_path.exists(), "the stale pre-move path must not have been resurrected"
+        assert updated.path.exists()
+        assert updated.path.read_text(encoding="utf-8").count("New Journal") == 1
 
 
 class TestCreateDirRejectsPathTraversal:

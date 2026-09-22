@@ -949,12 +949,16 @@ class TestEnsureMdFormatCleansUpOnFailure:
 
 
 class TestSetNodeTypeLocking:
-    def test_holds_vault_write_lock_for_its_whole_duration(self, vault, monkeypatch):
+    def test_holds_its_file_lock_for_its_whole_duration(self, vault, monkeypatch):
         # Tests lock ownership directly (a concurrent non-blocking acquire
         # attempt must fail while set_node_type() is mid-flight) rather
         # than a sleep-timed race -- this method has no operation slow
         # enough to reliably win a real race, so a sleep-based version was
-        # flaky.
+        # flaky. Hooks Path.write_text, not find_file() -- _locked_path()
+        # calls the resolver *before* acquiring the lock (to know which
+        # key to lock), so a hook there would fire while nothing is held
+        # yet; the write is the one thing guaranteed to run only after the
+        # lock is confirmed held.
         import threading
 
         source = vault.create_source_from_citekey(
@@ -963,26 +967,26 @@ class TestSetNodeTypeLocking:
 
         lock_held_during_call = threading.Event()
         proceed = threading.Event()
-        real_find_file = VaultService.find_file
+        real_write_text = Path.write_text
 
-        def blocking_find_file(self, slug):
-            result = real_find_file(self, slug)
+        def blocking_write_text(self, data, encoding=None):
             lock_held_during_call.set()
             proceed.wait(timeout=2)
-            return result
+            return real_write_text(self, data, encoding=encoding)
 
-        monkeypatch.setattr(VaultService, "find_file", blocking_find_file)
+        monkeypatch.setattr(Path, "write_text", blocking_write_text)
 
         t = threading.Thread(target=lambda: vault.set_node_type(source.slug, NodeType.source))
         t.start()
-        assert lock_held_during_call.wait(timeout=2), "set_node_type() never reached find_file()"
+        assert lock_held_during_call.wait(timeout=2), "set_node_type() never reached its write"
 
-        acquired = vault._vault_write_lock.acquire(blocking=False)
+        key = vault._key_for(source.path)
+        acquired = vault._get_lock(key).acquire(blocking=False)
         proceed.set()
         t.join()
         if acquired:
-            vault._vault_write_lock.release()
-        assert not acquired, "set_node_type() must hold _vault_write_lock while it runs"
+            vault._get_lock(key).release()
+        assert not acquired, "set_node_type() must hold this file's lock while it runs"
 
     def test_failed_write_preserves_the_existing_source(self, vault, monkeypatch):
         # A failed write must not destroy the Source's existing content.
@@ -1008,35 +1012,35 @@ class TestSetNodeTypeLocking:
 
 
 class TestSaveNoteLocking:
-    def test_holds_vault_write_lock_for_its_whole_duration(self, vault, monkeypatch):
-        # Tests lock ownership directly, same reasoning as
-        # TestSetNodeTypeLocking above.
+    def test_holds_its_file_lock_for_its_whole_duration(self, vault, monkeypatch):
+        # Tests lock ownership directly, same reasoning and same
+        # Path.write_text hook point as TestSetNodeTypeLocking above.
         import threading
 
         note = vault.create_note("My Note", "original body")
 
         lock_held_during_call = threading.Event()
         proceed = threading.Event()
-        real_find_md = VaultService._find_md
+        real_write_text = Path.write_text
 
-        def blocking_find_md(self, slug):
-            result = real_find_md(self, slug)
+        def blocking_write_text(self, data, encoding=None):
             lock_held_during_call.set()
             proceed.wait(timeout=2)
-            return result
+            return real_write_text(self, data, encoding=encoding)
 
-        monkeypatch.setattr(VaultService, "_find_md", blocking_find_md)
+        monkeypatch.setattr(Path, "write_text", blocking_write_text)
 
         t = threading.Thread(target=lambda: vault.save_note(note.slug, "updated body"))
         t.start()
-        assert lock_held_during_call.wait(timeout=2), "save_note() never reached _find_md()"
+        assert lock_held_during_call.wait(timeout=2), "save_note() never reached its write"
 
-        acquired = vault._vault_write_lock.acquire(blocking=False)
+        key = vault._key_for(note.path)
+        acquired = vault._get_lock(key).acquire(blocking=False)
         proceed.set()
         t.join()
         if acquired:
-            vault._vault_write_lock.release()
-        assert not acquired, "save_note() must hold _vault_write_lock while it runs"
+            vault._get_lock(key).release()
+        assert not acquired, "save_note() must hold this file's lock while it runs"
 
     def test_failed_write_preserves_the_existing_note(self, vault, monkeypatch):
         # A failed write must not destroy the note's existing content.
@@ -1335,91 +1339,103 @@ class TestDeleteNode:
 
         assert not companion.exists()
 
-    def test_holds_vault_write_lock_for_its_whole_duration(self, vault, monkeypatch):
+    def test_holds_its_file_lock_for_its_whole_duration(self, vault, monkeypatch):
+        # Hooks Path.unlink, not find_file() -- _locked_paths() calls its
+        # resolver before acquiring any lock, so a hook there fires too
+        # early; unlink() is the mutating step, guaranteed to run only
+        # after the lock is confirmed held.
         import threading
 
         note = vault.create_note("Note A")
 
         lock_held_during_call = threading.Event()
         proceed = threading.Event()
-        real_find_file = VaultService.find_file
+        real_unlink = Path.unlink
 
-        def blocking_find_file(self, slug):
-            result = real_find_file(self, slug)
+        def blocking_unlink(self, missing_ok=False):
             lock_held_during_call.set()
             proceed.wait(timeout=2)
-            return result
+            return real_unlink(self, missing_ok=missing_ok)
 
-        monkeypatch.setattr(VaultService, "find_file", blocking_find_file)
+        monkeypatch.setattr(Path, "unlink", blocking_unlink)
 
         t = threading.Thread(target=lambda: vault.delete_node(note.slug))
         t.start()
-        assert lock_held_during_call.wait(timeout=2), "delete_node() never reached find_file()"
+        assert lock_held_during_call.wait(timeout=2), "delete_node() never reached its unlink"
 
-        acquired = vault._vault_write_lock.acquire(blocking=False)
+        key = vault._key_for(note.path)
+        acquired = vault._get_lock(key).acquire(blocking=False)
         proceed.set()
         t.join()
         if acquired:
-            vault._vault_write_lock.release()
-        assert not acquired, "delete_node() must hold _vault_write_lock while it runs"
+            vault._get_lock(key).release()
+        assert not acquired, "delete_node() must hold this file's lock while it runs"
 
 
 class TestMoveAndRenameNodeLocking:
-    def test_move_node_holds_vault_write_lock_for_its_whole_duration(self, vault, monkeypatch):
+    def test_move_node_holds_its_file_lock_for_its_whole_duration(self, vault, monkeypatch):
+        # Hooks Path.rename, not find_file() -- _locked_paths() calls its
+        # resolver before acquiring any lock, so a hook there fires too
+        # early; rename() is the mutating step, guaranteed to run only
+        # after both the old and new path's locks are confirmed held.
+        # Checking the *old* path's key is enough to prove the point (the
+        # new path is locked too, see move_node()'s own docstring).
         import threading
 
         note = vault.create_note("Note A")
 
         lock_held_during_call = threading.Event()
         proceed = threading.Event()
-        real_find_file = VaultService.find_file
+        real_rename = Path.rename
 
-        def blocking_find_file(self, slug):
-            result = real_find_file(self, slug)
+        def blocking_rename(self, target):
             lock_held_during_call.set()
             proceed.wait(timeout=2)
-            return result
+            return real_rename(self, target)
 
-        monkeypatch.setattr(VaultService, "find_file", blocking_find_file)
+        monkeypatch.setattr(Path, "rename", blocking_rename)
 
         t = threading.Thread(target=lambda: vault.move_node(note.slug, dest_dir="sources"))
         t.start()
-        assert lock_held_during_call.wait(timeout=2), "move_node() never reached find_file()"
+        assert lock_held_during_call.wait(timeout=2), "move_node() never reached its rename"
 
-        acquired = vault._vault_write_lock.acquire(blocking=False)
+        key = vault._key_for(note.path)
+        acquired = vault._get_lock(key).acquire(blocking=False)
         proceed.set()
         t.join()
         if acquired:
-            vault._vault_write_lock.release()
-        assert not acquired, "move_node() must hold _vault_write_lock while it runs"
+            vault._get_lock(key).release()
+        assert not acquired, "move_node() must hold this file's lock while it runs"
 
-    def test_rename_node_holds_vault_write_lock_for_its_whole_duration(self, vault, monkeypatch):
+    def test_rename_node_holds_its_file_lock_for_its_whole_duration(self, vault, monkeypatch):
+        # Same Path.rename hook point and reasoning as move_node's version
+        # above.
         import threading
 
         note = vault.create_note("Note A")
 
         lock_held_during_call = threading.Event()
         proceed = threading.Event()
-        real_find_md = VaultService._find_md
+        real_rename = Path.rename
 
-        def blocking_find_md(self, slug):
-            result = real_find_md(self, slug)
+        def blocking_rename(self, target):
             lock_held_during_call.set()
             proceed.wait(timeout=2)
-            return result
+            return real_rename(self, target)
 
-        monkeypatch.setattr(VaultService, "_find_md", blocking_find_md)
+        monkeypatch.setattr(Path, "rename", blocking_rename)
 
         t = threading.Thread(target=lambda: vault.rename_node(note.slug, "New Title"))
         t.start()
-        assert lock_held_during_call.wait(timeout=2), "rename_node() never reached _find_md()"
+        assert lock_held_during_call.wait(timeout=2), "rename_node() never reached its rename"
 
-        acquired = vault._vault_write_lock.acquire(blocking=False)
+        key = vault._key_for(note.path)
+        acquired = vault._get_lock(key).acquire(blocking=False)
         proceed.set()
         t.join()
         if acquired:
-            vault._vault_write_lock.release()
-        assert not acquired, "rename_node() must hold _vault_write_lock while it runs"
+            vault._get_lock(key).release()
+        assert not acquired, "rename_node() must hold this file's lock while it runs"
 
     def test_rename_node_failed_write_does_not_leave_a_truncated_file(self, vault, monkeypatch):
         note = vault.create_note("Note A", "original body")
@@ -1442,6 +1458,63 @@ class TestMoveAndRenameNodeLocking:
         remaining = list(vault.root.rglob("*.md"))
         assert len(remaining) == 1
         assert "original body" in remaining[0].read_text(encoding="utf-8")
+
+
+class TestPerFileLockIsolation:
+    def test_a_slow_companion_extraction_on_one_source_does_not_block_an_edit_on_another(
+        self, vault, monkeypatch
+    ):
+        # The actual point of per-file locking, not just same-file
+        # serialization (already covered elsewhere): source A's multi-
+        # second extraction must not stall an unrelated edit to source B.
+        # Under the old single global lock this would deadlock the test
+        # itself (edit_started never fires until extraction_may_finish is
+        # set, but nothing sets it until edit_started fires) -- so on
+        # pre-per-file-locking code this test hangs, not just fails.
+        import threading
+
+        source_a = vault.create_source_from_citekey(
+            "smith2024", "Source A", "", zotero_key="AAA111", authors=[], tags=[],
+        )
+        source_b = vault.create_source_from_citekey(
+            "jones2024", "Source B", "original body", zotero_key="BBB222", authors=[], tags=[],
+        )
+
+        extraction_started = threading.Event()
+        extraction_may_finish = threading.Event()
+
+        def blocking_pdf_bytes_to_md(data):
+            extraction_started.set()
+            extraction_may_finish.wait(timeout=2)
+            return "extracted text"
+
+        monkeypatch.setattr("prisma.services.vault.pdf_bytes_to_md", blocking_pdf_bytes_to_md)
+
+        t_a = threading.Thread(
+            target=lambda: vault.attach_source_companion(source_a.slug, "paper.pdf", b"pdf bytes")
+        )
+        t_a.start()
+        assert extraction_started.wait(timeout=2), "source A's extraction never started"
+
+        edit_started = threading.Event()
+
+        def edit_b():
+            edit_started.set()
+            vault.update_source_bibliographic_fields(source_b.slug, journal="Updated Journal")
+
+        t_b = threading.Thread(target=edit_b)
+        t_b.start()
+        assert edit_started.wait(timeout=2), "source B's edit thread never started"
+        t_b.join(timeout=2)
+        assert not t_b.is_alive(), (
+            "an edit to an unrelated source must not block on source A's still-in-flight extraction"
+        )
+        assert vault.get_source(source_b.slug).journal == "Updated Journal"
+
+        extraction_may_finish.set()
+        t_a.join(timeout=2)
+        assert not t_a.is_alive(), "source A's extraction thread never finished"
+        assert vault.get_source(source_a.slug).body == "extracted text"
 
 
 class TestCreateDirRejectsPathTraversal:

@@ -57,24 +57,23 @@ is a backlog, not a log.
 
 ## Vault
 
-- **`_vault_write_lock` (renamed from `_source_write_lock`) now covers
-  every in-vault file mutator.** Closing the same read-merge-write
-  lost-update race across `update_source_bibliographic_fields()`,
-  `attach_source_companion()`, `ensure_md_format()`, `set_node_type()`,
-  `save_note()`, `move_node()`, `rename_node()`, and `write_by_path()`/
-  `delete_by_path()` (the `/sync/file` desktop-sync path, which used to
-  take a second, uncoordinated `_path_write_lock`, now retired) turned out
-  to be one lock, applied consistently, not one lock per route. `move_node()`/
-  `rename_node()` also gained real companion-relocation logic — previously
-  only `if path.suffix == ".html"` was handled, which is unconditionally
-  False for a Source, silently orphaning its `.pdf`/`.svg`/etc. companion
-  on every move or rename. The lock is global, not per-slug — a companion
-  upload's multi-second PDF/HTML extraction now also blocks metadata
-  edits, type changes, moves, renames, creates, and synced desktop writes
-  for every unrelated node for that whole duration, a real cross-slug
-  contention cost traded for correctness rather than a free fix. Worth a
-  follow-up per-slug lock to remove that cost, but not accepted as
-  permanent.
+- **Chat `.sess` writes aren't coordinated with the per-file vault-write
+  lock.** `save_chat()`/`append_messages()`/`set_pinned_turns()` hold
+  `_chat_write_lock` (a separate, chat-only lock) around a `.sess` file's
+  read-merge-write; `delete_node()`'s chat branch locks that same `.sess`
+  path through the per-file registry instead (inherited unchanged from
+  when it held the single global `_vault_write_lock` — a different lock
+  from `_chat_write_lock` even then). A concurrent chat save/pin and a
+  `delete_node()` on that same chat can therefore still race: two
+  uncoordinated locks over the same file, which is exactly as unsafe as
+  no lock at all, just less obviously so. Noticed while auditing every
+  existing lock during a per-slug vault-write-lock refactor (PR replacing
+  the single global `_vault_write_lock` with a per-file registry);
+  pre-existing before that refactor, not introduced by it, out of scope —
+  fixing it means either folding chat writes into the per-file registry
+  or making `delete_node()`'s chat branch take `_chat_write_lock` instead,
+  a decision that needs its own look at every other `_chat_write_lock`
+  caller first.
 - **No UI to view a companion file** — `COMPANION_EXTS` covers pdf/html/htm/
   svg/epub/docx/tex/drawio/jpg/jpeg, and the backend already serves any of
   them generically (`GET /notes/{slug}/original`, `FileResponse`), but the

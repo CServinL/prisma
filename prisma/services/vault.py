@@ -5,6 +5,7 @@ import logging
 import re
 import threading
 import uuid
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Iterator
@@ -102,6 +103,22 @@ _FRONTMATTER_READ_BYTES = 8192
 # for real Source files.
 _CITEKEY_SCAN_READ_BYTES = 65536
 _CITEKEY_SCAN_MAX_BYTES = 4 * 1024 * 1024
+
+# _locked_paths()'s retry cap when a resolved path keeps changing out from
+# under it (a concurrent move/rename winning the race each time). A safety
+# valve against a hypothetical bug turning into a silent hang, not a bound
+# expected to matter in practice -- hitting it needs a sustained storm of
+# concurrent moves on the exact node being operated on.
+_LOCK_RESOLVE_MAX_RETRIES = 100
+
+
+def _or_raise(value, exc: BaseException):
+    """Lets a resolve-a-path lambda passed to VaultService._locked_path()
+    raise its own not-found error without needing a full nested def --
+    a bare `lambda` can't contain a `raise` statement."""
+    if value is None:
+        raise exc
+    return value
 
 
 def _parse_frontmatter(body: str) -> tuple[dict, str]:
@@ -381,15 +398,108 @@ class VaultService:
         self._chat_write_lock = threading.Lock()
         # Same rationale again, for any single-vault-file read-merge-write
         # (or, for write_by_path()/delete_by_path(), a blind create-or-
-        # overwrite): guards every Source-mutating method that reads and
+        # overwrite) -- guards every Source-mutating method that reads and
         # rewrites the same file (update_source_bibliographic_fields,
         # attach_source_companion, ensure_md_format, set_node_type),
         # Note's save_note(), move_node()/rename_node(), and /sync/file's
-        # write_by_path()/delete_by_path(). One process-wide lock for
-        # every vault-file write, not one lock per code path, so a synced
-        # desktop edit and a locked API-side edit can never race each
-        # other on the same file.
-        self._vault_write_lock = threading.Lock()
+        # write_by_path()/delete_by_path(). One lock *per file*, not one
+        # process-wide lock for every write: a companion's multi-second
+        # PDF/HTML extraction must not stall an edit to an unrelated
+        # Source. _get_lock()/_locked_path()/_locked_paths() below are the
+        # shared machinery every one of those call sites goes through, so
+        # the file-identity keying and multi-file acquisition order stay
+        # consistent in one place rather than each call site inventing
+        # its own.
+        self._file_locks: dict[str, threading.Lock] = {}
+        self._file_locks_meta_lock = threading.Lock()
+        # citekey_exists() is inherently vault-wide (it must see every
+        # existing file), so there's no single per-file key to shrink its
+        # check-then-create to -- a small dedicated lock, not part of the
+        # per-file registry below, keeps two concurrent creates from
+        # colliding on the same citekey without coupling that vault-wide
+        # scan to any single file's lock.
+        self._citekey_create_lock = threading.Lock()
+
+    def _key_for(self, path: Path) -> str:
+        return str(path.relative_to(self.root))
+
+    def _get_lock(self, key: str) -> threading.Lock:
+        """Get-or-create is done under a short-lived meta-lock, not a bare
+        dict .setdefault()/defaultdict -- "check key, construct Lock,
+        insert" isn't atomic even under the GIL, so two threads racing a
+        first touch of the same key could otherwise install two different
+        Lock objects for one file, silently defeating the mutual exclusion
+        this whole scheme exists to provide. The meta-lock is only ever
+        held for the dict lookup/insert itself, never across real I/O.
+
+        self._file_locks never shrinks -- one entry per distinct
+        vault-relative-path string ever locked over the process's
+        lifetime. Deliberate: a Lock is ~56 bytes, this is a single-user
+        local vault, and correctly evicting an entry that might still be
+        referenced by a lock some other thread is mid-acquire on is real
+        complexity to solve a problem that doesn't exist at this scale."""
+        with self._file_locks_meta_lock:
+            lock = self._file_locks.get(key)
+            if lock is None:
+                lock = threading.Lock()
+                self._file_locks[key] = lock
+            return lock
+
+    @contextmanager
+    def _locked_paths(self, compute):
+        """compute() returns a tuple of Path|None for every file one
+        operation touches (None entries are skipped), or raises itself
+        (e.g. FileNotFoundError) if its anchor doesn't resolve at all.
+
+        Every current caller resolves slug -> path *inside* whatever lock
+        it holds, which is how it re-validates invariants (a node's type,
+        its continued existence) atomically with the mutation that follows.
+        Per-file locking needs the key before it can lock, but resolving
+        the key is exactly the step that needs protecting -- so this
+        resolves once unlocked, locks the deduplicated, sorted set of keys
+        that resolve to (sorting is the one ABBA-safe acquisition order
+        every multi-key caller in this class uses, so two threads can
+        never form a cyclic wait), then re-invokes compute() to confirm
+        the same files are still in play. A concurrent move/rename/delete
+        that won the race in between changes what compute() returns; this
+        releases and retries against the new result rather than proceeding
+        against a stale one. Sound because every mutator that can change a
+        slug's resolved path also goes through this same protocol keyed on
+        the same path strings -- once a thread's re-resolve check passes,
+        nothing else can be concurrently past its own check for an
+        identical path (they'd block on the same Lock object) until this
+        thread releases it.
+
+        compute() must stay side-effect-light: it may run more than once
+        per call, and only the code inside the `with` block is guaranteed
+        to run exactly once."""
+        for _ in range(_LOCK_RESOLVE_MAX_RETRIES):
+            result = compute()
+            keys = sorted({self._key_for(p) for p in result if p is not None})
+            locks = [self._get_lock(k) for k in keys]
+            for lk in locks:
+                lk.acquire()
+            try:
+                confirm = compute()
+                confirm_keys = sorted({self._key_for(p) for p in confirm if p is not None})
+                if confirm_keys != keys:
+                    continue
+                yield confirm
+                return
+            finally:
+                for lk in locks:
+                    lk.release()
+        raise RuntimeError(
+            "gave up stabilizing a vault file lock after repeated concurrent moves/renames"
+        )
+
+    @contextmanager
+    def _locked_path(self, resolve):
+        """Single-file convenience wrapper over _locked_paths() -- resolve()
+        returns a Path or raises itself, same contract as _locked_paths()'s
+        compute()."""
+        with self._locked_paths(lambda: (resolve(),)) as (path,):
+            yield path
 
     def ensure_dirs(self) -> None:
         for d in self.default_dirs.values():
@@ -796,13 +906,13 @@ class VaultService:
         changing it after creation would silently orphan or misdirect any
         citation already pointing at this source elsewhere in the vault.
 
-        Holds _vault_write_lock across the whole read-merge-write, same as
-        attach_source_companion() below -- without it, a metadata edit
-        racing a companion upload's own read-merge-write of the identical
-        frontmatter (the two are read-merge-write on the same file, not
-        independent) is a lost-update: whichever finishes last silently
-        wins, discarding the other caller's already-200'd change with no
-        error to either side.
+        Locked on this file's own path across the whole read-merge-write,
+        same as attach_source_companion() below -- without it, a metadata
+        edit racing a companion upload's own read-merge-write of the
+        identical frontmatter (the two are read-merge-write on the same
+        file, not independent) is a lost-update: whichever finishes last
+        silently wins, discarding the other caller's already-200'd change
+        with no error to either side.
 
         Re-validates type == source here, inside the lock, rather than
         trusting the route layer's own isinstance(node, Source) check
@@ -811,10 +921,9 @@ class VaultService:
         this node away from Source in between would otherwise let this
         method proceed anyway, silently writing Source-only bibliographic
         fields into what is now a Note."""
-        with self._vault_write_lock:
-            path = self._find_md(slug)
-            if path is None:
-                raise FileNotFoundError(f"source not found: {slug!r}")
+        with self._locked_path(
+            lambda: _or_raise(self._find_md(slug), FileNotFoundError(f"source not found: {slug!r}"))
+        ) as path:
             raw = path.read_text(encoding="utf-8")
             fm, content = _parse_frontmatter(raw)
             if fm.get("type") != NodeType.source.value:
@@ -905,7 +1014,7 @@ class VaultService:
         return False
 
     def create_source_from_citekey_if_free(self, citekey: str, title: str, body: str, **kwargs) -> Source:
-        """Atomic check-and-create: holds _vault_write_lock across the
+        """Atomic check-and-create: holds _citekey_create_lock across the
         citekey_exists() check and the actual write. Calling those two as
         separate steps from the route layer (check, then create) leaves a
         real TOCTOU window -- two concurrent manual-create requests (a
@@ -918,13 +1027,26 @@ class VaultService:
         FileExistsError) on collision to match this module's other
         caller-facing validation errors (see attach_source_companion).
 
+        _citekey_create_lock, not a per-file lock keyed on the not-yet-
+        existing destination: citekey_exists() is a vault-wide scan (it
+        must see every file, not one), so there's no single file identity
+        to key this on. A small dedicated lock still serves the actual
+        correctness need -- two concurrent creates can't collide on a
+        citekey -- without coupling that vault-wide scan to any one file's
+        lock, and unlike sharing the old global lock, it no longer blocks
+        unrelated per-file operations (a metadata edit, a companion
+        upload) elsewhere in the vault for the duration of this check.
+        citekey is immutable post-creation (see update_source_
+        bibliographic_fields()'s docstring), so no locked mutator of an
+        *existing* file can invalidate an in-flight scan here either.
+
         Not used by Zotero import -- that path has its own, separate
         citekey-collision behavior via unique_slug() on the *file slug*
         (not the citekey field itself), unchanged here; folding it into
         this same guard would change POST /zotero/import/{key}'s existing
         behavior, out of scope for the manual-create gap this exists to
         close."""
-        with self._vault_write_lock:
+        with self._citekey_create_lock:
             if self.citekey_exists(citekey):
                 raise ValueError(f"citekey already in use: {citekey!r}")
             return self.create_source_from_citekey(citekey, title, body, **kwargs)
@@ -960,8 +1082,8 @@ class VaultService:
         way to tell it not to) -- a smaller, separate waste than the
         extraction this actually avoids, not chased further here.
 
-        Holds _vault_write_lock across the entire method, including the
-        (possibly seconds-long) ensure_md_format() extraction -- three
+        Locked on this file's own path for the entire method, including
+        the (possibly seconds-long) ensure_md_format() extraction -- three
         separate races otherwise open up, none needing true byte-level bad
         luck to hit, just two requests landing close together (double-
         submit, two tabs, a client retry racing the original):
@@ -978,21 +1100,19 @@ class VaultService:
         - ensure_md_format() reads this exact file's frontmatter into its
           own `fm` before extraction starts; a concurrent metadata PATCH
           (update_source_bibliographic_fields(), which takes this same
-          lock) completing in between would otherwise get silently
+          file's lock) completing in between would otherwise get silently
           overwritten by ensure_md_format()'s stale-frontmatter write when
           the slow extraction finally finishes, discarding an edit that
           already returned 200 to its caller.
 
-        Trade-off worth naming: _vault_write_lock is global, not per-slug,
-        so this also blocks create_source_from_citekey_if_free() and
-        update_source_bibliographic_fields() for *unrelated* sources for
-        the full extraction duration, not just this one's. Correct beats
-        fast here -- see TODO.md's Vault section for the per-slug-lock
-        follow-up that would remove this cost."""
-        with self._vault_write_lock:
-            path = self._find_md(slug)
-            if path is None:
-                raise FileNotFoundError(f"source not found: {slug!r}")
+        Per-file, not global: unlike the single vault-wide lock this used
+        to share, the extraction above no longer blocks
+        create_source_from_citekey_if_free() or update_source_
+        bibliographic_fields() for *unrelated* sources -- only another
+        caller locked on this exact file waits."""
+        with self._locked_path(
+            lambda: _or_raise(self._find_md(slug), FileNotFoundError(f"source not found: {slug!r}"))
+        ) as path:
             # Re-read and validate type here, inside the lock, rather than
             # trusting the route layer's own isinstance(node, Source) check
             # alone -- that check runs BEFORE this lock is acquired (and
@@ -1070,7 +1190,7 @@ class VaultService:
                 existing.unlink(missing_ok=True)
             if ext in (".pdf", ".html", ".htm"):
                 # _ensure_md_format_locked(), not ensure_md_format() -- this
-                # method already holds _vault_write_lock; re-acquiring the
+                # method already holds this file's lock; re-acquiring the
                 # same non-reentrant Lock here would deadlock.
                 self._ensure_md_format_locked(companion_path, force=is_replace)
             return self.get_source(slug)
@@ -1238,22 +1358,28 @@ class VaultService:
     def set_node_type(self, slug: str, node_type: NodeType) -> None:
         """Update the type field for any node. For HTML files, creates/updates a companion .md.
 
-        Holds _vault_write_lock unconditionally (cheap when uncontended)
-        even though this method is generic across every node type --
-        reachable against a Source via PATCH /{slug}/type, which can race
-        update_source_bibliographic_fields()/attach_source_companion() on
-        the same file otherwise. Writes atomically (tmp-file+replace), same
-        as its locked siblings."""
-        with self._vault_write_lock:
-            path = self.find_file(slug)
-            if path is None:
-                raise FileNotFoundError(f"node not found: {slug!r}")
-            target = path.with_suffix(".md") if path.suffix == ".html" else path
+        Locked on `target` below -- the file this actually reads and
+        writes, not find_file(slug)'s raw result -- even though this
+        method is generic across every node type: reachable against a
+        Source via PATCH /{slug}/type, which can race update_source_
+        bibliographic_fields()/attach_source_companion() on the same file
+        otherwise, and those key their own lock on the same .md path via
+        _find_md(). Locking find_file()'s raw (pre-redirect) result here
+        instead would give this method a *different* key than theirs for
+        the identical file, silently failing to serialize against them.
+        Writes atomically (tmp-file+replace), same as its locked
+        siblings."""
+
+        def _resolve_target() -> Path:
+            path = _or_raise(self.find_file(slug), FileNotFoundError(f"node not found: {slug!r}"))
+            return path.with_suffix(".md") if path.suffix == ".html" else path
+
+        with self._locked_path(_resolve_target) as target:
             if target.exists():
                 raw = target.read_text(encoding="utf-8")
                 fm, body = _parse_frontmatter(raw)
             else:
-                fm, body = {"title": path.stem}, ""
+                fm, body = {"title": target.stem}, ""
             fm["type"] = node_type.value
             tmp_path = target.with_name(f"{target.name}.{uuid.uuid4().hex}.type.tmp")
             try:
@@ -1266,21 +1392,29 @@ class VaultService:
     # ── Format generation ─────────────────────────────────────────────────────
 
     def ensure_md_format(self, companion_path: Path, force: bool = False) -> bool:
-        """Public entry point -- acquires _vault_write_lock, then delegates
-        to _ensure_md_format_locked() below. Needed because this method has
-        two callers with different locking needs: generate_md_format()
-        (the /{slug}/md route) calls this directly and holds no lock of
-        its own, so without this it would race unsynchronized against
-        edit_source()/upload_source_companion()'s own _vault_write_lock-
-        guarded read-merge-write of the identical file -- the exact "lost
-        update" class this lock exists to prevent, just missed for this
-        pre-existing fourth call path when the other three got it.
-        attach_source_companion() is the other caller, and it already
-        holds this same lock for its own multi-step operation -- calling
-        this method (and re-acquiring the same non-reentrant Lock) from
-        inside that would deadlock, so it calls _ensure_md_format_locked()
-        directly instead, below."""
-        with self._vault_write_lock:
+        """Public entry point -- locks the sibling .md this will write to,
+        then delegates to _ensure_md_format_locked() below. Needed because
+        this method has two callers with different locking needs:
+        generate_md_format() (the /{slug}/md route) calls this directly
+        and holds no lock of its own, so without this it would race
+        unsynchronized against edit_source()/upload_source_companion()'s
+        own locked read-merge-write of the identical file -- the exact
+        "lost update" class this locking scheme exists to prevent, just
+        missed for this pre-existing fourth call path when the other
+        three got it. attach_source_companion() is the other caller, and
+        it already holds this same file's lock for its own multi-step
+        operation -- calling this method (and re-acquiring the same
+        non-reentrant Lock) from inside that would deadlock, so it calls
+        _ensure_md_format_locked() directly instead, below.
+
+        Fixed-key, no retry -- unlike _locked_path()'s slug-based callers,
+        there's no slug here to re-resolve from if the target changed
+        underneath (this receives a Path, not a slug). Not a regression:
+        the pre-per-file-locking code didn't re-validate this path against
+        the route's own resolve either; this only narrows the blocking
+        radius from every vault write to this one file."""
+        target = companion_path.with_suffix(".md")
+        with self._get_lock(self._key_for(target)):
             return self._ensure_md_format_locked(companion_path, force=force)
 
     def _ensure_md_format_locked(self, companion_path: Path, force: bool = False) -> bool:
@@ -1300,7 +1434,7 @@ class VaultService:
         refresh stale content, so the empty-body gate would otherwise
         silently keep serving the old extraction forever.
 
-        Assumes the caller already holds _vault_write_lock -- see
+        Assumes the caller already holds this file's lock -- see
         ensure_md_format() above for why this is split out."""
         companion = companion_path.with_suffix(".md")
         if companion.exists():
@@ -1396,20 +1530,19 @@ class VaultService:
         return self.get_note(slug)
 
     def save_note(self, slug: str, body: str) -> Note:
-        """Holds _vault_write_lock and writes atomically (tmp-file+replace),
-        same as every Source-mutating method -- this was a plain, unlocked
-        write_text() until a TODO.md audit found the underlying read-
-        merge-write race isn't actually Source-specific, just first noticed
-        there: two requests saving the same note close together (two
-        browser tabs, a double-click, or a concurrent PATCH /{slug}/type)
-        could each read stale frontmatter and one write silently clobbers
-        the other's change, and a write failure partway through (disk
-        full, killed mid-write) destroyed the note instead of leaving it
-        untouched."""
-        with self._vault_write_lock:
-            path = self._find_md(slug)
-            if path is None:
-                raise FileNotFoundError(f"note not found: {slug!r}")
+        """Locked on this file's own path and writes atomically (tmp-file+
+        replace), same as every Source-mutating method -- this was a
+        plain, unlocked write_text() until a TODO.md audit found the
+        underlying read-merge-write race isn't actually Source-specific,
+        just first noticed there: two requests saving the same note close
+        together (two browser tabs, a double-click, or a concurrent
+        PATCH /{slug}/type) could each read stale frontmatter and one
+        write silently clobbers the other's change, and a write failure
+        partway through (disk full, killed mid-write) destroyed the note
+        instead of leaving it untouched."""
+        with self._locked_path(
+            lambda: _or_raise(self._find_md(slug), FileNotFoundError(f"note not found: {slug!r}"))
+        ) as path:
             existing = path.read_text(encoding="utf-8")
             fm, _ = _parse_frontmatter(existing)
             # This body is no longer extraction-derived once something else
@@ -1711,12 +1844,17 @@ class VaultService:
         never learns the old path is gone, and can end up pushing its still-
         present stale copy back up as a "new" file, duplicating the move.
 
-        Holds _vault_write_lock -- moving a Source out from under a
-        concurrent update_source_bibliographic_fields()/attach_source_
-        companion() call (both locked, both assume the file stays where
-        they found it) would otherwise race the rename against their own
-        read-merge-write, the same class of problem closed for every other
-        Source-mutating method.
+        Locks both the source and destination primary paths (plus their
+        companions, if any) via _locked_paths() -- moving a Source out
+        from under a concurrent update_source_bibliographic_fields()/
+        attach_source_companion() call (both locked on the source path,
+        both assume the file stays where they found it) would otherwise
+        race the rename against their own read-merge-write, the same
+        class of problem closed for every other Source-mutating method.
+        The *destination* needs locking too, not just the source -- an
+        unrelated concurrent write landing there between the collision
+        check and the rename would otherwise reopen exactly the race the
+        companion-destination check below exists to close.
 
         Checks the companion's own destination for a collision *before*
         renaming the primary -- checking only the primary's destination
@@ -1725,18 +1863,20 @@ class VaultService:
         primary already moved with no companion move to follow if the
         rename raised instead (platform-dependent partial-move either
         way)."""
-        with self._vault_write_lock:
-            path = self.find_file(slug)
-            if path is None:
-                raise FileNotFoundError(f"node not found: {slug!r}")
-            old_rel = str(path.relative_to(self.root))
+
+        def compute():
+            path = _or_raise(self.find_file(slug), FileNotFoundError(f"node not found: {slug!r}"))
             dest = self.resolve_within_root(dest_dir)
-            dest.mkdir(parents=True, exist_ok=True)
             new_path = dest / path.name
-            if new_path.exists() and new_path != path:
-                raise FileExistsError(f"file already exists at destination: {new_path.name}")
             old_companion = self._paired_companion(path)
             new_companion = self._companion_target(path, new_path, old_companion) if old_companion else None
+            return path, new_path, old_companion, new_companion
+
+        with self._locked_paths(compute) as (path, new_path, old_companion, new_companion):
+            old_rel = str(path.relative_to(self.root))
+            new_path.parent.mkdir(parents=True, exist_ok=True)
+            if new_path.exists() and new_path != path:
+                raise FileExistsError(f"file already exists at destination: {new_path.name}")
             if new_companion is not None and new_companion.exists() and new_companion != old_companion:
                 raise FileExistsError(f"a file named {new_companion.name!r} already exists")
             path.rename(new_path)
@@ -1750,7 +1890,7 @@ class VaultService:
         None for a chat (.sess isn't part of the sync protocol at all, see
         _safe_sync_path, so there's nothing to broadcast); see move_node's
         docstring for why the caller needs these for a .md rename, and for
-        why this holds _vault_write_lock too."""
+        why this locks both the old and new path (plus companions) too."""
         sess_path = self._find_sess(slug)
         if sess_path is not None:
             new_stem = _slugify(new_title)
@@ -1765,20 +1905,23 @@ class VaultService:
                 new_path,
             )
             return new_slug, None, None
-        with self._vault_write_lock:
-            path = self._find_md(slug)
-            if path is None:
-                raise FileNotFoundError(f"node not found: {slug!r}")
-            old_rel = str(path.relative_to(self.root))
+
+        def compute():
+            path = _or_raise(self._find_md(slug), FileNotFoundError(f"node not found: {slug!r}"))
             new_stem = _slugify(new_title)
             new_path = path.parent / f"{new_stem}.md"
+            old_companion = self._paired_companion(path)
+            new_companion = self._companion_target(path, new_path, old_companion) if old_companion else None
+            return path, new_path, old_companion, new_companion
+
+        with self._locked_paths(compute) as (path, new_path, old_companion, new_companion):
+            old_rel = str(path.relative_to(self.root))
+            new_stem = new_path.stem
             if new_path.exists() and new_path != path:
                 raise FileExistsError(f"a file named {new_stem!r} already exists")
             raw = path.read_text(encoding="utf-8")
             fm, body = _parse_frontmatter(raw)
             fm["title"] = new_title
-            old_companion = self._paired_companion(path)
-            new_companion = self._companion_target(path, new_path, old_companion) if old_companion else None
             if new_companion is not None and new_companion.exists() and new_companion != old_companion:
                 raise FileExistsError(f"a file named {new_companion.name!r} already exists")
             path.rename(new_path)
@@ -1804,24 +1947,34 @@ class VaultService:
         chat (.sess isn't part of the sync protocol, see move_node's
         docstring for why the caller needs this for a synced file).
 
-        Holds _vault_write_lock -- same reasoning as move_node()/
-        rename_node(): without it, a concurrent locked mutation
-        (update_source_bibliographic_fields()/attach_source_companion())
-        can read this file, or even recreate it via its own tmp-file+
-        replace, in the same window as this delete, leaving the vault in
-        an inconsistent state with no error to either caller. Also used
-        _paired_companion() (previously only `if path.suffix == ".html"`,
-        unconditionally False for a Source) to find and remove a Source's
-        `.pdf`/`.svg`/etc. companion too -- deleting a Source left its
-        companion orphaned on disk otherwise, permanently invisible to
-        find_companion() once the primary .md is gone."""
-        with self._vault_write_lock:
-            path = self.find_file(slug) or self._find_sess(slug)
-            if path is None:
-                raise FileNotFoundError(f"node not found: {slug!r}")
+        Locks the primary (and companion, if any) via _locked_paths() --
+        same reasoning as move_node()/rename_node(): without it, a
+        concurrent locked mutation (update_source_bibliographic_fields()/
+        attach_source_companion()) can read this file, or even recreate it
+        via its own tmp-file+replace, in the same window as this delete,
+        leaving the vault in an inconsistent state with no error to either
+        caller. This locks a chat's .sess path too, via the same registry
+        _chat_write_lock's own callers don't participate in -- nothing
+        else ever holds both at once, so no coordination is needed beyond
+        giving delete_node() itself a real per-file lock instead of none.
+        Also uses _paired_companion() (previously only
+        `if path.suffix == ".html"`, unconditionally False for a Source)
+        to find and remove a Source's `.pdf`/`.svg`/etc. companion too --
+        deleting a Source left its companion orphaned on disk otherwise,
+        permanently invisible to find_companion() once the primary .md is
+        gone."""
+
+        def compute():
+            path = _or_raise(
+                self.find_file(slug) or self._find_sess(slug),
+                FileNotFoundError(f"node not found: {slug!r}"),
+            )
+            companion = self._paired_companion(path)
+            return path, companion
+
+        with self._locked_paths(compute) as (path, companion):
             is_synced = path.suffix != ".sess"
             rel = str(path.relative_to(self.root)) if is_synced else None
-            companion = self._paired_companion(path)
             path.unlink()
             if companion is not None and companion.exists():
                 companion.unlink()
@@ -1886,13 +2039,17 @@ class VaultService:
     def write_by_path(self, rel_path: str, body: str) -> float:
         """Create-or-overwrite. Returns the new mtime.
 
-        Holds _vault_write_lock, so a synced desktop edit can't race a
-        locked API-side edit (e.g. PATCH /{slug}/source) on the same file.
-        Writes atomically (tmp-file+replace) so a write failure partway
-        through (disk full, killed mid-write) leaves the existing file
-        untouched instead of truncated."""
+        Locked by this file's own path, so a synced desktop edit can't
+        race a locked API-side edit (e.g. PATCH /{slug}/source) on the
+        same file. No retry needed here the way _locked_path() gives
+        slug-based callers one -- _safe_sync_path() already gives this
+        file's identity directly, with no slug indirection that could go
+        stale between resolving and locking. Writes atomically (tmp-file+
+        replace) so a write failure partway through (disk full, killed
+        mid-write) leaves the existing file untouched instead of
+        truncated."""
         path = self._safe_sync_path(rel_path)
-        with self._vault_write_lock:
+        with self._get_lock(self._key_for(path)):
             path.parent.mkdir(parents=True, exist_ok=True)
             tmp_path = path.with_name(f"{path.name}.{uuid.uuid4().hex}.sync.tmp")
             try:
@@ -1905,7 +2062,7 @@ class VaultService:
 
     def delete_by_path(self, rel_path: str) -> None:
         path = self._safe_sync_path(rel_path)
-        with self._vault_write_lock:
+        with self._get_lock(self._key_for(path)):
             path.unlink(missing_ok=True)
 
     def list_md_manifest(self) -> list[tuple[str, float, int]]:

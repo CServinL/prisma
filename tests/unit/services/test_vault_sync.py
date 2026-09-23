@@ -40,21 +40,13 @@ def test_read_by_path_missing_file_returns_none(vault):
     assert vault.read_by_path("notes/does-not-exist.md") is None
 
 
-def test_write_by_path_holds_vault_write_lock_for_its_whole_duration(vault, monkeypatch):
-    # Regression: write_by_path()/delete_by_path() used to take a second,
-    # separate _path_write_lock that was never coordinated with
-    # _vault_write_lock -- a synced desktop edit landing on the same file
-    # as a locked API-side edit (e.g. PATCH /{slug}/source) could still
-    # race, just via two uncoordinated locks instead of no lock at all.
+def test_write_by_path_holds_its_file_lock_for_its_whole_duration(vault, monkeypatch):
     import threading
 
     lock_held_during_call = threading.Event()
     proceed = threading.Event()
     real_write_text = Path.write_text
 
-    # _safe_sync_path() runs BEFORE _vault_write_lock is acquired (same as
-    # every other locked method resolves its path first) -- the write
-    # itself, inside the lock, is the correct hook point.
     def blocking_write_text(self, data, encoding=None):
         lock_held_during_call.set()
         proceed.wait(timeout=2)
@@ -66,12 +58,13 @@ def test_write_by_path_holds_vault_write_lock_for_its_whole_duration(vault, monk
     t.start()
     assert lock_held_during_call.wait(timeout=2), "write_by_path() never reached write_text()"
 
-    acquired = vault._vault_write_lock.acquire(blocking=False)
+    key = vault._key_for(vault._safe_sync_path("notes/foo.md"))
+    acquired = vault._get_lock(key).acquire(blocking=False)
     proceed.set()
     t.join()
     if acquired:
-        vault._vault_write_lock.release()
-    assert not acquired, "write_by_path() must hold _vault_write_lock while it runs"
+        vault._get_lock(key).release()
+    assert not acquired, "write_by_path() must hold this file's lock while it runs"
 
 
 def test_write_by_path_failed_write_preserves_the_existing_file(vault, monkeypatch):

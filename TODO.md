@@ -57,24 +57,20 @@ is a backlog, not a log.
 
 ## Vault
 
-- **`_vault_write_lock` (renamed from `_source_write_lock`) now covers
-  every in-vault file mutator.** Closing the same read-merge-write
-  lost-update race across `update_source_bibliographic_fields()`,
-  `attach_source_companion()`, `ensure_md_format()`, `set_node_type()`,
-  `save_note()`, `move_node()`, `rename_node()`, and `write_by_path()`/
-  `delete_by_path()` (the `/sync/file` desktop-sync path, which used to
-  take a second, uncoordinated `_path_write_lock`, now retired) turned out
-  to be one lock, applied consistently, not one lock per route. `move_node()`/
-  `rename_node()` also gained real companion-relocation logic — previously
-  only `if path.suffix == ".html"` was handled, which is unconditionally
-  False for a Source, silently orphaning its `.pdf`/`.svg`/etc. companion
-  on every move or rename. The lock is global, not per-slug — a companion
-  upload's multi-second PDF/HTML extraction now also blocks metadata
-  edits, type changes, moves, renames, creates, and synced desktop writes
-  for every unrelated node for that whole duration, a real cross-slug
-  contention cost traded for correctness rather than a free fix. Worth a
-  follow-up per-slug lock to remove that cost, but not accepted as
-  permanent.
+- **The per-file lock's resolve-then-lock-then-reconfirm protocol doubles
+  the vault scan cost of every slug-based mutation.** `_locked_path()`/
+  `_locked_paths()` call `compute()` (which resolves via `find_file()`/
+  `_find_md()`, each an `iter_files()` walk of the whole vault) twice —
+  once to pick a lock key, once to confirm nothing changed after
+  acquiring it — where the single global lock only ever needed one.
+  Measured: `move_node()`/`delete_node()` go from 1 walk to 2,
+  `update_source_bibliographic_fields()`/`save_note()` from 2 to 3. This
+  PR's whole point was reducing lock *contention*; it quietly traded that
+  for more `iter_files()` work per call, worst-case scaling with total
+  file count same as the scan itself. Not fixed here — closing it for
+  real needs `find_file()`/`_find_md()` to stop being an O(vault) walk in
+  the first place (an in-memory slug→path index, invalidated on writes),
+  which is a bigger, separate change than this lock refactor.
 - **No UI to view a companion file** — `COMPANION_EXTS` covers pdf/html/htm/
   svg/epub/docx/tex/drawio/jpg/jpeg, and the backend already serves any of
   them generically (`GET /notes/{slug}/original`, `FileResponse`), but the

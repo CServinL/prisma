@@ -104,11 +104,8 @@ _FRONTMATTER_READ_BYTES = 8192
 _CITEKEY_SCAN_READ_BYTES = 65536
 _CITEKEY_SCAN_MAX_BYTES = 4 * 1024 * 1024
 
-# _locked_paths()'s retry cap when a resolved path keeps changing out from
-# under it (a concurrent move/rename winning the race each time). A safety
-# valve against a hypothetical bug turning into a silent hang, not a bound
-# expected to matter in practice -- hitting it needs a sustained storm of
-# concurrent moves on the exact node being operated on.
+# _locked_paths()'s retry cap -- a safety valve against a silent hang,
+# not a bound expected to matter in practice.
 _LOCK_RESOLVE_MAX_RETRIES = 100
 
 

@@ -57,37 +57,6 @@ is a backlog, not a log.
 
 ## Vault
 
-- **Chat `.sess` mutations outside `save_chat`/`append_messages`/
-  `set_pinned_turns` aren't coordinated with `_chat_write_lock`.** Those
-  three hold `_chat_write_lock` around a `.sess` file's read-merge-write,
-  but two other chat-mutating paths don't share it: `delete_node()`'s
-  chat branch locks the same `.sess` path through the per-file registry
-  instead (a different, uncoordinated lock — inherited unchanged from
-  when it held the single global `_vault_write_lock`, itself already a
-  different lock from `_chat_write_lock`), and `rename_node()`'s `.sess`
-  branch takes no lock at all, ever. A concurrent chat save/pin racing
-  either a delete or a rename of that same chat can therefore still race.
-  Noticed while auditing every existing lock during a per-slug vault-
-  write-lock refactor (PR replacing the single global `_vault_write_lock`
-  with a per-file registry); both gaps are pre-existing before that
-  refactor, not introduced by it, out of scope for it — fixing this means
-  deciding whether chat writes fold into the per-file registry or every
-  chat-mutating method (including delete/rename) takes `_chat_write_lock`
-  instead, a decision that needs its own look at every `_chat_write_lock`
-  caller first.
-- **`move_node()`/`rename_node()` don't roll back a primary rename if the
-  companion rename right after it fails.** `path.rename(new_path)` then
-  `self._relocate_companion(...)` (which renames the companion) — a
-  failure in the second step leaves the primary already moved to its new
-  location with the companion still at the old one, an orphaned pairing
-  `find_companion()` can no longer resolve. Pre-existing (present before
-  the per-slug-lock refactor, unrelated to it, not a locking gap) and low
-  probability in practice — both renames target the same already-proven-
-  writable destination directory, so the second one failing after the
-  first succeeded needs a genuinely exceptional cause (permission change
-  mid-operation, disk error). Noted, not fixed — a real fix needs either
-  a rollback (rename the primary back) or reordering to rename the
-  companion first.
 - **The per-file lock's resolve-then-lock-then-reconfirm protocol doubles
   the vault scan cost of every slug-based mutation.** `_locked_path()`/
   `_locked_paths()` call `compute()` (which resolves via `find_file()`/

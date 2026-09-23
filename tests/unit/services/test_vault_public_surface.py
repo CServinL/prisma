@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from prisma.services.vault import VaultService
+from prisma.services.vault import VaultService, save_chat_session
 from prisma.storage.models.vault_models import NodeType, SourceKind, SourceOrigin
 
 
@@ -1388,6 +1388,56 @@ class TestMoveAndRenameNodeCompanionHandling:
         assert vault.find_file(source.slug).stem == "smith2024"
         assert colliding.read_bytes() == b"unrelated content"
 
+    def test_move_node_rolls_back_the_primary_if_the_companion_rename_fails(self, vault, monkeypatch):
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "body", zotero_key="ABC123", authors=[], tags=[],
+        )
+        vault.attach_source_companion(source.slug, "figure.svg", b"<svg></svg>")
+        original_primary = source.path
+        original_companion = vault.find_companion(source.slug)
+
+        real_rename = Path.rename
+        call_count = {"n": 0}
+
+        def flaky_rename(self, target):
+            call_count["n"] += 1
+            if call_count["n"] == 2:
+                raise OSError("simulated failure renaming the companion")
+            return real_rename(self, target)
+
+        monkeypatch.setattr(Path, "rename", flaky_rename)
+
+        with pytest.raises(OSError):
+            vault.move_node(source.slug, dest_dir="notes")
+
+        assert original_primary.exists(), "the primary must be rolled back, not left at the destination"
+        assert original_companion.exists(), "the companion must never have moved"
+
+    def test_rename_node_rolls_back_the_primary_if_the_companion_rename_fails(self, vault, monkeypatch):
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "body", zotero_key="ABC123", authors=[], tags=[],
+        )
+        vault.attach_source_companion(source.slug, "figure.svg", b"<svg></svg>")
+        original_primary = source.path
+        original_companion = vault.find_companion(source.slug)
+
+        real_rename = Path.rename
+        call_count = {"n": 0}
+
+        def flaky_rename(self, target):
+            call_count["n"] += 1
+            if call_count["n"] == 2:
+                raise OSError("simulated failure renaming the companion")
+            return real_rename(self, target)
+
+        monkeypatch.setattr(Path, "rename", flaky_rename)
+
+        with pytest.raises(OSError):
+            vault.rename_node(source.slug, "A Renamed Paper")
+
+        assert original_primary.exists(), "the primary must be rolled back, not left at the destination"
+        assert original_companion.exists(), "the companion must never have moved"
+
 
 class TestDeleteNode:
     def test_deletes_a_source_companion_too(self, vault):
@@ -1432,6 +1482,43 @@ class TestDeleteNode:
         if acquired:
             vault._get_lock(key).release()
         assert not acquired, "delete_node() must hold this file's lock while it runs"
+
+    def test_deleting_a_chat_is_excluded_from_a_concurrent_append(self, vault, monkeypatch):
+        import threading
+
+        chat = vault.create_chat("Test Chat")
+
+        append_started = threading.Event()
+        proceed = threading.Event()
+        real_save_chat_session = save_chat_session
+
+        def blocking_save_chat_session(chat_obj, path):
+            append_started.set()
+            proceed.wait(timeout=2)
+            return real_save_chat_session(chat_obj, path)
+
+        monkeypatch.setattr("prisma.services.vault.save_chat_session", blocking_save_chat_session)
+
+        t_append = threading.Thread(target=lambda: vault.append_messages(chat.slug, []))
+        t_append.start()
+        assert append_started.wait(timeout=2), "append_messages() never reached its write"
+
+        delete_done = threading.Event()
+
+        def do_delete():
+            vault.delete_node(chat.slug)
+            delete_done.set()
+
+        t_delete = threading.Thread(target=do_delete)
+        t_delete.start()
+        assert not delete_done.wait(timeout=0.3), (
+            "delete_node() must not run concurrently with a still-in-flight append_messages()"
+        )
+
+        proceed.set()
+        t_append.join(timeout=2)
+        t_delete.join(timeout=2)
+        assert delete_done.is_set()
 
 
 class TestMoveAndRenameNodeLocking:
@@ -1527,6 +1614,51 @@ class TestMoveAndRenameNodeLocking:
         if acquired:
             vault._get_lock(key).release()
         assert not acquired, "rename_node() must hold this file's lock while it runs"
+
+    def test_renaming_a_chat_is_excluded_from_a_concurrent_append(self, vault, monkeypatch):
+        import threading
+
+        chat = vault.create_chat("Test Chat")
+
+        append_started = threading.Event()
+        proceed = threading.Event()
+        real_save_chat_session = save_chat_session
+        call_count = {"n": 0}
+
+        def blocking_save_chat_session(chat_obj, path):
+            # rename_node()'s own .sess branch also calls save_chat_session()
+            # -- only the first call (append_messages()'s) should block, or
+            # a concurrent rename_node() reaching its own call would block
+            # on the same Event too and pass this test whether or not it's
+            # actually excluded by a lock.
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                append_started.set()
+                proceed.wait(timeout=2)
+            return real_save_chat_session(chat_obj, path)
+
+        monkeypatch.setattr("prisma.services.vault.save_chat_session", blocking_save_chat_session)
+
+        t_append = threading.Thread(target=lambda: vault.append_messages(chat.slug, []))
+        t_append.start()
+        assert append_started.wait(timeout=2), "append_messages() never reached its write"
+
+        rename_done = threading.Event()
+
+        def do_rename():
+            vault.rename_node(chat.slug, "New Title")
+            rename_done.set()
+
+        t_rename = threading.Thread(target=do_rename)
+        t_rename.start()
+        assert not rename_done.wait(timeout=0.3), (
+            "rename_node() must not run concurrently with a still-in-flight append_messages()"
+        )
+
+        proceed.set()
+        t_append.join(timeout=2)
+        t_rename.join(timeout=2)
+        assert rename_done.is_set()
 
     def test_rename_node_failed_write_does_not_leave_a_truncated_file(self, vault, monkeypatch):
         note = vault.create_note("Note A", "original body")

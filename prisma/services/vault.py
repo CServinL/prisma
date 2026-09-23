@@ -1823,7 +1823,11 @@ class VaultService:
             if new_companion is not None and new_companion.exists() and new_companion != old_companion:
                 raise FileExistsError(f"a file named {new_companion.name!r} already exists")
             path.rename(new_path)
-            self._relocate_companion(path, new_path, old_companion)
+            try:
+                self._relocate_companion(path, new_path, old_companion)
+            except BaseException:
+                new_path.rename(path)
+                raise
             rel = new_path.relative_to(self.root)
             new_slug = self.slug_for_relpath(rel)
             return new_slug, old_rel, str(rel)
@@ -1836,18 +1840,19 @@ class VaultService:
         why this locks both the old and new path (plus companions) too."""
         sess_path = self._find_sess(slug)
         if sess_path is not None:
-            new_stem = _slugify(new_title)
-            new_path = sess_path.parent / f"{new_stem}.sess"
-            if new_path.exists() and new_path != sess_path:
-                raise FileExistsError(f"a file named {new_stem!r} already exists")
-            chat = load_chat_session(sess_path)
-            new_slug = _file_slug(new_stem)
-            sess_path.rename(new_path)
-            save_chat_session(
-                chat.model_copy(update={"title": new_title, "slug": new_slug, "modified_at": datetime.utcnow()}),
-                new_path,
-            )
-            return new_slug, None, None
+            with self._chat_write_lock:
+                new_stem = _slugify(new_title)
+                new_path = sess_path.parent / f"{new_stem}.sess"
+                if new_path.exists() and new_path != sess_path:
+                    raise FileExistsError(f"a file named {new_stem!r} already exists")
+                chat = load_chat_session(sess_path)
+                new_slug = _file_slug(new_stem)
+                sess_path.rename(new_path)
+                save_chat_session(
+                    chat.model_copy(update={"title": new_title, "slug": new_slug, "modified_at": datetime.utcnow()}),
+                    new_path,
+                )
+                return new_slug, None, None
 
         def compute():
             path = _or_raise(self._find_md(slug), FileNotFoundError(f"node not found: {slug!r}"))
@@ -1872,7 +1877,11 @@ class VaultService:
             if new_companion is not None and new_companion.exists() and new_companion != old_companion:
                 raise FileExistsError(f"a file named {new_companion.name!r} already exists")
             path.rename(new_path)
-            self._relocate_companion(path, new_path, old_companion)
+            try:
+                self._relocate_companion(path, new_path, old_companion)
+            except BaseException:
+                new_path.rename(path)
+                raise
             # Atomic tmp-file+replace, not a direct new_path.write_text() --
             # same reasoning as every other Source-mutating write: a
             # failure partway through this step would otherwise leave the
@@ -1900,28 +1909,25 @@ class VaultService:
         attach_source_companion()) can read this file, or even recreate it
         via its own tmp-file+replace, in the same window as this delete,
         leaving the vault in an inconsistent state with no error to either
-        caller. For a chat's .sess path, this locks through the per-file
-        registry, a *different* lock from _chat_write_lock -- the two
-        don't exclude each other, so a concurrent append_messages() can
-        still recreate a chat this call already deleted (see TODO.md).
-        Also uses _paired_companion() (previously only
+        caller. Also uses _paired_companion() (previously only
         `if path.suffix == ".html"`, unconditionally False for a Source)
         to find and remove a Source's `.pdf`/`.svg`/etc. companion too --
         deleting a Source left its companion orphaned on disk otherwise,
         permanently invisible to find_companion() once the primary .md is
         gone."""
+        sess_path = self._find_sess(slug)
+        if sess_path is not None:
+            with self._chat_write_lock:
+                sess_path.unlink()
+            return None
 
         def compute():
-            path = _or_raise(
-                self.find_file(slug) or self._find_sess(slug),
-                FileNotFoundError(f"node not found: {slug!r}"),
-            )
+            path = _or_raise(self.find_file(slug), FileNotFoundError(f"node not found: {slug!r}"))
             companion = self._paired_companion(path)
             return path, companion
 
         with self._locked_paths(compute) as (path, companion):
-            is_synced = path.suffix != ".sess"
-            rel = str(path.relative_to(self.root)) if is_synced else None
+            rel = str(path.relative_to(self.root))
             path.unlink()
             if companion is not None and companion.exists():
                 companion.unlink()

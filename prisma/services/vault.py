@@ -458,53 +458,28 @@ class VaultService:
     @contextmanager
     def _locked_paths(self, compute):
         """compute() returns a tuple of Path|None for every file one
-        operation touches (None entries are skipped), or raises itself
-        (e.g. FileNotFoundError) if its anchor doesn't resolve at all.
+        operation touches, or raises itself if its anchor doesn't resolve.
+        May run more than once per call -- keep it side-effect-light; only
+        the code inside the `with` block is guaranteed to run exactly once.
 
-        Every current caller resolves slug -> path *inside* whatever lock
-        it holds, which is how it re-validates invariants (a node's type,
-        its continued existence) atomically with the mutation that follows.
-        Per-file locking needs the key before it can lock, but resolving
-        the key is exactly the step that needs protecting -- so this
-        resolves once unlocked, locks the deduplicated, sorted set of keys
-        that resolve to (sorting is the one ABBA-safe acquisition order
-        every multi-key caller in this class uses, so two threads can
-        never form a cyclic wait), then re-invokes compute() to confirm
-        the same files are still in play. A concurrent move/rename/delete
-        that won the race in between changes what compute() returns; this
-        releases and retries against the new result rather than proceeding
-        against a stale one. Sound because every mutator that can change a
-        slug's resolved path also goes through this same protocol keyed on
-        the same path strings -- once a thread's re-resolve check passes,
-        nothing else can be concurrently past its own check for an
-        identical path (they'd block on the same Lock object) until this
-        thread releases it.
-
-        compute() must stay side-effect-light: it may run more than once
-        per call, and only the code inside the `with` block is guaranteed
-        to run exactly once."""
+        Resolves once unlocked (locking needs the key first), locks the
+        deduplicated keys in sorted order (the one ABBA-safe order every
+        multi-key caller here uses), then re-invokes compute() to confirm
+        the same files are still in play -- retrying against a fresh
+        result if a concurrent move/rename/delete changed it first. Sound
+        because every mutator that can change a slug's resolved path goes
+        through this same protocol: once a thread's re-resolve check
+        passes, nothing else can be mid-check for that identical path."""
         for _ in range(_LOCK_RESOLVE_MAX_RETRIES):
             result = compute()
             keys = sorted({self._key_for(p) for p in result if p is not None})
             locks = [self._get_lock(k) for k in keys]
-            # This loop itself must be exception-safe, not just the `with`
-            # body below: without the try/except here, an exception while
-            # acquiring the Nth lock (e.g. a real bug in some future
-            # change to this loop, or an async exception like
-            # KeyboardInterrupt landing between two acquire() calls) would
-            # leave every lock already acquired before it held forever --
-            # a permanent per-file deadlock outliving this call, worse
-            # than any lost-update bug this scheme exists to prevent.
-            # Not airtight against every possible async-exception timing:
-            # one landing between `lk.acquire()` succeeding and
-            # `acquired.append(lk)` recording it would still leak that one
-            # lock, same residual gap `contextlib.ExitStack` has for the
-            # identical reason -- there is always a bytecode boundary
-            # between "acquired" and "recorded as acquired" that a signal
-            # can land on in pure Python. Closes the much more likely
-            # case (an exception raised *from* acquire() itself, or from
-            # anything else synchronous in this loop), not a fully
-            # airtight guarantee against CPython signal delivery.
+            # This acquisition loop needs its own rollback, not just the
+            # `with` body's -- an exception acquiring the Nth lock would
+            # otherwise leave every lock already acquired before it held
+            # forever. (Not airtight against a signal landing between
+            # acquire() and the append() below -- same residual gap
+            # contextlib.ExitStack has, not fully closable in pure Python.)
             acquired: list[threading.Lock] = []
             try:
                 for lk in locks:
@@ -1067,23 +1042,13 @@ class VaultService:
         caller-facing validation errors (see attach_source_companion).
 
         _citekey_create_lock, not a per-file lock keyed on the not-yet-
-        existing destination: citekey_exists() is a vault-wide scan (it
-        must see every file, not one), so there's no single file identity
-        to key this on. A small dedicated lock still serves the actual
-        correctness need -- two concurrent creates can't collide on a
-        citekey -- without coupling that vault-wide scan to any one file's
-        lock, and unlike sharing the old global lock, it no longer blocks
-        unrelated per-file operations (a metadata edit, a companion
-        upload) elsewhere in the vault for the duration of this check.
-        citekey is immutable post-creation (see update_source_
-        bibliographic_fields()'s docstring), so an in-place metadata edit
-        can't invalidate an in-flight scan -- but *relocating* a file
-        (move_node()/rename_node()) or blindly overwriting one
-        (write_by_path()) can, by moving it out of citekey_exists()'s
-        os.walk-based scan before the scan reaches it (see that method's
-        own comment on this). Those three also hold this same lock for
-        their whole duration to close that window, not just the ones
-        that edit a file in place.
+        existing destination: citekey_exists() is a vault-wide scan, so
+        there's no single file identity to key this on. move_node()/
+        rename_node()/write_by_path() also hold this same lock for their
+        whole duration -- see move_node()'s docstring for why a file
+        relocating mid-scan needs excluding too, not just an in-place
+        edit (citekey is immutable post-creation, so those alone can't
+        invalidate the scan).
 
         Not used by Zotero import -- that path has its own, separate
         citekey-collision behavior via unique_slug() on the *file slug*
@@ -1452,12 +1417,10 @@ class VaultService:
         non-reentrant Lock) from inside that would deadlock, so it calls
         _ensure_md_format_locked() directly instead, below.
 
-        Fixed-key, no retry -- unlike _locked_path()'s slug-based callers,
-        there's no slug here to re-resolve from if the target changed
-        underneath (this receives a Path, not a slug). Not a regression:
-        the pre-per-file-locking code didn't re-validate this path against
-        the route's own resolve either; this only narrows the blocking
-        radius from every vault write to this one file."""
+        Fixed-key, no retry -- this receives a Path, not a slug, so there's
+        no identifier to re-resolve from if the target changed underneath;
+        the caller's own resolve is trusted as-is, same as generate_md_
+        format() already does before calling in."""
         target = companion_path.with_suffix(".md")
         with self._get_lock(self._key_for(target)):
             return self._ensure_md_format_locked(companion_path, force=force)
@@ -1970,14 +1933,10 @@ class VaultService:
             new_companion = self._companion_target(path, new_path, old_companion) if old_companion else None
             return path, new_path, old_companion, new_companion
 
-        # Also holds _citekey_create_lock, outside the per-file lock(s) --
-        # a related but distinct version of move_node()'s own reasoning:
-        # os.walk() hands each directory's filenames as a fixed snapshot
-        # the moment it's yielded, never refreshed for that directory
-        # again. A rename swaps the old filename out of that already-
-        # captured list -- citekey_exists()'s scan misses the new name
-        # even though it never left the same directory, letting a
-        # concurrent create claim a citekey that still exists.
+        # Also holds _citekey_create_lock (see move_node()'s docstring) --
+        # a rename swaps the old filename out of os.walk()'s already-
+        # captured directory listing, missing the new one, even though
+        # the file never left that directory.
         with self._citekey_create_lock, self._locked_paths(compute) as (path, new_path, old_companion, new_companion):
             old_rel = str(path.relative_to(self.root))
             new_stem = new_path.stem
@@ -2118,14 +2077,10 @@ class VaultService:
         mid-write) leaves the existing file untouched instead of
         truncated.
 
-        Also holds _citekey_create_lock -- a blind create-or-overwrite
-        from a desktop sync push can add, change, or remove a citekey at
-        this path with no route-level validation at all, and (same
-        os.walk-snapshot reasoning as move_node()/rename_node()) can make
-        an existing citekey briefly invisible to create_source_from_
-        citekey_if_free()'s scan, letting a concurrent create claim a
-        citekey this write is simultaneously putting somewhere the scan
-        won't see."""
+        Also holds _citekey_create_lock (see move_node()'s docstring) --
+        a blind create-or-overwrite from a desktop sync push can add,
+        change, or remove a citekey at this path with no route-level
+        validation at all."""
         path = self._safe_sync_path(rel_path)
         with self._citekey_create_lock, self._get_lock(self._key_for(path)):
             path.parent.mkdir(parents=True, exist_ok=True)

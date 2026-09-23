@@ -104,15 +104,10 @@ _FRONTMATTER_READ_BYTES = 8192
 _CITEKEY_SCAN_READ_BYTES = 65536
 _CITEKEY_SCAN_MAX_BYTES = 4 * 1024 * 1024
 
-# _locked_paths()'s retry cap -- a safety valve against a silent hang,
-# not a bound expected to matter in practice.
 _LOCK_RESOLVE_MAX_RETRIES = 100
 
 
 def _or_raise(value, exc: BaseException):
-    """Lets a resolve-a-path lambda passed to VaultService._locked_path()
-    raise its own not-found error without needing a full nested def --
-    a bare `lambda` can't contain a `raise` statement."""
     if value is None:
         raise exc
     return value
@@ -402,49 +397,22 @@ class VaultService:
         # write_by_path()/delete_by_path(). One lock *per file*, not one
         # process-wide lock for every write: a companion's multi-second
         # PDF/HTML extraction must not stall an edit to an unrelated
-        # Source. _get_lock()/_locked_path()/_locked_paths() below are the
-        # shared machinery every one of those call sites goes through, so
-        # the file-identity keying and multi-file acquisition order stay
-        # consistent in one place rather than each call site inventing
-        # its own.
+        # Source.
         self._file_locks: dict[str, threading.Lock] = {}
         self._file_locks_meta_lock = threading.Lock()
-        # citekey_exists() is inherently vault-wide (it must see every
-        # existing file), so there's no single per-file key to shrink its
-        # check-then-create to -- a small dedicated lock, not part of the
-        # per-file registry below, keeps two concurrent creates from
-        # colliding on the same citekey without coupling that vault-wide
-        # scan to any single file's lock.
         self._citekey_create_lock = threading.Lock()
 
     def _key_for(self, path: Path) -> str:
-        """The file's canonical identity for locking, not whatever literal
-        components a caller's path happened to be built from --
-        _resolve_compound_slug() deliberately returns an *unresolved*
-        candidate (see its own docstring), so a `dir--..--dir--name`
-        compound slug that round-trips through a `..` resolves to the
-        same on-disk file as the bare slug but, without resolving here
-        too, produces a different string -- two different Lock objects
-        for one physical file, silently defeating this whole scheme's
-        mutual exclusion for a slug spelling a client can send directly
-        on any PATCH/POST route."""
+        """.resolve() matters: _resolve_compound_slug() returns an
+        unresolved candidate, so a `..`-decoding compound slug and the
+        bare slug for the same file would otherwise produce different
+        keys -- two Locks for one file, bypassable from any route."""
         return str(path.resolve().relative_to(self.root))
 
     def _get_lock(self, key: str) -> threading.Lock:
-        """Get-or-create is done under a short-lived meta-lock, not a bare
-        dict .setdefault()/defaultdict -- "check key, construct Lock,
-        insert" isn't atomic even under the GIL, so two threads racing a
-        first touch of the same key could otherwise install two different
-        Lock objects for one file, silently defeating the mutual exclusion
-        this whole scheme exists to provide. The meta-lock is only ever
-        held for the dict lookup/insert itself, never across real I/O.
-
-        self._file_locks never shrinks -- one entry per distinct
-        vault-relative-path string ever locked over the process's
-        lifetime. Deliberate: a Lock is ~56 bytes, this is a single-user
-        local vault, and correctly evicting an entry that might still be
-        referenced by a lock some other thread is mid-acquire on is real
-        complexity to solve a problem that doesn't exist at this scale."""
+        """Never evicted -- a Lock is ~56 bytes and this is a single-user
+        local vault; eviction risks releasing an entry another thread is
+        still mid-acquire on for no real memory benefit here."""
         with self._file_locks_meta_lock:
             lock = self._file_locks.get(key)
             if lock is None:
@@ -459,24 +427,17 @@ class VaultService:
         May run more than once per call -- keep it side-effect-light; only
         the code inside the `with` block is guaranteed to run exactly once.
 
-        Resolves once unlocked (locking needs the key first), locks the
-        deduplicated keys in sorted order (the one ABBA-safe order every
-        multi-key caller here uses), then re-invokes compute() to confirm
-        the same files are still in play -- retrying against a fresh
-        result if a concurrent move/rename/delete changed it first. Sound
-        because every mutator that can change a slug's resolved path goes
-        through this same protocol: once a thread's re-resolve check
-        passes, nothing else can be mid-check for that identical path."""
+        Sound against a concurrent move/rename/delete only because every
+        mutator that can change a slug's resolved path goes through this
+        same protocol -- a fact not visible from this function alone."""
         for _ in range(_LOCK_RESOLVE_MAX_RETRIES):
             result = compute()
+            # sorted(), not just deduplicated: acquiring in a consistent
+            # order across every multi-key caller is what makes this
+            # ABBA-safe -- an unsorted order could deadlock two calls
+            # locking the same two files in opposite sequence.
             keys = sorted({self._key_for(p) for p in result if p is not None})
             locks = [self._get_lock(k) for k in keys]
-            # This acquisition loop needs its own rollback, not just the
-            # `with` body's -- an exception acquiring the Nth lock would
-            # otherwise leave every lock already acquired before it held
-            # forever. (Not airtight against a signal landing between
-            # acquire() and the append() below -- same residual gap
-            # contextlib.ExitStack has, not fully closable in pure Python.)
             acquired: list[threading.Lock] = []
             try:
                 for lk in locks:
@@ -1003,14 +964,10 @@ class VaultService:
                             break
                         head_bytes += more
             except FileNotFoundError:
-                # A file can vanish between iter_files()'s walk yielding it
-                # and this read -- a concurrent delete_node() (not
-                # move_node()/rename_node()/write_by_path(), which all
-                # hold this same _citekey_create_lock and so can't run
-                # concurrently with this scan at all). A citekey going
-                # missing because its file was genuinely deleted is
-                # harmless to this existence check either way, so skip it
-                # rather than letting POST /notes/sources 500 on it.
+                # A file can vanish between iter_files()'s walk yielding
+                # it and this read (a concurrent delete_node()) -- harmless
+                # to this existence check either way, so skip it rather
+                # than letting POST /notes/sources 500 on it.
                 continue
             # Deliberately NOT a bare `except OSError` -- that would also
             # swallow PermissionError (and other real I/O failures) on a
@@ -1037,15 +994,6 @@ class VaultService:
         citation, with no error to either creator. Raises ValueError (not
         FileExistsError) on collision to match this module's other
         caller-facing validation errors (see attach_source_companion).
-
-        _citekey_create_lock, not a per-file lock keyed on the not-yet-
-        existing destination: citekey_exists() is a vault-wide scan, so
-        there's no single file identity to key this on. move_node()/
-        rename_node()/write_by_path() also hold this same lock for their
-        whole duration -- see move_node()'s docstring for why a file
-        relocating mid-scan needs excluding too, not just an in-place
-        edit (citekey is immutable post-creation, so those alone can't
-        invalidate the scan).
 
         Not used by Zotero import -- that path has its own, separate
         citekey-collision behavior via unique_slug() on the *file slug*
@@ -1110,13 +1058,7 @@ class VaultService:
           file's lock) completing in between would otherwise get silently
           overwritten by ensure_md_format()'s stale-frontmatter write when
           the slow extraction finally finishes, discarding an edit that
-          already returned 200 to its caller.
-
-        Per-file, not global: unlike the single vault-wide lock this used
-        to share, the extraction above no longer blocks
-        create_source_from_citekey_if_free() or update_source_
-        bibliographic_fields() for *unrelated* sources -- only another
-        caller locked on this exact file waits."""
+          already returned 200 to its caller."""
         with self._locked_path(
             lambda: _or_raise(self._find_md(slug), FileNotFoundError(f"source not found: {slug!r}"))
         ) as path:
@@ -1365,17 +1307,11 @@ class VaultService:
     def set_node_type(self, slug: str, node_type: NodeType) -> None:
         """Update the type field for any node. For HTML files, creates/updates a companion .md.
 
-        Locked on `target` below -- the file this actually reads and
-        writes, not find_file(slug)'s raw result -- even though this
-        method is generic across every node type: reachable against a
-        Source via PATCH /{slug}/type, which can race update_source_
-        bibliographic_fields()/attach_source_companion() on the same file
-        otherwise, and those key their own lock on the same .md path via
-        _find_md(). Locking find_file()'s raw (pre-redirect) result here
-        instead would give this method a *different* key than theirs for
-        the identical file, silently failing to serialize against them.
-        Writes atomically (tmp-file+replace), same as its locked
-        siblings."""
+        Must lock on `target`, not find_file(slug)'s raw result --
+        update_source_bibliographic_fields()/attach_source_companion() key
+        their own lock on that same redirected .md path via _find_md(), so
+        locking the pre-redirect path here would silently fail to
+        serialize against them for a Source."""
 
         def _resolve_target() -> Path:
             path = _or_raise(self.find_file(slug), FileNotFoundError(f"node not found: {slug!r}"))
@@ -1412,12 +1348,7 @@ class VaultService:
         it already holds this same file's lock for its own multi-step
         operation -- calling this method (and re-acquiring the same
         non-reentrant Lock) from inside that would deadlock, so it calls
-        _ensure_md_format_locked() directly instead, below.
-
-        Fixed-key, no retry -- this receives a Path, not a slug, so there's
-        no identifier to re-resolve from if the target changed underneath;
-        the caller's own resolve is trusted as-is, same as generate_md_
-        format() already does before calling in."""
+        _ensure_md_format_locked() directly instead, below."""
         target = companion_path.with_suffix(".md")
         with self._get_lock(self._key_for(target)):
             return self._ensure_md_format_locked(companion_path, force=force)
@@ -1869,16 +1800,12 @@ class VaultService:
         rename raised instead (platform-dependent partial-move either
         way).
 
-        Also holds _citekey_create_lock for the whole call, outside (and
-        acquired before) the per-file lock(s) above -- create_source_
-        from_citekey_if_free()'s citekey_exists() scan walks the vault
-        once, and a file relocating out of a directory the walk hasn't
-        reached yet into one it already has becomes permanently invisible
-        to that scan (the walk never revisits a directory once yielded),
-        letting a concurrent create claim a citekey that in fact still
-        exists elsewhere in the vault. _citekey_create_lock, not a
-        per-file lock, because the scan this must exclude against is
-        vault-wide, not scoped to any single file this method touches."""
+        Also holds _citekey_create_lock -- a file relocating mid-scan can
+        vanish from citekey_exists()'s os.walk-based scan (each
+        directory's listing is a snapshot taken once, never revisited),
+        letting a concurrent create claim a citekey that still exists.
+        rename_node()/write_by_path() hold the same lock for the same
+        reason."""
 
         def compute():
             path = _or_raise(self.find_file(slug), FileNotFoundError(f"node not found: {slug!r}"))
@@ -1973,16 +1900,11 @@ class VaultService:
         attach_source_companion()) can read this file, or even recreate it
         via its own tmp-file+replace, in the same window as this delete,
         leaving the vault in an inconsistent state with no error to either
-        caller. This locks a chat's .sess path too, through the same
-        per-file registry -- but that registry is a *different* lock
-        from _chat_write_lock, which save_chat()/append_messages()/
-        set_pinned_turns() hold instead for that identical file. The two
-        don't exclude each other: a concurrent append_messages() can
-        still recreate a chat this call already deleted. Real, tracked in
-        TODO.md, not fixed here -- resolving it needs a decision on
-        whether chat writes fold into this registry or every chat-
-        mutating method takes _chat_write_lock, not a change to this one
-        method alone. Also uses _paired_companion() (previously only
+        caller. For a chat's .sess path, this locks through the per-file
+        registry, a *different* lock from _chat_write_lock -- the two
+        don't exclude each other, so a concurrent append_messages() can
+        still recreate a chat this call already deleted (see TODO.md).
+        Also uses _paired_companion() (previously only
         `if path.suffix == ".html"`, unconditionally False for a Source)
         to find and remove a Source's `.pdf`/`.svg`/etc. companion too --
         deleting a Source left its companion orphaned on disk otherwise,

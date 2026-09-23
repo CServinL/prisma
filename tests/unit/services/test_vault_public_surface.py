@@ -536,17 +536,7 @@ class TestCreateSourceFromCitekeyIfFree:
     def test_a_concurrent_move_of_the_colliding_file_does_not_let_a_duplicate_citekey_through(
         self, vault, monkeypatch
     ):
-        # citekey_exists() walks the vault via iter_files() (os.walk
-        # underneath) -- a directory's file list is a fixed snapshot the
-        # moment os.walk yields it, never refreshed. A concurrent
-        # move_node()/rename_node() relocating the one file that actually
-        # holds this citekey, mid-scan, can make it permanently invisible
-        # to that scan: the old (dirpath, filename) pair the snapshot
-        # already captured now 404s (caught, skipped as a harmless
-        # "vanished" case), and the new location was never in any
-        # snapshot to begin with. Without _citekey_create_lock also
-        # excluding move_node()/rename_node()/write_by_path(), this lets
-        # a concurrent create claim a citekey that in fact still exists.
+        # See move_node()'s docstring for the race this closes.
         #
         # Hooks citekey_exists() directly, not iter_files() -- iter_files()
         # is also used by find_file()/_find_md(), so a global slowdown
@@ -560,10 +550,8 @@ class TestCreateSourceFromCitekeyIfFree:
         )
 
         def slow_citekey_exists(self, citekey):
-            # Simulates a scan that already passed some other directory
-            # (the sleep) before reaching existing's file at the path it
-            # had at scan start -- the same path a real os.walk-based
-            # scan would still use even if the file had since moved.
+            # Stands in for a scan already past this file's directory,
+            # still using the path it had at scan start.
             time.sleep(0.2)
             try:
                 content = existing.path.read_text(encoding="utf-8")
@@ -1416,10 +1404,8 @@ class TestDeleteNode:
         assert not companion.exists()
 
     def test_holds_its_file_lock_for_its_whole_duration(self, vault, monkeypatch):
-        # Hooks Path.unlink, not find_file() -- _locked_paths() calls its
-        # resolver before acquiring any lock, so a hook there fires too
-        # early; unlink() is the mutating step, guaranteed to run only
-        # after the lock is confirmed held.
+        # Hooks Path.unlink, not find_file() -- see TestSetNodeTypeLocking's
+        # version above for why.
         import threading
 
         note = vault.create_note("Note A")
@@ -1450,12 +1436,9 @@ class TestDeleteNode:
 
 class TestMoveAndRenameNodeLocking:
     def test_move_node_holds_its_file_lock_for_its_whole_duration(self, vault, monkeypatch):
-        # Hooks Path.rename, not find_file() -- _locked_paths() calls its
-        # resolver before acquiring any lock, so a hook there fires too
-        # early; rename() is the mutating step, guaranteed to run only
-        # after both the old and new path's locks are confirmed held.
-        # Checking the *old* path's key is enough to prove the point (the
-        # new path is locked too, see move_node()'s own docstring).
+        # Hooks Path.rename, not find_file() -- see TestSetNodeTypeLocking's
+        # version above for why. Checks the source key; the sibling test
+        # below checks the destination.
         import threading
 
         note = vault.create_note("Note A")
@@ -1666,14 +1649,7 @@ class TestPerFileLockIsolation:
         real_get_lock(vault, primary_key).release()
 
     def test_a_compound_slug_that_decodes_through_dotdot_gets_the_same_key_as_the_bare_slug(self, vault):
-        # _resolve_compound_slug() deliberately returns the *unresolved*
-        # candidate Path (see its own docstring) -- a slug like
-        # "notes--..--notes--foo" decodes to "notes/../notes/foo.md",
-        # the identical on-disk file as the bare slug "foo" but a
-        # different string unless _key_for() resolves it first. Two
-        # different lock keys for one physical file means the lock is
-        # bypassable: a client can send either slug spelling on a
-        # PATCH/POST route, and neither request excludes the other.
+        # See _key_for()'s docstring for why this must hold.
         note = vault.create_note("Foo")
         path_plain = vault._find_md(note.slug)
         compound_slug = f"notes--..--notes--{note.slug}"
@@ -1684,15 +1660,10 @@ class TestPerFileLockIsolation:
         )
 
     def test_a_concurrent_move_between_resolve_and_lock_is_picked_up_by_the_retry(self, vault, monkeypatch):
-        # _locked_path()/_locked_paths() resolve a slug's path *before*
-        # acquiring its lock (there's no key to lock without it), then
-        # re-resolve once locked to confirm nothing changed in between --
-        # retrying against the fresh result otherwise. This forces that
-        # exact window open: update_source_bibliographic_fields()'s first,
+        # Forces _locked_path()'s resolve-then-lock window open: the first,
         # unlocked resolve returns the pre-move path, a real move_node()
         # actually runs and completes before the lock is even acquired,
-        # and the edit must still land on the file at its new location,
-        # not silently no-op against a path that no longer exists.
+        # and the edit must still land on the file's new location.
         import threading
 
         source = vault.create_source_from_citekey(
@@ -1707,12 +1678,8 @@ class TestPerFileLockIsolation:
         def hooked_find_md(self, slug):
             call_count["n"] += 1
             if call_count["n"] == 1:
-                # The first call is update_source_bibliographic_fields()'s
-                # own unlocked resolve -- return the stale, pre-move path
-                # directly (not a real lookup) so this doesn't race the
-                # move below, then let the move actually complete before
-                # returning it, so every later call in this test sees a
-                # vault that has already moved.
+                # This is the unlocked resolve -- return the stale path,
+                # but only after the move has actually completed.
                 mover.start()
                 assert move_done.wait(timeout=2), "move_node() never finished"
                 return original_path

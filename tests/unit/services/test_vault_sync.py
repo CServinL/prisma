@@ -41,20 +41,12 @@ def test_read_by_path_missing_file_returns_none(vault):
 
 
 def test_write_by_path_holds_its_file_lock_for_its_whole_duration(vault, monkeypatch):
-    # write_by_path()/delete_by_path() go through the same per-file lock
-    # registry as every other vault-file mutator -- without it, a synced
-    # desktop edit landing on the same file as a locked API-side edit
-    # (e.g. PATCH /{slug}/source) could still race.
     import threading
 
     lock_held_during_call = threading.Event()
     proceed = threading.Event()
     real_write_text = Path.write_text
 
-    # _safe_sync_path() runs before the lock is acquired (it's a direct
-    # path resolution, not the resolve-then-lock protocol slug-based
-    # callers use, but the write is still the correct hook point -- it's
-    # guaranteed to run only after the lock is held).
     def blocking_write_text(self, data, encoding=None):
         lock_held_during_call.set()
         proceed.wait(timeout=2)

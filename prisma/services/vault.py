@@ -1843,18 +1843,24 @@ class VaultService:
 
         Checks the companion's own destination for a collision *before*
         renaming the primary -- checking only the primary's destination
-        (as before) let a same-stem companion already at the destination
-        get silently overwritten by Path.rename() on POSIX, or left the
-        primary already moved with no companion move to follow if the
-        rename raised instead (platform-dependent partial-move either
-        way).
+        lets a same-stem companion already at the destination get silently
+        overwritten by Path.rename() on POSIX, or leaves the primary
+        already moved with no companion move to follow if the rename
+        raises instead (platform-dependent partial-move either way).
 
-        Also holds _citekey_create_lock -- a file relocating mid-scan can
-        vanish from citekey_exists()'s os.walk-based scan (each
-        directory's listing is a snapshot taken once, never revisited),
-        letting a concurrent create claim a citekey that still exists.
-        rename_node()/write_by_path() hold the same lock for the same
-        reason."""
+        Also holds _citekey_create_lock, acquired *after* the per-file
+        locks above, not before -- a file relocating mid-scan can vanish
+        from citekey_exists()'s os.walk-based scan (each directory's
+        listing is a snapshot taken once, never revisited), letting a
+        concurrent create claim a citekey that still exists.
+        rename_node()/write_by_path() hold the same lock, in the same
+        order, for the same reason: taking it first would hold this
+        single process-wide lock for however long the per-file locks
+        below take to acquire (e.g. a slow companion extraction on this
+        exact file), stalling every unrelated write_by_path/manual-create
+        across the whole vault for that entire wait -- the same
+        cross-file contention this whole per-file locking scheme exists
+        to remove."""
 
         def compute():
             path = _or_raise(self.find_file(slug), FileNotFoundError(f"node not found: {slug!r}"))
@@ -1867,9 +1873,9 @@ class VaultService:
                 self._html_md_lock_target(path), self._html_md_lock_target(new_path),
             )
 
-        with self._citekey_create_lock, self._locked_paths(compute) as (
+        with self._locked_paths(compute) as (
             path, new_path, old_companion, new_companion, *_,
-        ):
+        ), self._citekey_create_lock:
             old_rel = str(path.relative_to(self.root))
             new_path.parent.mkdir(parents=True, exist_ok=True)
             if new_path.exists() and new_path != path:
@@ -1922,11 +1928,12 @@ class VaultService:
             new_companion = self._companion_target(path, new_path, old_companion) if old_companion else None
             return path, new_path, old_companion, new_companion
 
-        # Also holds _citekey_create_lock (see move_node()'s docstring) --
+        # Also holds _citekey_create_lock, acquired after the per-file
+        # locks (see move_node()'s docstring for why the order matters) --
         # a rename swaps the old filename out of os.walk()'s already-
         # captured directory listing, missing the new one, even though
         # the file never left that directory.
-        with self._citekey_create_lock, self._locked_paths(compute) as (path, new_path, old_companion, new_companion):
+        with self._locked_paths(compute) as (path, new_path, old_companion, new_companion), self._citekey_create_lock:
             old_rel = str(path.relative_to(self.root))
             new_stem = new_path.stem
             if new_path.exists() and new_path != path:
@@ -2076,12 +2083,13 @@ class VaultService:
         mid-write) leaves the existing file untouched instead of
         truncated.
 
-        Also holds _citekey_create_lock (see move_node()'s docstring) --
-        a blind create-or-overwrite from a desktop sync push can add,
+        Also holds _citekey_create_lock, acquired after this file's own
+        lock (see move_node()'s docstring for why the order matters) -- a
+        blind create-or-overwrite from a desktop sync push can add,
         change, or remove a citekey at this path with no route-level
         validation at all."""
         path = self._safe_sync_path(rel_path)
-        with self._citekey_create_lock, self._get_lock(self._key_for(path)):
+        with self._get_lock(self._key_for(path)), self._citekey_create_lock:
             path.parent.mkdir(parents=True, exist_ok=True)
             tmp_path = path.with_name(f"{path.name}.{uuid.uuid4().hex}.sync.tmp")
             try:

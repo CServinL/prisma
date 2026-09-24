@@ -1947,9 +1947,63 @@ class TestPerFileLockIsolation:
         )
         assert vault.get_source(source_b.slug).journal == "Updated Journal"
 
+    def test_waiting_on_a_busy_per_file_lock_does_not_block_an_unrelated_write_by_path(self, vault, monkeypatch):
+        # move_node()/rename_node()/write_by_path() all also hold
+        # _citekey_create_lock (a single, process-wide lock). Acquiring it
+        # *before* a per-file lock that's already held by someone else
+        # (here, a slow extraction) would hold it for however long that
+        # wait takes, stalling every unrelated write_by_path/manual-create
+        # across the vault for the same window -- the exact cross-file
+        # contention per-file locking exists to remove.
+        import threading
+
+        source_a = vault.create_source_from_citekey(
+            "smith2024", "Source A", "", zotero_key="AAA111", authors=[], tags=[],
+        )
+
+        extraction_started = threading.Event()
+        extraction_may_finish = threading.Event()
+
+        def blocking_pdf_bytes_to_md(data):
+            extraction_started.set()
+            extraction_may_finish.wait(timeout=2)
+            return "extracted text"
+
+        monkeypatch.setattr("prisma.services.vault.pdf_bytes_to_md", blocking_pdf_bytes_to_md)
+
+        t_extract = threading.Thread(
+            target=lambda: vault.attach_source_companion(source_a.slug, "paper.pdf", b"pdf bytes")
+        )
+        t_extract.start()
+        assert extraction_started.wait(timeout=2), "source A's extraction never started"
+
+        move_reached_lock_wait = threading.Event()
+
+        def do_move():
+            move_reached_lock_wait.set()
+            vault.move_node(source_a.slug, dest_dir="notes")
+
+        t_move = threading.Thread(target=do_move)
+        t_move.start()
+        assert move_reached_lock_wait.wait(timeout=2), "move_node() thread never started"
+
+        write_done = threading.Event()
+
+        def do_write():
+            vault.write_by_path("unrelated/other.md", "hello")
+            write_done.set()
+
+        t_write = threading.Thread(target=do_write)
+        t_write.start()
+        assert write_done.wait(timeout=1), (
+            "an unrelated write_by_path() must not block behind move_node()'s wait "
+            "for source A's still-busy per-file lock"
+        )
+
         extraction_may_finish.set()
-        t_a.join(timeout=2)
-        assert not t_a.is_alive(), "source A's extraction thread never finished"
+        t_extract.join(timeout=2)
+        t_move.join(timeout=2)
+        t_write.join(timeout=2)
         assert vault.get_source(source_a.slug).body == "extracted text"
 
     def test_a_failed_multi_key_acquisition_releases_locks_already_acquired(self, vault, monkeypatch):

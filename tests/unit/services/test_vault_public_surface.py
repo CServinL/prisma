@@ -1832,14 +1832,36 @@ class TestMoveAndRenameNodeLocking:
         with pytest.raises(OSError):
             vault.rename_node(note.slug, "New Title")
 
-        # The rename already happened before the write step -- what matters
-        # is that SOME file with the note's content survives, not the old
-        # path specifically (that part of the original bug -- destroying
-        # the old path is fine, that's the point of a rename -- was never
-        # the issue; leaving the new one empty was).
+        # A failure this late rolls back the whole rename, not just the tmp
+        # file -- otherwise the note ends up silently renamed with its OLD
+        # title despite the caller getting an exception, and the caller's
+        # own sync broadcast (which assumes "exception means nothing
+        # changed") never fires.
         remaining = list(vault.root.rglob("*.md"))
         assert len(remaining) == 1
+        assert remaining[0] == note.path, "the rename must be rolled back, not left at the new path"
         assert "original body" in remaining[0].read_text(encoding="utf-8")
+
+    def test_rename_node_rolls_back_the_companion_too_if_the_metadata_write_fails(self, vault, monkeypatch):
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "body", zotero_key="ABC123", authors=[], tags=[],
+        )
+        vault.attach_source_companion(source.slug, "figure.svg", b"<svg></svg>")
+        original_primary = source.path
+        original_companion = vault.find_companion(source.slug)
+
+        original_write_text = Path.write_text
+
+        def boom(self, data, encoding=None):
+            original_write_text(self, "", encoding=encoding)
+            raise OSError("disk full")
+
+        monkeypatch.setattr(Path, "write_text", boom)
+        with pytest.raises(OSError):
+            vault.rename_node(source.slug, "A Renamed Paper")
+
+        assert original_primary.exists(), "the primary must be rolled back, not left at the new name"
+        assert original_companion.exists(), "the companion must be rolled back too, not left at the new name"
 
 
 class TestPerFileLockIsolation:

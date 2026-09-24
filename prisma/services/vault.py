@@ -1917,16 +1917,23 @@ class VaultService:
             # Atomic tmp-file+replace, not a direct new_path.write_text() --
             # same reasoning as every other Source-mutating write: a
             # failure partway through this step would otherwise leave the
-            # renamed file truncated, with the *old* path no longer
-            # existing at all to fall back to (strictly worse than the
-            # in-place truncation risk elsewhere, since a rename already
-            # happened first).
+            # renamed file truncated. A failure here also rolls back the
+            # rename/companion-relocate above, not just the tmp file --
+            # otherwise the file (and its companion) end up silently
+            # renamed with the *old* title despite the caller getting an
+            # exception, and the route's caller-side sync_delete/sync_write
+            # broadcast (keyed on this call actually having failed) never
+            # fires, leaving a connected desktop client's stale copy of the
+            # old path to get pushed back up as a duplicate.
             tmp_path = new_path.with_name(f"{new_path.name}.{uuid.uuid4().hex}.rename.tmp")
             try:
                 tmp_path.write_text(_render_frontmatter(fm) + body, encoding="utf-8")
                 tmp_path.replace(new_path)
             except BaseException:
                 tmp_path.unlink(missing_ok=True)
+                if old_companion is not None:
+                    new_companion.rename(old_companion)
+                new_path.rename(path)
                 raise
             return _file_slug(new_stem), old_rel, str(new_path.relative_to(self.root))
 

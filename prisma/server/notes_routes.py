@@ -553,10 +553,9 @@ def build_notes_router(
         (a raw import, node.path points straight at it). .pdf: the node
         always has a real .md already (created via create_note()), with the
         .pdf sitting alongside as a companion. Both cases, and the locked
-        resolution of which one applies, are handled by ensure_md_format()
-        itself now -- resolving the companion here first, unlocked, then
-        handing it a Path could already be stale by the time it acquired
-        its lock."""
+        resolution of which one applies, are ensure_md_format()'s own job --
+        resolving the companion here first, unlocked, would risk handing it
+        a Path already stale by the time its lock is actually acquired."""
         vault = get_vault()
         try:
             generated = vault.ensure_md_format(slug)

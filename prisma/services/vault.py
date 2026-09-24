@@ -1346,12 +1346,12 @@ class VaultService:
     # ── Format generation ─────────────────────────────────────────────────────
 
     def _companion_for_md_generation(self, slug: str) -> Path:
-        """Resolves the companion file generate_md_format()'s route used to
-        find externally, before it had a lock protocol to run this under.
-        Raises FileNotFoundError (via get_any()) if the node itself is
-        gone, or ValueError if it has neither an HTML primary nor a PDF/
-        HTML companion -- same two failure cases the route used to detect
-        itself, now mapped from inside a single locked call instead."""
+        """Resolves the companion file for `slug` -- the html-primary/
+        companion-suffix logic generate_md_format()'s route needs, done
+        here so it runs under this class's own lock protocol instead of
+        externally, unlocked. Raises FileNotFoundError (via get_any()) if
+        the node itself is gone, or ValueError if it has neither an HTML
+        primary nor a PDF/HTML companion."""
         node = self.get_any(slug)
         node_path = getattr(node, "path", None)
         companion_path = (
@@ -1366,12 +1366,12 @@ class VaultService:
         """Public entry point -- resolves the companion and locks the
         sibling .md this will write to, under the same resolve-then-lock-
         then-reconfirm protocol every other slug-based mutator uses. Takes
-        a slug, not an already-resolved Path -- the route used to resolve
-        the companion itself, unlocked, and hand this method a Path that
-        could already be stale by the time the lock was actually acquired
-        (e.g. a concurrent move_node() relocating the node in between),
-        leaving this call running unsynchronized against whatever now
-        lives at the node's new location.
+        a slug, not an already-resolved Path: a caller resolving the
+        companion itself, unlocked, before handing it in here risks a
+        path that's already stale by the time this method's own lock is
+        actually acquired (e.g. a concurrent move_node() relocating the
+        node in between), leaving this call running unsynchronized
+        against whatever now lives at the node's new location.
 
         Needed because this method has two callers with different locking
         needs: generate_md_format() (the /{slug}/md route) calls this
@@ -1506,15 +1506,14 @@ class VaultService:
 
     def save_note(self, slug: str, body: str) -> Note:
         """Locked on this file's own path and writes atomically (tmp-file+
-        replace), same as every Source-mutating method -- this was a
-        plain, unlocked write_text() until a TODO.md audit found the
-        underlying read-merge-write race isn't actually Source-specific,
-        just first noticed there: two requests saving the same note close
-        together (two browser tabs, a double-click, or a concurrent
-        PATCH /{slug}/type) could each read stale frontmatter and one
-        write silently clobbers the other's change, and a write failure
-        partway through (disk full, killed mid-write) destroyed the note
-        instead of leaving it untouched."""
+        replace), same as every Source-mutating method -- the read-merge-
+        write race this closes isn't actually Source-specific: two
+        requests saving the same note close together (two browser tabs, a
+        double-click, or a concurrent PATCH /{slug}/type) could each read
+        stale frontmatter and one write silently clobbers the other's
+        change, and a write failure partway through (disk full, killed
+        mid-write) would otherwise destroy the note instead of leaving it
+        untouched."""
         with self._locked_path(
             lambda: _or_raise(self._find_md(slug), FileNotFoundError(f"note not found: {slug!r}"))
         ) as path:
@@ -1983,12 +1982,11 @@ class VaultService:
         attach_source_companion()) can read this file, or even recreate it
         via its own tmp-file+replace, in the same window as this delete,
         leaving the vault in an inconsistent state with no error to either
-        caller. Also uses _paired_companion() (previously only
-        `if path.suffix == ".html"`, unconditionally False for a Source)
-        to find and remove a Source's `.pdf`/`.svg`/etc. companion too --
-        deleting a Source left its companion orphaned on disk otherwise,
-        permanently invisible to find_companion() once the primary .md is
-        gone."""
+        caller. Also uses _paired_companion() to find and remove a
+        Source's `.pdf`/`.svg`/etc. companion too, not just an html-
+        primary's `.md` -- deleting a Source without this orphans its
+        companion on disk, permanently invisible to find_companion() once
+        the primary .md is gone."""
         sess_path = self._find_sess(slug)
         if sess_path is not None:
             with self._chat_write_lock:

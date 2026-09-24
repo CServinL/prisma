@@ -474,6 +474,17 @@ class VaultService:
         with self._locked_paths(lambda: (resolve(),)) as (path,):
             yield path
 
+    def _locked_md(self, slug: str, kind: str):
+        """Locks and yields the .md file for `slug` via _locked_path(),
+        raising FileNotFoundError with a `kind`-specific message (e.g.
+        "source"/"note") if it doesn't resolve -- the resolve-then-lock
+        anchor update_source_bibliographic_fields()/
+        attach_source_companion()/save_note() otherwise all repeat
+        identically, differing only in that message."""
+        return self._locked_path(
+            lambda: _or_raise(self._find_md(slug), FileNotFoundError(f"{kind} not found: {slug!r}"))
+        )
+
     def ensure_dirs(self) -> None:
         for d in self.default_dirs.values():
             d.mkdir(parents=True, exist_ok=True)
@@ -894,9 +905,7 @@ class VaultService:
         this node away from Source in between would otherwise let this
         method proceed anyway, silently writing Source-only bibliographic
         fields into what is now a Note."""
-        with self._locked_path(
-            lambda: _or_raise(self._find_md(slug), FileNotFoundError(f"source not found: {slug!r}"))
-        ) as path:
+        with self._locked_md(slug, "source") as path:
             raw = path.read_text(encoding="utf-8")
             fm, content = _parse_frontmatter(raw)
             if fm.get("type") != NodeType.source.value:
@@ -1064,9 +1073,7 @@ class VaultService:
           overwritten by ensure_md_format()'s stale-frontmatter write when
           the slow extraction finally finishes, discarding an edit that
           already returned 200 to its caller."""
-        with self._locked_path(
-            lambda: _or_raise(self._find_md(slug), FileNotFoundError(f"source not found: {slug!r}"))
-        ) as path:
+        with self._locked_md(slug, "source") as path:
             # Re-read and validate type here, inside the lock, rather than
             # trusting the route layer's own isinstance(node, Source) check
             # alone -- that check runs BEFORE this lock is acquired (and
@@ -1514,9 +1521,7 @@ class VaultService:
         change, and a write failure partway through (disk full, killed
         mid-write) would otherwise destroy the note instead of leaving it
         untouched."""
-        with self._locked_path(
-            lambda: _or_raise(self._find_md(slug), FileNotFoundError(f"note not found: {slug!r}"))
-        ) as path:
+        with self._locked_md(slug, "note") as path:
             existing = path.read_text(encoding="utf-8")
             fm, _ = _parse_frontmatter(existing)
             # This body is no longer extraction-derived once something else

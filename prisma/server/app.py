@@ -1394,7 +1394,7 @@ def promote_attachment_to_vault(slug: str, req: PromoteAttachmentRequest):
         dest.write_text(attachment.value, encoding="utf-8")
 
     if ext in (".pdf", ".html"):
-        _vault.ensure_md_format(dest)
+        _vault.ensure_md_format(note.slug)
     _indexer.mark_stale()
     _activity.info("action=promote_attachment note_slug=%s kind=%s", note.slug, attachment.kind.value)
     return PromoteAttachmentResponse(slug=note.slug)

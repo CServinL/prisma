@@ -57,6 +57,18 @@ is a backlog, not a log.
 
 ## Vault
 
+- **Drop `.html` as a primary node format — `.md` should be the only
+  primary format.** HTML's formatting/style/UI markup is bloat for
+  content that's just text with structure; `.md` already covers that.
+  Real blast radius (grepped 2026-09-24): `vault.py` (`_paired_companion`/
+  `_companion_target`/`_relocate_companion`'s html-primary/.md-companion
+  branch, `find_file`'s .html fallback), `notes_routes.py`/`app.py`
+  (serving/generating), `static.py`, `asset_rewrite.py`, `vault_models.py`
+  (node typing), and the UI's html-iframe viewer (`+page.svelte`/
+  `+layout.ts`). Needs a decision on existing html-primary files already
+  in vaults today — migrate each via docu-craft's `.md` render, or
+  something else — before removing the code paths that support them. Not
+  scoped in detail; its own session.
 - **The per-file lock's resolve-then-lock-then-reconfirm protocol doubles
   the vault scan cost of every slug-based mutation.** `_locked_path()`/
   `_locked_paths()` call `compute()` (which resolves via `find_file()`/
@@ -71,6 +83,15 @@ is a backlog, not a log.
   real needs `find_file()`/`_find_md()` to stop being an O(vault) walk in
   the first place (an in-memory slug→path index, invalidated on writes),
   which is a bigger, separate change than this lock refactor.
+- **`_file_locks` (the per-file lock registry) is never evicted and grows
+  for the life of the process.** Deliberate for a single-user local vault
+  (evicting risks releasing an entry another thread is still mid-acquire
+  on, for no real memory benefit here) — but every distinct path ever
+  locked adds one `Lock` plus its path-string key permanently, including
+  retry destinations and collision-rejected move targets, not just live
+  vault files. Each entry is small; an unusually long-running process with
+  heavy desktop sync or repeated moves to varied destinations is the only
+  realistic way this adds up to anything worth revisiting.
 - **No UI to view a companion file** — `COMPANION_EXTS` covers pdf/html/htm/
   svg/epub/docx/tex/drawio/jpg/jpeg, and the backend already serves any of
   them generically (`GET /notes/{slug}/original`, `FileResponse`), but the

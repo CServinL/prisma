@@ -552,23 +552,17 @@ def build_notes_router(
         """.html: the node itself may BE the .html file with no .md yet
         (a raw import, node.path points straight at it). .pdf: the node
         always has a real .md already (created via create_note()), with the
-        .pdf sitting alongside as a companion -- vault.find_companion()
-        resolves that case, node.path alone would only ever be the .md.
-        Both end up calling the same ensure_md_format(), which branches on
-        the companion's own suffix (vault.py)."""
+        .pdf sitting alongside as a companion. Both cases, and the locked
+        resolution of which one applies, are ensure_md_format()'s own job --
+        resolving the companion here first, unlocked, would risk handing it
+        a Path already stale by the time its lock is actually acquired."""
         vault = get_vault()
         try:
-            node = vault.get_any(slug)
+            generated = vault.ensure_md_format(slug)
         except FileNotFoundError:
             raise HTTPException(status_code=404, detail=f"node not found: {slug!r}")
-        node_path = getattr(node, "path", None)
-        companion_path = (
-            node_path if (node_path is not None and node_path.suffix == ".html")
-            else vault.find_companion(slug)
-        )
-        if companion_path is None or companion_path.suffix not in (".html", ".pdf"):
-            raise HTTPException(status_code=400, detail="node has no HTML or PDF format")
-        generated = vault.ensure_md_format(companion_path)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
         return {"generated": generated, "slug": slug}
 
     @router.patch("/{slug}/type")

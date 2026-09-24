@@ -926,7 +926,7 @@ class TestEnsureMdFormatCleansUpOnFailure:
         companion.parent.mkdir(parents=True, exist_ok=True)
         companion.write_text("<html><body>hi</body></html>", encoding="utf-8")
 
-        result = vault.ensure_md_format(companion)
+        result = vault.ensure_md_format("paper")
 
         assert result is False
         assert len(created) == 1
@@ -946,7 +946,7 @@ class TestEnsureMdFormatCleansUpOnFailure:
         companion = source.path.with_suffix(".html")
         companion.write_text("<html><body>hi</body></html>", encoding="utf-8")
 
-        result = vault.ensure_md_format(companion, force=True)
+        result = vault.ensure_md_format(source.slug, force=True)
 
         assert result is False
         assert vault.get_source(source.slug).body == "hand-typed body"
@@ -971,7 +971,7 @@ class TestEnsureMdFormatCleansUpOnFailure:
 
         monkeypatch.setattr(Path, "write_text", boom)
         with pytest.raises(OSError):
-            vault.ensure_md_format(companion_path, force=True)
+            vault.ensure_md_format(source.slug, force=True)
         assert vault.get_source(source.slug).body == "original body"
 
     def test_concurrent_metadata_edit_and_generate_md_format_do_not_lose_the_edit(self, vault, monkeypatch):
@@ -994,7 +994,7 @@ class TestEnsureMdFormatCleansUpOnFailure:
         monkeypatch.setattr("prisma.services.vault.pdf_bytes_to_md", slow_pdf_bytes_to_md)
 
         def generate():
-            vault.ensure_md_format(companion_path)
+            vault.ensure_md_format(source.slug)
 
         def edit():
             time.sleep(0.05)  # let generate() grab the lock and start its slow extraction first
@@ -1009,6 +1009,39 @@ class TestEnsureMdFormatCleansUpOnFailure:
 
         assert vault.get_source(source.slug).authors == ["New Author"], (
             "a metadata edit racing generate_md_format()'s extraction must not be silently lost"
+        )
+
+    def test_resolves_the_companion_again_after_acquiring_its_lock(self, vault, monkeypatch):
+        # ensure_md_format() used to take an already-resolved companion
+        # Path from its caller (the /{slug}/md route resolved it
+        # externally, unlocked) -- a concurrent move landing before this
+        # method's own lock was acquired left it locking and operating on
+        # a stale path with no way to notice. It now resolves the
+        # companion itself, and must do so again after acquiring the lock
+        # (the reconfirm half of the same resolve-then-lock-then-reconfirm
+        # protocol every other slug-based mutator uses).
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "", zotero_key="ABC123", authors=[], tags=[],
+        )
+        companion_path = source.path.with_suffix(".pdf")
+        companion_path.write_bytes(b"pdf bytes")
+        monkeypatch.setattr("prisma.services.vault.pdf_bytes_to_md", lambda data: "extracted text")
+
+        lock_key = vault._key_for(source.path.with_suffix(".md"))
+        real_find_companion = VaultService.find_companion
+        calls_while_locked = []
+
+        def hooked_find_companion(self, slug):
+            calls_while_locked.append(self._get_lock(lock_key).locked())
+            return real_find_companion(self, slug)
+
+        monkeypatch.setattr(VaultService, "find_companion", hooked_find_companion)
+
+        vault.ensure_md_format(source.slug)
+
+        assert any(calls_while_locked), (
+            "ensure_md_format() must resolve the companion again after acquiring its lock, "
+            "not only from the caller's own unlocked resolve"
         )
 
 
@@ -1483,6 +1516,39 @@ class TestDeleteNode:
             vault._get_lock(key).release()
         assert not acquired, "delete_node() must hold this file's lock while it runs"
 
+    def test_holds_the_html_md_target_lock_for_a_bare_html_node(self, vault, monkeypatch):
+        # Before any .md companion exists, set_node_type()/ensure_md_format()
+        # still lock this exact .md path (they may be the ones creating it)
+        # -- delete_node() must hold it too, or the two share no lock at all
+        # for the same node.
+        import threading
+
+        html_path = vault.root / "notes" / "raw.html"
+        html_path.write_text("<html><body>hi</body></html>", encoding="utf-8")
+
+        lock_held_during_call = threading.Event()
+        proceed = threading.Event()
+        real_unlink = Path.unlink
+
+        def blocking_unlink(self, missing_ok=False):
+            lock_held_during_call.set()
+            proceed.wait(timeout=2)
+            return real_unlink(self, missing_ok=missing_ok)
+
+        monkeypatch.setattr(Path, "unlink", blocking_unlink)
+
+        t = threading.Thread(target=lambda: vault.delete_node("raw"))
+        t.start()
+        assert lock_held_during_call.wait(timeout=2), "delete_node() never reached its unlink"
+
+        key = vault._key_for(html_path.with_suffix(".md"))
+        acquired = vault._get_lock(key).acquire(blocking=False)
+        proceed.set()
+        t.join()
+        if acquired:
+            vault._get_lock(key).release()
+        assert not acquired, "delete_node() must hold the html-primary's .md target lock too, even before it exists"
+
     def test_deleting_a_chat_is_excluded_from_a_concurrent_append(self, vault, monkeypatch):
         import threading
 
@@ -1520,6 +1586,28 @@ class TestDeleteNode:
         t_delete.join(timeout=2)
         assert delete_done.is_set()
 
+    def test_reresolves_the_chat_path_after_acquiring_the_lock(self, vault, monkeypatch):
+        # The dispatch check at the top of delete_node() (is this slug a
+        # chat at all) runs before _chat_write_lock is acquired, and its
+        # resolved path can go stale before the lock is actually granted
+        # (e.g. a concurrent rename of this same chat). The path actually
+        # acted on must come from a second, fresh resolve taken while the
+        # lock is held, not the dispatch check's value.
+        chat = vault.create_chat("Test Chat")
+        real_find_sess = VaultService._find_sess
+        calls_while_locked = []
+
+        def hooked_find_sess(self, slug):
+            calls_while_locked.append(self._chat_write_lock.locked())
+            return real_find_sess(self, slug)
+
+        monkeypatch.setattr(VaultService, "_find_sess", hooked_find_sess)
+
+        vault.delete_node(chat.slug)
+
+        assert any(calls_while_locked), (
+            "delete_node() must re-resolve the chat's path while holding _chat_write_lock"
+        )
 
 class TestMoveAndRenameNodeLocking:
     def test_move_node_holds_its_file_lock_for_its_whole_duration(self, vault, monkeypatch):
@@ -1584,6 +1672,39 @@ class TestMoveAndRenameNodeLocking:
         if acquired:
             vault._get_lock(key).release()
         assert not acquired, "move_node() must hold the destination path's lock too, not just the source's"
+
+    def test_move_node_holds_the_html_md_target_lock_for_a_bare_html_node(self, vault, monkeypatch):
+        # Before any .md companion exists, set_node_type()/ensure_md_format()
+        # still lock this exact .md path (they may be the ones creating it)
+        # -- move_node() must hold it too, or the two share no lock at all
+        # for the same node.
+        import threading
+
+        html_path = vault.root / "notes" / "raw.html"
+        html_path.write_text("<html><body>hi</body></html>", encoding="utf-8")
+
+        lock_held_during_call = threading.Event()
+        proceed = threading.Event()
+        real_rename = Path.rename
+
+        def blocking_rename(self, target):
+            lock_held_during_call.set()
+            proceed.wait(timeout=2)
+            return real_rename(self, target)
+
+        monkeypatch.setattr(Path, "rename", blocking_rename)
+
+        t = threading.Thread(target=lambda: vault.move_node("raw", dest_dir="sources"))
+        t.start()
+        assert lock_held_during_call.wait(timeout=2), "move_node() never reached its rename"
+
+        key = vault._key_for(html_path.with_suffix(".md"))
+        acquired = vault._get_lock(key).acquire(blocking=False)
+        proceed.set()
+        t.join()
+        if acquired:
+            vault._get_lock(key).release()
+        assert not acquired, "move_node() must hold the html-primary's .md target lock too, even before it exists"
 
     def test_rename_node_holds_its_file_lock_for_its_whole_duration(self, vault, monkeypatch):
         # Same Path.rename hook point and reasoning as move_node's version
@@ -1660,6 +1781,77 @@ class TestMoveAndRenameNodeLocking:
         t_rename.join(timeout=2)
         assert rename_done.is_set()
 
+    def test_rename_node_reresolves_the_chat_path_after_acquiring_the_lock(self, vault, monkeypatch):
+        # Same reasoning as delete_node()'s version of this test: the
+        # dispatch check's resolved path can go stale before the lock is
+        # actually granted, so the path acted on must come from a second,
+        # fresh resolve taken while the lock is held.
+        chat = vault.create_chat("Test Chat")
+        real_find_sess = VaultService._find_sess
+        calls_while_locked = []
+
+        def hooked_find_sess(self, slug):
+            calls_while_locked.append(self._chat_write_lock.locked())
+            return real_find_sess(self, slug)
+
+        monkeypatch.setattr(VaultService, "_find_sess", hooked_find_sess)
+
+        vault.rename_node(chat.slug, "New Title")
+
+        assert any(calls_while_locked), (
+            "rename_node() must re-resolve the chat's path while holding _chat_write_lock"
+        )
+
+    def test_create_chat_is_excluded_from_a_concurrent_rename(self, vault, monkeypatch):
+        # create_chat() picks its slug via unique_slug() (a listing scan)
+        # and previously wrote its .sess with no lock at all -- a
+        # concurrent rename_node()/delete_node() chat branch (both
+        # _chat_write_lock-guarded) could otherwise race it.
+        import threading
+
+        chat = vault.create_chat("Existing Chat")
+
+        rename_started = threading.Event()
+        proceed = threading.Event()
+        real_save_chat_session = save_chat_session
+        call_count = {"n": 0}
+
+        def blocking_save_chat_session(chat_obj, path):
+            # create_chat() calls this same function -- only the first call
+            # (rename_node()'s) should block, or create_chat()'s own call
+            # would block on this mock directly and pass this test whether
+            # or not it's actually excluded by a lock (see the sibling
+            # test_renaming_a_chat_is_excluded_from_a_concurrent_append,
+            # which hit the identical trap first).
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                rename_started.set()
+                proceed.wait(timeout=2)
+            return real_save_chat_session(chat_obj, path)
+
+        monkeypatch.setattr("prisma.services.vault.save_chat_session", blocking_save_chat_session)
+
+        t_rename = threading.Thread(target=lambda: vault.rename_node(chat.slug, "Renamed"))
+        t_rename.start()
+        assert rename_started.wait(timeout=2), "rename_node() never reached its write"
+
+        create_done = threading.Event()
+
+        def do_create():
+            vault.create_chat("New Chat")
+            create_done.set()
+
+        t_create = threading.Thread(target=do_create)
+        t_create.start()
+        assert not create_done.wait(timeout=0.3), (
+            "create_chat() must not run concurrently with a still-in-flight rename_node()"
+        )
+
+        proceed.set()
+        t_rename.join(timeout=2)
+        t_create.join(timeout=2)
+        assert create_done.is_set()
+
     def test_rename_node_failed_write_does_not_leave_a_truncated_file(self, vault, monkeypatch):
         note = vault.create_note("Note A", "original body")
 
@@ -1673,14 +1865,36 @@ class TestMoveAndRenameNodeLocking:
         with pytest.raises(OSError):
             vault.rename_node(note.slug, "New Title")
 
-        # The rename already happened before the write step -- what matters
-        # is that SOME file with the note's content survives, not the old
-        # path specifically (that part of the original bug -- destroying
-        # the old path is fine, that's the point of a rename -- was never
-        # the issue; leaving the new one empty was).
+        # A failure this late rolls back the whole rename, not just the tmp
+        # file -- otherwise the note ends up silently renamed with its OLD
+        # title despite the caller getting an exception, and the caller's
+        # own sync broadcast (which assumes "exception means nothing
+        # changed") never fires.
         remaining = list(vault.root.rglob("*.md"))
         assert len(remaining) == 1
+        assert remaining[0] == note.path, "the rename must be rolled back, not left at the new path"
         assert "original body" in remaining[0].read_text(encoding="utf-8")
+
+    def test_rename_node_rolls_back_the_companion_too_if_the_metadata_write_fails(self, vault, monkeypatch):
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "body", zotero_key="ABC123", authors=[], tags=[],
+        )
+        vault.attach_source_companion(source.slug, "figure.svg", b"<svg></svg>")
+        original_primary = source.path
+        original_companion = vault.find_companion(source.slug)
+
+        original_write_text = Path.write_text
+
+        def boom(self, data, encoding=None):
+            original_write_text(self, "", encoding=encoding)
+            raise OSError("disk full")
+
+        monkeypatch.setattr(Path, "write_text", boom)
+        with pytest.raises(OSError):
+            vault.rename_node(source.slug, "A Renamed Paper")
+
+        assert original_primary.exists(), "the primary must be rolled back, not left at the new name"
+        assert original_companion.exists(), "the companion must be rolled back too, not left at the new name"
 
 
 class TestPerFileLockIsolation:
@@ -1733,9 +1947,63 @@ class TestPerFileLockIsolation:
         )
         assert vault.get_source(source_b.slug).journal == "Updated Journal"
 
+    def test_waiting_on_a_busy_per_file_lock_does_not_block_an_unrelated_write_by_path(self, vault, monkeypatch):
+        # move_node()/rename_node()/write_by_path() all also hold
+        # _citekey_create_lock (a single, process-wide lock). Acquiring it
+        # *before* a per-file lock that's already held by someone else
+        # (here, a slow extraction) would hold it for however long that
+        # wait takes, stalling every unrelated write_by_path/manual-create
+        # across the vault for the same window -- the exact cross-file
+        # contention per-file locking exists to remove.
+        import threading
+
+        source_a = vault.create_source_from_citekey(
+            "smith2024", "Source A", "", zotero_key="AAA111", authors=[], tags=[],
+        )
+
+        extraction_started = threading.Event()
+        extraction_may_finish = threading.Event()
+
+        def blocking_pdf_bytes_to_md(data):
+            extraction_started.set()
+            extraction_may_finish.wait(timeout=2)
+            return "extracted text"
+
+        monkeypatch.setattr("prisma.services.vault.pdf_bytes_to_md", blocking_pdf_bytes_to_md)
+
+        t_extract = threading.Thread(
+            target=lambda: vault.attach_source_companion(source_a.slug, "paper.pdf", b"pdf bytes")
+        )
+        t_extract.start()
+        assert extraction_started.wait(timeout=2), "source A's extraction never started"
+
+        move_reached_lock_wait = threading.Event()
+
+        def do_move():
+            move_reached_lock_wait.set()
+            vault.move_node(source_a.slug, dest_dir="notes")
+
+        t_move = threading.Thread(target=do_move)
+        t_move.start()
+        assert move_reached_lock_wait.wait(timeout=2), "move_node() thread never started"
+
+        write_done = threading.Event()
+
+        def do_write():
+            vault.write_by_path("unrelated/other.md", "hello")
+            write_done.set()
+
+        t_write = threading.Thread(target=do_write)
+        t_write.start()
+        assert write_done.wait(timeout=1), (
+            "an unrelated write_by_path() must not block behind move_node()'s wait "
+            "for source A's still-busy per-file lock"
+        )
+
         extraction_may_finish.set()
-        t_a.join(timeout=2)
-        assert not t_a.is_alive(), "source A's extraction thread never finished"
+        t_extract.join(timeout=2)
+        t_move.join(timeout=2)
+        t_write.join(timeout=2)
         assert vault.get_source(source_a.slug).body == "extracted text"
 
     def test_a_failed_multi_key_acquisition_releases_locks_already_acquired(self, vault, monkeypatch):
@@ -1790,6 +2058,20 @@ class TestPerFileLockIsolation:
         assert vault._key_for(path_plain) == vault._key_for(path_compound), (
             "two slug spellings for the identical physical file must produce the same lock key"
         )
+
+    def test_key_for_does_not_raise_for_a_file_reached_through_a_symlinked_dir(self, vault, tmp_path):
+        # iter_files() walks with os.walk(followlinks=True), so a symlinked
+        # directory is a real, previously-working way to reach a vault
+        # file -- .resolve() on such a path lands outside self.root, and
+        # relative_to(self.root) raised ValueError for exactly this case.
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "linked.md").write_text("---\ntype: note\n---\ncontent", encoding="utf-8")
+        (vault.root / "notes" / "shared").symlink_to(outside)
+
+        path = vault._find_md("linked")
+        assert path is not None, "test setup: symlinked file must be found by the walk"
+        vault._key_for(path)  # must not raise
 
     def test_a_concurrent_move_between_resolve_and_lock_is_picked_up_by_the_retry(self, vault, monkeypatch):
         # Forces _locked_path()'s resolve-then-lock window open: the first,

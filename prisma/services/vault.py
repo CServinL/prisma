@@ -1345,23 +1345,51 @@ class VaultService:
 
     # ── Format generation ─────────────────────────────────────────────────────
 
-    def ensure_md_format(self, companion_path: Path, force: bool = False) -> bool:
-        """Public entry point -- locks the sibling .md this will write to,
-        then delegates to _ensure_md_format_locked() below. Needed because
-        this method has two callers with different locking needs:
-        generate_md_format() (the /{slug}/md route) calls this directly
-        and holds no lock of its own, so without this it would race
-        unsynchronized against edit_source()/upload_source_companion()'s
-        own locked read-merge-write of the identical file -- the exact
-        "lost update" class this locking scheme exists to prevent, just
-        missed for this pre-existing fourth call path when the other
-        three got it. attach_source_companion() is the other caller, and
-        it already holds this same file's lock for its own multi-step
-        operation -- calling this method (and re-acquiring the same
-        non-reentrant Lock) from inside that would deadlock, so it calls
-        _ensure_md_format_locked() directly instead, below."""
-        target = companion_path.with_suffix(".md")
-        with self._get_lock(self._key_for(target)):
+    def _companion_for_md_generation(self, slug: str) -> Path:
+        """Resolves the companion file generate_md_format()'s route used to
+        find externally, before it had a lock protocol to run this under.
+        Raises FileNotFoundError (via get_any()) if the node itself is
+        gone, or ValueError if it has neither an HTML primary nor a PDF/
+        HTML companion -- same two failure cases the route used to detect
+        itself, now mapped from inside a single locked call instead."""
+        node = self.get_any(slug)
+        node_path = getattr(node, "path", None)
+        companion_path = (
+            node_path if (node_path is not None and node_path.suffix == ".html")
+            else self.find_companion(slug)
+        )
+        if companion_path is None or companion_path.suffix not in (".html", ".pdf"):
+            raise ValueError(f"{slug!r} has no HTML or PDF format")
+        return companion_path
+
+    def ensure_md_format(self, slug: str, force: bool = False) -> bool:
+        """Public entry point -- resolves the companion and locks the
+        sibling .md this will write to, under the same resolve-then-lock-
+        then-reconfirm protocol every other slug-based mutator uses. Takes
+        a slug, not an already-resolved Path -- the route used to resolve
+        the companion itself, unlocked, and hand this method a Path that
+        could already be stale by the time the lock was actually acquired
+        (e.g. a concurrent move_node() relocating the node in between),
+        leaving this call running unsynchronized against whatever now
+        lives at the node's new location.
+
+        Needed because this method has two callers with different locking
+        needs: generate_md_format() (the /{slug}/md route) calls this
+        directly and holds no lock of its own, so without this it would
+        race unsynchronized against edit_source()/upload_source_
+        companion()'s own locked read-merge-write of the identical file --
+        the exact "lost update" class this locking scheme exists to
+        prevent, just missed for this pre-existing fourth call path when
+        the other three got it. attach_source_companion() is the other
+        caller, and it already holds this same file's lock for its own
+        multi-step operation -- calling this method (and re-acquiring the
+        same non-reentrant Lock) from inside that would deadlock, so it
+        calls _ensure_md_format_locked() directly instead, below."""
+        def compute():
+            companion_path = self._companion_for_md_generation(slug)
+            return companion_path.with_suffix(".md"), companion_path
+
+        with self._locked_paths(compute) as (_, companion_path):
             return self._ensure_md_format_locked(companion_path, force=force)
 
     def _ensure_md_format_locked(self, companion_path: Path, force: bool = False) -> bool:

@@ -926,7 +926,7 @@ class TestEnsureMdFormatCleansUpOnFailure:
         companion.parent.mkdir(parents=True, exist_ok=True)
         companion.write_text("<html><body>hi</body></html>", encoding="utf-8")
 
-        result = vault.ensure_md_format(companion)
+        result = vault.ensure_md_format("paper")
 
         assert result is False
         assert len(created) == 1
@@ -946,7 +946,7 @@ class TestEnsureMdFormatCleansUpOnFailure:
         companion = source.path.with_suffix(".html")
         companion.write_text("<html><body>hi</body></html>", encoding="utf-8")
 
-        result = vault.ensure_md_format(companion, force=True)
+        result = vault.ensure_md_format(source.slug, force=True)
 
         assert result is False
         assert vault.get_source(source.slug).body == "hand-typed body"
@@ -971,7 +971,7 @@ class TestEnsureMdFormatCleansUpOnFailure:
 
         monkeypatch.setattr(Path, "write_text", boom)
         with pytest.raises(OSError):
-            vault.ensure_md_format(companion_path, force=True)
+            vault.ensure_md_format(source.slug, force=True)
         assert vault.get_source(source.slug).body == "original body"
 
     def test_concurrent_metadata_edit_and_generate_md_format_do_not_lose_the_edit(self, vault, monkeypatch):
@@ -994,7 +994,7 @@ class TestEnsureMdFormatCleansUpOnFailure:
         monkeypatch.setattr("prisma.services.vault.pdf_bytes_to_md", slow_pdf_bytes_to_md)
 
         def generate():
-            vault.ensure_md_format(companion_path)
+            vault.ensure_md_format(source.slug)
 
         def edit():
             time.sleep(0.05)  # let generate() grab the lock and start its slow extraction first
@@ -1009,6 +1009,39 @@ class TestEnsureMdFormatCleansUpOnFailure:
 
         assert vault.get_source(source.slug).authors == ["New Author"], (
             "a metadata edit racing generate_md_format()'s extraction must not be silently lost"
+        )
+
+    def test_resolves_the_companion_again_after_acquiring_its_lock(self, vault, monkeypatch):
+        # ensure_md_format() used to take an already-resolved companion
+        # Path from its caller (the /{slug}/md route resolved it
+        # externally, unlocked) -- a concurrent move landing before this
+        # method's own lock was acquired left it locking and operating on
+        # a stale path with no way to notice. It now resolves the
+        # companion itself, and must do so again after acquiring the lock
+        # (the reconfirm half of the same resolve-then-lock-then-reconfirm
+        # protocol every other slug-based mutator uses).
+        source = vault.create_source_from_citekey(
+            "smith2024", "A Great Paper", "", zotero_key="ABC123", authors=[], tags=[],
+        )
+        companion_path = source.path.with_suffix(".pdf")
+        companion_path.write_bytes(b"pdf bytes")
+        monkeypatch.setattr("prisma.services.vault.pdf_bytes_to_md", lambda data: "extracted text")
+
+        lock_key = vault._key_for(source.path.with_suffix(".md"))
+        real_find_companion = VaultService.find_companion
+        calls_while_locked = []
+
+        def hooked_find_companion(self, slug):
+            calls_while_locked.append(self._get_lock(lock_key).locked())
+            return real_find_companion(self, slug)
+
+        monkeypatch.setattr(VaultService, "find_companion", hooked_find_companion)
+
+        vault.ensure_md_format(source.slug)
+
+        assert any(calls_while_locked), (
+            "ensure_md_format() must resolve the companion again after acquiring its lock, "
+            "not only from the caller's own unlocked resolve"
         )
 
 

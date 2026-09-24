@@ -57,6 +57,18 @@ is a backlog, not a log.
 
 ## Vault
 
+- **Drop `.html` as a primary node format — `.md` should be the only
+  primary format.** HTML's formatting/style/UI markup is bloat for
+  content that's just text with structure; `.md` already covers that.
+  Real blast radius (grepped 2026-09-24): `vault.py` (`_paired_companion`/
+  `_companion_target`/`_relocate_companion`'s html-primary/.md-companion
+  branch, `find_file`'s .html fallback), `notes_routes.py`/`app.py`
+  (serving/generating), `static.py`, `asset_rewrite.py`, `vault_models.py`
+  (node typing), and the UI's html-iframe viewer (`+page.svelte`/
+  `+layout.ts`). Needs a decision on existing html-primary files already
+  in vaults today — migrate each via docu-craft's `.md` render, or
+  something else — before removing the code paths that support them. Not
+  scoped in detail; its own session.
 - **The per-file lock's resolve-then-lock-then-reconfirm protocol doubles
   the vault scan cost of every slug-based mutation.** `_locked_path()`/
   `_locked_paths()` call `compute()` (which resolves via `find_file()`/

@@ -406,8 +406,13 @@ class VaultService:
         """.resolve() matters: _resolve_compound_slug() returns an
         unresolved candidate, so a `..`-decoding compound slug and the
         bare slug for the same file would otherwise produce different
-        keys -- two Locks for one file, bypassable from any route."""
-        return str(path.resolve().relative_to(self.root))
+        keys -- two Locks for one file, bypassable from any route. Keyed
+        on the resolved absolute path itself, not a path relative to
+        self.root -- a file reached through a symlinked directory (the
+        vault walk follows symlinks) resolves outside self.root, and
+        relative_to() would raise for exactly the files this exists to
+        lock correctly."""
+        return str(path.resolve())
 
     def _get_lock(self, key: str) -> threading.Lock:
         """Never evicted -- a Lock is ~56 bytes and this is a single-user
@@ -1151,11 +1156,17 @@ class VaultService:
         return load_chat_session(path)
 
     def create_chat(self, title: str, model: str = "llama3") -> Chat:
-        self.ensure_dirs()
-        slug = self.unique_slug(title)
-        path = self.default_dirs[NodeType.chat] / f"{slug}.sess"
-        chat = Chat(slug=slug, title=title, tags=["chat"], model=model, path=path)
-        save_chat_session(chat, path)
+        """Locked the same as save_chat()/append_messages()/rename_node()'s
+        and delete_node()'s chat branches -- without it, a slug freed by a
+        concurrent rename (or chosen by unique_slug() against a stale
+        listing) could collide with, or get silently claimed out from
+        under, one of those in-flight operations."""
+        with self._chat_write_lock:
+            self.ensure_dirs()
+            slug = self.unique_slug(title)
+            path = self.default_dirs[NodeType.chat] / f"{slug}.sess"
+            chat = Chat(slug=slug, title=title, tags=["chat"], model=model, path=path)
+            save_chat_session(chat, path)
         return self.get_chat(slug)
 
     def save_chat(self, slug: str, messages: list[TurnNode], model: str | None = None) -> Chat:
@@ -1745,6 +1756,16 @@ class VaultService:
             return next((c for ext in COMPANION_EXTS if (c := path.with_suffix(ext)).exists()), None)
         return None
 
+    def _html_md_lock_target(self, path: Path) -> Path | None:
+        """The .md companion path for an html-primary node, whether or
+        not it exists yet -- set_node_type()/ensure_md_format() always
+        lock this exact path (they may be the ones creating it), so
+        move_node()/delete_node() must include it in their own lock set
+        too, or the two groups share no lock at all before any .md has
+        ever been generated for this node. Unlike _paired_companion(),
+        not existence-gated -- that's the point."""
+        return path.with_suffix(".md") if path.suffix == ".html" else None
+
     def _companion_target(self, old_path: Path, new_path: Path, old_companion: Path) -> Path:
         """Where `old_companion` should land after its primary moves/renames
         from `old_path` to `new_path` -- the companion's own extension is
@@ -1813,9 +1834,14 @@ class VaultService:
             new_path = dest / path.name
             old_companion = self._paired_companion(path)
             new_companion = self._companion_target(path, new_path, old_companion) if old_companion else None
-            return path, new_path, old_companion, new_companion
+            return (
+                path, new_path, old_companion, new_companion,
+                self._html_md_lock_target(path), self._html_md_lock_target(new_path),
+            )
 
-        with self._citekey_create_lock, self._locked_paths(compute) as (path, new_path, old_companion, new_companion):
+        with self._citekey_create_lock, self._locked_paths(compute) as (
+            path, new_path, old_companion, new_companion, *_,
+        ):
             old_rel = str(path.relative_to(self.root))
             new_path.parent.mkdir(parents=True, exist_ok=True)
             if new_path.exists() and new_path != path:
@@ -1841,6 +1867,12 @@ class VaultService:
         sess_path = self._find_sess(slug)
         if sess_path is not None:
             with self._chat_write_lock:
+                # Re-resolved fresh, not the outer check's value -- that
+                # one only decides which branch to take (a slug's chat-ness
+                # doesn't change), but the *path* it found can already be
+                # stale by the time this lock is acquired, if a concurrent
+                # rename of this same chat ran first.
+                sess_path = _or_raise(self._find_sess(slug), FileNotFoundError(f"node not found: {slug!r}"))
                 new_stem = _slugify(new_title)
                 new_path = sess_path.parent / f"{new_stem}.sess"
                 if new_path.exists() and new_path != sess_path:
@@ -1918,15 +1950,22 @@ class VaultService:
         sess_path = self._find_sess(slug)
         if sess_path is not None:
             with self._chat_write_lock:
+                # Re-resolved fresh -- see rename_node()'s chat branch for
+                # why the outer check's path can't be trusted here: a
+                # concurrent rename of this same chat could otherwise leave
+                # this call unlinking whatever unrelated chat now happens
+                # to occupy the stale path (e.g. a fresh one created under
+                # the same slug after the rename freed it).
+                sess_path = _or_raise(self._find_sess(slug), FileNotFoundError(f"node not found: {slug!r}"))
                 sess_path.unlink()
             return None
 
         def compute():
             path = _or_raise(self.find_file(slug), FileNotFoundError(f"node not found: {slug!r}"))
             companion = self._paired_companion(path)
-            return path, companion
+            return path, companion, self._html_md_lock_target(path)
 
-        with self._locked_paths(compute) as (path, companion):
+        with self._locked_paths(compute) as (path, companion, *_):
             rel = str(path.relative_to(self.root))
             path.unlink()
             if companion is not None and companion.exists():

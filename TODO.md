@@ -83,6 +83,15 @@ is a backlog, not a log.
   real needs `find_file()`/`_find_md()` to stop being an O(vault) walk in
   the first place (an in-memory slug→path index, invalidated on writes),
   which is a bigger, separate change than this lock refactor.
+- **`_file_locks` (the per-file lock registry) is never evicted and grows
+  for the life of the process.** Deliberate for a single-user local vault
+  (evicting risks releasing an entry another thread is still mid-acquire
+  on, for no real memory benefit here) — but every distinct path ever
+  locked adds one `Lock` plus its path-string key permanently, including
+  retry destinations and collision-rejected move targets, not just live
+  vault files. Each entry is small; an unusually long-running process with
+  heavy desktop sync or repeated moves to varied destinations is the only
+  realistic way this adds up to anything worth revisiting.
 - **No UI to view a companion file** — `COMPANION_EXTS` covers pdf/html/htm/
   svg/epub/docx/tex/drawio/jpg/jpeg, and the backend already serves any of
   them generically (`GET /notes/{slug}/original`, `FileResponse`), but the
